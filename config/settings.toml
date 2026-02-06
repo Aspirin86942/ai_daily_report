@@ -1,0 +1,27 @@
+[app]
+name = "审计日报生成器"
+version = "5.0.0"
+
+[paths]
+work_dir = "D:\\01- 工作"
+data_dir = "data"
+reports_dir = "data/reports"
+db_dir = "data/db"
+
+[llm]
+model_id = "gemini-2.5-flash"
+temperature = 0.2
+max_tokens = 8192  # 增加到 8192，确保有足够空间生成完整日报
+max_retries = 3
+
+[scanner]
+allowed_extensions = [".xlsx", ".xls", ".pptx", ".pdf", ".txt", ".md", ".docx"]
+ignored_patterns = ["~$*", "*.tmp"]
+max_workers = 4
+excel_max_rows = 50
+pdf_max_pages = 5
+text_max_chars = 6000
+summary_excel_max_rows = 10
+summary_pdf_max_pages = 2
+summary_text_max_chars = 2000
+total_max_chars = 50000
