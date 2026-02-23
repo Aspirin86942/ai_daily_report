@@ -65,3 +65,16 @@ def test_get_files_in_range():
     assert isinstance(files, list)
     for f in files:
         assert isinstance(f, Path)
+
+    # 验证排除目录配置生效（如果配置了排除目录）
+    excluded_dirs = scanner.scanner_cfg.get("excluded_dirs", [])
+    if excluded_dirs:
+        for excluded_dir in excluded_dirs:
+            excluded_path = Path(excluded_dir).resolve()
+            for f in files:
+                # 确保没有文件来自排除目录
+                try:
+                    f.resolve().relative_to(excluded_path)
+                    assert False, f"文件 {f} 不应该来自排除目录 {excluded_dir}"
+                except ValueError:
+                    pass  # 正常，文件不在排除目录中

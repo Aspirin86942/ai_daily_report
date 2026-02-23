@@ -164,7 +164,25 @@ class FileScanner:
         end_dt = datetime.combine(end_date, datetime.max.time())
 
         files = []
+        excluded_dirs = self.scanner_cfg.get("excluded_dirs", [])
+        excluded_paths = [Path(d).resolve() for d in excluded_dirs]
+
         for root, _, filenames in os.walk(self.work_dir):
+            root_path = Path(root).resolve()
+
+            # 检查是否在排除目录中
+            skip_dir = False
+            for excluded in excluded_paths:
+                try:
+                    root_path.relative_to(excluded)
+                    skip_dir = True
+                    break
+                except ValueError:
+                    continue
+
+            if skip_dir:
+                continue
+
             for filename in filenames:
                 # 检查扩展名
                 if not any(

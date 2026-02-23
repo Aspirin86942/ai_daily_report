@@ -18,6 +18,7 @@ max_retries = 3
 [scanner]
 allowed_extensions = [".xlsx", ".xls", ".pptx", ".pdf", ".txt", ".md", ".docx"]
 ignored_patterns = ["~$*", "*.tmp"]
+excluded_dirs = ["D:\\01- 工作\\2025年\\03- 通用软件"]
 max_workers = 4
 excel_max_rows = 50
 pdf_max_pages = 5
