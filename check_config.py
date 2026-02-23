@@ -59,14 +59,22 @@ def check_config():
     try:
         from src.core.config import config
         print(f"\n[OK] 配置加载成功")
+        print(f"  - LLM Provider: {config.llm_provider}")
         print(f"  - 工作目录: {config.work_dir}")
         print(f"  - LLM 模型: {config.llm_config['model_id']}")
         print(f"  - 最大并发: {config.scanner_config['max_workers']}")
+        print(f"  - SQLite DB: {config.db_dir / 'reports.sqlite3'}")
 
         # 检查 API Key
-        api_key = config.api_key
+        if config.llm_provider == "openai":
+            api_key = config.openai_api_key
+            missing_env = "OPENAI_API_KEY"
+        else:
+            api_key = config.google_api_key
+            missing_env = "GOOGLE_API_KEY"
+
         if not api_key or api_key.startswith("${"):
-            errors.append("未配置 GOOGLE_API_KEY")
+            errors.append(f"未配置 {missing_env}")
         else:
             print(f"  - API Key: {api_key[:10]}...")
 
@@ -77,6 +85,7 @@ def check_config():
     print("\n===== 依赖检查 =====\n")
     required_packages = [
         'google.genai',
+        'openai',
         'pydantic',
         'dynaconf',
         'rich',

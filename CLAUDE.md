@@ -2,7 +2,13 @@
 
 ## Project Overview
 
-审计报告生成器 v5.0 — 基于 LLM 的审计报告自动化生成工具。支持日报、周报、月报三种模式，每种模式支持 `db` (聚合历史日报) 和 `scan` (扫描工作目录文件) 两种数据来源。使用 Google Gemini API 生成结构化报告，JSON 强制输出 + Pydantic 校验。
+审计报告生成器 v5.0：基于 LLM 的日报/周报/月报自动生成工具。
+
+当前核心能力：
+- LLM provider 可切换：`gemini` / `openai`
+- 报告结构化输出：JSON + Pydantic 校验
+- 历史数据默认存储：SQLite（`data/db/reports.sqlite3`）
+- 支持 `db`（历史聚合）与 `scan`（文件扫描）两种数据来源
 
 ## Commands
 
@@ -14,125 +20,105 @@ pip install -r requirements.txt
 python check_config.py
 
 # 日报
-python main.py daily                           # 交互模式
-python main.py daily -i "今日工作内容"          # 命令行模式
-python main.py daily --no-save -i "预览模式"    # 预览不保存
-python main.py daily --date 2026-02-05 -i "..."  # 指定日期
+python main.py daily
+python main.py daily -i "今日工作内容"
+python main.py daily --no-save -i "预览模式"
+python main.py daily --date 2026-02-05 -i "..."
 
 # 周报
-python main.py weekly --source db               # 聚合本周日报
-python main.py weekly 2026-W05 --source scan -i "补充"  # 扫描文件
-python main.py weekly --source db --no-save     # 预览不保存
+python main.py weekly --source db
+python main.py weekly 2026-W05 --source scan -i "补充"
+python main.py weekly --source db --no-save
 
 # 月报
-python main.py monthly --source db              # 聚合本月日报
-python main.py monthly 2026-01 --source scan -i "补充"  # 扫描文件
+python main.py monthly --source db
+python main.py monthly 2026-01 --source scan -i "补充"
 
 # 列表
 python main.py list
 
+# 迁移（旧 JSON -> SQLite）
+python scripts/migrate_json_to_sqlite.py --dry-run
+python scripts/migrate_json_to_sqlite.py
+
 # 测试
-pytest tests/ -v
+python -m pytest tests/ -v
 ```
 
 ## Architecture
 
-```
+```text
 日报:
   用户输入 + 文件扫描 + 昨日计划
       ↓
-  LLMClient.generate_report() → JSON
+  LLMClient.generate_report() -> JSON
       ↓
   DailyReportData (Pydantic)
       ↓
-  ├─→ data/db/YYYY-MM-DD.json
-  └─→ data/reports/YYYY-MM/YYYY-MM-DD.md
+  ├─→ SQLite: daily_reports
+  └─→ Markdown: data/reports/YYYY-MM/YYYY-MM-DD.md
 
-周报 (source=db):
-  history_mgr.get_week_reports() → [DailyReportData] + missing_days
+周报/月报:
+  source=db: 从 SQLite 聚合历史日报
+  source=scan: 扫描文件构造上下文
       ↓
-  LLMClient.generate_weekly_report() → JSON
+  LLMClient.generate_weekly_report / generate_monthly_report
       ↓
-  WeeklyReportData (Pydantic)
+  WeeklyReportData / MonthlyReportData
       ↓
-  ├─→ data/db/weekly/YYYY-Wnn.json
-  └─→ data/reports/weekly/YYYY-Wnn.md
-
-周报 (source=scan):
-  scanner.scan_files(monday, sunday, summary_mode=True) → ScanResult
-      ↓
-  LLMClient.generate_weekly_report() → JSON
-      ↓
-  (同上存储)
-
-月报: 同周报模式，存储路径为 data/db/monthly/ 和 data/reports/monthly/
+  ├─→ SQLite: weekly_reports / monthly_reports
+  └─→ Markdown: data/reports/weekly|monthly/
 ```
 
 ## Project Structure
 
-```
+```text
 src/
 ├── core/
 │   ├── config.py        # 单例配置 (Dynaconf)
-│   ├── llm.py           # Gemini API 客户端 (_call_llm_with_json 公共重试)
+│   ├── llm.py           # Gemini/OpenAI 客户端 + JSON 校验重试
 │   └── logger.py
 ├── models/
-│   └── schemas.py       # Pydantic 模型 (Daily/Weekly/Monthly + 枚举)
+│   └── schemas.py       # Pydantic 模型
 ├── services/
-│   ├── file_scanner.py  # 文件扫描 (scan_files + summary_mode + total_max_chars)
-│   ├── history_mgr.py   # JSON 数据库读写 (日/周/月)
-│   └── report_gen.py    # Jinja2 渲染 (日/周/月)
+│   ├── sqlite_store.py  # SQLite 存储实现（日/周/月）
+│   ├── history_mgr.py   # 兼容入口（继承 SQLiteStore）
+│   ├── json_to_sqlite_migrator.py
+│   ├── file_scanner.py
+│   └── report_gen.py
 └── utils/
-    └── text_tools.py    # 文本工具 (parse_week_label, get_month_date_range)
+    └── text_tools.py
 
-config/
-├── settings.toml        # 路径、LLM、扫描器配置 (含 summary_* 限制)
-└── .secrets.toml        # API Key、代理 (不提交 Git)
-
-templates/
-├── system_prompt.md     # 日报 LLM Prompt
-├── report_template.md   # 日报 Jinja2 模板
-├── weekly_prompt.md     # 周报 LLM Prompt
-├── monthly_prompt.md    # 月报 LLM Prompt
-├── weekly_template.md   # 周报 Jinja2 模板
-└── monthly_template.md  # 月报 Jinja2 模板
-
-tests/
-├── test_schemas.py      # 数据模型测试
-├── test_text_tools.py   # 工具函数测试
-├── test_file_scanner.py # 文件扫描器测试
-├── test_history_mgr.py  # 历史管理器测试
-└── test_report_gen.py   # 报告生成器测试
+scripts/
+└── migrate_json_to_sqlite.py
 ```
 
 ## Key Patterns
 
-- **LLM**: `response_mime_type="application/json"` 强制 JSON，Pydantic 校验，`_call_llm_with_json()` 公共重试逻辑
-- **文件扫描**: `scan_files(start_date, end_date, summary_mode)` 通用接口，ThreadPoolExecutor 并行，Pandas 矢量化处理 Excel
-- **Token 控制**: `summary_mode=True` 时使用缩减限制 (excel_max_rows=10, pdf_max_pages=2)，`total_max_chars=50000` 全局上限
-- **存储**: JSON (程序读取) + Markdown (人类阅读) 双轨制，日/周/月各有独立目录
-- **周边界**: ISO 标准 Monday-Sunday，`date.fromisocalendar()` 处理跨年
+- LLM 输出：使用 JSON 模式 + Pydantic 严格校验
+- 扫描策略：`summary_mode` + `total_max_chars` 控制上下文长度
+- 存储策略：SQLite 作为程序事实源，Markdown 作为阅读输出
+- 周边界：ISO 周（Monday-Sunday）
 
 ## Modifying LLM Output
 
-修改日报输出：
-1. `templates/system_prompt.md` - Prompt
-2. `src/models/schemas.py` - `DailyReportData`
-3. `templates/report_template.md` - 渲染模板
+日报输出改动：
+1. `templates/system_prompt.md`
+2. `src/models/schemas.py` 的 `DailyReportData`
+3. `templates/report_template.md`
 
-修改周报输出：
-1. `templates/weekly_prompt.md` - Prompt
-2. `src/models/schemas.py` - `WeeklyReportData`
-3. `templates/weekly_template.md` - 渲染模板
+周报输出改动：
+1. `templates/weekly_prompt.md`
+2. `src/models/schemas.py` 的 `WeeklyReportData`
+3. `templates/weekly_template.md`
 
-修改月报输出：
-1. `templates/monthly_prompt.md` - Prompt
-2. `src/models/schemas.py` - `MonthlyReportData`
-3. `templates/monthly_template.md` - 渲染模板
+月报输出改动：
+1. `templates/monthly_prompt.md`
+2. `src/models/schemas.py` 的 `MonthlyReportData`
+3. `templates/monthly_template.md`
 
-## Adding File Types
+## LLM Provider Notes
 
-在 `src/services/file_scanner.py`:
-1. `_extract_content()` 添加分发
-2. 实现 `_parse_xxx()` 方法
-3. `config/settings.toml` 添加扩展名
+- `llm.provider = "gemini"` 时，使用 `GOOGLE_API_KEY`（或 `api.google_api_key`）
+- `llm.provider = "openai"` 时，使用 `OPENAI_API_KEY`（或 `api.openai_api_key`）
+- OpenAI 模型建议使用支持 JSON schema 输出的模型（例如 `gpt-4o-mini`）

@@ -87,20 +87,42 @@ class Config:
         return cfg
 
     @property
-    def api_key(self) -> str:
+    def llm_provider(self) -> str:
+        """LLM provider (gemini/openai)"""
+        provider = "gemini"
+        if hasattr(self._settings, "llm") and hasattr(self._settings.llm, "provider"):
+            provider = self._settings.llm.provider
+        return str(provider).strip().lower()
+
+    @property
+    def google_api_key(self) -> str:
         """Google API Key"""
-        # 优先从环境变量读取
+        # 优先读取环境变量，避免把密钥写入配置文件
         key = os.getenv('GOOGLE_API_KEY')
         if key:
             return key
-        return self._settings.api.google_api_key
+        return getattr(self._settings.api, "google_api_key", "")
+
+    @property
+    def openai_api_key(self) -> str:
+        """OpenAI API Key"""
+        key = os.getenv('OPENAI_API_KEY')
+        if key:
+            return key
+        return getattr(self._settings.api, "openai_api_key", "")
+
+    @property
+    def api_key(self) -> str:
+        """Backward compatible Google API Key"""
+        return self.google_api_key
 
     @property
     def proxy_config(self) -> Dict[str, str]:
         """代理配置"""
+        proxy = getattr(self._settings, "proxy", None)
         return {
-            'http': self._settings.proxy.http_proxy,
-            'https': self._settings.proxy.https_proxy
+            'http': getattr(proxy, "http_proxy", ""),
+            'https': getattr(proxy, "https_proxy", "")
         }
 
 

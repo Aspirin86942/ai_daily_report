@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import date
 from google import genai
 from google.genai import types
+from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 from ..models.schemas import DailyReportData, WeeklyReportData, MonthlyReportData
@@ -17,18 +18,26 @@ logger = setup_logger()
 
 
 class LLMClient:
-    """Google GenAI 客户端"""
+    """LLM 客户端 (支持 Gemini/OpenAI)"""
 
     def __init__(self):
         """初始化 LLM 客户端"""
         # 设置代理
         proxy_cfg = config.proxy_config
-        os.environ['HTTP_PROXY'] = proxy_cfg['http']
-        os.environ['HTTPS_PROXY'] = proxy_cfg['https']
+        if proxy_cfg.get('http'):
+            os.environ['HTTP_PROXY'] = proxy_cfg['http']
+        if proxy_cfg.get('https'):
+            os.environ['HTTPS_PROXY'] = proxy_cfg['https']
 
-        # 初始化客户端
-        self.client = genai.Client(api_key=config.api_key)
         self.llm_cfg = config.llm_config
+        self.provider = config.llm_provider
+
+        if self.provider == "gemini":
+            self.client = genai.Client(api_key=config.google_api_key)
+        elif self.provider == "openai":
+            self.client = OpenAI(api_key=config.openai_api_key or None)
+        else:
+            raise ValueError(f"Unsupported LLM provider: {self.provider}. Expected gemini/openai.")
 
         # 加载所有 prompt 模板
         template_dir = Path(__file__).parent.parent.parent / "templates"
@@ -59,17 +68,39 @@ class LLMClient:
             try:
                 logger.info(f"调用 LLM (尝试 {attempt + 1}/{self.llm_cfg['max_retries']})")
 
-                response = self.client.models.generate_content(
-                    model=self.llm_cfg['model_id'],
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
+                if self.provider == "gemini":
+                    response = self.client.models.generate_content(
+                        model=self.llm_cfg['model_id'],
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            temperature=self.llm_cfg['temperature'],
+                            max_output_tokens=self.llm_cfg['max_tokens'],
+                            response_mime_type="application/json"
+                        )
+                    )
+
+                    response_text = response.text
+
+                elif self.provider == "openai":
+                    schema_json = response_model.model_json_schema()
+                    response = self.client.responses.create(
+                        model=self.llm_cfg['model_id'],
+                        input=prompt,
                         temperature=self.llm_cfg['temperature'],
                         max_output_tokens=self.llm_cfg['max_tokens'],
-                        response_mime_type="application/json"
+                        text={
+                            "format": {
+                                "type": "json_schema",
+                                "name": response_model.__name__,
+                                "schema": schema_json,
+                                "strict": False
+                            }
+                        }
                     )
-                )
+                    response_text = response.output_text
 
-                response_text = response.text
+                else:
+                    raise ValueError(f"Unsupported LLM provider: {self.provider}. Expected gemini/openai.")
                 logger.info(f"LLM 返回: {len(response_text)} 字符")
 
                 # Pydantic 校验

@@ -9,6 +9,7 @@ reports_dir = "data/reports"
 db_dir = "data/db"
 
 [llm]
+provider = "gemini"
 model_id = "gemini-2.5-flash"
 temperature = 0.2
 max_tokens = 8192  # 增加到 8192，确保有足够空间生成完整日报
