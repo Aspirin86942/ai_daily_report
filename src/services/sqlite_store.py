@@ -15,8 +15,7 @@ logger = setup_logger()
 class SQLiteStore:
     """History storage backed by SQLite.
 
-    This is an additive storage layer and does not replace the existing
-    JSON-file based HistoryManager.
+    This store is used by ``HistoryManager`` as the default backend.
     """
 
     def __init__(self, db_path: Optional[Path] = None):
