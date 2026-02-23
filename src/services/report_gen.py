@@ -1,4 +1,5 @@
 """报告生成服务"""
+
 from pathlib import Path
 from datetime import datetime
 from jinja2 import Environment, FileSystemLoader
@@ -31,14 +32,11 @@ class ReportGenerator:
         Returns:
             Markdown 文本
         """
-        template = self.env.get_template('report_template.md')
+        template = self.env.get_template("report_template.md")
         return template.render(report=report)
 
     def save_markdown(
-        self,
-        content: str,
-        report_date: str,
-        output_dir: Path = None
+        self, content: str, report_date: str, output_dir: Path = None
     ) -> Path:
         """保存日报 Markdown 文件
 
@@ -54,13 +52,13 @@ class ReportGenerator:
             output_dir = self.reports_dir
 
         # 创建月份子目录
-        date_obj = datetime.strptime(report_date, '%Y-%m-%d')
-        month_dir = output_dir / date_obj.strftime('%Y-%m')
+        date_obj = datetime.strptime(report_date, "%Y-%m-%d")
+        month_dir = output_dir / date_obj.strftime("%Y-%m")
         month_dir.mkdir(parents=True, exist_ok=True)
 
         # 保存文件
         file_path = month_dir / f"{report_date}.md"
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
 
         logger.info(f"Markdown 已保存: {file_path}")
@@ -75,8 +73,10 @@ class ReportGenerator:
         Returns:
             Markdown 文本
         """
-        template = self.env.get_template('weekly_template.md')
-        return template.render(report=report, now=datetime.now().strftime('%Y-%m-%d %H:%M'))
+        template = self.env.get_template("weekly_template.md")
+        return template.render(
+            report=report, now=datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
 
     def render_monthly_markdown(self, report: MonthlyReportData) -> str:
         """渲染月报 Markdown
@@ -87,8 +87,10 @@ class ReportGenerator:
         Returns:
             Markdown 文本
         """
-        template = self.env.get_template('monthly_template.md')
-        return template.render(report=report, now=datetime.now().strftime('%Y-%m-%d %H:%M'))
+        template = self.env.get_template("monthly_template.md")
+        return template.render(
+            report=report, now=datetime.now().strftime("%Y-%m-%d %H:%M")
+        )
 
     def save_weekly_markdown(self, content: str, year: int, week: int) -> Path:
         """保存周报 Markdown 文件
@@ -106,7 +108,7 @@ class ReportGenerator:
 
         week_label = f"{year}-W{week:02d}"
         file_path = weekly_dir / f"{week_label}.md"
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
 
         logger.info(f"周报 Markdown 已保存: {file_path}")
@@ -126,7 +128,7 @@ class ReportGenerator:
         monthly_dir.mkdir(parents=True, exist_ok=True)
 
         file_path = monthly_dir / f"{year_month}.md"
-        with open(file_path, 'w', encoding='utf-8') as f:
+        with open(file_path, "w", encoding="utf-8") as f:
             f.write(content)
 
         logger.info(f"月报 Markdown 已保存: {file_path}")

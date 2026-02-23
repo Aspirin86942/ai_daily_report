@@ -1,8 +1,12 @@
 """测试文本处理工具"""
+
 import pytest
 from datetime import date
 from src.utils.text_tools import (
-    truncate_text, estimate_tokens, parse_week_label, get_month_date_range
+    truncate_text,
+    estimate_tokens,
+    parse_week_label,
+    get_month_date_range,
 )
 
 
@@ -27,6 +31,7 @@ def test_estimate_tokens():
 
 
 # --- parse_week_label ---
+
 
 def test_parse_week_label_valid():
     """测试有效的周标签解析"""
@@ -68,6 +73,7 @@ def test_parse_week_label_non_numeric():
 
 
 # --- get_month_date_range ---
+
 
 def test_get_month_date_range_feb():
     """测试2月边界"""

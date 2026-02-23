@@ -1,11 +1,12 @@
 """配置验证脚本"""
+
 import sys
 import os
 from pathlib import Path
 
 # 设置控制台编码为 UTF-8
-if sys.platform == 'win32':
-    os.system('chcp 65001 > nul')
+if sys.platform == "win32":
+    os.system("chcp 65001 > nul")
 
 
 def check_config():
@@ -58,7 +59,8 @@ def check_config():
     # 尝试加载配置
     try:
         from src.core.config import config
-        print(f"\n[OK] 配置加载成功")
+
+        print("\n[OK] 配置加载成功")
         print(f"  - LLM Provider: {config.llm_provider}")
         print(f"  - 工作目录: {config.work_dir}")
         print(f"  - LLM 模型: {config.llm_config['model_id']}")
@@ -84,21 +86,21 @@ def check_config():
     # 检查依赖
     print("\n===== 依赖检查 =====\n")
     required_packages = [
-        'google.genai',
-        'openai',
-        'pydantic',
-        'dynaconf',
-        'rich',
-        'pandas',
-        'openpyxl',
-        'pptx',
-        'pdfplumber',
-        'jinja2'
+        "google.genai",
+        "openai",
+        "pydantic",
+        "dynaconf",
+        "rich",
+        "pandas",
+        "openpyxl",
+        "pptx",
+        "pdfplumber",
+        "jinja2",
     ]
 
     for package in required_packages:
         try:
-            __import__(package.replace('-', '_'))
+            __import__(package.replace("-", "_"))
             print(f"[OK] {package}")
         except ImportError:
             errors.append(f"缺少依赖包: {package}")
@@ -123,6 +125,6 @@ def check_config():
         return True
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     success = check_config()
     sys.exit(0 if success else 1)

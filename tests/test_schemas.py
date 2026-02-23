@@ -1,8 +1,12 @@
 """测试 Pydantic 数据模型"""
-import pytest
+
 from src.models.schemas import (
-    ReportMode, DataSource, CategorySummary,
-    WeeklyReportData, MonthlyReportData, RiskItem
+    ReportMode,
+    DataSource,
+    CategorySummary,
+    WeeklyReportData,
+    MonthlyReportData,
+    RiskItem,
 )
 
 
@@ -25,7 +29,7 @@ def test_category_summary():
         category="现场审计",
         items=["审计项目A", "审计项目B"],
         total_count=2,
-        completion_rate="100%"
+        completion_rate="100%",
     )
     assert cs.category == "现场审计"
     assert len(cs.items) == 2
@@ -35,11 +39,7 @@ def test_category_summary():
 
 def test_category_summary_optional_completion_rate():
     """测试 CategorySummary 可选字段"""
-    cs = CategorySummary(
-        category="数据分析",
-        items=["分析任务"],
-        total_count=1
-    )
+    cs = CategorySummary(category="数据分析", items=["分析任务"], total_count=1)
     assert cs.completion_rate is None
 
 
@@ -54,15 +54,13 @@ def test_weekly_report_data():
                 category="现场审计",
                 items=["项目A审计"],
                 total_count=1,
-                completion_rate="100%"
+                completion_rate="100%",
             )
         ],
-        risks=[
-            RiskItem(severity="中", description="测试风险")
-        ],
+        risks=[RiskItem(severity="中", description="测试风险")],
         key_achievements=["完成项目A审计"],
         next_week_plans=["启动项目B审计"],
-        data_source="db"
+        data_source="db",
     )
     assert report.week_label == "2026-W05"
     assert len(report.category_summaries) == 1
@@ -79,7 +77,7 @@ def test_weekly_report_data_defaults():
         category_summaries=[],
         key_achievements=[],
         next_week_plans=[],
-        data_source="scan"
+        data_source="scan",
     )
     assert report.risks == []
     assert report.missing_days == []
@@ -92,16 +90,14 @@ def test_monthly_report_data():
         summary="本月完成多项审计工作",
         category_summaries=[
             CategorySummary(
-                category="报告撰写",
-                items=["报告A", "报告B"],
-                total_count=2
+                category="报告撰写", items=["报告A", "报告B"], total_count=2
             )
         ],
         statistics={"审计项目数": "5", "发现问题数": "12"},
         key_achievements=["完成年度审计计划"],
         next_month_plans=["启动新项目"],
         missing_days=["2026-01-15"],
-        data_source="db"
+        data_source="db",
     )
     assert report.year_month == "2026-01"
     assert report.statistics["审计项目数"] == "5"
@@ -116,7 +112,7 @@ def test_monthly_report_data_defaults():
         category_summaries=[],
         key_achievements=[],
         next_month_plans=[],
-        data_source="scan"
+        data_source="scan",
     )
     assert report.risks == []
     assert report.statistics == {}
@@ -132,7 +128,7 @@ def test_weekly_report_json_roundtrip():
         category_summaries=[],
         key_achievements=["成果"],
         next_week_plans=["计划"],
-        data_source="db"
+        data_source="db",
     )
     json_str = report.model_dump_json()
     restored = WeeklyReportData.model_validate_json(json_str)
@@ -149,7 +145,7 @@ def test_monthly_report_json_roundtrip():
         statistics={"key": "value"},
         key_achievements=["成果"],
         next_month_plans=["计划"],
-        data_source="scan"
+        data_source="scan",
     )
     json_str = report.model_dump_json()
     restored = MonthlyReportData.model_validate_json(json_str)

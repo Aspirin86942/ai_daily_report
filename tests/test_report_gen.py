@@ -1,9 +1,13 @@
 """测试报告生成"""
-import pytest
+
 from src.services.report_gen import ReportGenerator
 from src.models.schemas import (
-    DailyReportData, WorkItem, RiskItem,
-    WeeklyReportData, MonthlyReportData, CategorySummary
+    DailyReportData,
+    WorkItem,
+    RiskItem,
+    WeeklyReportData,
+    MonthlyReportData,
+    CategorySummary,
 )
 
 
@@ -22,14 +26,11 @@ def test_render_markdown():
         summary="测试日报",
         achievements=[
             WorkItem(
-                category="测试",
-                content="单元测试",
-                status="已完成",
-                quantitative="1项"
+                category="测试", content="单元测试", status="已完成", quantitative="1项"
             )
         ],
         risks=[],
-        plans=["明日继续测试"]
+        plans=["明日继续测试"],
     )
 
     markdown = gen.render_markdown(report)
@@ -51,16 +52,14 @@ def test_render_weekly_markdown():
                 category="现场审计",
                 items=["项目A审计", "项目B审计"],
                 total_count=2,
-                completion_rate="100%"
+                completion_rate="100%",
             )
         ],
-        risks=[
-            RiskItem(severity="中", description="测试风险")
-        ],
+        risks=[RiskItem(severity="中", description="测试风险")],
         key_achievements=["完成项目A审计"],
         next_week_plans=["启动项目C审计"],
         missing_days=["2026-01-30"],
-        data_source="db"
+        data_source="db",
     )
 
     markdown = gen.render_weekly_markdown(report)
@@ -80,16 +79,12 @@ def test_render_monthly_markdown():
         year_month="2026-01",
         summary="本月完成多项工作",
         category_summaries=[
-            CategorySummary(
-                category="报告撰写",
-                items=["审计报告A"],
-                total_count=1
-            )
+            CategorySummary(category="报告撰写", items=["审计报告A"], total_count=1)
         ],
         statistics={"审计项目数": "5", "发现问题数": "12"},
         key_achievements=["完成年度审计计划"],
         next_month_plans=["启动新项目"],
-        data_source="db"
+        data_source="db",
     )
 
     markdown = gen.render_monthly_markdown(report)
@@ -107,7 +102,7 @@ def test_save_weekly_markdown():
     path = gen.save_weekly_markdown(content, 2026, 5)
     assert path.exists()
     assert path.name == "2026-W05.md"
-    assert path.read_text(encoding='utf-8') == content
+    assert path.read_text(encoding="utf-8") == content
 
 
 def test_save_monthly_markdown():
@@ -117,4 +112,4 @@ def test_save_monthly_markdown():
     path = gen.save_monthly_markdown(content, "2026-01")
     assert path.exists()
     assert path.name == "2026-01.md"
-    assert path.read_text(encoding='utf-8') == content
+    assert path.read_text(encoding="utf-8") == content

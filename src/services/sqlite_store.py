@@ -1,4 +1,5 @@
 """SQLite-based history storage layer."""
+
 import json
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -205,7 +206,9 @@ class SQLiteStore:
 
         return reports, missing_dates
 
-    def get_week_reports(self, year: int, week: int) -> Tuple[List[DailyReportData], List[str]]:
+    def get_week_reports(
+        self, year: int, week: int
+    ) -> Tuple[List[DailyReportData], List[str]]:
         monday = date.fromisocalendar(year, week, 1)
         sunday = date.fromisocalendar(year, week, 7)
         return self.get_reports_in_range(monday, sunday)

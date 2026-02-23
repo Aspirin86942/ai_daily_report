@@ -1,10 +1,13 @@
 """日志模块"""
+
 import logging
 from pathlib import Path
 from datetime import datetime
 
 
-def setup_logger(name: str = "ai_daily_report", log_dir: str = "logs") -> logging.Logger:
+def setup_logger(
+    name: str = "ai_daily_report", log_dir: str = "logs"
+) -> logging.Logger:
     """配置日志系统
 
     Args:
@@ -27,7 +30,7 @@ def setup_logger(name: str = "ai_daily_report", log_dir: str = "logs") -> loggin
 
     # 文件 handler
     log_file = log_path / f"{datetime.now().strftime('%Y-%m-%d')}.log"
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
+    file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setLevel(logging.INFO)
 
     # 控制台 handler
@@ -36,8 +39,8 @@ def setup_logger(name: str = "ai_daily_report", log_dir: str = "logs") -> loggin
 
     # 格式化
     formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
     file_handler.setFormatter(formatter)
     console_handler.setFormatter(formatter)

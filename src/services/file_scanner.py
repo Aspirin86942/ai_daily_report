@@ -1,4 +1,5 @@
 """文件扫描服务"""
+
 import os
 from pathlib import Path
 from datetime import date, datetime, timedelta
@@ -38,7 +39,7 @@ class FileScanner:
         self,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
-        summary_mode: bool = False
+        summary_mode: bool = False,
     ) -> ScanResult:
         """通用文件扫描方法
 
@@ -55,7 +56,9 @@ class FileScanner:
         if end_date is None:
             end_date = date.today()
 
-        logger.info(f"开始扫描工作目录: {self.work_dir} ({start_date} ~ {end_date}, summary={summary_mode})")
+        logger.info(
+            f"开始扫描工作目录: {self.work_dir} ({start_date} ~ {end_date}, summary={summary_mode})"
+        )
 
         # 获取日期范围内修改的文件
         matched_files = self._get_files_in_range(start_date, end_date)
@@ -63,27 +66,24 @@ class FileScanner:
 
         if not matched_files:
             return ScanResult(
-                total_files=0,
-                success_count=0,
-                error_count=0,
-                contexts=[]
+                total_files=0, success_count=0, error_count=0, contexts=[]
             )
 
         # 确定解析限制
         if summary_mode:
             limits = {
-                'excel_max_rows': self.scanner_cfg.get('summary_excel_max_rows', 10),
-                'pdf_max_pages': self.scanner_cfg.get('summary_pdf_max_pages', 2),
-                'text_max_chars': self.scanner_cfg.get('summary_text_max_chars', 2000),
+                "excel_max_rows": self.scanner_cfg.get("summary_excel_max_rows", 10),
+                "pdf_max_pages": self.scanner_cfg.get("summary_pdf_max_pages", 2),
+                "text_max_chars": self.scanner_cfg.get("summary_text_max_chars", 2000),
             }
         else:
             limits = {
-                'excel_max_rows': self.scanner_cfg['excel_max_rows'],
-                'pdf_max_pages': self.scanner_cfg['pdf_max_pages'],
-                'text_max_chars': self.scanner_cfg['text_max_chars'],
+                "excel_max_rows": self.scanner_cfg["excel_max_rows"],
+                "pdf_max_pages": self.scanner_cfg["pdf_max_pages"],
+                "text_max_chars": self.scanner_cfg["text_max_chars"],
             }
 
-        total_max_chars = self.scanner_cfg.get('total_max_chars', 50000)
+        total_max_chars = self.scanner_cfg.get("total_max_chars", 50000)
 
         # 并行处理文件
         contexts: list[FileContext] = []
@@ -92,7 +92,9 @@ class FileScanner:
         total_chars = 0
         truncated_by_global_limit = False
 
-        with ThreadPoolExecutor(max_workers=self.scanner_cfg['max_workers']) as executor:
+        with ThreadPoolExecutor(
+            max_workers=self.scanner_cfg["max_workers"]
+        ) as executor:
             future_to_file = {
                 executor.submit(self._extract_content, f, limits): f
                 for f in matched_files
@@ -111,26 +113,30 @@ class FileScanner:
                     total_chars += len(context.content)
                     if total_chars > total_max_chars and not truncated_by_global_limit:
                         truncated_by_global_limit = True
-                        logger.warning(f"已达全局字符上限 {total_max_chars}，后续文件内容将被省略")
+                        logger.warning(
+                            f"已达全局字符上限 {total_max_chars}，后续文件内容将被省略"
+                        )
 
                     if truncated_by_global_limit and not context.error:
                         context = FileContext(
                             file_path=context.file_path,
                             file_type=context.file_type,
                             content="(已达全局字符上限，内容省略)",
-                            error=None
+                            error=None,
                         )
 
                     contexts.append(context)
                 except Exception as e:
                     logger.error(f"处理文件失败 {file_path}: {e}")
                     error_count += 1
-                    contexts.append(FileContext(
-                        file_path=str(file_path),
-                        file_type=file_path.suffix,
-                        content="",
-                        error=str(e)
-                    ))
+                    contexts.append(
+                        FileContext(
+                            file_path=str(file_path),
+                            file_type=file_path.suffix,
+                            content="",
+                            error=str(e),
+                        )
+                    )
 
         # 数据完整性校验
         assert success_count + error_count == len(matched_files), "文件处理数量不匹配"
@@ -141,7 +147,7 @@ class FileScanner:
             total_files=len(matched_files),
             success_count=success_count,
             error_count=error_count,
-            contexts=contexts
+            contexts=contexts,
         )
 
     def _get_files_in_range(self, start_date: date, end_date: date) -> List[Path]:
@@ -161,11 +167,17 @@ class FileScanner:
         for root, _, filenames in os.walk(self.work_dir):
             for filename in filenames:
                 # 检查扩展名
-                if not any(filename.endswith(ext) for ext in self.scanner_cfg['allowed_extensions']):
+                if not any(
+                    filename.endswith(ext)
+                    for ext in self.scanner_cfg["allowed_extensions"]
+                ):
                     continue
 
                 # 检查忽略模式
-                if any(filename.startswith(pattern.replace('*', '')) for pattern in self.scanner_cfg['ignored_patterns']):
+                if any(
+                    filename.startswith(pattern.replace("*", ""))
+                    for pattern in self.scanner_cfg["ignored_patterns"]
+                ):
                     continue
 
                 file_path = Path(root) / filename
@@ -178,7 +190,9 @@ class FileScanner:
 
         return files
 
-    def _extract_content(self, file_path: Path, limits: Optional[dict] = None) -> FileContext:
+    def _extract_content(
+        self, file_path: Path, limits: Optional[dict] = None
+    ) -> FileContext:
         """提取文件内容
 
         Args:
@@ -190,44 +204,41 @@ class FileScanner:
         """
         if limits is None:
             limits = {
-                'excel_max_rows': self.scanner_cfg['excel_max_rows'],
-                'pdf_max_pages': self.scanner_cfg['pdf_max_pages'],
-                'text_max_chars': self.scanner_cfg['text_max_chars'],
+                "excel_max_rows": self.scanner_cfg["excel_max_rows"],
+                "pdf_max_pages": self.scanner_cfg["pdf_max_pages"],
+                "text_max_chars": self.scanner_cfg["text_max_chars"],
             }
 
         file_type = file_path.suffix.lower()
 
         try:
-            if file_type in ['.xlsx', '.xls']:
-                content = self._parse_excel(file_path, limits['excel_max_rows'])
-            elif file_type == '.pdf':
-                content = self._parse_pdf(file_path, limits['pdf_max_pages'])
-            elif file_type == '.pptx':
+            if file_type in [".xlsx", ".xls"]:
+                content = self._parse_excel(file_path, limits["excel_max_rows"])
+            elif file_type == ".pdf":
+                content = self._parse_pdf(file_path, limits["pdf_max_pages"])
+            elif file_type == ".pptx":
                 content = self._parse_pptx(file_path)
-            elif file_type in ['.txt', '.md']:
+            elif file_type in [".txt", ".md"]:
                 content = self._parse_text(file_path)
-            elif file_type == '.docx':
+            elif file_type == ".docx":
                 content = self._parse_docx(file_path)
             else:
                 content = ""
 
             # 截断过长文本
-            content = truncate_text(content, limits['text_max_chars'])
+            content = truncate_text(content, limits["text_max_chars"])
 
             return FileContext(
                 file_path=str(file_path),
                 file_type=file_type,
                 content=content,
-                error=None
+                error=None,
             )
 
         except Exception as e:
             logger.warning(f"解析文件失败 {file_path}: {e}")
             return FileContext(
-                file_path=str(file_path),
-                file_type=file_type,
-                content="",
-                error=str(e)
+                file_path=str(file_path), file_type=file_type, content="", error=str(e)
             )
 
     def _parse_excel(self, file_path: Path, max_rows: Optional[int] = None) -> str:
@@ -241,7 +252,7 @@ class FileScanner:
             Markdown 格式的表格内容
         """
         if max_rows is None:
-            max_rows = self.scanner_cfg['excel_max_rows']
+            max_rows = self.scanner_cfg["excel_max_rows"]
 
         content_parts = []
 
@@ -252,7 +263,7 @@ class FileScanner:
             df = pd.read_excel(file_path, sheet_name=sheet_name)
 
             # 矢量化过滤空行
-            df = df.dropna(how='all')
+            df = df.dropna(how="all")
 
             # 限制行数
             if len(df) > max_rows:
@@ -278,7 +289,7 @@ class FileScanner:
             提取的文本内容
         """
         if max_pages is None:
-            max_pages = self.scanner_cfg['pdf_max_pages']
+            max_pages = self.scanner_cfg["pdf_max_pages"]
 
         content_parts = []
 
@@ -289,7 +300,9 @@ class FileScanner:
                     content_parts.append(f"## 第 {i + 1} 页\n{text}")
 
             if len(pdf.pages) > max_pages:
-                content_parts.append(f"\n(PDF 共 {len(pdf.pages)} 页，仅显示前 {max_pages} 页)")
+                content_parts.append(
+                    f"\n(PDF 共 {len(pdf.pages)} 页，仅显示前 {max_pages} 页)"
+                )
 
         return "\n\n".join(content_parts)
 
@@ -325,7 +338,7 @@ class FileScanner:
         Returns:
             文件文本内容
         """
-        return file_path.read_text(encoding='utf-8')
+        return file_path.read_text(encoding="utf-8")
 
     def _parse_docx(self, file_path: Path) -> str:
         """解析 Word 文档
@@ -337,5 +350,6 @@ class FileScanner:
             提取的文本内容
         """
         from docx import Document
+
         doc = Document(file_path)
         return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())

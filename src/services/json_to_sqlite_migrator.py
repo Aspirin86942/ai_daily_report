@@ -58,7 +58,9 @@ class JSONToSQLiteMigrator:
         sqlite_db_path: Path | None = None,
     ):
         self.json_db_dir = Path(json_db_dir or config.db_dir)
-        self.sqlite_db_path = Path(sqlite_db_path or (config.db_dir / "reports.sqlite3"))
+        self.sqlite_db_path = Path(
+            sqlite_db_path or (config.db_dir / "reports.sqlite3")
+        )
         self._store: SQLiteStore | None = None
 
     def migrate(self, dry_run: bool = False) -> MigrationStats:
@@ -89,7 +91,9 @@ class JSONToSQLiteMigrator:
                     self._get_store().save_report(report)
                 except Exception as exc:
                     stats.daily_failed += 1
-                    logger.warning("Failed to migrate daily file %s: %s", file_path, exc)
+                    logger.warning(
+                        "Failed to migrate daily file %s: %s", file_path, exc
+                    )
                     continue
             stats.daily_migrated += 1
 
@@ -107,7 +111,9 @@ class JSONToSQLiteMigrator:
                     self._get_store().save_weekly_report(report)
                 except Exception as exc:
                     stats.weekly_failed += 1
-                    logger.warning("Failed to migrate weekly file %s: %s", file_path, exc)
+                    logger.warning(
+                        "Failed to migrate weekly file %s: %s", file_path, exc
+                    )
                     continue
             stats.weekly_migrated += 1
 
@@ -125,12 +131,16 @@ class JSONToSQLiteMigrator:
                     self._get_store().save_monthly_report(report)
                 except Exception as exc:
                     stats.monthly_failed += 1
-                    logger.warning("Failed to migrate monthly file %s: %s", file_path, exc)
+                    logger.warning(
+                        "Failed to migrate monthly file %s: %s", file_path, exc
+                    )
                     continue
             stats.monthly_migrated += 1
 
     @staticmethod
-    def _iter_json_files(base_dir: Path, stem_pattern: re.Pattern[str]) -> Iterable[Path]:
+    def _iter_json_files(
+        base_dir: Path, stem_pattern: re.Pattern[str]
+    ) -> Iterable[Path]:
         if not base_dir.exists():
             return []
         return (
@@ -146,5 +156,7 @@ class JSONToSQLiteMigrator:
                 payload = json.load(f)
             return model_cls(**payload)
         except Exception as exc:
-            logger.warning("Failed to parse %s as %s: %s", file_path, model_cls.__name__, exc)
+            logger.warning(
+                "Failed to parse %s as %s: %s", file_path, model_cls.__name__, exc
+            )
             return None

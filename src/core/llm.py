@@ -1,4 +1,5 @@
 """LLM 交互模块"""
+
 import os
 import json
 import time
@@ -24,10 +25,10 @@ class LLMClient:
         """初始化 LLM 客户端"""
         # 设置代理
         proxy_cfg = config.proxy_config
-        if proxy_cfg.get('http'):
-            os.environ['HTTP_PROXY'] = proxy_cfg['http']
-        if proxy_cfg.get('https'):
-            os.environ['HTTPS_PROXY'] = proxy_cfg['https']
+        if proxy_cfg.get("http"):
+            os.environ["HTTP_PROXY"] = proxy_cfg["http"]
+        if proxy_cfg.get("https"):
+            os.environ["HTTPS_PROXY"] = proxy_cfg["https"]
 
         self.llm_cfg = config.llm_config
         self.provider = config.llm_provider
@@ -37,20 +38,20 @@ class LLMClient:
         elif self.provider == "openai":
             self.client = OpenAI(api_key=config.openai_api_key or None)
         else:
-            raise ValueError(f"Unsupported LLM provider: {self.provider}. Expected gemini/openai.")
+            raise ValueError(
+                f"Unsupported LLM provider: {self.provider}. Expected gemini/openai."
+            )
 
         # 加载所有 prompt 模板
         template_dir = Path(__file__).parent.parent.parent / "templates"
         self.prompt_templates: dict[str, str] = {}
-        for name in ('system_prompt', 'weekly_prompt', 'monthly_prompt'):
+        for name in ("system_prompt", "weekly_prompt", "monthly_prompt"):
             path = template_dir / f"{name}.md"
-            with open(path, 'r', encoding='utf-8') as f:
+            with open(path, "r", encoding="utf-8") as f:
                 self.prompt_templates[name] = f.read()
 
     def _call_llm_with_json(
-        self,
-        prompt: str,
-        response_model: type[BaseModel]
+        self, prompt: str, response_model: type[BaseModel]
     ) -> BaseModel:
         """调用 LLM 并校验 JSON 响应 (含重试逻辑)
 
@@ -64,19 +65,21 @@ class LLMClient:
         Raises:
             Exception: 重试耗尽后仍失败
         """
-        for attempt in range(self.llm_cfg['max_retries']):
+        for attempt in range(self.llm_cfg["max_retries"]):
             try:
-                logger.info(f"调用 LLM (尝试 {attempt + 1}/{self.llm_cfg['max_retries']})")
+                logger.info(
+                    f"调用 LLM (尝试 {attempt + 1}/{self.llm_cfg['max_retries']})"
+                )
 
                 if self.provider == "gemini":
                     response = self.client.models.generate_content(
-                        model=self.llm_cfg['model_id'],
+                        model=self.llm_cfg["model_id"],
                         contents=prompt,
                         config=types.GenerateContentConfig(
-                            temperature=self.llm_cfg['temperature'],
-                            max_output_tokens=self.llm_cfg['max_tokens'],
-                            response_mime_type="application/json"
-                        )
+                            temperature=self.llm_cfg["temperature"],
+                            max_output_tokens=self.llm_cfg["max_tokens"],
+                            response_mime_type="application/json",
+                        ),
                     )
 
                     response_text = response.text
@@ -84,23 +87,25 @@ class LLMClient:
                 elif self.provider == "openai":
                     schema_json = response_model.model_json_schema()
                     response = self.client.responses.create(
-                        model=self.llm_cfg['model_id'],
+                        model=self.llm_cfg["model_id"],
                         input=prompt,
-                        temperature=self.llm_cfg['temperature'],
-                        max_output_tokens=self.llm_cfg['max_tokens'],
+                        temperature=self.llm_cfg["temperature"],
+                        max_output_tokens=self.llm_cfg["max_tokens"],
                         text={
                             "format": {
                                 "type": "json_schema",
                                 "name": response_model.__name__,
                                 "schema": schema_json,
-                                "strict": False
+                                "strict": False,
                             }
-                        }
+                        },
                     )
                     response_text = response.output_text
 
                 else:
-                    raise ValueError(f"Unsupported LLM provider: {self.provider}. Expected gemini/openai.")
+                    raise ValueError(
+                        f"Unsupported LLM provider: {self.provider}. Expected gemini/openai."
+                    )
                 logger.info(f"LLM 返回: {len(response_text)} 字符")
 
                 # Pydantic 校验
@@ -110,16 +115,18 @@ class LLMClient:
 
             except ValidationError as e:
                 logger.error(f"JSON 校验失败: {e}")
-                if attempt == self.llm_cfg['max_retries'] - 1:
+                if attempt == self.llm_cfg["max_retries"] - 1:
                     raise Exception(f"JSON 校验失败: {e}")
 
             except Exception as e:
                 logger.warning(f"LLM 调用失败: {e}")
-                if attempt == self.llm_cfg['max_retries'] - 1:
-                    raise Exception(f"LLM 调用失败 (已重试 {self.llm_cfg['max_retries']} 次): {e}")
+                if attempt == self.llm_cfg["max_retries"] - 1:
+                    raise Exception(
+                        f"LLM 调用失败 (已重试 {self.llm_cfg['max_retries']} 次): {e}"
+                    )
 
                 # 指数退避
-                wait_time = 2 ** attempt
+                wait_time = 2**attempt
                 logger.info(f"等待 {wait_time} 秒后重试")
                 time.sleep(wait_time)
 
@@ -127,7 +134,7 @@ class LLMClient:
         self,
         user_input: str,
         file_context: str,
-        yesterday_plan: Optional[List[str]] = None
+        yesterday_plan: Optional[List[str]] = None,
     ) -> DailyReportData:
         """生成日报
 
@@ -140,13 +147,15 @@ class LLMClient:
             结构化日报数据
         """
         schema_json = DailyReportData.model_json_schema()
-        yesterday_text = "\n".join(f"- {p}" for p in yesterday_plan) if yesterday_plan else "无"
+        yesterday_text = (
+            "\n".join(f"- {p}" for p in yesterday_plan) if yesterday_plan else "无"
+        )
 
-        prompt = self.prompt_templates['system_prompt'].format(
+        prompt = self.prompt_templates["system_prompt"].format(
             schema=json.dumps(schema_json, ensure_ascii=False, indent=2),
             user_input=user_input,
             yesterday_plan=yesterday_text,
-            file_context=file_context
+            file_context=file_context,
         )
 
         report_data: DailyReportData = self._call_llm_with_json(prompt, DailyReportData)
@@ -163,7 +172,7 @@ class LLMClient:
         year: int,
         week: int,
         missing_days: List[str],
-        data_source: str
+        data_source: str,
     ) -> WeeklyReportData:
         """生成周报
 
@@ -183,13 +192,13 @@ class LLMClient:
         reports_summary = self._summarize_reports(reports) if reports else "无日报数据"
         missing_text = ", ".join(missing_days) if missing_days else "无"
 
-        prompt = self.prompt_templates['weekly_prompt'].format(
+        prompt = self.prompt_templates["weekly_prompt"].format(
             schema=json.dumps(schema_json, ensure_ascii=False, indent=2),
             week_label=week_label,
             reports_summary=reports_summary,
             file_context=file_context,
             missing_days=missing_text,
-            data_source=data_source
+            data_source=data_source,
         )
 
         return self._call_llm_with_json(prompt, WeeklyReportData)
@@ -200,7 +209,7 @@ class LLMClient:
         file_context: str,
         year_month: str,
         missing_days: List[str],
-        data_source: str
+        data_source: str,
     ) -> MonthlyReportData:
         """生成月报
 
@@ -218,13 +227,13 @@ class LLMClient:
         reports_summary = self._summarize_reports(reports) if reports else "无日报数据"
         missing_text = ", ".join(missing_days) if missing_days else "无"
 
-        prompt = self.prompt_templates['monthly_prompt'].format(
+        prompt = self.prompt_templates["monthly_prompt"].format(
             schema=json.dumps(schema_json, ensure_ascii=False, indent=2),
             year_month=year_month,
             reports_summary=reports_summary,
             file_context=file_context,
             missing_days=missing_text,
-            data_source=data_source
+            data_source=data_source,
         )
 
         return self._call_llm_with_json(prompt, MonthlyReportData)
@@ -242,14 +251,14 @@ class LLMClient:
         for r in reports:
             # 工作项摘要
             work_items = "; ".join(
-                f"[{a.category}] {a.content} ({a.status})"
-                for a in r.achievements
+                f"[{a.category}] {a.content} ({a.status})" for a in r.achievements
             )
             # 风险摘要
-            risk_items = "; ".join(
-                f"[{ri.severity}] {ri.description}"
-                for ri in r.risks
-            ) if r.risks else "无"
+            risk_items = (
+                "; ".join(f"[{ri.severity}] {ri.description}" for ri in r.risks)
+                if r.risks
+                else "无"
+            )
 
             part = (
                 f"## {r.date}\n"

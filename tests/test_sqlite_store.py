@@ -1,4 +1,5 @@
 """Tests for SQLite-based history storage."""
+
 import sqlite3
 from datetime import date, datetime
 
@@ -13,7 +14,9 @@ from src.models.schemas import (
 from src.services.sqlite_store import SQLiteStore
 
 
-def _make_daily_report(report_date: str, summary: str = "daily summary") -> DailyReportData:
+def _make_daily_report(
+    report_date: str, summary: str = "daily summary"
+) -> DailyReportData:
     return DailyReportData(
         date=report_date,
         summary=summary,

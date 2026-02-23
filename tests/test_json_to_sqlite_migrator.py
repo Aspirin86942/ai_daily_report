@@ -39,7 +39,9 @@ def _weekly_payload() -> dict:
         week_label="2026-W06",
         date_range="2026-02-02 ~ 2026-02-08",
         summary="weekly summary",
-        category_summaries=[CategorySummary(category="eng", items=["item"], total_count=1)],
+        category_summaries=[
+            CategorySummary(category="eng", items=["item"], total_count=1)
+        ],
         risks=[],
         key_achievements=["weekly ach"],
         next_week_plans=["weekly plan"],

@@ -1,5 +1,5 @@
 """测试文件扫描器"""
-import pytest
+
 from datetime import date, timedelta
 from pathlib import Path
 from src.services.file_scanner import FileScanner
@@ -9,7 +9,7 @@ def test_file_scanner_init():
     """测试扫描器初始化"""
     scanner = FileScanner()
     assert scanner.work_dir.exists()
-    assert scanner.scanner_cfg['max_workers'] > 0
+    assert scanner.scanner_cfg["max_workers"] > 0
 
 
 def test_scan_files_default_dates():

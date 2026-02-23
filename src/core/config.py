@@ -1,4 +1,5 @@
 """配置管理模块"""
+
 import os
 from pathlib import Path
 from typing import Dict, Any
@@ -28,10 +29,10 @@ class Config:
             envvar_prefix="DAILY_REPORT",
             settings_files=[
                 str(config_dir / "settings.toml"),
-                str(config_dir / ".secrets.toml")
+                str(config_dir / ".secrets.toml"),
             ],
             environments=False,
-            load_dotenv=True
+            load_dotenv=True,
         )
 
     @property
@@ -61,27 +62,31 @@ class Config:
     def llm_config(self) -> Dict[str, Any]:
         """LLM 配置"""
         return {
-            'model_id': self._settings.llm.model_id,
-            'temperature': self._settings.llm.temperature,
-            'max_tokens': self._settings.llm.max_tokens,
-            'max_retries': self._settings.llm.max_retries
+            "model_id": self._settings.llm.model_id,
+            "temperature": self._settings.llm.temperature,
+            "max_tokens": self._settings.llm.max_tokens,
+            "max_retries": self._settings.llm.max_retries,
         }
 
     @property
     def scanner_config(self) -> Dict[str, Any]:
         """扫描器配置"""
         cfg: Dict[str, Any] = {
-            'allowed_extensions': self._settings.scanner.allowed_extensions,
-            'ignored_patterns': self._settings.scanner.ignored_patterns,
-            'max_workers': self._settings.scanner.max_workers,
-            'excel_max_rows': self._settings.scanner.excel_max_rows,
-            'pdf_max_pages': self._settings.scanner.pdf_max_pages,
-            'text_max_chars': self._settings.scanner.text_max_chars,
+            "allowed_extensions": self._settings.scanner.allowed_extensions,
+            "ignored_patterns": self._settings.scanner.ignored_patterns,
+            "max_workers": self._settings.scanner.max_workers,
+            "excel_max_rows": self._settings.scanner.excel_max_rows,
+            "pdf_max_pages": self._settings.scanner.pdf_max_pages,
+            "text_max_chars": self._settings.scanner.text_max_chars,
         }
         # 可选的 summary 模式配置
         scanner = self._settings.scanner
-        for key in ('summary_excel_max_rows', 'summary_pdf_max_pages',
-                     'summary_text_max_chars', 'total_max_chars'):
+        for key in (
+            "summary_excel_max_rows",
+            "summary_pdf_max_pages",
+            "summary_text_max_chars",
+            "total_max_chars",
+        ):
             if hasattr(scanner, key):
                 cfg[key] = getattr(scanner, key)
         return cfg
@@ -98,7 +103,7 @@ class Config:
     def google_api_key(self) -> str:
         """Google API Key"""
         # 优先读取环境变量，避免把密钥写入配置文件
-        key = os.getenv('GOOGLE_API_KEY')
+        key = os.getenv("GOOGLE_API_KEY")
         if key:
             return key
         return getattr(self._settings.api, "google_api_key", "")
@@ -106,7 +111,7 @@ class Config:
     @property
     def openai_api_key(self) -> str:
         """OpenAI API Key"""
-        key = os.getenv('OPENAI_API_KEY')
+        key = os.getenv("OPENAI_API_KEY")
         if key:
             return key
         return getattr(self._settings.api, "openai_api_key", "")
@@ -121,8 +126,8 @@ class Config:
         """代理配置"""
         proxy = getattr(self._settings, "proxy", None)
         return {
-            'http': getattr(proxy, "http_proxy", ""),
-            'https': getattr(proxy, "https_proxy", "")
+            "http": getattr(proxy, "http_proxy", ""),
+            "https": getattr(proxy, "https_proxy", ""),
         }
 
 
