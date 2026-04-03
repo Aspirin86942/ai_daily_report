@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -45,7 +46,7 @@ class FileContext(BaseModel):
     file_path: str = Field(description="文件路径")
     file_type: str = Field(description="文件类型")
     content: str = Field(description="抽取文本")
-    error: str = Field(description="发现的问题摘要")
+    error: Optional[str] = Field(default=None, description="发现的问题摘要")
 
 
 class ScanResult(BaseModel):

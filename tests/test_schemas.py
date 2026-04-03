@@ -67,5 +67,8 @@ def test_models_package_exports():
 
 
 def test_scanner_models_available():
-    assert FileContext(file_path="a", file_type="txt", content="foo", error="")  # type: ignore
-    assert ScanResult(total_files=0, success_count=0, error_count=0, contexts=[])
+    ctx = FileContext(
+        file_path="a", file_type="txt", content="foo", error=None
+    )
+    assert ctx.error is None
+    assert ScanResult(total_files=0, success_count=0, error_count=0, contexts=[ctx])

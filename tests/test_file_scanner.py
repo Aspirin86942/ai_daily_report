@@ -78,3 +78,13 @@ def test_get_files_in_range():
                     assert False, f"文件 {f} 不应该来自排除目录 {excluded_dir}"
                 except ValueError:
                     pass  # 正常，文件不在排除目录中
+
+
+def test_extract_content_allows_success(tmp_path):
+    """成功路径应当构造 error=None 的 FileContext"""
+    scanner = FileScanner()
+    sample = tmp_path / "example.txt"
+    sample.write_text("example content", encoding="utf-8")
+    context = scanner._extract_content(sample)
+    assert context.error is None
+    assert "example" in context.content
