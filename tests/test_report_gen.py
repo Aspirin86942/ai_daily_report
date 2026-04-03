@@ -1,13 +1,7 @@
 """测试报告生成"""
 
-import pytest
-
+from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
 from src.services.report_gen import ReportGenerator
-from src.models.schemas import (
-    DailyReportData,
-    WeeklyReportData,
-    MonthlyReportData,
-)
 
 
 def test_report_generator_init():
@@ -37,60 +31,51 @@ def test_render_markdown():
 
 def test_render_weekly_markdown():
     """测试周报 Markdown 渲染"""
-    pytest.skip("Task 4 会统一更新周报 schema/template 测试")
     gen = ReportGenerator()
 
     report = WeeklyReportData(
         week_label="2026-W05",
         date_range="2026-01-27 ~ 2026-02-02",
-        summary="本周完成审计工作",
-        category_summaries=[
-            CategorySummary(
-                category="现场审计",
-                items=["项目A审计", "项目B审计"],
-                total_count=2,
-                completion_rate="100%",
-            )
-        ],
-        risks=[RiskItem(severity="中", description="测试风险")],
-        key_achievements=["完成项目A审计"],
-        next_week_plans=["启动项目C审计"],
-        missing_days=["2026-01-30"],
-        data_source="db",
+        overview="本周围绕两个审计项目推进资料核验和底稿收口，整体节奏保持稳定。",
+        completed_work="本周完成项目A底稿复核、项目B资料清单初审，并同步补齐问题跟踪记录。",
+        work_summary="本周工作以阶段性收口和新项目准备并行为主，关键依赖已经基本识别清楚。",
+        next_plan="下周继续推进项目B补件核验，并启动项目C现场访谈准备。",
     )
 
     markdown = gen.render_weekly_markdown(report)
     assert "2026-W05" in markdown
-    assert "本周完成审计工作" in markdown
-    assert "现场审计" in markdown
-    assert "项目A审计" in markdown
-    assert "测试风险" in markdown
-    assert "2026-01-30" in markdown
+    assert "## 本周总览" in markdown
+    assert "## 本周完成内容" in markdown
+    assert "## 本周工作小结" in markdown
+    assert "## 下周工作计划" in markdown
+    assert "项目A底稿复核" in markdown
+    assert "项目C现场访谈准备" in markdown
+    assert "category_summaries" not in markdown
+    assert "风险与问题" not in markdown
 
 
 def test_render_monthly_markdown():
     """测试月报 Markdown 渲染"""
-    pytest.skip("Task 4 会统一更新月报 schema/template 测试")
     gen = ReportGenerator()
 
     report = MonthlyReportData(
         year_month="2026-01",
-        summary="本月完成多项工作",
-        category_summaries=[
-            CategorySummary(category="报告撰写", items=["审计报告A"], total_count=1)
-        ],
-        statistics={"审计项目数": "5", "发现问题数": "12"},
-        key_achievements=["完成年度审计计划"],
-        next_month_plans=["启动新项目"],
-        data_source="db",
+        overview="本月围绕审计计划执行、资料核验和报告整理持续推进，整体进度符合预期。",
+        completed_work="本月完成年度审计计划拆解、两个项目的阶段性底稿整理以及一轮报告初稿编写。",
+        work_summary="本月工作重点在于把前期分散事项收束成可交付成果，并提前暴露后续依赖。",
+        next_plan="下月继续完善报告初稿，跟进整改反馈，并启动新项目进场准备。",
     )
 
     markdown = gen.render_monthly_markdown(report)
     assert "2026-01" in markdown
-    assert "本月完成多项工作" in markdown
-    assert "报告撰写" in markdown
-    assert "审计项目数" in markdown
-    assert "5" in markdown
+    assert "## 本月总览" in markdown
+    assert "## 本月完成内容" in markdown
+    assert "## 本月工作小结" in markdown
+    assert "## 下月工作计划" in markdown
+    assert "年度审计计划拆解" in markdown
+    assert "启动新项目进场准备" in markdown
+    assert "statistics" not in markdown
+    assert "| 指标 | 数值 |" not in markdown
 
 
 def test_save_weekly_markdown():
