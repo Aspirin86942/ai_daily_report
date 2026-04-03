@@ -1,3 +1,7 @@
+import pytest
+
+from pydantic import ValidationError
+
 from src.models.schemas import (
     DataSource,
     DailyReportData,
@@ -41,3 +45,20 @@ def test_monthly_report_data():
     )
     assert report.year_month == "2026-04"
     assert "自然语言" in report.work_summary
+
+
+def test_daily_report_rejects_unknown_fields():
+    with pytest.raises(ValidationError):
+        DailyReportData(
+            date="2026-04-03",
+            completed_work="完成了任务",
+            work_summary="总结",
+            next_plan="计划",
+            unexpected="something",
+        )
+
+
+def test_models_package_exports():
+    from src.models import DailyReportData as PackageDailyReportData
+
+    assert PackageDailyReportData is DailyReportData
