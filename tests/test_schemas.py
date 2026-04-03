@@ -1,17 +1,10 @@
-from importlib import util
-from pathlib import Path
-
-schema_path = Path(__file__).resolve().parents[1] / "src" / "models" / "schemas.py"
-spec = util.spec_from_file_location("schemas_module", schema_path)
-schemas = util.module_from_spec(spec)
-assert spec.loader
-spec.loader.exec_module(schemas)
-
-DataSource = schemas.DataSource
-DailyReportData = schemas.DailyReportData
-MonthlyReportData = schemas.MonthlyReportData
-ReportMode = schemas.ReportMode
-WeeklyReportData = schemas.WeeklyReportData
+from src.models.schemas import (
+    DataSource,
+    DailyReportData,
+    MonthlyReportData,
+    ReportMode,
+    WeeklyReportData,
+)
 
 
 def test_daily_report_data():
