@@ -56,7 +56,7 @@ def get_month_date_range(year_month: str) -> tuple[date, date]:
 def format_period_report_context(reports: list[DailyReportData]) -> str:
     """按日期拼接日报文本，供周报和月报聚合使用。"""
     if not reports:
-        return "无日报数据。"
+        return "无日报数据"
 
     sections: list[str] = []
     for report in sorted(reports, key=lambda item: item.date):

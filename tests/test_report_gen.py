@@ -1,5 +1,10 @@
 """测试报告生成"""
 
+import json
+
+import pytest
+
+from src.core.llm import LLMClient
 from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
 from src.services.report_gen import ReportGenerator
 
@@ -96,3 +101,113 @@ def test_save_monthly_markdown():
     assert path.exists()
     assert path.name == "2026-01.md"
     assert path.read_text(encoding="utf-8") == content
+
+
+@pytest.fixture
+def llm_client_for_prompt_tests():
+    """构造一个不依赖外部 API 的 LLMClient 测试实例"""
+    client = object.__new__(LLMClient)
+    client.prompt_templates = {
+        "weekly_prompt": (
+            "周标签:{week_label}\n"
+            "数据来源:{data_source}\n"
+            "缺失日报:{missing_days}\n"
+            "日报聚合上下文:\n{reports_summary}\n"
+            "文件证据:{file_context}\n"
+            "Schema:{schema}"
+        ),
+        "monthly_prompt": (
+            "年月:{year_month}\n"
+            "数据来源:{data_source}\n"
+            "缺失日报:{missing_days}\n"
+            "日报聚合上下文:\n{reports_summary}\n"
+            "文件证据:{file_context}\n"
+            "Schema:{schema}"
+        ),
+    }
+    return client
+
+
+def test_generate_weekly_report_prompt_contains_period_context_and_metadata(
+    monkeypatch, llm_client_for_prompt_tests
+):
+    """周报 prompt 需要带入三段日报上下文、缺失日期和数据来源"""
+    client = llm_client_for_prompt_tests
+    captured: dict[str, str] = {}
+
+    def fake_call(prompt: str, response_model: type[object]) -> WeeklyReportData:
+        captured["prompt"] = prompt
+        return WeeklyReportData(
+            week_label="2026-W14",
+            date_range="2026-03-30 ~ 2026-04-05",
+            overview="本周总览。",
+            completed_work="本周完成内容。",
+            work_summary="本周工作小结。",
+            next_plan="下周工作计划。",
+        )
+
+    monkeypatch.setattr(client, "_call_llm_with_json", fake_call)
+
+    reports = [
+        DailyReportData(
+            date="2026-04-01",
+            completed_work="完成项目A底稿复核。",
+            work_summary="同步收口问题台账。",
+            next_plan="继续跟进整改。",
+        )
+    ]
+
+    client.generate_weekly_report(
+        reports=reports,
+        file_context="附件中有会议纪要。",
+        year=2026,
+        week=14,
+        missing_days=["2026-04-03"],
+        data_source="db",
+    )
+
+    prompt = captured["prompt"]
+    assert "周标签:2026-W14" in prompt
+    assert "数据来源:db" in prompt
+    assert "缺失日报:2026-04-03" in prompt
+    assert "## 2026-04-01" in prompt
+    assert "### 今日工作完成内容" in prompt
+    assert "### 今日工作小结" in prompt
+    assert "### 明日工作计划" in prompt
+    assert "完成项目A底稿复核。" in prompt
+
+
+def test_generate_monthly_report_prompt_uses_empty_message_for_empty_reports(
+    monkeypatch, llm_client_for_prompt_tests
+):
+    """月报 prompt 在没有日报时需要带入空日报文案和元数据"""
+    client = llm_client_for_prompt_tests
+    captured: dict[str, str] = {}
+
+    def fake_call(prompt: str, response_model: type[object]) -> MonthlyReportData:
+        captured["prompt"] = prompt
+        return MonthlyReportData(
+            year_month="2026-04",
+            overview="本月总览。",
+            completed_work="本月完成内容。",
+            work_summary="本月工作小结。",
+            next_plan="下月工作计划。",
+        )
+
+    monkeypatch.setattr(client, "_call_llm_with_json", fake_call)
+
+    client.generate_monthly_report(
+        reports=[],
+        file_context="无文件补充。",
+        year_month="2026-04",
+        missing_days=["2026-04-04", "2026-04-18"],
+        data_source="scan",
+    )
+
+    prompt = captured["prompt"]
+    assert "年月:2026-04" in prompt
+    assert "数据来源:scan" in prompt
+    assert "缺失日报:2026-04-04、2026-04-18" in prompt
+    assert "日报聚合上下文:\n无日报数据" in prompt
+    assert "### 今日工作完成内容" not in prompt
+    assert json.dumps(MonthlyReportData.model_json_schema(), ensure_ascii=False, indent=2) in prompt

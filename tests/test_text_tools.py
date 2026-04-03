@@ -139,3 +139,37 @@ def test_format_period_report_context_groups_daily_sections():
     assert "### 明日工作计划" in result
     assert "完成项目A底稿复核" in result
     assert "开始整理周报聚合素材" in result
+
+
+def test_format_period_report_context_sorts_reports_by_date():
+    """周期报告上下文需要先按日期升序排序"""
+    reports = [
+        DailyReportData(
+            date="2026-04-03",
+            completed_work="第三天内容。",
+            work_summary="第三天小结。",
+            next_plan="第三天计划。",
+        ),
+        DailyReportData(
+            date="2026-04-01",
+            completed_work="第一天内容。",
+            work_summary="第一天小结。",
+            next_plan="第一天计划。",
+        ),
+        DailyReportData(
+            date="2026-04-02",
+            completed_work="第二天内容。",
+            work_summary="第二天小结。",
+            next_plan="第二天计划。",
+        ),
+    ]
+
+    result = format_period_report_context(reports)
+
+    assert result.index("## 2026-04-01") < result.index("## 2026-04-02")
+    assert result.index("## 2026-04-02") < result.index("## 2026-04-03")
+
+
+def test_format_period_report_context_returns_empty_message_for_empty_reports():
+    """空日报列表需要返回统一空文案"""
+    assert format_period_report_context([]) == "无日报数据"
