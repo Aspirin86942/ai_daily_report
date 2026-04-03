@@ -39,3 +39,17 @@ class MonthlyReportData(BaseModel):
     completed_work: str = Field(description="本月完成内容，使用自然段")
     work_summary: str = Field(description="本月工作小结，使用自然段")
     next_plan: str = Field(description="下月工作计划，使用自然段")
+
+
+class FileContext(BaseModel):
+    file_path: str = Field(description="文件路径")
+    file_type: str = Field(description="文件类型")
+    content: str = Field(description="抽取文本")
+    error: str = Field(description="发现的问题摘要")
+
+
+class ScanResult(BaseModel):
+    total_files: int = Field(description="扫描文件总数")
+    success_count: int = Field(description="成功解析数")
+    error_count: int = Field(description="失败解析数")
+    contexts: list[FileContext] = Field(description="文件级上下文")

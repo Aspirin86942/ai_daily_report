@@ -5,8 +5,10 @@ from pydantic import ValidationError
 from src.models.schemas import (
     DataSource,
     DailyReportData,
+    FileContext,
     MonthlyReportData,
     ReportMode,
+    ScanResult,
     WeeklyReportData,
 )
 
@@ -62,3 +64,8 @@ def test_models_package_exports():
     from src.models import DailyReportData as PackageDailyReportData
 
     assert PackageDailyReportData is DailyReportData
+
+
+def test_scanner_models_available():
+    assert FileContext(file_path="a", file_type="txt", content="foo", error="")  # type: ignore
+    assert ScanResult(total_files=0, success_count=0, error_count=0, contexts=[])
