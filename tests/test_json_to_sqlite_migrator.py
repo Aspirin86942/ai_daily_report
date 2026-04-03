@@ -4,14 +4,7 @@ from __future__ import annotations
 
 import json
 
-from src.models.schemas import (
-    CategorySummary,
-    DailyReportData,
-    MonthlyReportData,
-    RiskItem,
-    WeeklyReportData,
-    WorkItem,
-)
+from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
 from src.services.json_to_sqlite_migrator import JSONToSQLiteMigrator
 from src.services.sqlite_store import SQLiteStore
 
@@ -19,17 +12,9 @@ from src.services.sqlite_store import SQLiteStore
 def _daily_payload(report_date: str = "2026-02-09") -> dict:
     report = DailyReportData(
         date=report_date,
-        summary="daily summary",
-        achievements=[
-            WorkItem(
-                category="eng",
-                content="build migration",
-                status="done",
-                quantitative="1",
-            )
-        ],
-        risks=[RiskItem(severity="low", description="none")],
-        plans=["next task"],
+        completed_work="今天完成 JSON 到 SQLite 的文本化迁移。",
+        work_summary="重点处理 schema 收敛。",
+        next_plan="明天继续补齐历史兼容验证。",
     )
     return report.model_dump()
 
@@ -38,15 +23,10 @@ def _weekly_payload() -> dict:
     report = WeeklyReportData(
         week_label="2026-W06",
         date_range="2026-02-02 ~ 2026-02-08",
-        summary="weekly summary",
-        category_summaries=[
-            CategorySummary(category="eng", items=["item"], total_count=1)
-        ],
-        risks=[],
-        key_achievements=["weekly ach"],
-        next_week_plans=["weekly plan"],
-        missing_days=[],
-        data_source="db",
+        overview="本周围绕迁移改造推进。",
+        completed_work="完成周报文本结构迁移。",
+        work_summary="处理了旧 JSON payload 到新模型的映射。",
+        next_plan="下周验证迁移回归。",
     )
     return report.model_dump()
 
@@ -54,14 +34,10 @@ def _weekly_payload() -> dict:
 def _monthly_payload() -> dict:
     report = MonthlyReportData(
         year_month="2026-02",
-        summary="monthly summary",
-        category_summaries=[],
-        risks=[],
-        statistics={"count": "1"},
-        key_achievements=["monthly ach"],
-        next_month_plans=["monthly plan"],
-        missing_days=[],
-        data_source="db",
+        overview="本月集中推进历史数据迁移。",
+        completed_work="完成月报文本字段迁移。",
+        work_summary="确保迁移后模型可正常校验和落库。",
+        next_plan="下月继续观察稳定性。",
     )
     return report.model_dump()
 

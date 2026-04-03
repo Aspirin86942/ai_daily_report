@@ -2,31 +2,18 @@
 
 from datetime import date, datetime
 
-from src.models.schemas import (
-    CategorySummary,
-    DailyReportData,
-    MonthlyReportData,
-    RiskItem,
-    WeeklyReportData,
-    WorkItem,
-)
+from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
 from src.services.history_mgr import HistoryManager
 
 
-def _make_daily(report_date: str, summary: str = "daily summary") -> DailyReportData:
+def _make_daily(
+    report_date: str, work_summary: str = "daily summary"
+) -> DailyReportData:
     return DailyReportData(
         date=report_date,
-        summary=summary,
-        achievements=[
-            WorkItem(
-                category="testing",
-                content="write tests",
-                status="done",
-                quantitative="1",
-            )
-        ],
-        risks=[RiskItem(severity="low", description="minor")],
-        plans=["next task"],
+        completed_work="今天完成了 HistoryManager 兼容层改造。",
+        work_summary=work_summary,
+        next_plan="明天继续处理聚合链路。",
     )
 
 
@@ -50,7 +37,7 @@ def test_save_and_load_report(tmp_path):
     assert saved_path == mgr.db_path
     assert loaded is not None
     assert loaded.date == "2026-01-28"
-    assert loaded.summary == "saved summary"
+    assert loaded.work_summary == "saved summary"
 
 
 def test_get_month_reports(tmp_path):
@@ -100,9 +87,9 @@ def test_get_yesterday_plan(tmp_path):
     mgr = HistoryManager(db_dir=tmp_path / "db")
     mgr.save_report(_make_daily("2026-02-10"))
 
-    plans = mgr.get_yesterday_plan(datetime(2026, 2, 11, 9, 30, 0))
+    plan_text = mgr.get_yesterday_plan(datetime(2026, 2, 11, 9, 30, 0))
 
-    assert plans == ["next task"]
+    assert plan_text == "明天继续处理聚合链路。"
 
 
 def test_list_all_reports(tmp_path):
@@ -118,15 +105,10 @@ def test_save_weekly_report(tmp_path):
     report = WeeklyReportData(
         week_label="2026-W05",
         date_range="2026-01-26 ~ 2026-02-01",
-        summary="weekly summary",
-        category_summaries=[
-            CategorySummary(category="testing", items=["task"], total_count=1)
-        ],
-        risks=[],
-        key_achievements=["done"],
-        next_week_plans=["next"],
-        missing_days=[],
-        data_source="db",
+        overview="本周推进存储结构收敛。",
+        completed_work="完成周报文本字段设计。",
+        work_summary="主要处理字段压缩和兼容读取。",
+        next_plan="下周补充聚合策略验证。",
     )
 
     saved_path = mgr.save_weekly_report(report)
@@ -134,21 +116,17 @@ def test_save_weekly_report(tmp_path):
 
     assert saved_path == mgr.db_path
     assert loaded is not None
-    assert loaded.summary == "weekly summary"
+    assert loaded.overview == "本周推进存储结构收敛。"
 
 
 def test_save_monthly_report(tmp_path):
     mgr = HistoryManager(db_dir=tmp_path / "db")
     report = MonthlyReportData(
         year_month="2026-01",
-        summary="monthly summary",
-        category_summaries=[],
-        risks=[],
-        statistics={"total": "5"},
-        key_achievements=["done"],
-        next_month_plans=["next"],
-        missing_days=[],
-        data_source="db",
+        overview="本月重点是报告文本化。",
+        completed_work="完成月报新结构落库。",
+        work_summary="保留简洁文本表达并去除列表字段。",
+        next_plan="下月继续优化生成稳定性。",
     )
 
     saved_path = mgr.save_monthly_report(report)
@@ -156,4 +134,4 @@ def test_save_monthly_report(tmp_path):
 
     assert saved_path == mgr.db_path
     assert loaded is not None
-    assert loaded.statistics["total"] == "5"
+    assert loaded.next_plan == "下月继续优化生成稳定性。"

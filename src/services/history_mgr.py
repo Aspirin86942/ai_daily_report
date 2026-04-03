@@ -1,5 +1,6 @@
 """Backward-compatible history manager backed by SQLite."""
 
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -26,3 +27,7 @@ class HistoryManager(SQLiteStore):
             Path(db_path) if db_path is not None else self.db_dir / "reports.sqlite3"
         )
         super().__init__(db_path=sqlite_path)
+
+    def get_yesterday_plan(self, target_date: Optional[datetime] = None) -> str:
+        # 兼容层保持与 SQLiteStore 一致：返回昨日日报中的 next_plan 文本。
+        return super().get_yesterday_plan(target_date=target_date)

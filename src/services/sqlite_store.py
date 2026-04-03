@@ -37,11 +37,9 @@ class SQLiteStore:
                 """
                 CREATE TABLE IF NOT EXISTS daily_reports (
                     date TEXT PRIMARY KEY,
-                    summary TEXT NOT NULL,
-                    achievements_json TEXT NOT NULL,
-                    risks_json TEXT NOT NULL,
-                    plans_json TEXT NOT NULL,
-                    yesterday_review TEXT,
+                    completed_work TEXT NOT NULL,
+                    work_summary TEXT NOT NULL,
+                    next_plan TEXT NOT NULL,
                     raw_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -50,13 +48,10 @@ class SQLiteStore:
                 CREATE TABLE IF NOT EXISTS weekly_reports (
                     week_label TEXT PRIMARY KEY,
                     date_range TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    category_summaries_json TEXT NOT NULL,
-                    risks_json TEXT NOT NULL,
-                    key_achievements_json TEXT NOT NULL,
-                    next_week_plans_json TEXT NOT NULL,
-                    missing_days_json TEXT NOT NULL,
-                    data_source TEXT NOT NULL,
+                    overview TEXT NOT NULL,
+                    completed_work TEXT NOT NULL,
+                    work_summary TEXT NOT NULL,
+                    next_plan TEXT NOT NULL,
                     raw_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -64,14 +59,10 @@ class SQLiteStore:
 
                 CREATE TABLE IF NOT EXISTS monthly_reports (
                     year_month TEXT PRIMARY KEY,
-                    summary TEXT NOT NULL,
-                    category_summaries_json TEXT NOT NULL,
-                    risks_json TEXT NOT NULL,
-                    statistics_json TEXT NOT NULL,
-                    key_achievements_json TEXT NOT NULL,
-                    next_month_plans_json TEXT NOT NULL,
-                    missing_days_json TEXT NOT NULL,
-                    data_source TEXT NOT NULL,
+                    overview TEXT NOT NULL,
+                    completed_work TEXT NOT NULL,
+                    work_summary TEXT NOT NULL,
+                    next_plan TEXT NOT NULL,
                     raw_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -99,25 +90,21 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO daily_reports (
-                    date, summary, achievements_json, risks_json, plans_json,
-                    yesterday_review, raw_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    date, completed_work, work_summary, next_plan,
+                    raw_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(date) DO UPDATE SET
-                    summary=excluded.summary,
-                    achievements_json=excluded.achievements_json,
-                    risks_json=excluded.risks_json,
-                    plans_json=excluded.plans_json,
-                    yesterday_review=excluded.yesterday_review,
+                    completed_work=excluded.completed_work,
+                    work_summary=excluded.work_summary,
+                    next_plan=excluded.next_plan,
                     raw_json=excluded.raw_json,
                     updated_at=datetime('now')
                 """,
                 (
                     report.date,
-                    report.summary,
-                    self._to_json(payload.get("achievements", [])),
-                    self._to_json(payload.get("risks", [])),
-                    self._to_json(payload.get("plans", [])),
-                    report.yesterday_review,
+                    report.completed_work,
+                    report.work_summary,
+                    report.next_plan,
                     self._to_json(payload),
                 ),
             )
@@ -139,12 +126,12 @@ class SQLiteStore:
             logger.warning("Failed to parse daily report %s: %s", report_date, exc)
             return None
 
-    def get_yesterday_plan(self, target_date: Optional[datetime] = None) -> List[str]:
+    def get_yesterday_plan(self, target_date: Optional[datetime] = None) -> str:
         if target_date is None:
             target_date = datetime.now()
         yesterday = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
         report = self.get_report(yesterday)
-        return report.plans if report else []
+        return report.next_plan if report else ""
 
     def get_month_reports(self, year_month: str) -> List[DailyReportData]:
         with self._get_conn() as conn:
@@ -219,32 +206,25 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO weekly_reports (
-                    week_label, date_range, summary, category_summaries_json,
-                    risks_json, key_achievements_json, next_week_plans_json,
-                    missing_days_json, data_source, raw_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    week_label, date_range, overview, completed_work, work_summary,
+                    next_plan, raw_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(week_label) DO UPDATE SET
                     date_range=excluded.date_range,
-                    summary=excluded.summary,
-                    category_summaries_json=excluded.category_summaries_json,
-                    risks_json=excluded.risks_json,
-                    key_achievements_json=excluded.key_achievements_json,
-                    next_week_plans_json=excluded.next_week_plans_json,
-                    missing_days_json=excluded.missing_days_json,
-                    data_source=excluded.data_source,
+                    overview=excluded.overview,
+                    completed_work=excluded.completed_work,
+                    work_summary=excluded.work_summary,
+                    next_plan=excluded.next_plan,
                     raw_json=excluded.raw_json,
                     updated_at=datetime('now')
                 """,
                 (
                     report.week_label,
                     report.date_range,
-                    report.summary,
-                    self._to_json(payload.get("category_summaries", [])),
-                    self._to_json(payload.get("risks", [])),
-                    self._to_json(payload.get("key_achievements", [])),
-                    self._to_json(payload.get("next_week_plans", [])),
-                    self._to_json(payload.get("missing_days", [])),
-                    report.data_source,
+                    report.overview,
+                    report.completed_work,
+                    report.work_summary,
+                    report.next_plan,
                     self._to_json(payload),
                 ),
             )
@@ -271,32 +251,23 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO monthly_reports (
-                    year_month, summary, category_summaries_json, risks_json,
-                    statistics_json, key_achievements_json, next_month_plans_json,
-                    missing_days_json, data_source, raw_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    year_month, overview, completed_work, work_summary, next_plan,
+                    raw_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(year_month) DO UPDATE SET
-                    summary=excluded.summary,
-                    category_summaries_json=excluded.category_summaries_json,
-                    risks_json=excluded.risks_json,
-                    statistics_json=excluded.statistics_json,
-                    key_achievements_json=excluded.key_achievements_json,
-                    next_month_plans_json=excluded.next_month_plans_json,
-                    missing_days_json=excluded.missing_days_json,
-                    data_source=excluded.data_source,
+                    overview=excluded.overview,
+                    completed_work=excluded.completed_work,
+                    work_summary=excluded.work_summary,
+                    next_plan=excluded.next_plan,
                     raw_json=excluded.raw_json,
                     updated_at=datetime('now')
                 """,
                 (
                     report.year_month,
-                    report.summary,
-                    self._to_json(payload.get("category_summaries", [])),
-                    self._to_json(payload.get("risks", [])),
-                    self._to_json(payload.get("statistics", {})),
-                    self._to_json(payload.get("key_achievements", [])),
-                    self._to_json(payload.get("next_month_plans", [])),
-                    self._to_json(payload.get("missing_days", [])),
-                    report.data_source,
+                    report.overview,
+                    report.completed_work,
+                    report.work_summary,
+                    report.next_plan,
                     self._to_json(payload),
                 ),
             )
