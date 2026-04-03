@@ -134,22 +134,20 @@ class LLMClient:
         self,
         user_input: str,
         file_context: str,
-        yesterday_plan: Optional[List[str]] = None,
+        yesterday_plan: Optional[str] = None,
     ) -> DailyReportData:
         """生成日报
 
         Args:
             user_input: 用户口述内容
             file_context: 文件扫描结果
-            yesterday_plan: 昨日计划列表
+            yesterday_plan: 昨日计划参考文本
 
         Returns:
             结构化日报数据
         """
         schema_json = DailyReportData.model_json_schema()
-        yesterday_text = (
-            "\n".join(f"- {p}" for p in yesterday_plan) if yesterday_plan else "无"
-        )
+        yesterday_text = yesterday_plan or "无"
 
         prompt = self.prompt_templates["system_prompt"].format(
             schema=json.dumps(schema_json, ensure_ascii=False, indent=2),

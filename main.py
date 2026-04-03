@@ -134,9 +134,9 @@ def generate_daily_report(args: argparse.Namespace) -> None:
     # 2. 读取昨日计划
     yesterday_plan = history_mgr.get_yesterday_plan()
     if yesterday_plan:
-        console.print(f"[green]✓[/green] 读取昨日计划: {len(yesterday_plan)} 项\n")
+        console.print("[green]✓[/green] 已读取昨日计划参考\n")
     else:
-        console.print("[yellow]![/yellow] 无昨日计划\n")
+        console.print("[yellow]![/yellow] 无昨日计划参考\n")
 
     # 3. 获取用户输入
     if args.input:

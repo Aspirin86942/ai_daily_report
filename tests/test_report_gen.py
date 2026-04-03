@@ -3,11 +3,8 @@
 from src.services.report_gen import ReportGenerator
 from src.models.schemas import (
     DailyReportData,
-    WorkItem,
-    RiskItem,
     WeeklyReportData,
     MonthlyReportData,
-    CategorySummary,
 )
 
 
@@ -23,20 +20,17 @@ def test_render_markdown():
 
     report = DailyReportData(
         date="2026-01-28",
-        summary="测试日报",
-        achievements=[
-            WorkItem(
-                category="测试", content="单元测试", status="已完成", quantitative="1项"
-            )
-        ],
-        risks=[],
-        plans=["明日继续测试"],
+        completed_work="今天完成了日报模板精简，去掉了列表项和量化字段。",
+        work_summary="今天的主要工作是让日报输出回到自然语言段落，而不是伪结构化清单。",
+        next_plan="明天继续修改周报和月报模板。",
     )
 
     markdown = gen.render_markdown(report)
-    assert "2026-01-28" in markdown
-    assert "测试日报" in markdown
-    assert "单元测试" in markdown
+    assert "## 今日工作完成内容" in markdown
+    assert "## 今日工作小结" in markdown
+    assert "## 明日工作计划" in markdown
+    assert "日报模板精简" in markdown
+    assert "- **内容**" not in markdown
 
 
 def test_render_weekly_markdown():
