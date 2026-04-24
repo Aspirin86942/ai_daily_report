@@ -73,6 +73,19 @@ class SQLiteStore:
             )
             conn.commit()
 
+            # Verify schema is up-to-date to catch stale tables from prior versions
+            cols = {
+                r[1]
+                for r in conn.execute("PRAGMA table_info(daily_reports)").fetchall()
+            }
+            required = {"completed_work", "work_summary", "next_plan"}
+            if not required.issubset(cols):
+                actual = {r[1] for r in conn.execute("PRAGMA table_info(daily_reports)").fetchall()}
+                raise RuntimeError(
+                    f"daily_reports schema is outdated (columns: {sorted(actual)}). "
+                    f"Run: python scripts/migrate_daily_schema.py"
+                )
+
     @staticmethod
     def _to_json(value) -> str:
         return json.dumps(value, ensure_ascii=False)
