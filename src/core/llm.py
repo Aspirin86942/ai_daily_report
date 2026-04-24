@@ -7,8 +7,6 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from google import genai
-from google.genai import types
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
@@ -21,7 +19,7 @@ logger = setup_logger()
 
 
 class LLMClient:
-    """LLM 客户端，支持 Gemini 和 OpenAI。"""
+    """LLM 客户端，支持 DeepSeek / Gemini / OpenAI。"""
 
     def __init__(self):
         """初始化客户端并加载 prompt 模板。"""
@@ -34,13 +32,16 @@ class LLMClient:
         self.llm_cfg = config.llm_config
         self.provider = config.llm_provider
 
-        if self.provider == "gemini":
-            self.client = genai.Client(api_key=config.google_api_key)
+        if self.provider == "deepseek":
+            self.client = OpenAI(
+                api_key=config.deepseek_api_key,
+                base_url="https://api.deepseek.com",
+            )
         elif self.provider == "openai":
             self.client = OpenAI(api_key=config.openai_api_key or None)
         else:
             raise ValueError(
-                f"Unsupported LLM provider: {self.provider}. Expected gemini/openai."
+                f"Unsupported LLM provider: {self.provider}. Expected deepseek/openai."
             )
 
         template_dir = Path(__file__).parent.parent.parent / "templates"
@@ -62,38 +63,14 @@ class LLMClient:
                     self.llm_cfg["max_retries"],
                 )
 
-                if self.provider == "gemini":
-                    response = self.client.models.generate_content(
-                        model=self.llm_cfg["model_id"],
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            temperature=self.llm_cfg["temperature"],
-                            max_output_tokens=self.llm_cfg["max_tokens"],
-                            response_mime_type="application/json",
-                        ),
-                    )
-                    response_text = response.text
-                elif self.provider == "openai":
-                    schema_json = response_model.model_json_schema()
-                    response = self.client.responses.create(
-                        model=self.llm_cfg["model_id"],
-                        input=prompt,
-                        temperature=self.llm_cfg["temperature"],
-                        max_output_tokens=self.llm_cfg["max_tokens"],
-                        text={
-                            "format": {
-                                "type": "json_schema",
-                                "name": response_model.__name__,
-                                "schema": schema_json,
-                                "strict": False,
-                            }
-                        },
-                    )
-                    response_text = response.output_text
-                else:
-                    raise ValueError(
-                        f"Unsupported LLM provider: {self.provider}. Expected gemini/openai."
-                    )
+                response = self.client.chat.completions.create(
+                    model=self.llm_cfg["model_id"],
+                    messages=[{"role": "user", "content": prompt}],
+                    temperature=self.llm_cfg["temperature"],
+                    max_tokens=self.llm_cfg["max_tokens"],
+                    response_format={"type": "json_object"},
+                )
+                response_text = response.choices[0].message.content
 
                 logger.info("LLM 返回长度: %s 字符", len(response_text))
                 result = response_model.model_validate_json(response_text)

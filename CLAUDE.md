@@ -5,7 +5,7 @@
 审计报告生成器 v5.0：基于 LLM 的日报/周报/月报自动生成工具。
 
 当前核心能力：
-- LLM provider 可切换：`gemini` / `openai`
+- LLM provider 可切换：`deepseek` / `openai`
 - 报告结构化输出：JSON + Pydantic 校验
 - 历史数据默认存储：SQLite（`data/db/reports.sqlite3`）
 - 支持 `db`（历史聚合）与 `scan`（文件扫描）两种数据来源
@@ -76,7 +76,7 @@ python -m pytest tests/ -v
 src/
 ├── core/
 │   ├── config.py        # 单例配置 (Dynaconf)
-│   ├── llm.py           # Gemini/OpenAI 客户端 + JSON 校验重试
+│   ├── llm.py           # DeepSeek/OpenAI 客户端 + JSON 校验重试
 │   └── logger.py
 ├── models/
 │   └── schemas.py       # Pydantic 模型
@@ -119,6 +119,6 @@ scripts/
 
 ## LLM Provider Notes
 
-- `llm.provider = "gemini"` 时，使用 `GOOGLE_API_KEY`（或 `api.google_api_key`）
+- `llm.provider = "deepseek"` 时，使用 `DEEPSEEK_API_KEY`（或 `api.deepseek_api_key`），默认模型 `deepseek-chat`
 - `llm.provider = "openai"` 时，使用 `OPENAI_API_KEY`（或 `api.openai_api_key`）
-- OpenAI 模型建议使用支持 JSON schema 输出的模型（例如 `gpt-4o-mini`）
+- DeepSeek 和 OpenAI 均使用 Chat Completions API + JSON schema 输出

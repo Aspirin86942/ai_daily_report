@@ -71,6 +71,9 @@ def check_config():
         if config.llm_provider == "openai":
             api_key = config.openai_api_key
             missing_env = "OPENAI_API_KEY"
+        elif config.llm_provider == "deepseek":
+            api_key = config.deepseek_api_key
+            missing_env = "DEEPSEEK_API_KEY"
         else:
             api_key = config.google_api_key
             missing_env = "GOOGLE_API_KEY"
@@ -86,7 +89,6 @@ def check_config():
     # 检查依赖
     print("\n===== 依赖检查 =====\n")
     required_packages = [
-        "google.genai",
         "openai",
         "pydantic",
         "dynaconf",

@@ -93,11 +93,19 @@ class Config:
 
     @property
     def llm_provider(self) -> str:
-        """LLM provider (gemini/openai)"""
-        provider = "gemini"
+        """LLM provider (deepseek/gemini/openai)"""
+        provider = "deepseek"
         if hasattr(self._settings, "llm") and hasattr(self._settings.llm, "provider"):
             provider = self._settings.llm.provider
         return str(provider).strip().lower()
+
+    @property
+    def deepseek_api_key(self) -> str:
+        """DeepSeek API Key"""
+        key = os.getenv("DEEPSEEK_API_KEY")
+        if key:
+            return key
+        return getattr(self._settings.api, "deepseek_api_key", "")
 
     @property
     def google_api_key(self) -> str:
