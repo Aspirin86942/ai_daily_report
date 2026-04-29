@@ -8,10 +8,15 @@
 # 1) 安装依赖
 pip install -r requirements.txt
 
-# 2) 配置密钥（任选其一）
-# - DeepSeek: DEEPSEEK_API_KEY
-# - OpenAI: OPENAI_API_KEY
-# 也可写入 config/.secrets.toml
+# 2) 选择 LLM provider 并配置对应密钥
+#
+# 默认 provider 是 DeepSeek：
+# - 保持 config/settings.toml 中 llm.provider = "deepseek"
+# - 配置 DEEPSEEK_API_KEY（或写入 config/.secrets.toml）
+#
+# 如果使用 OpenAI：
+# - 先把 config/settings.toml 中 llm.provider 改为 "openai"
+# - 再配置 OPENAI_API_KEY（或写入 config/.secrets.toml）
 
 # 3) 检查配置
 python check_config.py
@@ -68,6 +73,9 @@ temperature = 0.2
 max_tokens = 8192
 max_retries = 3
 ```
+
+- 默认使用 `deepseek`，因此只配置 `OPENAI_API_KEY` 但不切换 `llm.provider` 时，`python check_config.py` 仍会按 DeepSeek 路径校验并报缺少 `DEEPSEEK_API_KEY`。
+- OpenAI 用户请先把 `llm.provider` 改成 `openai`，再配置 `OPENAI_API_KEY`。
 
 ### `config/.secrets.toml`
 
