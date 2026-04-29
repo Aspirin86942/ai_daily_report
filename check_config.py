@@ -75,13 +75,18 @@ def check_config():
             api_key = config.deepseek_api_key
             missing_env = "DEEPSEEK_API_KEY"
         else:
-            api_key = config.google_api_key
-            missing_env = "GOOGLE_API_KEY"
+            errors.append(
+                f"不支持的 LLM Provider: {config.llm_provider} "
+                "(仅支持 deepseek 或 openai)"
+            )
+            api_key = ""
+            missing_env = ""
 
-        if not api_key or api_key.startswith("${"):
+        if missing_env and (not api_key or api_key.startswith("${")):
             errors.append(f"未配置 {missing_env}")
         else:
-            print(f"  - API Key: {api_key[:10]}...")
+            if api_key:
+                print(f"  - API Key: {api_key[:10]}...")
 
     except Exception as e:
         errors.append(f"配置加载失败: {e}")

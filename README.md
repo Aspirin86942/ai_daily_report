@@ -9,7 +9,7 @@
 pip install -r requirements.txt
 
 # 2) 配置密钥（任选其一）
-# - Gemini: GOOGLE_API_KEY
+# - DeepSeek: DEEPSEEK_API_KEY
 # - OpenAI: OPENAI_API_KEY
 # 也可写入 config/.secrets.toml
 
@@ -62,8 +62,8 @@ reports_dir = "data/reports"
 db_dir = "data/db"
 
 [llm]
-provider = "gemini"              # gemini | openai
-model_id = "gemini-2.5-flash"    # OpenAI 示例: gpt-4o-mini
+provider = "deepseek"            # deepseek | openai
+model_id = "deepseek-chat"       # OpenAI 示例: gpt-4o-mini
 temperature = 0.2
 max_tokens = 8192
 max_retries = 3
@@ -73,7 +73,7 @@ max_retries = 3
 
 ```toml
 [api]
-google_api_key = "your-google-key"
+deepseek_api_key = "your-deepseek-key"
 openai_api_key = "your-openai-key"
 
 [proxy]
@@ -81,16 +81,10 @@ http_proxy = "http://127.0.0.1:10808"
 https_proxy = "http://127.0.0.1:10808"
 ```
 
-## 存储与迁移
+## 存储说明
 
 - 当前默认历史存储：`data/db/reports.sqlite3`
 - Markdown 报告输出：`data/reports/`
-- 若你有旧版 JSON 历史数据，可迁移到 SQLite：
-
-```bash
-python scripts/migrate_json_to_sqlite.py --dry-run
-python scripts/migrate_json_to_sqlite.py
-```
 
 ## 项目结构
 
@@ -116,4 +110,4 @@ main.py                # CLI 入口
 
 ## 技术栈
 
-Python 3.10+ | Gemini/OpenAI | SQLite | Pydantic | Dynaconf | Jinja2 | Pandas
+Python 3.10+ | DeepSeek/OpenAI | SQLite | Pydantic | Dynaconf | Jinja2 | Pandas

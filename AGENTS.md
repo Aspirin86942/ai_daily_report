@@ -31,6 +31,6 @@
 - PRs should include a clear summary, linked issues (if any), and notes on config changes or template updates.
 
 ## Configuration & Security
-- Do not commit API keys. Use `config/.secrets.toml` or `GOOGLE_API_KEY`.
+- Do not commit API keys. Use `config/.secrets.toml`, `DEEPSEEK_API_KEY`, or `OPENAI_API_KEY`.
 - Update `config/settings.toml` for path, model, and scanner limits changes.
- - LLM backend is selectable via `llm.provider` (`gemini` or `openai`). For OpenAI, set `OPENAI_API_KEY` (or `api.openai_api_key` in `config/.secrets.toml`) and use a model that supports JSON schema output (e.g., `gpt-4o-mini`).
+ - LLM backend is selectable via `llm.provider` (`deepseek` or `openai`). For DeepSeek, set `DEEPSEEK_API_KEY` (or `api.deepseek_api_key` in `config/.secrets.toml`). For OpenAI, set `OPENAI_API_KEY` (or `api.openai_api_key` in `config/.secrets.toml`) and use a model that supports JSON schema output (e.g., `gpt-4o-mini`).

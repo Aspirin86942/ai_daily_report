@@ -37,10 +37,6 @@ python main.py monthly 2026-01 --source scan -i "补充"
 # 列表
 python main.py list
 
-# 迁移（旧 JSON -> SQLite）
-python scripts/migrate_json_to_sqlite.py --dry-run
-python scripts/migrate_json_to_sqlite.py
-
 # 测试
 python -m pytest tests/ -v
 ```
@@ -82,15 +78,10 @@ src/
 │   └── schemas.py       # Pydantic 模型
 ├── services/
 │   ├── sqlite_store.py  # SQLite 存储实现（日/周/月）
-│   ├── history_mgr.py   # 兼容入口（继承 SQLiteStore）
-│   ├── json_to_sqlite_migrator.py
 │   ├── file_scanner.py
 │   └── report_gen.py
 └── utils/
     └── text_tools.py
-
-scripts/
-└── migrate_json_to_sqlite.py
 ```
 
 ## Key Patterns

@@ -93,7 +93,7 @@ class Config:
 
     @property
     def llm_provider(self) -> str:
-        """LLM provider (deepseek/gemini/openai)"""
+        """LLM provider (deepseek/openai)"""
         provider = "deepseek"
         if hasattr(self._settings, "llm") and hasattr(self._settings.llm, "provider"):
             provider = self._settings.llm.provider
