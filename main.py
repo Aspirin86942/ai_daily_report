@@ -11,8 +11,8 @@ from src.core.logger import setup_logger
 from src.core.llm import LLMClient
 from src.models.schemas import ScanResult
 from src.services.file_scanner import FileScanner
-from src.services.history_mgr import HistoryManager
 from src.services.report_gen import ReportGenerator
+from src.services.sqlite_store import SQLiteStore
 from src.utils.text_tools import parse_week_label, get_month_date_range
 
 # 修复 Windows 控制台编码问题
@@ -110,7 +110,7 @@ def generate_daily_report(args: argparse.Namespace) -> None:
 
     # 初始化服务
     scanner = FileScanner()
-    history_mgr = HistoryManager()
+    store = SQLiteStore()
     report_gen = ReportGenerator()
     llm_client = LLMClient()
 
@@ -132,7 +132,7 @@ def generate_daily_report(args: argparse.Namespace) -> None:
     file_context = build_file_context(scan_result)
 
     # 2. 读取昨日计划
-    yesterday_plan = history_mgr.get_yesterday_plan()
+    yesterday_plan = store.get_yesterday_plan()
     if yesterday_plan:
         console.print("[green]✓[/green] 已读取昨日计划参考\n")
     else:
@@ -179,7 +179,7 @@ def generate_daily_report(args: argparse.Namespace) -> None:
 
     # 6. 保存
     if not args.no_save:
-        history_mgr.save_report(report_data)
+        store.save_report(report_data)
         report_gen.save_markdown(markdown_content, report_data.date)
         console.print("[green]✓[/green] 日报已保存\n")
 
@@ -211,7 +211,7 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
     )
 
     # 初始化服务
-    history_mgr = HistoryManager()
+    store = SQLiteStore()
     report_gen = ReportGenerator()
     llm_client = LLMClient()
 
@@ -222,7 +222,7 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
     match args.source:
         case "db":
             # 从数据库聚合日报
-            reports, missing_days = history_mgr.get_week_reports(year, week_num)
+            reports, missing_days = store.get_week_reports(year, week_num)
             if not reports:
                 console.print(f"[red]错误: 未找到 {week_label} 的日报数据[/red]")
                 return
@@ -282,7 +282,7 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
 
     # 保存
     if not args.no_save:
-        history_mgr.save_weekly_report(report_data)
+        store.save_weekly_report(report_data)
         report_gen.save_weekly_markdown(markdown_content, year, week_num)
         console.print("[green]✓[/green] 周报已保存\n")
 
@@ -310,7 +310,7 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
     )
 
     # 初始化服务
-    history_mgr = HistoryManager()
+    store = SQLiteStore()
     report_gen = ReportGenerator()
     llm_client = LLMClient()
 
@@ -320,7 +320,7 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
 
     match args.source:
         case "db":
-            reports, missing_days = history_mgr.get_reports_in_range(
+            reports, missing_days = store.get_reports_in_range(
                 start_date, end_date
             )
             if not reports:
@@ -382,7 +382,7 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
 
     # 保存
     if not args.no_save:
-        history_mgr.save_monthly_report(report_data)
+        store.save_monthly_report(report_data)
         report_gen.save_monthly_markdown(markdown_content, year_month)
         console.print("[green]✓[/green] 月报已保存\n")
 
@@ -395,8 +395,8 @@ def list_reports() -> None:
     """列出已有日报"""
     console.print("\n[bold green]===== 已有日报列表 =====[/bold green]\n")
 
-    history_mgr = HistoryManager()
-    dates = history_mgr.list_all_reports()
+    store = SQLiteStore()
+    dates = store.list_all_reports()
 
     if not dates:
         console.print("[yellow]暂无日报数据[/yellow]")

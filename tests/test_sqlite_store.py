@@ -4,7 +4,7 @@ import sqlite3
 from datetime import date, datetime
 
 from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
-from src.services.sqlite_store import SQLiteStore
+from src.services import SQLiteStore
 
 
 def _make_daily_report(
@@ -78,6 +78,10 @@ def test_sqlite_store_init_creates_tables(tmp_path):
     }
 
 
+def test_services_exports_sqlite_store():
+    assert SQLiteStore.__name__ == "SQLiteStore"
+
+
 def test_save_and_get_daily_report(tmp_path):
     store = SQLiteStore(db_path=tmp_path / "reports.sqlite3")
     report = _make_daily_report("2026-02-03", "saved summary")
@@ -91,6 +95,17 @@ def test_save_and_get_daily_report(tmp_path):
     assert loaded.completed_work == "今天完成了 SQLite 文本字段改造。"
     assert loaded.work_summary == "saved summary"
     assert loaded.next_plan == "明天继续处理周报和月报存储。"
+
+
+def test_get_month_reports(tmp_path):
+    store = SQLiteStore(db_path=tmp_path / "reports.sqlite3")
+    store.save_report(_make_daily_report("2026-01-27"))
+    store.save_report(_make_daily_report("2026-01-28"))
+    store.save_report(_make_daily_report("2026-02-01"))
+
+    reports = store.get_month_reports("2026-01")
+
+    assert [r.date for r in reports] == ["2026-01-27", "2026-01-28"]
 
 
 def test_get_reports_in_range_and_missing_days(tmp_path):
@@ -107,6 +122,31 @@ def test_get_reports_in_range_and_missing_days(tmp_path):
     assert missing == ["2026-01-27", "2026-01-29", "2026-01-30"]
 
 
+def test_get_reports_in_range_skips_weekends(tmp_path):
+    store = SQLiteStore(db_path=tmp_path / "reports.sqlite3")
+
+    reports, missing = store.get_reports_in_range(
+        date(2026, 1, 31),
+        date(2026, 2, 1),
+    )
+
+    assert reports == []
+    assert missing == []
+
+
+def test_get_week_reports(tmp_path):
+    store = SQLiteStore(db_path=tmp_path / "reports.sqlite3")
+    store.save_report(_make_daily_report("2026-01-26"))
+    store.save_report(_make_daily_report("2026-01-28"))
+
+    reports, missing = store.get_week_reports(2026, 5)
+
+    assert [r.date for r in reports] == ["2026-01-26", "2026-01-28"]
+    assert "2026-01-27" in missing
+    assert "2026-01-29" in missing
+    assert "2026-01-30" in missing
+
+
 def test_get_yesterday_plan(tmp_path):
     store = SQLiteStore(db_path=tmp_path / "reports.sqlite3")
     store.save_report(_make_daily_report("2026-02-10"))
@@ -114,6 +154,14 @@ def test_get_yesterday_plan(tmp_path):
     plan_text = store.get_yesterday_plan(datetime(2026, 2, 11, 9, 30, 0))
 
     assert plan_text == "明天继续处理周报和月报存储。"
+
+
+def test_list_all_reports(tmp_path):
+    store = SQLiteStore(db_path=tmp_path / "reports.sqlite3")
+    store.save_report(_make_daily_report("2026-02-03"))
+    store.save_report(_make_daily_report("2026-02-01"))
+
+    assert store.list_all_reports() == ["2026-02-01", "2026-02-03"]
 
 
 def test_save_and_get_weekly_monthly_reports(tmp_path):
@@ -129,7 +177,7 @@ def test_save_and_get_weekly_monthly_reports(tmp_path):
     )
     monthly = MonthlyReportData(
         year_month="2026-02",
-        overview="本月主要处理报告文本化收缩。",
+        overview="本月主要处理报告文本化收敛。",
         completed_work="完成了数据库和模板的改造准备。",
         work_summary="整体方向是让输出回到自然段表达。",
         next_plan="下月继续验证生成质量。",
