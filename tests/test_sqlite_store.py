@@ -101,6 +101,9 @@ def test_sqlite_store_init_rejects_outdated_daily_schema_without_deleted_script_
         assert "daily_reports schema is outdated" in message
         deleted_script_hint = "scripts/" + "migrate_" + "daily_schema.py"
         assert deleted_script_hint not in message
+        assert "Delete the outdated SQLite file" not in message
+        assert "backup" in message.lower()
+        assert "manual migration" in message.lower()
 
 
 def test_services_exports_sqlite_store():
