@@ -99,13 +99,11 @@ def test_sqlite_store_init_rejects_outdated_daily_schema_without_deleted_script_
     except RuntimeError as exc:
         message = str(exc)
         assert "daily_reports schema is outdated" in message
-        deleted_script_hint = "scripts/" + "migrate_" + "daily_schema.py"
-        legacy_phrase = "manual" + " " + "migration"
-        assert deleted_script_hint not in message
-        assert "Delete the outdated SQLite file" not in message
+        assert "Create a backup" in message
+        assert "review the schema" in message
+        assert "rebuild the file if needed" in message
+        assert "scripts/" not in message
         assert "backup" in message.lower()
-        assert legacy_phrase not in message.lower()
-        assert "review the schema" in message.lower()
 
 
 def test_services_exports_sqlite_store():
