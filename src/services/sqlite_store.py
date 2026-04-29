@@ -16,7 +16,7 @@ logger = setup_logger()
 class SQLiteStore:
     """History storage backed by SQLite.
 
-    This store is used by ``HistoryManager`` as the default backend.
+    This store is the single storage entry for report persistence.
     """
 
     def __init__(self, db_path: Optional[Path] = None):
