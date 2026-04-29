@@ -27,7 +27,10 @@ def check_config():
         print(f"[OK] 找到配置文件: {settings_file}")
 
     if not secrets_file.exists():
-        errors.append(f"缺少敏感配置文件: {secrets_file}")
+        warnings.append(
+            f"缺少敏感配置文件: {secrets_file} "
+            "(如已通过环境变量配置 API Key，可忽略)"
+        )
     else:
         print(f"[OK] 找到敏感配置文件: {secrets_file}")
 

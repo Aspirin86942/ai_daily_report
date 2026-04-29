@@ -105,7 +105,8 @@ class Config:
         key = os.getenv("DEEPSEEK_API_KEY")
         if key:
             return key
-        return getattr(self._settings.api, "deepseek_api_key", "")
+        api_settings = getattr(self._settings, "api", None)
+        return getattr(api_settings, "deepseek_api_key", "")
 
     @property
     def google_api_key(self) -> str:
@@ -114,7 +115,8 @@ class Config:
         key = os.getenv("GOOGLE_API_KEY")
         if key:
             return key
-        return getattr(self._settings.api, "google_api_key", "")
+        api_settings = getattr(self._settings, "api", None)
+        return getattr(api_settings, "google_api_key", "")
 
     @property
     def openai_api_key(self) -> str:
@@ -122,7 +124,8 @@ class Config:
         key = os.getenv("OPENAI_API_KEY")
         if key:
             return key
-        return getattr(self._settings.api, "openai_api_key", "")
+        api_settings = getattr(self._settings, "api", None)
+        return getattr(api_settings, "openai_api_key", "")
 
     @property
     def api_key(self) -> str:
