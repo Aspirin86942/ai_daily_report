@@ -177,7 +177,7 @@ def test_save_and_get_weekly_monthly_reports(tmp_path):
     )
     monthly = MonthlyReportData(
         year_month="2026-02",
-        overview="本月主要处理报告文本化收敛。",
+        overview="本月主要处理报告文本化收缩。",
         completed_work="完成了数据库和模板的改造准备。",
         work_summary="整体方向是让输出回到自然段表达。",
         next_plan="下月继续验证生成质量。",
