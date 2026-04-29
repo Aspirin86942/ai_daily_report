@@ -55,6 +55,11 @@ python -m pytest tests/ -v
 - `db`: 从 SQLite 历史库聚合（推荐）
 - `scan`: 直接扫描工作目录文件
 
+## 升级说明
+
+- 当前版本只支持现行 SQLite schema。若沿用旧版 `data/db/reports.sqlite3` 并触发 schema 过期错误，请先备份数据库，再按当前结构重建。
+- 当前版本不再提供旧 JSON 历史数据到 SQLite 的自动迁移。若历史数据仍停留在旧 JSON 载体中，`weekly --source db` 和 `monthly --source db` 不会自动读取这部分内容。
+
 ## 配置说明
 
 ### `config/settings.toml`
