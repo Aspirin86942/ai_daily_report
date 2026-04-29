@@ -83,7 +83,7 @@ class SQLiteStore:
                 actual = {r[1] for r in conn.execute("PRAGMA table_info(daily_reports)").fetchall()}
                 raise RuntimeError(
                     f"daily_reports schema is outdated (columns: {sorted(actual)}). "
-                    f"Run: python scripts/migrate_daily_schema.py"
+                    "Delete the outdated SQLite file and let the application recreate it."
                 )
 
     @staticmethod

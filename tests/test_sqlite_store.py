@@ -78,6 +78,31 @@ def test_sqlite_store_init_creates_tables(tmp_path):
     }
 
 
+def test_sqlite_store_init_rejects_outdated_daily_schema_without_deleted_script_hint(
+    tmp_path,
+):
+    db_path = tmp_path / "reports.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE daily_reports (
+                date TEXT PRIMARY KEY,
+                work_done TEXT NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+    try:
+        SQLiteStore(db_path=db_path)
+        assert False, "expected outdated schema to raise RuntimeError"
+    except RuntimeError as exc:
+        message = str(exc)
+        assert "daily_reports schema is outdated" in message
+        deleted_script_hint = "scripts/" + "migrate_" + "daily_schema.py"
+        assert deleted_script_hint not in message
+
+
 def test_services_exports_sqlite_store():
     assert SQLiteStore.__name__ == "SQLiteStore"
 
