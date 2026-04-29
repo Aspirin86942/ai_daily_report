@@ -100,7 +100,7 @@ data/
 src/
   core/                # 配置、日志、LLM 客户端
   models/              # Pydantic 数据模型
-  services/            # 文件扫描、历史管理、报告生成
+  services/            # 文件扫描、SQLite 存储、报告生成
   utils/               # 工具函数
 
 templates/             # Prompt + Jinja2 模板
