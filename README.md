@@ -18,8 +18,8 @@ pip install -r requirements.txt
 # - 先把 config/settings.toml 中 llm.provider 改为 "openai"
 # - 再配置 OPENAI_API_KEY（或写入 config/.secrets.toml）
 
-# 3) 检查配置
-python check_config.py
+# 3) 检查环境与配置
+python main.py doctor
 
 # 4) 生成日报
 python main.py daily -i "今日完成XX审计"
@@ -45,6 +45,9 @@ python main.py monthly 2026-01 --source scan
 
 # 列出已有日报日期
 python main.py list
+
+# 检查环境与配置
+python main.py doctor
 
 # 测试
 python -m pytest tests/ -v
@@ -79,7 +82,7 @@ max_tokens = 8192
 max_retries = 3
 ```
 
-- 默认使用 `deepseek`，因此只配置 `OPENAI_API_KEY` 但不切换 `llm.provider` 时，`python check_config.py` 仍会按 DeepSeek 路径校验并报缺少 `DEEPSEEK_API_KEY`。
+- 默认使用 `deepseek`，因此只配置 `OPENAI_API_KEY` 但不切换 `llm.provider` 时，`python main.py doctor` 仍会按 DeepSeek 路径校验并报缺少 `DEEPSEEK_API_KEY`。
 - OpenAI 用户请先把 `llm.provider` 改成 `openai`，再配置 `OPENAI_API_KEY`。
 
 ### `config/.secrets.toml`
@@ -111,7 +114,7 @@ data/
   reports/             # Markdown 报告输出（日/周/月）
 
 src/
-  core/                # 配置、日志、LLM 客户端
+  core/                # 配置、环境检查、日志、LLM 客户端
   models/              # Pydantic 数据模型
   services/            # 文件扫描、SQLite 存储、报告生成
   utils/               # 工具函数

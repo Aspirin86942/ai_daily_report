@@ -1,8 +1,10 @@
 """Smoke tests for CLI entrypoints in main.py."""
 
 from argparse import Namespace
+from pathlib import Path
 
 import main
+from src.core.healthcheck import HealthCheckResult
 from src.models.schemas import DailyReportData, MonthlyReportData, ScanResult, WeeklyReportData
 
 
@@ -261,3 +263,42 @@ def test_list_reports_uses_sqlite_store(monkeypatch):
     assert calls == {"init": 1, "list_all_reports": 1}
     assert any("已有日报列表" in text for text in printed)
     assert any("暂无日报数据" in text for text in printed)
+
+
+def test_build_parser_accepts_doctor_and_check_config_alias():
+    parser = main.build_parser()
+
+    doctor_args = parser.parse_args(["doctor"])
+    alias_args = parser.parse_args(["check-config"])
+
+    assert doctor_args.subcommand == "doctor"
+    assert alias_args.subcommand == "doctor"
+
+
+def test_run_doctor_cmd_uses_healthcheck(monkeypatch):
+    printed = _patch_console(monkeypatch)
+
+    monkeypatch.setattr(
+        main,
+        "collect_healthcheck",
+        lambda: HealthCheckResult(
+            info={
+                "LLM Provider": "deepseek",
+                "工作目录": str(Path("D:/work")),
+                "LLM 模型": "deepseek-chat",
+                "最大并发": "4",
+                "SQLite DB": "data/db/reports.sqlite3",
+                "API Key": "sk-test-12...",
+            },
+            warnings=["缺少敏感配置文件: config/.secrets.toml"],
+            errors=[],
+        ),
+    )
+
+    success = main.run_doctor_cmd()
+
+    assert success is True
+    assert any("环境检查" in str(text) for text in printed)
+    assert any("LLM Provider" in str(text) for text in printed)
+    assert any("警告" in str(text) for text in printed)
+    assert any("所有检查通过" in str(text) for text in printed)

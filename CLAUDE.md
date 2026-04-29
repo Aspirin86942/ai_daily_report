@@ -16,8 +16,8 @@
 # 安装依赖
 pip install -r requirements.txt
 
-# 配置检查
-python check_config.py
+# 环境与配置检查
+python main.py doctor
 
 # 日报
 python main.py daily
@@ -72,6 +72,7 @@ python -m pytest tests/ -v
 src/
 ├── core/
 │   ├── config.py        # 单例配置 (Dynaconf)
+│   ├── healthcheck.py   # CLI 环境检查
 │   ├── llm.py           # DeepSeek/OpenAI 客户端 + JSON 校验重试
 │   └── logger.py
 ├── models/

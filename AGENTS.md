@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 - `main.py` is the CLI entry point.
-- `src/` holds core logic: `core/` (config, logging, LLM client), `models/` (Pydantic schemas), `services/` (file scanning, SQLite storage, report generation), and `utils/` (text helpers).
+- `src/` holds core logic: `core/` (config, health checks, logging, LLM client), `models/` (Pydantic schemas), `services/` (file scanning, SQLite storage, report generation), and `utils/` (text helpers).
 - `templates/` contains LLM prompts and Jinja2 report templates.
 - `config/` stores settings (`settings.toml`) and secrets (`.secrets.toml`, not committed).
 - `data/` stores the SQLite database and generated Markdown reports; `logs/` holds runtime logs.
@@ -10,7 +10,7 @@
 
 ## Build, Test, and Development Commands
 - `pip install -r requirements.txt` installs runtime dependencies.
-- `python check_config.py` validates config and API setup.
+- `python main.py doctor` validates config, templates, dependencies, and API setup.
 - `python main.py daily -i "..."` generates a daily report (CLI mode). Examples: `python main.py daily --no-save -i "..."`, `python main.py daily --date 2026-02-05 -i "..."`.
 - `python main.py weekly --source db` aggregates weekly reports; `--source scan` scans files instead.
 - `python main.py monthly --source db` aggregates monthly reports.

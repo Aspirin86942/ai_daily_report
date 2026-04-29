@@ -7,6 +7,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
+from src.core.healthcheck import collect_healthcheck
 from src.core.logger import setup_logger
 from src.core.llm import LLMClient
 from src.models.schemas import ScanResult
@@ -63,6 +64,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     # list 子命令
     subparsers.add_parser("list", help="列出已有日报")
+
+    # doctor 子命令
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        aliases=["check-config"],
+        help="检查运行环境和配置",
+    )
+    doctor_parser.set_defaults(subcommand="doctor")
 
     return parser
 
@@ -419,6 +428,33 @@ def list_reports() -> None:
     console.print(f"[green]共 {len(dates)} 份日报[/green]")
 
 
+def run_doctor_cmd() -> bool:
+    """检查运行环境和配置。"""
+    console.print("\n[bold green]===== 环境检查 =====[/bold green]\n")
+
+    result = collect_healthcheck()
+
+    if result.info:
+        console.print("[bold cyan]配置概览[/bold cyan]")
+        for label, value in result.info.items():
+            console.print(f"  - {label}: {value}")
+
+    if result.warnings:
+        console.print("\n[yellow]警告:[/yellow]")
+        for message in result.warnings:
+            console.print(f"  [!] {message}")
+
+    if result.errors:
+        console.print("\n[red]错误:[/red]")
+        for message in result.errors:
+            console.print(f"  [X] {message}")
+        console.print("\n[red]环境检查失败，请修复上述问题[/red]")
+        return False
+
+    console.print("\n[green]所有检查通过，可以正常使用[/green]")
+    return True
+
+
 def main() -> None:
     """主函数"""
     parser = build_parser()
@@ -438,6 +474,9 @@ def main() -> None:
                 generate_monthly_report_cmd(args)
             case "list":
                 list_reports()
+            case "doctor":
+                if not run_doctor_cmd():
+                    raise SystemExit(1)
 
     except KeyboardInterrupt:
         console.print("\n[yellow]操作已取消[/yellow]")
