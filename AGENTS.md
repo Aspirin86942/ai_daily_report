@@ -2,10 +2,10 @@
 
 ## Project Structure & Module Organization
 - `main.py` is the CLI entry point.
-- `src/` holds core logic: `core/` (config, logging, LLM client), `models/` (Pydantic schemas), `services/` (file scanning, history, report generation), and `utils/` (text helpers).
+- `src/` holds core logic: `core/` (config, logging, LLM client), `models/` (Pydantic schemas), `services/` (file scanning, SQLite storage, report generation), and `utils/` (text helpers).
 - `templates/` contains LLM prompts and Jinja2 report templates.
 - `config/` stores settings (`settings.toml`) and secrets (`.secrets.toml`, not committed).
-- `data/` stores generated JSON databases and Markdown reports; `logs/` holds runtime logs.
+- `data/` stores the SQLite database and generated Markdown reports; `logs/` holds runtime logs.
 - `tests/` contains pytest test modules.
 
 ## Build, Test, and Development Commands
