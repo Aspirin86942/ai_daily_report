@@ -128,11 +128,6 @@ class Config:
         return getattr(api_settings, "openai_api_key", "")
 
     @property
-    def api_key(self) -> str:
-        """Backward compatible Google API Key"""
-        return self.google_api_key
-
-    @property
     def proxy_config(self) -> Dict[str, str]:
         """代理配置"""
         proxy = getattr(self._settings, "proxy", None)

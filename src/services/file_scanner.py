@@ -26,7 +26,7 @@ class FileScanner:
         self.work_dir = config.work_dir
 
     def scan_today_files(self) -> ScanResult:
-        """扫描今日修改的文件 (向后兼容封装)
+        """扫描今日修改的文件（默认日期范围封装）
 
         Returns:
             扫描汇总结果

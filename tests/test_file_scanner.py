@@ -49,8 +49,8 @@ def test_scan_files_empty_range():
     assert result.success_count == 0
 
 
-def test_scan_today_files_backward_compat():
-    """测试 scan_today_files 向后兼容"""
+def test_scan_today_files_default_date_range():
+    """测试 scan_today_files 默认日期范围封装"""
     scanner = FileScanner()
     result = scanner.scan_today_files()
     assert result.total_files >= 0
