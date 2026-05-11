@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Iterable
 
@@ -35,21 +36,50 @@ class ScanPlanner:
         )
         return profile
 
+    def serialize_parser_profile(self, profile: dict) -> str:
+        """稳定序列化 parser profile，避免 cache key 因键顺序漂移。"""
+        return json.dumps(profile, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
     def plan_candidates(
         self,
-        candidates: Iterable[Path],
+        candidates: Iterable[object],
         cached_file_paths: set[str] | None = None,
+        start_date: object | None = None,
+        end_date: object | None = None,
+        cache_lookup: dict[str, bool] | None = None,
     ) -> dict:
         """把候选文件拆分为缓存命中和未命中两组。"""
         cached_file_paths = cached_file_paths or set()
+        cache_lookup = cache_lookup or {}
         cached: list[Path] = []
         uncached: list[Path] = []
+        cached_inventory: list[object] = []
+        uncached_inventory: list[object] = []
 
-        for file_path in candidates:
-            if str(file_path) in cached_file_paths:
-                cached.append(file_path)
+        for candidate in candidates:
+            if isinstance(candidate, Path):
+                if str(candidate) in cached_file_paths:
+                    cached.append(candidate)
+                else:
+                    uncached.append(candidate)
+                continue
+
+            candidate_path = getattr(candidate, "path", None)
+            file_identity = getattr(candidate, "file_identity", None)
+            if candidate_path is None or file_identity is None:
+                raise TypeError("candidate must be Path or inventory-like object")
+
+            if cache_lookup.get(str(file_identity), False):
+                cached_inventory.append(candidate)
             else:
-                uncached.append(file_path)
+                uncached_inventory.append(candidate)
+
+        if cached_inventory or uncached_inventory:
+            return {
+                "cached": cached_inventory,
+                "uncached": uncached_inventory,
+                "total_candidates": len(cached_inventory) + len(uncached_inventory),
+            }
 
         return {
             "cached": cached,

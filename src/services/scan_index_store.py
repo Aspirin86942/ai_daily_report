@@ -3,7 +3,21 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
+
+
+@dataclass(slots=True)
+class InventoryItem:
+    """库存查询返回的 typed 文件元数据。"""
+
+    file_identity: str
+    path: Path
+    extension: str
+    modified_date: date
+    size_bytes: int
+    source_version: str
 
 
 class ScanIndexStore:
@@ -31,7 +45,8 @@ class ScanIndexStore:
                     path TEXT NOT NULL,
                     extension TEXT NOT NULL,
                     modified_date TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL
+                    size_bytes INTEGER NOT NULL,
+                    source_version TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE TABLE IF NOT EXISTS parse_cache (
@@ -60,11 +75,18 @@ class ScanIndexStore:
         table_names = self._list_table_names(conn)
         if "file_inventory" in table_names:
             inventory_columns = self._list_column_names(conn, "file_inventory")
-            if "modified_at" in inventory_columns or "modified_date" not in inventory_columns:
+            if (
+                "modified_at" in inventory_columns
+                or "modified_date" not in inventory_columns
+                or "source_version" not in inventory_columns
+            ):
                 modified_date_expr = (
                     "modified_date"
                     if "modified_date" in inventory_columns
                     else "modified_at"
+                )
+                source_version_expr = (
+                    "source_version" if "source_version" in inventory_columns else "''"
                 )
                 conn.executescript(
                     f"""
@@ -75,7 +97,8 @@ class ScanIndexStore:
                         path TEXT NOT NULL,
                         extension TEXT NOT NULL,
                         modified_date TEXT NOT NULL,
-                        size_bytes INTEGER NOT NULL
+                        size_bytes INTEGER NOT NULL,
+                        source_version TEXT NOT NULL DEFAULT ''
                     );
 
                     INSERT INTO file_inventory (
@@ -83,14 +106,16 @@ class ScanIndexStore:
                         path,
                         extension,
                         modified_date,
-                        size_bytes
+                        size_bytes,
+                        source_version
                     )
                     SELECT
                         file_identity,
                         path,
                         extension,
                         {modified_date_expr},
-                        size_bytes
+                        size_bytes,
+                        {source_version_expr}
                     FROM file_inventory_legacy;
 
                     DROP TABLE file_inventory_legacy;
@@ -265,3 +290,67 @@ class ScanIndexStore:
             "parse_status": str(row["parse_status"]),
             "parse_error": str(row["parse_error"]),
         }
+
+    def replace_inventory(self, items: list[dict[str, object]]) -> None:
+        """用一次 bootstrap 快照整体替换当前库存。"""
+        with self._connect() as conn:
+            conn.execute("DELETE FROM file_inventory")
+            conn.executemany(
+                """
+                INSERT INTO file_inventory (
+                    file_identity,
+                    path,
+                    extension,
+                    modified_date,
+                    size_bytes,
+                    source_version
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        str(item["file_identity"]),
+                        str(item["path"]),
+                        str(item["extension"]),
+                        str(item["modified_date"]),
+                        int(item["size_bytes"]),
+                        str(item.get("source_version", "")),
+                    )
+                    for item in items
+                ],
+            )
+
+    def query_inventory(
+        self,
+        start_date: date,
+        end_date: date,
+    ) -> list[InventoryItem]:
+        """按修改日期闭区间读取库存快照。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    file_identity,
+                    path,
+                    extension,
+                    modified_date,
+                    size_bytes,
+                    source_version
+                FROM file_inventory
+                WHERE modified_date >= ? AND modified_date <= ?
+                ORDER BY path, file_identity
+                """,
+                (start_date.isoformat(), end_date.isoformat()),
+            ).fetchall()
+
+        return [
+            InventoryItem(
+                file_identity=str(row["file_identity"]),
+                path=Path(str(row["path"])),
+                extension=str(row["extension"]),
+                modified_date=date.fromisoformat(str(row["modified_date"])),
+                size_bytes=int(row["size_bytes"]),
+                source_version=str(row["source_version"]),
+            )
+            for row in rows
+        ]

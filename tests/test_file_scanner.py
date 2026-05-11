@@ -1,6 +1,6 @@
 """测试文件扫描器"""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,7 +8,7 @@ import pytest
 
 import src.services.file_scanner as file_scanner_module
 from src.services.file_scanner import FileScanner
-from src.services.scan_discovery import FileDiscoveryService
+from src.services.scan_discovery import DiscoveredFile, FileDiscoveryService
 
 
 def _make_scanner(
@@ -54,6 +54,21 @@ def _make_scanner(
     fake_config = SimpleNamespace(scanner_config=scanner_cfg, work_dir=work_dir)
     monkeypatch.setattr(file_scanner_module, "config", fake_config)
     return FileScanner()
+
+
+def _build_discovered_file(
+    sample: Path,
+    source_version: str,
+) -> DiscoveredFile:
+    """构造带稳定元数据的发现结果，便于覆盖缓存相关路径。"""
+    return DiscoveredFile(
+        file_identity=f"bootstrap:{str(sample.resolve()).lower()}",
+        path=sample,
+        extension=sample.suffix.lower(),
+        modified_at=datetime.combine(date.today(), datetime.min.time()),
+        size_bytes=sample.stat().st_size,
+        source_version=source_version,
+    )
 
 
 def test_file_scanner_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -371,16 +386,16 @@ def test_scan_files_counts_cached_and_uncached_contexts(
     monkeypatch.setattr(
         scanner.scan_planner,
         "plan_candidates",
-        lambda candidates: {
-            "cached": [cached_file],
-            "uncached": [uncached_file],
+        lambda candidates, start_date=None, end_date=None, cache_lookup=None: {
+            "cached": [next(item for item in candidates if item.path == cached_file)],
+            "uncached": [next(item for item in candidates if item.path == uncached_file)],
             "total_candidates": 2,
         },
     )
     monkeypatch.setattr(
         scanner,
         "_get_cached_contexts",
-        lambda cached_files: [
+        lambda cached_files, parser_profile: [
             file_scanner_module.FileContext(
                 file_path=str(cached_file),
                 file_type=".txt",
@@ -427,13 +442,17 @@ def test_scan_files_emits_auditable_error_when_cached_context_missing(
     monkeypatch.setattr(
         scanner.scan_planner,
         "plan_candidates",
-        lambda candidates: {
-            "cached": [cached_file],
+        lambda candidates, start_date=None, end_date=None, cache_lookup=None: {
+            "cached": [next(item for item in candidates if item.path == cached_file)],
             "uncached": [],
             "total_candidates": 1,
         },
     )
-    monkeypatch.setattr(scanner, "_get_cached_contexts", lambda cached_files: [])
+    monkeypatch.setattr(
+        scanner,
+        "_get_cached_contexts",
+        lambda cached_files, parser_profile: [],
+    )
 
     result = scanner.scan_files(date.today(), date.today())
 
@@ -442,3 +461,185 @@ def test_scan_files_emits_auditable_error_when_cached_context_missing(
     assert result.error_count == 1
     assert result.contexts[0].file_path == str(cached_file)
     assert "cache hit missing context" in (result.contexts[0].error or "")
+
+
+def test_scan_files_reuses_fresh_parse_cache_without_parsing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """fresh cache 命中时应直接复用缓存，不再调用解析器。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    cached_file = scanner.work_dir / "cached.txt"
+    cached_file.write_text("cached content", encoding="utf-8")
+    source_version = "mtime_ns=1:size=14"
+    discovered = [_build_discovered_file(cached_file, source_version)]
+    parser_profile_key = scanner.scan_planner.serialize_parser_profile(
+        scanner.scan_planner.build_parser_profile(summary_mode=False)
+    )
+    scanner.scan_index_store.upsert_parse_cache(
+        file_identity=discovered[0].file_identity,
+        parser_profile=parser_profile_key,
+        content_excerpt="cached excerpt",
+        parse_status="success",
+        parse_error="",
+        source_version=source_version,
+    )
+
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    parse_calls: list[Path] = []
+
+    def fake_extract(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        parse_calls.append(file_path)
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".txt",
+            content="parsed unexpectedly",
+            error=None,
+        )
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fake_extract)
+    monkeypatch.setattr(
+        scanner,
+        "_get_cached_contexts",
+        lambda cached_items, parser_profile: [
+            file_scanner_module.FileContext(
+                file_path=str(cached_file),
+                file_type=".txt",
+                content="cached excerpt",
+                error=None,
+            )
+        ],
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert parse_calls == []
+    assert result.total_files == 1
+    assert result.success_count == 1
+    assert result.error_count == 0
+    assert result.contexts[0].content == "cached excerpt"
+
+
+def test_scan_files_reparses_when_source_version_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """source_version 变化后，即使 file_identity 不变也必须重解析。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    sample = scanner.work_dir / "report.txt"
+    sample.write_text("new content", encoding="utf-8")
+    file_identity = f"bootstrap:{str(sample.resolve()).lower()}"
+    parser_profile_key = scanner.scan_planner.serialize_parser_profile(
+        scanner.scan_planner.build_parser_profile(summary_mode=False)
+    )
+    scanner.scan_index_store.upsert_parse_cache(
+        file_identity=file_identity,
+        parser_profile=parser_profile_key,
+        content_excerpt="old cached content",
+        parse_status="success",
+        parse_error="",
+        source_version="mtime_ns=1:size=11",
+    )
+    discovered = [_build_discovered_file(sample, "mtime_ns=2:size=11")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_get_cached_contexts",
+        lambda cached_items, parser_profile: [],
+    )
+    parse_calls: list[Path] = []
+
+    def fake_extract(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        parse_calls.append(file_path)
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".txt",
+            content="new parsed content",
+            error=None,
+        )
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fake_extract)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert parse_calls == [sample]
+    assert result.total_files == 1
+    assert result.success_count == 1
+    assert result.contexts[0].content == "new parsed content"
+    assert (
+        scanner.scan_index_store.load_parse_cache(
+            file_identity,
+            parser_profile_key,
+            source_version="mtime_ns=2:size=11",
+        )["content_excerpt"]
+        == "new parsed content"
+    )
+
+
+def test_get_files_in_range_still_returns_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """兼容层 _get_files_in_range 对外仍应返回 Path 列表。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    sample = scanner.work_dir / "report.txt"
+    sample.write_text("hello", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=5")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    files = scanner._get_files_in_range(date.today(), date.today())
+
+    assert files == [sample]
+
+
+def test_scan_files_writes_error_cache_when_parser_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """解析器抛异常时应留下可复用的 error cache，而不是只记运行时日志。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    sample = scanner.work_dir / "broken.txt"
+    sample.write_text("broken", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=3:size=6")]
+    parser_profile_key = scanner.scan_planner.serialize_parser_profile(
+        scanner.scan_planner.build_parser_profile(summary_mode=False)
+    )
+
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    def raising_extract(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", raising_extract)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.total_files == 1
+    assert result.success_count == 0
+    assert result.error_count == 1
+    assert "boom" in (result.contexts[0].error or "")
+    assert (
+        scanner.scan_index_store.load_parse_cache(
+            discovered[0].file_identity,
+            parser_profile_key,
+            source_version=discovered[0].source_version,
+        )
+        == {
+            "content_excerpt": "",
+            "parse_status": "error",
+            "parse_error": "boom",
+        }
+    )

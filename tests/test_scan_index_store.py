@@ -1,11 +1,12 @@
 """测试 SQLite 扫描索引存储。"""
 
 import sqlite3
+from datetime import date
 from pathlib import Path
 
 import pytest
 
-from src.services.scan_index_store import ScanIndexStore
+from src.services.scan_index_store import InventoryItem, ScanIndexStore
 
 
 def test_index_store_creates_inventory_and_cache_tables(tmp_path: Path):
@@ -113,6 +114,85 @@ def test_file_inventory_schema_uses_modified_date_column(tmp_path: Path):
     assert "modified_at" not in column_names
 
 
+def test_file_inventory_schema_includes_source_version(tmp_path: Path):
+    """库存表应保存发现阶段计算的文件版本。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    with store._connect() as conn:
+        rows = conn.execute("PRAGMA table_info(file_inventory)").fetchall()
+
+    column_names = {row["name"] for row in rows}
+    assert "source_version" in column_names
+
+
+def test_replace_inventory_and_query_inventory(tmp_path: Path):
+    """库存快照应能整体替换并按日期范围读回 typed item。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    store.replace_inventory(
+        [
+            {
+                "file_identity": "bootstrap:/work/report.txt",
+                "path": "/work/report.txt",
+                "extension": ".txt",
+                "modified_date": "2026-05-10",
+                "size_bytes": 10,
+                "source_version": "mtime=1:size=10",
+            }
+        ]
+    )
+
+    items = store.query_inventory(date(2026, 5, 9), date(2026, 5, 11))
+
+    assert items == [
+        InventoryItem(
+            file_identity="bootstrap:/work/report.txt",
+            path=Path("/work/report.txt"),
+            extension=".txt",
+            modified_date=date(2026, 5, 10),
+            size_bytes=10,
+            source_version="mtime=1:size=10",
+        )
+    ]
+
+
+def test_query_inventory_filters_date_range(tmp_path: Path):
+    """库存查询应按 modified_date 闭区间过滤。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    store.replace_inventory(
+        [
+            {
+                "file_identity": "old",
+                "path": "/work/old.txt",
+                "extension": ".txt",
+                "modified_date": "2026-05-08",
+                "size_bytes": 1,
+                "source_version": "mtime=1:size=1",
+            },
+            {
+                "file_identity": "inside",
+                "path": "/work/inside.txt",
+                "extension": ".txt",
+                "modified_date": "2026-05-10",
+                "size_bytes": 2,
+                "source_version": "mtime=2:size=2",
+            },
+            {
+                "file_identity": "new",
+                "path": "/work/new.txt",
+                "extension": ".txt",
+                "modified_date": "2026-05-12",
+                "size_bytes": 3,
+                "source_version": "mtime=3:size=3",
+            },
+        ]
+    )
+
+    items = store.query_inventory(date(2026, 5, 9), date(2026, 5, 11))
+
+    assert [item.file_identity for item in items] == ["inside"]
+
+
 def test_existing_task2_database_is_migrated_to_source_version_schema(tmp_path: Path):
     """旧 Task 2 索引库应迁移到版本化缓存和 modified_date 列。"""
     db_path = tmp_path / "scan_index.sqlite3"
@@ -170,6 +250,7 @@ def test_existing_task2_database_is_migrated_to_source_version_schema(tmp_path: 
 
     assert "modified_date" in inventory_columns
     assert "modified_at" not in inventory_columns
+    assert "source_version" in inventory_columns
     assert "source_version" in cache_columns
     assert inventory_row["modified_date"] == "2026-05-11"
     assert store.has_fresh_cache("file-1", "{}", source_version="") is True

@@ -1,6 +1,8 @@
 """测试扫描规划边界。"""
 
+from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 from src.services.scan_planner import ScanPlanner
 
@@ -51,3 +53,61 @@ def test_plan_candidates_splits_cache_hits_and_misses(tmp_path: Path):
 
     assert plan["uncached"] == [first]
     assert plan["cached"] == [second]
+
+
+def test_plan_candidates_uses_inventory_cache_lookup():
+    """库存候选应根据 cache_lookup 拆分为缓存命中和未命中。"""
+    planner = ScanPlanner(
+        scanner_cfg={
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+        }
+    )
+    cached_item = SimpleNamespace(
+        file_identity="bootstrap:/work/cached.txt",
+        path=Path("/work/cached.txt"),
+        extension=".txt",
+        modified_date=date(2026, 5, 10),
+        size_bytes=10,
+        source_version="mtime=1:size=10",
+    )
+    uncached_item = SimpleNamespace(
+        file_identity="bootstrap:/work/uncached.txt",
+        path=Path("/work/uncached.txt"),
+        extension=".txt",
+        modified_date=date(2026, 5, 10),
+        size_bytes=20,
+        source_version="mtime=2:size=20",
+    )
+
+    plan = planner.plan_candidates(
+        candidates=[cached_item, uncached_item],
+        start_date=date(2026, 5, 9),
+        end_date=date(2026, 5, 11),
+        cache_lookup={
+            "bootstrap:/work/cached.txt": True,
+            "bootstrap:/work/uncached.txt": False,
+        },
+    )
+
+    assert plan["cached"] == [cached_item]
+    assert plan["uncached"] == [uncached_item]
+    assert plan["total_candidates"] == 2
+
+
+def test_serialize_parser_profile_uses_stable_json_key_order():
+    """parser profile 序列化应稳定排序，避免同义配置导致 cache key 漂移。"""
+    planner = ScanPlanner(scanner_cfg={})
+
+    serialized = planner.serialize_parser_profile(
+        {
+            "text_max_chars": 2000,
+            "excel_max_rows": 10,
+            "parser_profile_version": "v1",
+        }
+    )
+
+    assert serialized == (
+        '{"excel_max_rows":10,"parser_profile_version":"v1","text_max_chars":2000}'
+    )

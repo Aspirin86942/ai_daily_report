@@ -14,8 +14,8 @@ from ..core.config import config
 from ..core.logger import setup_logger
 from ..utils.text_tools import truncate_text
 from .scan_aggregator import ScanAggregator
-from .scan_discovery import FileDiscoveryService
-from .scan_index_store import ScanIndexStore
+from .scan_discovery import DiscoveredFile, FileDiscoveryService
+from .scan_index_store import InventoryItem, ScanIndexStore
 from .scan_planner import ScanPlanner
 
 logger = setup_logger()
@@ -96,10 +96,12 @@ class FileScanner:
         )
 
         # 发现边界只负责找候选文件，不承担解析与汇总逻辑。
-        matched_files = self.discovery_service.bootstrap_full_scan(start_date, end_date)
-        logger.info(f"发现 {len(matched_files)} 个文件")
+        discovered_files = self._normalize_discovered_files(
+            self.discovery_service.bootstrap_full_scan(start_date, end_date)
+        )
+        logger.info(f"发现 {len(discovered_files)} 个文件")
 
-        if not matched_files:
+        if not discovered_files:
             return ScanResult(
                 total_files=0, success_count=0, error_count=0, contexts=[]
             )
@@ -107,25 +109,58 @@ class FileScanner:
         parser_profile = self.scan_planner.build_parser_profile(
             summary_mode=summary_mode
         )
-        planned_candidates = self.scan_planner.plan_candidates(matched_files)
+        parser_profile_key = self.scan_planner.serialize_parser_profile(parser_profile)
+        # 先写入 bootstrap inventory，后续计划才能稳定基于统一快照做 freshness 判断。
+        self.scan_index_store.replace_inventory(
+            [
+                {
+                    "file_identity": item.file_identity,
+                    "path": str(item.path),
+                    "extension": item.extension,
+                    "modified_date": item.modified_at.date().isoformat(),
+                    "size_bytes": item.size_bytes,
+                    "source_version": item.source_version,
+                }
+                for item in discovered_files
+            ]
+        )
+        inventory_items = self.scan_index_store.query_inventory(start_date, end_date)
+        cache_lookup = {
+            item.file_identity: self.scan_index_store.has_fresh_cache(
+                item.file_identity,
+                parser_profile_key,
+                source_version=item.source_version,
+            )
+            for item in inventory_items
+        }
+        planned_candidates = self.scan_planner.plan_candidates(
+            candidates=inventory_items,
+            start_date=start_date,
+            end_date=end_date,
+            cache_lookup=cache_lookup,
+        )
         limits = {
             "excel_max_rows": parser_profile["excel_max_rows"],
             "pdf_max_pages": parser_profile["pdf_max_pages"],
             "text_max_chars": parser_profile["text_max_chars"],
         }
         aggregator = ScanAggregator(parser_profile["total_max_chars"])
-        cached_contexts = self._get_cached_contexts(planned_candidates["cached"])
+        cached_contexts = self._get_cached_contexts(
+            planned_candidates["cached"],
+            parser_profile_key,
+        )
         cached_contexts_by_path = {
             Path(context.file_path): context for context in cached_contexts
         }
 
         for cached_file in planned_candidates["cached"]:
-            cached_context = cached_contexts_by_path.get(cached_file)
+            cached_path = self._item_path(cached_file)
+            cached_context = cached_contexts_by_path.get(cached_path)
             if cached_context is None:
                 aggregator.add_context(
                     FileContext(
-                        file_path=str(cached_file),
-                        file_type=cached_file.suffix.lower(),
+                        file_path=str(cached_path),
+                        file_type=self._item_extension(cached_file),
                         content="",
                         error="cache hit missing context",
                     )
@@ -138,14 +173,24 @@ class FileScanner:
             max_workers=self.scanner_cfg["max_workers"]
         ) as executor:
             future_to_file = {
-                executor.submit(self._extract_content_with_timeout, f, limits): f
-                for f in planned_candidates["uncached"]
+                executor.submit(
+                    self._extract_content_with_timeout,
+                    self._item_path(item),
+                    limits,
+                ): item
+                for item in planned_candidates["uncached"]
             }
 
             for future in as_completed(future_to_file):
-                file_path = future_to_file[future]
+                inventory_item = future_to_file[future]
+                file_path = self._item_path(inventory_item)
                 try:
                     context = future.result()
+                    self._write_parse_cache(
+                        inventory_item,
+                        parser_profile_key,
+                        context,
+                    )
                     previous_truncated = aggregator.truncated_by_global_limit
                     aggregator.add_context(context)
                     if (
@@ -158,6 +203,14 @@ class FileScanner:
                         )
                 except Exception as e:
                     logger.error(f"处理文件失败 {file_path}: {e}")
+                    self.scan_index_store.upsert_parse_cache(
+                        file_identity=self._item_identity(inventory_item),
+                        parser_profile=parser_profile_key,
+                        content_excerpt="",
+                        parse_status="error",
+                        parse_error=str(e),
+                        source_version=self._item_source_version(inventory_item),
+                    )
                     aggregator.add_exception(file_path, e)
 
         # 数据完整性校验
@@ -174,9 +227,58 @@ class FileScanner:
 
         return aggregator.build_result(planned_candidates["total_candidates"])
 
-    def _get_cached_contexts(self, cached_files: list[Path]) -> list[FileContext]:
-        """缓存上下文加载钩子，默认由后续任务接入外部缓存实现。"""
-        return []
+    def _normalize_discovered_files(
+        self,
+        discovered_files: list[Path | DiscoveredFile],
+    ) -> list[DiscoveredFile]:
+        """兼容旧 Path monkeypatch，同时统一生成 inventory 所需元数据。"""
+        normalized: list[DiscoveredFile] = []
+        for item in discovered_files:
+            if isinstance(item, DiscoveredFile):
+                normalized.append(item)
+                continue
+
+            file_path = Path(item)
+            stat_result = file_path.stat()
+            resolved_path = file_path.resolve()
+            normalized.append(
+                DiscoveredFile(
+                    file_identity=f"bootstrap:{str(resolved_path).lower()}",
+                    path=file_path,
+                    extension=file_path.suffix.lower(),
+                    modified_at=datetime.fromtimestamp(stat_result.st_mtime),
+                    size_bytes=stat_result.st_size,
+                    source_version=(
+                        f"mtime_ns={stat_result.st_mtime_ns}:size={stat_result.st_size}"
+                    ),
+                )
+            )
+        return normalized
+
+    def _get_cached_contexts(
+        self,
+        cached_files: list[Path | InventoryItem],
+        parser_profile: str,
+    ) -> list[FileContext]:
+        """从 parse_cache 恢复 fresh cache 命中的上下文。"""
+        contexts: list[FileContext] = []
+        for item in cached_files:
+            cached = self.scan_index_store.load_parse_cache(
+                self._item_identity(item),
+                parser_profile,
+                source_version=self._item_source_version(item),
+            )
+            parse_status = cached["parse_status"]
+            parse_error = cached["parse_error"] or None
+            contexts.append(
+                FileContext(
+                    file_path=str(self._item_path(item)),
+                    file_type=self._item_extension(item),
+                    content=cached["content_excerpt"],
+                    error=parse_error if parse_status != "success" else None,
+                )
+            )
+        return contexts
 
     def _get_files_in_range(self, start_date: date, end_date: date) -> List[Path]:
         """获取日期范围内修改的文件列表
@@ -188,7 +290,49 @@ class FileScanner:
         Returns:
             文件路径列表
         """
-        return self.discovery_service.bootstrap_full_scan(start_date, end_date)
+        discovered_files = self.discovery_service.bootstrap_full_scan(start_date, end_date)
+        return [
+            item.path if isinstance(item, DiscoveredFile) else Path(item)
+            for item in discovered_files
+        ]
+
+    def _item_path(self, item: Path | InventoryItem) -> Path:
+        """统一读取候选路径。"""
+        return item if isinstance(item, Path) else Path(item.path)
+
+    def _item_identity(self, item: Path | InventoryItem) -> str:
+        """统一读取缓存身份。"""
+        if isinstance(item, Path):
+            return f"bootstrap:{str(item.resolve()).lower()}"
+        return item.file_identity
+
+    def _item_extension(self, item: Path | InventoryItem) -> str:
+        """统一读取扩展名。"""
+        return item.suffix.lower() if isinstance(item, Path) else item.extension
+
+    def _item_source_version(self, item: Path | InventoryItem) -> str:
+        """统一读取 discovery 版本指纹。"""
+        if isinstance(item, Path):
+            stat_result = item.stat()
+            return f"mtime_ns={stat_result.st_mtime_ns}:size={stat_result.st_size}"
+        return item.source_version
+
+    def _write_parse_cache(
+        self,
+        item: Path | InventoryItem,
+        parser_profile: str,
+        context: FileContext,
+    ) -> None:
+        """把本轮解析结果写回 parse_cache。"""
+        is_success = context.error is None
+        self.scan_index_store.upsert_parse_cache(
+            file_identity=self._item_identity(item),
+            parser_profile=parser_profile,
+            content_excerpt=context.content if is_success else "",
+            parse_status="success" if is_success else "error",
+            parse_error=context.error or "",
+            source_version=self._item_source_version(item),
+        )
 
     def _extract_content_with_timeout(
         self, file_path: Path, limits: Optional[dict] = None
