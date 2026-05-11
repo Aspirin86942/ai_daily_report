@@ -1,8 +1,6 @@
 """文件扫描服务"""
 
-import fnmatch
 import multiprocessing as mp
-import os
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import List, Optional
@@ -15,6 +13,9 @@ from ..models.schemas import FileContext, ScanResult
 from ..core.config import config
 from ..core.logger import setup_logger
 from ..utils.text_tools import truncate_text
+from .scan_aggregator import ScanAggregator
+from .scan_discovery import FileDiscoveryService
+from .scan_planner import ScanPlanner
 
 logger = setup_logger()
 
@@ -43,6 +44,8 @@ class FileScanner:
         """初始化扫描器"""
         self.scanner_cfg = config.scanner_config
         self.work_dir = config.work_dir
+        self.discovery_service = FileDiscoveryService(self.work_dir, self.scanner_cfg)
+        self.scan_planner = ScanPlanner(self.scanner_cfg)
 
     def scan_today_files(self) -> ScanResult:
         """扫描今日修改的文件（默认日期范围封装）
@@ -79,8 +82,8 @@ class FileScanner:
             f"开始扫描工作目录: {self.work_dir} ({start_date} ~ {end_date}, summary={summary_mode})"
         )
 
-        # 获取日期范围内修改的文件
-        matched_files = self._get_files_in_range(start_date, end_date)
+        # 发现边界只负责找候选文件，不承担解析与汇总逻辑。
+        matched_files = self.discovery_service.bootstrap_full_scan(start_date, end_date)
         logger.info(f"发现 {len(matched_files)} 个文件")
 
         if not matched_files:
@@ -88,86 +91,57 @@ class FileScanner:
                 total_files=0, success_count=0, error_count=0, contexts=[]
             )
 
-        # 确定解析限制
-        if summary_mode:
-            limits = {
-                "excel_max_rows": self.scanner_cfg.get("summary_excel_max_rows", 10),
-                "pdf_max_pages": self.scanner_cfg.get("summary_pdf_max_pages", 2),
-                "text_max_chars": self.scanner_cfg.get("summary_text_max_chars", 2000),
-            }
-        else:
-            limits = {
-                "excel_max_rows": self.scanner_cfg["excel_max_rows"],
-                "pdf_max_pages": self.scanner_cfg["pdf_max_pages"],
-                "text_max_chars": self.scanner_cfg["text_max_chars"],
-            }
-
-        total_max_chars = self.scanner_cfg.get("total_max_chars", 50000)
+        parser_profile = self.scan_planner.build_parser_profile(
+            summary_mode=summary_mode
+        )
+        planned_candidates = self.scan_planner.plan_candidates(matched_files)
+        limits = {
+            "excel_max_rows": parser_profile["excel_max_rows"],
+            "pdf_max_pages": parser_profile["pdf_max_pages"],
+            "text_max_chars": parser_profile["text_max_chars"],
+        }
+        aggregator = ScanAggregator(parser_profile["total_max_chars"])
 
         # 并行处理文件
-        contexts: list[FileContext] = []
-        success_count = 0
-        error_count = 0
-        total_chars = 0
-        truncated_by_global_limit = False
-
         with ThreadPoolExecutor(
             max_workers=self.scanner_cfg["max_workers"]
         ) as executor:
             future_to_file = {
                 executor.submit(self._extract_content_with_timeout, f, limits): f
-                for f in matched_files
+                for f in planned_candidates["uncached"]
             }
 
             for future in as_completed(future_to_file):
                 file_path = future_to_file[future]
                 try:
                     context = future.result()
-                    if context.error:
-                        error_count += 1
-                    else:
-                        success_count += 1
-
-                    # 全局字符上限检查
-                    total_chars += len(context.content)
-                    if total_chars > total_max_chars and not truncated_by_global_limit:
-                        truncated_by_global_limit = True
+                    previous_truncated = aggregator.truncated_by_global_limit
+                    aggregator.add_context(context)
+                    if (
+                        aggregator.truncated_by_global_limit
+                        and not previous_truncated
+                    ):
                         logger.warning(
-                            f"已达全局字符上限 {total_max_chars}，后续文件内容将被省略"
+                            "已达全局字符上限 %s，后续文件内容将被省略",
+                            aggregator.total_max_chars,
                         )
-
-                    if truncated_by_global_limit and not context.error:
-                        context = FileContext(
-                            file_path=context.file_path,
-                            file_type=context.file_type,
-                            content="(已达全局字符上限，内容省略)",
-                            error=None,
-                        )
-
-                    contexts.append(context)
                 except Exception as e:
                     logger.error(f"处理文件失败 {file_path}: {e}")
-                    error_count += 1
-                    contexts.append(
-                        FileContext(
-                            file_path=str(file_path),
-                            file_type=file_path.suffix,
-                            content="",
-                            error=str(e),
-                        )
-                    )
+                    aggregator.add_exception(file_path, e)
 
         # 数据完整性校验
-        assert success_count + error_count == len(matched_files), "文件处理数量不匹配"
+        assert (
+            aggregator.success_count + aggregator.error_count
+            == planned_candidates["total_candidates"]
+        ), "文件处理数量不匹配"
 
-        logger.info(f"扫描完成: 成功 {success_count}, 失败 {error_count}")
-
-        return ScanResult(
-            total_files=len(matched_files),
-            success_count=success_count,
-            error_count=error_count,
-            contexts=contexts,
+        logger.info(
+            "扫描完成: 成功 %s, 失败 %s",
+            aggregator.success_count,
+            aggregator.error_count,
         )
+
+        return aggregator.build_result(planned_candidates["total_candidates"])
 
     def _get_files_in_range(self, start_date: date, end_date: date) -> List[Path]:
         """获取日期范围内修改的文件列表
@@ -179,55 +153,7 @@ class FileScanner:
         Returns:
             文件路径列表
         """
-        start_dt = datetime.combine(start_date, datetime.min.time())
-        end_dt = datetime.combine(end_date, datetime.max.time())
-
-        files = []
-        excluded_dirs = self.scanner_cfg.get("excluded_dirs", [])
-        excluded_paths = [Path(d).resolve() for d in excluded_dirs]
-
-        for root, _, filenames in os.walk(self.work_dir):
-            root_path = Path(root).resolve()
-
-            # 检查是否在排除目录中
-            skip_dir = False
-            for excluded in excluded_paths:
-                try:
-                    root_path.relative_to(excluded)
-                    skip_dir = True
-                    break
-                except ValueError:
-                    continue
-
-            if skip_dir:
-                continue
-
-            for filename in filenames:
-                filename_lower = filename.lower()
-
-                # 检查扩展名。这里统一转小写，避免 .PDF/.XLSX 这类文件漏扫。
-                if not any(
-                    filename_lower.endswith(str(ext).lower())
-                    for ext in self.scanner_cfg["allowed_extensions"]
-                ):
-                    continue
-
-                # 检查忽略模式。使用 glob 语义，避免 "*.tmp" 只匹配 ".tmp" 前缀。
-                if any(
-                    fnmatch.fnmatch(filename_lower, str(pattern).lower())
-                    for pattern in self.scanner_cfg["ignored_patterns"]
-                ):
-                    continue
-
-                file_path = Path(root) / filename
-                try:
-                    mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
-                    if start_dt <= mtime <= end_dt:
-                        files.append(file_path)
-                except Exception as e:
-                    logger.warning(f"无法读取文件时间 {file_path}: {e}")
-
-        return files
+        return self.discovery_service.bootstrap_full_scan(start_date, end_date)
 
     def _extract_content_with_timeout(
         self, file_path: Path, limits: Optional[dict] = None

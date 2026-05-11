@@ -8,6 +8,7 @@ import pytest
 
 import src.services.file_scanner as file_scanner_module
 from src.services.file_scanner import FileScanner
+from src.services.scan_discovery import FileDiscoveryService
 
 
 def _make_scanner(
@@ -306,3 +307,41 @@ def test_scan_files_records_timeout_and_continues(
     assert result.success_count == 1
     assert result.error_count == 1
     assert any(ctx.error and ctx.error.startswith("timeout:") for ctx in result.contexts)
+
+
+def test_scan_files_delegates_bootstrap_discovery(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """scan_files 应把启动阶段的文件发现委托给 FileDiscoveryService。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    expected = [scanner.work_dir / "delegated.txt"]
+    expected[0].write_text("delegated", encoding="utf-8")
+    calls: list[tuple[date, date]] = []
+
+    def fake_bootstrap(
+        self: FileDiscoveryService, start_date: date, end_date: date
+    ) -> list[Path]:
+        calls.append((start_date, end_date))
+        return expected
+
+    monkeypatch.setattr(
+        FileDiscoveryService,
+        "bootstrap_full_scan",
+        fake_bootstrap,
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_extract_content_with_timeout",
+        lambda file_path, limits: file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".txt",
+            content="delegated",
+            error=None,
+        ),
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert calls == [(date.today(), date.today())]
+    assert result.total_files == 1
+    assert result.success_count == 1
