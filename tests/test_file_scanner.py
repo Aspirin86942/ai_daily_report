@@ -125,6 +125,45 @@ def test_scan_files_empty_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     }
 
 
+def test_scan_files_empty_range_clears_inventory_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """空扫描也应覆盖 inventory 快照，避免沿用上一轮发现结果。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    sample = scanner.work_dir / "report.txt"
+    sample.write_text("hello", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=5")]
+
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_extract_content_with_timeout",
+        lambda file_path, limits: file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".txt",
+            content="hello",
+            error=None,
+        ),
+    )
+
+    scanner.scan_files(date.today(), date.today())
+    assert scanner.scan_index_store.query_inventory(date.today(), date.today())
+
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: [],
+    )
+
+    scanner.scan_files(date.today(), date.today())
+
+    assert scanner.scan_index_store.query_inventory(date.today(), date.today()) == []
+
+
 def test_scan_today_files_default_date_range(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

@@ -108,6 +108,8 @@ class FileScanner:
         logger.info(f"发现 {len(discovered_files)} 个文件")
 
         if not discovered_files:
+            # 空扫描同样要覆盖 inventory 快照，避免后续规划继续读取旧发现结果。
+            self.scan_index_store.replace_inventory([])
             # 空扫描也要落一条 run 记录，避免 latest 指标停留在上一轮结果。
             self.scan_index_store.save_scan_run_metrics(
                 discovered_count=0,
