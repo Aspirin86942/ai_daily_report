@@ -80,6 +80,30 @@ def test_parse_cache_freshness_requires_matching_source_version(tmp_path: Path):
     )
 
 
+def test_error_parse_cache_is_not_treated_as_fresh(tmp_path: Path):
+    """error cache 只保留审计记录，不能阻止同版本再次重解析。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    parser_profile = '{"parser_profile_version":"v1"}'
+
+    store.upsert_parse_cache(
+        file_identity="bootstrap:/work/report.txt",
+        parser_profile=parser_profile,
+        content_excerpt="",
+        parse_status="error",
+        parse_error="boom",
+        source_version="mtime=1:size=10",
+    )
+
+    assert (
+        store.has_fresh_cache(
+            "bootstrap:/work/report.txt",
+            parser_profile,
+            source_version="mtime=1:size=10",
+        )
+        is False
+    )
+
+
 def test_load_parse_cache_requires_matching_source_version(tmp_path: Path):
     """按版本加载缓存时，版本不匹配应按缺失处理。"""
     store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")

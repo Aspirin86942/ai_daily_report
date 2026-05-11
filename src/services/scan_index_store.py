@@ -249,7 +249,7 @@ class ScanIndexStore:
         parser_profile: str,
         source_version: str = "",
     ) -> bool:
-        """判断指定文件身份、parser profile 和文件版本是否存在缓存。"""
+        """只把成功解析缓存视为 fresh，error cache 仅保留审计用途。"""
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -258,6 +258,7 @@ class ScanIndexStore:
                 WHERE file_identity = ?
                     AND parser_profile = ?
                     AND source_version = ?
+                    AND parse_status = 'success'
                 """,
                 (file_identity, parser_profile, source_version),
             ).fetchone()

@@ -643,3 +643,77 @@ def test_scan_files_writes_error_cache_when_parser_raises(
             "parse_error": "boom",
         }
     )
+
+
+def test_scan_files_reparses_when_only_error_cache_exists_for_same_source_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """同版本只有 error cache 时，下一次扫描仍应重解析并用 success 覆盖。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    sample = scanner.work_dir / "retry.txt"
+    sample.write_text("retry", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=4:size=5")]
+    parser_profile_key = scanner.scan_planner.serialize_parser_profile(
+        scanner.scan_planner.build_parser_profile(summary_mode=False)
+    )
+
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    def raising_extract(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        raise RuntimeError("boom once")
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", raising_extract)
+
+    first_result = scanner.scan_files(date.today(), date.today())
+
+    assert first_result.total_files == 1
+    assert first_result.error_count == 1
+    assert (
+        scanner.scan_index_store.load_parse_cache(
+            discovered[0].file_identity,
+            parser_profile_key,
+            source_version=discovered[0].source_version,
+        )
+        == {
+            "content_excerpt": "",
+            "parse_status": "error",
+            "parse_error": "boom once",
+        }
+    )
+
+    parse_calls: list[Path] = []
+
+    def success_extract(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        parse_calls.append(file_path)
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".txt",
+            content="parsed on retry",
+            error=None,
+        )
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", success_extract)
+
+    second_result = scanner.scan_files(date.today(), date.today())
+
+    assert parse_calls == [sample]
+    assert second_result.total_files == 1
+    assert second_result.success_count == 1
+    assert second_result.error_count == 0
+    assert second_result.contexts[0].content == "parsed on retry"
+    assert (
+        scanner.scan_index_store.load_parse_cache(
+            discovered[0].file_identity,
+            parser_profile_key,
+            source_version=discovered[0].source_version,
+        )
+        == {
+            "content_excerpt": "parsed on retry",
+            "parse_status": "success",
+            "parse_error": "",
+        }
+    )
