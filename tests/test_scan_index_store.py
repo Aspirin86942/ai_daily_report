@@ -16,7 +16,12 @@ def test_index_store_creates_inventory_and_cache_tables(tmp_path: Path):
     table_names = store.list_tables()
 
     assert store.db_path.exists()
-    assert {"file_inventory", "parse_cache", "scan_runs"} <= table_names
+    assert {
+        "file_inventory",
+        "parse_cache",
+        "scan_runs",
+        "discovery_checkpoints",
+    } <= table_names
 
 
 def test_parse_cache_round_trip_and_fresh_lookup(tmp_path: Path):
@@ -287,3 +292,20 @@ def test_load_parse_cache_missing_raises_key_error(tmp_path: Path):
 
     with pytest.raises(KeyError):
         store.load_parse_cache("missing-file", '{"parser_profile_version":"v1"}')
+
+
+def test_save_and_load_discovery_checkpoint(tmp_path: Path):
+    """checkpoint placeholder 应支持覆盖写入与读回。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    store.save_checkpoint("bootstrap", "2026-05-11T10:00:00")
+    store.save_checkpoint("bootstrap", "2026-05-11T10:05:00")
+
+    assert store.load_checkpoint("bootstrap") == "2026-05-11T10:05:00"
+
+
+def test_load_checkpoint_returns_none_when_missing(tmp_path: Path):
+    """缺失 checkpoint 时应返回 None，便于上层保留 placeholder 流程。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    assert store.load_checkpoint("missing") is None

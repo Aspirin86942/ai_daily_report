@@ -23,3 +23,4 @@ def test_scanner_config_exposes_scan_index_defaults_when_keys_absent():
 
     assert scanner_config["index_db_path"] == "data/db/scan_index.sqlite3"
     assert scanner_config["parser_profile_version"] == "v1"
+    assert scanner_config["worker_lane_mode"] == "direct"

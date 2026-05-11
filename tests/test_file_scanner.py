@@ -76,6 +76,7 @@ def test_file_scanner_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     scanner = _make_scanner(tmp_path, monkeypatch)
     assert scanner.work_dir.exists()
     assert scanner.scanner_cfg["max_workers"] > 0
+    assert scanner.parser_supervisor is not None
     assert (
         scanner.scan_index_store.db_path
         == tmp_path / "data" / "db" / "scan_index.sqlite3"
@@ -274,6 +275,40 @@ def test_extract_content_with_timeout_returns_auditable_timeout_error(
     assert context.file_type == ".txt"
     assert context.content == ""
     assert context.error == "timeout: file parse exceeded 12s"
+
+
+def test_extract_content_with_timeout_uses_supervisor_extension_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """timeout 错误文案应通过 supervisor 统一格式化，并支持扩展名覆盖。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "file_timeout_seconds": 30,
+            "file_timeout_by_extension": {".pdf": 45},
+        },
+    )
+    sample = tmp_path / "slow.pdf"
+    sample.write_text("slow", encoding="utf-8")
+
+    monkeypatch.setattr(
+        scanner,
+        "_run_extract_subprocess",
+        lambda file_path, limits, timeout_seconds: (None, True),
+    )
+
+    context = scanner._extract_content_with_timeout(
+        sample,
+        {
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+        },
+    )
+
+    assert scanner.parser_supervisor.resolve_timeout(".pdf") == 45
+    assert context.error == "timeout: file parse exceeded 45s"
 
 
 def test_extract_content_with_timeout_runs_real_subprocess(

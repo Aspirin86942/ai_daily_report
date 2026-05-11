@@ -35,7 +35,7 @@ class ScanIndexStore:
         return conn
 
     def _init_schema(self) -> None:
-        """初始化 Task 2 需要的最小表结构。"""
+        """初始化扫描索引、缓存和 checkpoint 占位表。"""
         with self._connect() as conn:
             self._migrate_existing_schema(conn)
             conn.executescript(
@@ -66,6 +66,11 @@ class ScanIndexStore:
                     discovered_count INTEGER NOT NULL DEFAULT 0,
                     reused_count INTEGER NOT NULL DEFAULT 0,
                     reparsed_count INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS discovery_checkpoints (
+                    discovery_key TEXT PRIMARY KEY,
+                    checkpoint_value TEXT NOT NULL
                 );
                 """
             )
@@ -204,6 +209,35 @@ class ScanIndexStore:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             ).fetchall()
         return {str(row["name"]) for row in rows}
+
+    def save_checkpoint(self, discovery_key: str, checkpoint_value: str) -> None:
+        """保存 discovery checkpoint 占位值，后续任务可在此接入增量扫描。"""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO discovery_checkpoints (discovery_key, checkpoint_value)
+                VALUES (?, ?)
+                ON CONFLICT(discovery_key) DO UPDATE SET
+                    checkpoint_value = excluded.checkpoint_value
+                """,
+                (discovery_key, checkpoint_value),
+            )
+
+    def load_checkpoint(self, discovery_key: str) -> str | None:
+        """读取 checkpoint；缺失时返回 None，避免上层误判为空字符串。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT checkpoint_value
+                FROM discovery_checkpoints
+                WHERE discovery_key = ?
+                """,
+                (discovery_key,),
+            ).fetchone()
+
+        if row is None:
+            return None
+        return str(row["checkpoint_value"])
 
     def upsert_parse_cache(
         self,

@@ -17,11 +17,11 @@ from .scan_aggregator import ScanAggregator
 from .scan_discovery import DiscoveredFile, FileDiscoveryService
 from .scan_index_store import InventoryItem, ScanIndexStore
 from .scan_planner import ScanPlanner
+from .scan_worker_pool import ParserSupervisor
 
 logger = setup_logger()
 
 TEXT_FILE_TYPES = {".txt", ".md", ".csv", ".json", ".log"}
-DEFAULT_FILE_TIMEOUT_SECONDS = 30.0
 
 
 def _extract_content_worker(
@@ -49,6 +49,12 @@ class FileScanner:
         self.scan_planner = ScanPlanner(self.scanner_cfg)
         self.scan_index_store = ScanIndexStore(
             self._resolve_project_path(self.scanner_cfg["index_db_path"])
+        )
+        self.parser_supervisor = ParserSupervisor(
+            file_timeout_seconds=self.scanner_cfg.get("file_timeout_seconds", 30.0),
+            file_timeout_by_extension=(
+                self.scanner_cfg.get("file_timeout_by_extension", {}) or {}
+            ),
         )
 
     @staticmethod
@@ -339,25 +345,19 @@ class FileScanner:
     ) -> FileContext:
         """带单文件时间预算的内容提取入口。"""
         file_type = file_path.suffix.lower()
-        timeout_seconds = self._resolve_file_timeout(file_type)
+        timeout_seconds = self.parser_supervisor.resolve_timeout(file_type)
         context, timed_out = self._run_extract_subprocess(
             file_path,
             limits,
             timeout_seconds,
         )
         if timed_out:
-            timeout_label = f"{timeout_seconds:g}"
             logger.warning(
                 "解析文件超时: %s (%ss)",
                 file_path,
-                timeout_label,
+                f"{timeout_seconds:g}",
             )
-            return FileContext(
-                file_path=str(file_path),
-                file_type=file_type,
-                content="",
-                error=f"timeout: file parse exceeded {timeout_label}s",
-            )
+            return self.parser_supervisor.handle_worker_timeout(file_path, file_type)
         if context is None:
             return FileContext(
                 file_path=str(file_path),
@@ -408,23 +408,20 @@ class FileScanner:
             )
 
     def _resolve_file_timeout(self, file_type: str) -> float:
-        """解析单文件超时秒数，优先使用扩展名覆盖。"""
-        normalized_type = file_type.lower()
-        overrides = self.scanner_cfg.get("file_timeout_by_extension", {}) or {}
-        timeout_value = overrides.get(
-            normalized_type,
-            self.scanner_cfg.get("file_timeout_seconds", DEFAULT_FILE_TIMEOUT_SECONDS),
-        )
-        try:
-            timeout = float(timeout_value)
-        except (TypeError, ValueError):
-            logger.warning("非法单文件超时配置 %s，回退默认值 30s", timeout_value)
-            return DEFAULT_FILE_TIMEOUT_SECONDS
+        """兼容旧调用点，内部转发给 supervisor。"""
+        return self.parser_supervisor.resolve_timeout(file_type)
 
-        if timeout <= 0:
-            logger.warning("非法单文件超时配置 %s，回退默认值 30s", timeout_value)
-            return DEFAULT_FILE_TIMEOUT_SECONDS
-        return timeout
+    def load_discovery_checkpoint(self, discovery_key: str) -> str | None:
+        """读取 discovery checkpoint 占位值，供后续增量发现接线。"""
+        return self.scan_index_store.load_checkpoint(discovery_key)
+
+    def save_discovery_checkpoint(
+        self,
+        discovery_key: str,
+        checkpoint_value: str,
+    ) -> None:
+        """写入 discovery checkpoint 占位值，但当前扫描流程仍不依赖它。"""
+        self.scan_index_store.save_checkpoint(discovery_key, checkpoint_value)
 
     def _extract_content(
         self, file_path: Path, limits: Optional[dict] = None

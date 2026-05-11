@@ -88,6 +88,11 @@ class Config:
                 "parser_profile_version",
                 "v1",
             ),
+            "worker_lane_mode": getattr(
+                self._settings.scanner,
+                "worker_lane_mode",
+                "direct",
+            ),
         }
         # 可选的 summary 模式配置
         scanner = self._settings.scanner
