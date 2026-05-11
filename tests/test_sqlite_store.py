@@ -1,6 +1,8 @@
 """Tests for SQLite-based history storage."""
 
+import importlib
 import sqlite3
+import sys
 from datetime import date, datetime
 
 from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
@@ -108,6 +110,19 @@ def test_sqlite_store_init_rejects_outdated_daily_schema_without_deleted_script_
 
 def test_services_exports_sqlite_store():
     assert SQLiteStore.__name__ == "SQLiteStore"
+
+
+def test_importing_scan_planner_does_not_eager_import_file_scanner():
+    for module_name in [
+        "src.services.scan_planner",
+        "src.services.file_scanner",
+        "src.services",
+    ]:
+        sys.modules.pop(module_name, None)
+
+    importlib.import_module("src.services.scan_planner")
+
+    assert "src.services.file_scanner" not in sys.modules
 
 
 def test_save_and_get_daily_report(tmp_path):
