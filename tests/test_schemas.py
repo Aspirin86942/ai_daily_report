@@ -28,13 +28,16 @@ def test_weekly_report_data():
     report = WeeklyReportData(
         week_label="2026-W14",
         date_range="2026-03-30 ~ 2026-04-05",
-        overview="本周主要完成了报告结构调整方案确认。",
         completed_work="本周完成了日报字段收缩、模板方向确认和数据重建方案确认。",
+        self_growth="本周在整理需求和测试边界的过程中，更加重视先锁定输出合同再实现的工作方式。",
+        improvement_actions="有些旧字段仍然散落在周报链路中，后续会逐步清点影响面并在改造时同步补齐验证。",
         work_summary="整体工作集中在模型与输出风格瘦身，重点是去掉无依据的量化表达。",
         next_plan="下周开始修改 SQLite、Prompt 和模板。",
+        support_needed="如需兼容历史周报入库结构，后续需要在持久化层补充过渡方案。",
+        other_notes="本次先锁定周报七段正文合同，暂不调整月报与日报路径。",
     )
     assert report.week_label == "2026-W14"
-    assert report.overview.startswith("本周")
+    assert report.self_growth.startswith("本周")
 
 
 def test_monthly_report_data():

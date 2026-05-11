@@ -144,10 +144,13 @@ def test_generate_weekly_report_db_uses_sqlite_store(monkeypatch):
             return WeeklyReportData(
                 week_label=f"{year}-W{week:02d}",
                 date_range="2026-01-26 ~ 2026-02-01",
-                overview="周报概览",
                 completed_work="完成周报",
+                self_growth="自我成长",
+                improvement_actions="改善措施",
                 work_summary="周报总结",
                 next_plan="下周计划",
+                support_needed="需要支持",
+                other_notes="其他说明",
             )
 
     printed = _patch_console(monkeypatch)

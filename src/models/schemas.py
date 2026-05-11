@@ -27,10 +27,15 @@ class WeeklyReportData(BaseModel):
     model_config = ConfigDict(extra="forbid")
     week_label: str = Field(description="ISO 周标签，例如 2026-W14")
     date_range: str = Field(description="日期范围，例如 2026-03-30 ~ 2026-04-05")
-    overview: str = Field(description="本周总览，使用自然段")
-    completed_work: str = Field(description="本周完成内容，使用自然段")
+    completed_work: str = Field(description="本周主要工作完成情况，使用自然段")
+    self_growth: str = Field(description="自我成长，使用自然段")
+    improvement_actions: str = Field(
+        description="有待改善的地方及相关措施，使用自然段"
+    )
     work_summary: str = Field(description="本周工作小结，使用自然段")
-    next_plan: str = Field(description="下周工作计划，使用自然段")
+    next_plan: str = Field(description="下周主要工作目标及计划，使用自然段")
+    support_needed: str = Field(description="需要的协助与支持，使用自然段")
+    other_notes: str = Field(description="其他补充说明，使用自然段")
 
 
 class MonthlyReportData(BaseModel):

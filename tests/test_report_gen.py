@@ -41,20 +41,30 @@ def test_render_weekly_markdown():
     report = WeeklyReportData(
         week_label="2026-W05",
         date_range="2026-01-27 ~ 2026-02-02",
-        overview="本周围绕两个审计项目推进资料核验和底稿收口，整体节奏保持稳定。",
         completed_work="本周完成项目A底稿复核、项目B资料清单初审，并同步补齐问题跟踪记录。",
+        self_growth="本周在跨项目协同中，对底稿收口节奏和问题升级时点有了更清晰的判断。",
+        improvement_actions="资料催收记录还不够前置，后续会把缺件确认提前到每日结束前统一跟进。",
         work_summary="本周工作以阶段性收口和新项目准备并行为主，关键依赖已经基本识别清楚。",
         next_plan="下周继续推进项目B补件核验，并启动项目C现场访谈准备。",
+        support_needed="需要业务同事协助确认项目B剩余缺件的反馈时点，以免影响下周访谈排期。",
+        other_notes="若项目C现场安排提前，需要同步调整项目A复核资源分配。",
     )
 
     markdown = gen.render_weekly_markdown(report)
     assert "2026-W05" in markdown
-    assert "## 本周总览" in markdown
-    assert "## 本周完成内容" in markdown
-    assert "## 本周工作小结" in markdown
-    assert "## 下周工作计划" in markdown
+    assert "## 1、本周主要工作完成情况（例行及专项，体现关键数据及进度情况）" in markdown
+    assert "## 2、自我成长（结合本周工作开展，收获了什么成长和领悟）" in markdown
+    assert "## 3、有待改善的地方及相关措施" in markdown
+    assert "## 4、本周工作小结（整体回顾分析本周的工作，直面问题进行思考，有评有论）" in markdown
+    assert "## 5、下周主要工作目标及计划（提炼关键目标，做好任务计划管理）" in markdown
+    assert "## 6、需要的协助与支持（针对工作过程中出现的困难等）" in markdown
+    assert "## 7、其他（建议等）" in markdown
     assert "项目A底稿复核" in markdown
+    assert "跨项目协同" in markdown
+    assert "资料催收记录还不够前置" in markdown
     assert "项目C现场访谈准备" in markdown
+    assert "业务同事协助确认项目B剩余缺件的反馈时点" in markdown
+    assert "同步调整项目A复核资源分配" in markdown
     assert "category_summaries" not in markdown
     assert "风险与问题" not in markdown
 
@@ -140,10 +150,13 @@ def test_generate_weekly_report_prompt_contains_period_context_and_metadata(
         return WeeklyReportData(
             week_label="2026-W14",
             date_range="2026-03-30 ~ 2026-04-05",
-            overview="本周总览。",
             completed_work="本周完成内容。",
+            self_growth="本周自我成长。",
+            improvement_actions="本周改善措施。",
             work_summary="本周工作小结。",
             next_plan="下周工作计划。",
+            support_needed="本周需要支持。",
+            other_notes="本周其他说明。",
         )
 
     monkeypatch.setattr(client, "_call_llm_with_json", fake_call)
@@ -175,6 +188,10 @@ def test_generate_weekly_report_prompt_contains_period_context_and_metadata(
     assert "### 今日工作小结" in prompt
     assert "### 明日工作计划" in prompt
     assert "完成项目A底稿复核。" in prompt
+    assert "self_growth" in prompt
+    assert "improvement_actions" in prompt
+    assert "support_needed" in prompt
+    assert "other_notes" in prompt
 
 
 def test_generate_monthly_report_prompt_uses_empty_message_for_empty_reports(
