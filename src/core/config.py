@@ -1,8 +1,9 @@
 """配置管理模块"""
 
 import os
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict
 from dynaconf import Dynaconf
 
 
@@ -34,6 +35,18 @@ class Config:
             environments=False,
             load_dotenv=True,
         )
+
+    @staticmethod
+    def _to_builtin_value(value: Any) -> Any:
+        """递归转成原生容器，避免 Dynaconf 容器在 Windows spawn 下无法 pickle。"""
+        if isinstance(value, Mapping):
+            return {
+                str(key): Config._to_builtin_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            return [Config._to_builtin_value(item) for item in value]
+        return value
 
     @property
     def work_dir(self) -> Path:
@@ -72,8 +85,12 @@ class Config:
     def scanner_config(self) -> Dict[str, Any]:
         """扫描器配置"""
         cfg: Dict[str, Any] = {
-            "allowed_extensions": self._settings.scanner.allowed_extensions,
-            "ignored_patterns": self._settings.scanner.ignored_patterns,
+            "allowed_extensions": self._to_builtin_value(
+                self._settings.scanner.allowed_extensions
+            ),
+            "ignored_patterns": self._to_builtin_value(
+                self._settings.scanner.ignored_patterns
+            ),
             "max_workers": self._settings.scanner.max_workers,
             "excel_max_rows": self._settings.scanner.excel_max_rows,
             "pdf_max_pages": self._settings.scanner.pdf_max_pages,
@@ -106,7 +123,7 @@ class Config:
             "file_timeout_by_extension",
         ):
             if hasattr(scanner, key):
-                cfg[key] = getattr(scanner, key)
+                cfg[key] = self._to_builtin_value(getattr(scanner, key))
         return cfg
 
     @property
