@@ -30,3 +30,6 @@ total_max_chars = 50000
 max_file_size_mb = 50
 file_timeout_seconds = 30
 file_timeout_by_extension = { ".pdf" = 45, ".xlsx" = 60, ".xls" = 60 }
+index_db_path = "data/db/scan_index.sqlite3"
+parser_profile_version = "v1"
+worker_lane_mode = "direct"

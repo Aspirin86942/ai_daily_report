@@ -1,8 +1,6 @@
 """文件扫描服务"""
 
-import fnmatch
 import multiprocessing as mp
-import os
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import List, Optional
@@ -15,11 +13,15 @@ from ..models.schemas import FileContext, ScanResult
 from ..core.config import config
 from ..core.logger import setup_logger
 from ..utils.text_tools import truncate_text
+from .scan_aggregator import ScanAggregator
+from .scan_discovery import DiscoveredFile, FileDiscoveryService
+from .scan_index_store import InventoryItem, ScanIndexStore
+from .scan_planner import ScanPlanner
+from .scan_worker_pool import ParserSupervisor
 
 logger = setup_logger()
 
 TEXT_FILE_TYPES = {".txt", ".md", ".csv", ".json", ".log"}
-DEFAULT_FILE_TIMEOUT_SECONDS = 30.0
 
 
 def _extract_content_worker(
@@ -43,6 +45,26 @@ class FileScanner:
         """初始化扫描器"""
         self.scanner_cfg = config.scanner_config
         self.work_dir = config.work_dir
+        self.discovery_service = FileDiscoveryService(self.work_dir, self.scanner_cfg)
+        self.scan_planner = ScanPlanner(self.scanner_cfg)
+        self.scan_index_store = ScanIndexStore(
+            self._resolve_project_path(self.scanner_cfg["index_db_path"])
+        )
+        self.parser_supervisor = ParserSupervisor(
+            file_timeout_seconds=self.scanner_cfg.get("file_timeout_seconds", 30.0),
+            file_timeout_by_extension=(
+                self.scanner_cfg.get("file_timeout_by_extension", {}) or {}
+            ),
+        )
+
+    @staticmethod
+    def _resolve_project_path(path_value: str | Path) -> Path:
+        """把相对配置路径解析到项目根目录，避免随运行目录漂移。"""
+        path = Path(path_value)
+        if path.is_absolute():
+            return path
+        project_root = Path(__file__).resolve().parent.parent.parent
+        return project_root / path
 
     def scan_today_files(self) -> ScanResult:
         """扫描今日修改的文件（默认日期范围封装）
@@ -79,95 +101,204 @@ class FileScanner:
             f"开始扫描工作目录: {self.work_dir} ({start_date} ~ {end_date}, summary={summary_mode})"
         )
 
-        # 获取日期范围内修改的文件
-        matched_files = self._get_files_in_range(start_date, end_date)
-        logger.info(f"发现 {len(matched_files)} 个文件")
+        # 发现边界只负责找候选文件，不承担解析与汇总逻辑。
+        discovered_files = self._normalize_discovered_files(
+            self.discovery_service.bootstrap_full_scan(start_date, end_date)
+        )
+        logger.info(f"发现 {len(discovered_files)} 个文件")
 
-        if not matched_files:
+        if not discovered_files:
+            # 空扫描同样要覆盖 inventory 快照，避免后续规划继续读取旧发现结果。
+            self.scan_index_store.replace_inventory([])
+            # 空扫描也要落一条 run 记录，避免 latest 指标停留在上一轮结果。
+            self.scan_index_store.save_scan_run_metrics(
+                discovered_count=0,
+                reused_count=0,
+                reparsed_count=0,
+            )
             return ScanResult(
                 total_files=0, success_count=0, error_count=0, contexts=[]
             )
 
-        # 确定解析限制
-        if summary_mode:
-            limits = {
-                "excel_max_rows": self.scanner_cfg.get("summary_excel_max_rows", 10),
-                "pdf_max_pages": self.scanner_cfg.get("summary_pdf_max_pages", 2),
-                "text_max_chars": self.scanner_cfg.get("summary_text_max_chars", 2000),
-            }
-        else:
-            limits = {
-                "excel_max_rows": self.scanner_cfg["excel_max_rows"],
-                "pdf_max_pages": self.scanner_cfg["pdf_max_pages"],
-                "text_max_chars": self.scanner_cfg["text_max_chars"],
-            }
+        parser_profile = self.scan_planner.build_parser_profile(
+            summary_mode=summary_mode
+        )
+        parser_profile_key = self.scan_planner.serialize_parser_profile(parser_profile)
+        # 先写入 bootstrap inventory，后续计划才能稳定基于统一快照做 freshness 判断。
+        self.scan_index_store.replace_inventory(
+            [
+                {
+                    "file_identity": item.file_identity,
+                    "path": str(item.path),
+                    "extension": item.extension,
+                    "modified_date": item.modified_at.date().isoformat(),
+                    "size_bytes": item.size_bytes,
+                    "source_version": item.source_version,
+                }
+                for item in discovered_files
+            ]
+        )
+        inventory_items = self.scan_index_store.query_inventory(start_date, end_date)
+        cache_lookup = {
+            item.file_identity: self.scan_index_store.has_fresh_cache(
+                item.file_identity,
+                parser_profile_key,
+                source_version=item.source_version,
+            )
+            for item in inventory_items
+        }
+        planned_candidates = self.scan_planner.plan_candidates(
+            candidates=inventory_items,
+            start_date=start_date,
+            end_date=end_date,
+            cache_lookup=cache_lookup,
+        )
+        # 记录本轮 planning 产出的最小指标，便于后续核对发现量与缓存复用效果。
+        self.scan_index_store.save_scan_run_metrics(
+            discovered_count=len(discovered_files),
+            reused_count=len(planned_candidates["cached"]),
+            reparsed_count=len(planned_candidates["uncached"]),
+        )
+        limits = {
+            "excel_max_rows": parser_profile["excel_max_rows"],
+            "pdf_max_pages": parser_profile["pdf_max_pages"],
+            "text_max_chars": parser_profile["text_max_chars"],
+        }
+        aggregator = ScanAggregator(parser_profile["total_max_chars"])
+        cached_contexts = self._get_cached_contexts(
+            planned_candidates["cached"],
+            parser_profile_key,
+        )
+        cached_contexts_by_path = {
+            Path(context.file_path): context for context in cached_contexts
+        }
 
-        total_max_chars = self.scanner_cfg.get("total_max_chars", 50000)
+        for cached_file in planned_candidates["cached"]:
+            cached_path = self._item_path(cached_file)
+            cached_context = cached_contexts_by_path.get(cached_path)
+            if cached_context is None:
+                aggregator.add_context(
+                    FileContext(
+                        file_path=str(cached_path),
+                        file_type=self._item_extension(cached_file),
+                        content="",
+                        error="cache hit missing context",
+                    )
+                )
+                continue
+            aggregator.add_cached_context(cached_context)
 
         # 并行处理文件
-        contexts: list[FileContext] = []
-        success_count = 0
-        error_count = 0
-        total_chars = 0
-        truncated_by_global_limit = False
-
         with ThreadPoolExecutor(
             max_workers=self.scanner_cfg["max_workers"]
         ) as executor:
             future_to_file = {
-                executor.submit(self._extract_content_with_timeout, f, limits): f
-                for f in matched_files
+                executor.submit(
+                    self._extract_content_with_timeout,
+                    self._item_path(item),
+                    limits,
+                ): item
+                for item in planned_candidates["uncached"]
             }
 
             for future in as_completed(future_to_file):
-                file_path = future_to_file[future]
+                inventory_item = future_to_file[future]
+                file_path = self._item_path(inventory_item)
                 try:
                     context = future.result()
-                    if context.error:
-                        error_count += 1
-                    else:
-                        success_count += 1
-
-                    # 全局字符上限检查
-                    total_chars += len(context.content)
-                    if total_chars > total_max_chars and not truncated_by_global_limit:
-                        truncated_by_global_limit = True
+                    self._write_parse_cache(
+                        inventory_item,
+                        parser_profile_key,
+                        context,
+                    )
+                    previous_truncated = aggregator.truncated_by_global_limit
+                    aggregator.add_context(context)
+                    if (
+                        aggregator.truncated_by_global_limit
+                        and not previous_truncated
+                    ):
                         logger.warning(
-                            f"已达全局字符上限 {total_max_chars}，后续文件内容将被省略"
+                            "已达全局字符上限 %s，后续文件内容将被省略",
+                            aggregator.total_max_chars,
                         )
-
-                    if truncated_by_global_limit and not context.error:
-                        context = FileContext(
-                            file_path=context.file_path,
-                            file_type=context.file_type,
-                            content="(已达全局字符上限，内容省略)",
-                            error=None,
-                        )
-
-                    contexts.append(context)
                 except Exception as e:
                     logger.error(f"处理文件失败 {file_path}: {e}")
-                    error_count += 1
-                    contexts.append(
-                        FileContext(
-                            file_path=str(file_path),
-                            file_type=file_path.suffix,
-                            content="",
-                            error=str(e),
-                        )
+                    self.scan_index_store.upsert_parse_cache(
+                        file_identity=self._item_identity(inventory_item),
+                        parser_profile=parser_profile_key,
+                        content_excerpt="",
+                        parse_status="error",
+                        parse_error=str(e),
+                        source_version=self._item_source_version(inventory_item),
                     )
+                    aggregator.add_exception(file_path, e)
 
         # 数据完整性校验
-        assert success_count + error_count == len(matched_files), "文件处理数量不匹配"
+        assert (
+            aggregator.success_count + aggregator.error_count
+            == planned_candidates["total_candidates"]
+        ), "文件处理数量不匹配"
 
-        logger.info(f"扫描完成: 成功 {success_count}, 失败 {error_count}")
-
-        return ScanResult(
-            total_files=len(matched_files),
-            success_count=success_count,
-            error_count=error_count,
-            contexts=contexts,
+        logger.info(
+            "扫描完成: 成功 %s, 失败 %s",
+            aggregator.success_count,
+            aggregator.error_count,
         )
+
+        return aggregator.build_result(planned_candidates["total_candidates"])
+
+    def _normalize_discovered_files(
+        self,
+        discovered_files: list[Path | DiscoveredFile],
+    ) -> list[DiscoveredFile]:
+        """兼容旧 Path monkeypatch，同时统一生成 inventory 所需元数据。"""
+        normalized: list[DiscoveredFile] = []
+        for item in discovered_files:
+            if isinstance(item, DiscoveredFile):
+                normalized.append(item)
+                continue
+
+            file_path = Path(item)
+            stat_result = file_path.stat()
+            resolved_path = file_path.resolve()
+            normalized.append(
+                DiscoveredFile(
+                    file_identity=f"bootstrap:{str(resolved_path).lower()}",
+                    path=file_path,
+                    extension=file_path.suffix.lower(),
+                    modified_at=datetime.fromtimestamp(stat_result.st_mtime),
+                    size_bytes=stat_result.st_size,
+                    source_version=(
+                        f"mtime_ns={stat_result.st_mtime_ns}:size={stat_result.st_size}"
+                    ),
+                )
+            )
+        return normalized
+
+    def _get_cached_contexts(
+        self,
+        cached_files: list[Path | InventoryItem],
+        parser_profile: str,
+    ) -> list[FileContext]:
+        """从 parse_cache 恢复 fresh cache 命中的上下文。"""
+        contexts: list[FileContext] = []
+        for item in cached_files:
+            cached = self.scan_index_store.load_parse_cache(
+                self._item_identity(item),
+                parser_profile,
+                source_version=self._item_source_version(item),
+            )
+            parse_status = cached["parse_status"]
+            parse_error = cached["parse_error"] or None
+            contexts.append(
+                FileContext(
+                    file_path=str(self._item_path(item)),
+                    file_type=self._item_extension(item),
+                    content=cached["content_excerpt"],
+                    error=parse_error if parse_status != "success" else None,
+                )
+            )
+        return contexts
 
     def _get_files_in_range(self, start_date: date, end_date: date) -> List[Path]:
         """获取日期范围内修改的文件列表
@@ -179,87 +310,70 @@ class FileScanner:
         Returns:
             文件路径列表
         """
-        start_dt = datetime.combine(start_date, datetime.min.time())
-        end_dt = datetime.combine(end_date, datetime.max.time())
+        discovered_files = self.discovery_service.bootstrap_full_scan(start_date, end_date)
+        return [
+            item.path if isinstance(item, DiscoveredFile) else Path(item)
+            for item in discovered_files
+        ]
 
-        files = []
-        excluded_dirs = self.scanner_cfg.get("excluded_dirs", [])
-        excluded_paths = [Path(d).resolve() for d in excluded_dirs]
+    def _item_path(self, item: Path | InventoryItem) -> Path:
+        """统一读取候选路径。"""
+        return item if isinstance(item, Path) else Path(item.path)
 
-        for root, _, filenames in os.walk(self.work_dir):
-            root_path = Path(root).resolve()
+    def _item_identity(self, item: Path | InventoryItem) -> str:
+        """统一读取缓存身份。"""
+        if isinstance(item, Path):
+            return f"bootstrap:{str(item.resolve()).lower()}"
+        return item.file_identity
 
-            # 检查是否在排除目录中
-            skip_dir = False
-            for excluded in excluded_paths:
-                try:
-                    root_path.relative_to(excluded)
-                    skip_dir = True
-                    break
-                except ValueError:
-                    continue
+    def _item_extension(self, item: Path | InventoryItem) -> str:
+        """统一读取扩展名。"""
+        return item.suffix.lower() if isinstance(item, Path) else item.extension
 
-            if skip_dir:
-                continue
+    def _item_source_version(self, item: Path | InventoryItem) -> str:
+        """统一读取 discovery 版本指纹。"""
+        if isinstance(item, Path):
+            stat_result = item.stat()
+            return f"mtime_ns={stat_result.st_mtime_ns}:size={stat_result.st_size}"
+        return item.source_version
 
-            for filename in filenames:
-                filename_lower = filename.lower()
-
-                # 检查扩展名。这里统一转小写，避免 .PDF/.XLSX 这类文件漏扫。
-                if not any(
-                    filename_lower.endswith(str(ext).lower())
-                    for ext in self.scanner_cfg["allowed_extensions"]
-                ):
-                    continue
-
-                # 检查忽略模式。使用 glob 语义，避免 "*.tmp" 只匹配 ".tmp" 前缀。
-                if any(
-                    fnmatch.fnmatch(filename_lower, str(pattern).lower())
-                    for pattern in self.scanner_cfg["ignored_patterns"]
-                ):
-                    continue
-
-                file_path = Path(root) / filename
-                try:
-                    mtime = datetime.fromtimestamp(file_path.stat().st_mtime)
-                    if start_dt <= mtime <= end_dt:
-                        files.append(file_path)
-                except Exception as e:
-                    logger.warning(f"无法读取文件时间 {file_path}: {e}")
-
-        return files
+    def _write_parse_cache(
+        self,
+        item: Path | InventoryItem,
+        parser_profile: str,
+        context: FileContext,
+    ) -> None:
+        """把本轮解析结果写回 parse_cache。"""
+        is_success = context.error is None
+        self.scan_index_store.upsert_parse_cache(
+            file_identity=self._item_identity(item),
+            parser_profile=parser_profile,
+            content_excerpt=context.content if is_success else "",
+            parse_status="success" if is_success else "error",
+            parse_error=context.error or "",
+            source_version=self._item_source_version(item),
+        )
 
     def _extract_content_with_timeout(
         self, file_path: Path, limits: Optional[dict] = None
     ) -> FileContext:
         """带单文件时间预算的内容提取入口。"""
         file_type = file_path.suffix.lower()
-        timeout_seconds = self._resolve_file_timeout(file_type)
+        timeout_seconds = self.parser_supervisor.resolve_timeout(file_type)
         context, timed_out = self._run_extract_subprocess(
             file_path,
             limits,
             timeout_seconds,
         )
         if timed_out:
-            timeout_label = f"{timeout_seconds:g}"
             logger.warning(
                 "解析文件超时: %s (%ss)",
                 file_path,
-                timeout_label,
+                f"{timeout_seconds:g}",
             )
-            return FileContext(
-                file_path=str(file_path),
-                file_type=file_type,
-                content="",
-                error=f"timeout: file parse exceeded {timeout_label}s",
-            )
+            return self.parser_supervisor.handle_worker_timeout(file_path, file_type)
         if context is None:
-            return FileContext(
-                file_path=str(file_path),
-                file_type=file_type,
-                content="",
-                error="subprocess exited without result",
-            )
+            return self.parser_supervisor.handle_missing_result(file_path, file_type)
         return context
 
     def _run_extract_subprocess(
@@ -293,33 +407,28 @@ class FileScanner:
         except Exception as exc:
             logger.warning("子进程返回无效结果 %s: %s", file_path, exc)
             return (
-                FileContext(
-                    file_path=str(file_path),
-                    file_type=file_path.suffix.lower(),
-                    content="",
-                    error="subprocess returned invalid payload",
+                self.parser_supervisor.handle_invalid_payload(
+                    file_path,
+                    file_path.suffix.lower(),
                 ),
                 False,
             )
 
     def _resolve_file_timeout(self, file_type: str) -> float:
-        """解析单文件超时秒数，优先使用扩展名覆盖。"""
-        normalized_type = file_type.lower()
-        overrides = self.scanner_cfg.get("file_timeout_by_extension", {}) or {}
-        timeout_value = overrides.get(
-            normalized_type,
-            self.scanner_cfg.get("file_timeout_seconds", DEFAULT_FILE_TIMEOUT_SECONDS),
-        )
-        try:
-            timeout = float(timeout_value)
-        except (TypeError, ValueError):
-            logger.warning("非法单文件超时配置 %s，回退默认值 30s", timeout_value)
-            return DEFAULT_FILE_TIMEOUT_SECONDS
+        """兼容旧调用点，内部转发给 supervisor。"""
+        return self.parser_supervisor.resolve_timeout(file_type)
 
-        if timeout <= 0:
-            logger.warning("非法单文件超时配置 %s，回退默认值 30s", timeout_value)
-            return DEFAULT_FILE_TIMEOUT_SECONDS
-        return timeout
+    def load_discovery_checkpoint(self, discovery_key: str) -> str | None:
+        """读取 discovery checkpoint 占位值，供后续增量发现接线。"""
+        return self.scan_index_store.load_checkpoint(discovery_key)
+
+    def save_discovery_checkpoint(
+        self,
+        discovery_key: str,
+        checkpoint_value: str,
+    ) -> None:
+        """写入 discovery checkpoint 占位值，但当前扫描流程仍不依赖它。"""
+        self.scan_index_store.save_checkpoint(discovery_key, checkpoint_value)
 
     def _extract_content(
         self, file_path: Path, limits: Optional[dict] = None

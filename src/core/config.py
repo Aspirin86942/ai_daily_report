@@ -78,6 +78,21 @@ class Config:
             "excel_max_rows": self._settings.scanner.excel_max_rows,
             "pdf_max_pages": self._settings.scanner.pdf_max_pages,
             "text_max_chars": self._settings.scanner.text_max_chars,
+            "index_db_path": getattr(
+                self._settings.scanner,
+                "index_db_path",
+                "data/db/scan_index.sqlite3",
+            ),
+            "parser_profile_version": getattr(
+                self._settings.scanner,
+                "parser_profile_version",
+                "v1",
+            ),
+            "worker_lane_mode": getattr(
+                self._settings.scanner,
+                "worker_lane_mode",
+                "direct",
+            ),
         }
         # 可选的 summary 模式配置
         scanner = self._settings.scanner
