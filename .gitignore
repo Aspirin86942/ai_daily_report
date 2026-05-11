@@ -26,6 +26,9 @@ venv/
 .claude/
 .worktrees/
 
+# workbuddy
+.workbuddy/
+
 # 临时文件
 ~$*
 *.tmp
