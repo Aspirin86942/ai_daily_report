@@ -345,3 +345,94 @@ def test_scan_files_delegates_bootstrap_discovery(
     assert calls == [(date.today(), date.today())]
     assert result.total_files == 1
     assert result.success_count == 1
+
+
+def test_scan_files_counts_cached_and_uncached_contexts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """存在 cached 与 uncached 候选时，两类上下文都应进入结果。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    cached_file = scanner.work_dir / "cached.txt"
+    uncached_file = scanner.work_dir / "uncached.txt"
+    cached_file.write_text("cached", encoding="utf-8")
+    uncached_file.write_text("uncached", encoding="utf-8")
+
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: [cached_file, uncached_file],
+    )
+    monkeypatch.setattr(
+        scanner.scan_planner,
+        "plan_candidates",
+        lambda candidates: {
+            "cached": [cached_file],
+            "uncached": [uncached_file],
+            "total_candidates": 2,
+        },
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_get_cached_contexts",
+        lambda cached_files: [
+            file_scanner_module.FileContext(
+                file_path=str(cached_file),
+                file_type=".txt",
+                content="cached content",
+                error=None,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_extract_content_with_timeout",
+        lambda file_path, limits: file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".txt",
+            content="uncached content",
+            error=None,
+        ),
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.total_files == 2
+    assert result.success_count == 2
+    assert result.error_count == 0
+    assert [context.file_path for context in result.contexts] == [
+        str(cached_file),
+        str(uncached_file),
+    ]
+
+
+def test_scan_files_emits_auditable_error_when_cached_context_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """缓存命中但未返回上下文时，不应静默漏算。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    cached_file = scanner.work_dir / "cached.txt"
+    cached_file.write_text("cached", encoding="utf-8")
+
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: [cached_file],
+    )
+    monkeypatch.setattr(
+        scanner.scan_planner,
+        "plan_candidates",
+        lambda candidates: {
+            "cached": [cached_file],
+            "uncached": [],
+            "total_candidates": 1,
+        },
+    )
+    monkeypatch.setattr(scanner, "_get_cached_contexts", lambda cached_files: [])
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.total_files == 1
+    assert result.success_count == 0
+    assert result.error_count == 1
+    assert result.contexts[0].file_path == str(cached_file)
+    assert "cache hit missing context" in (result.contexts[0].error or "")

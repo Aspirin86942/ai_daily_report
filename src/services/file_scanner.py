@@ -101,6 +101,24 @@ class FileScanner:
             "text_max_chars": parser_profile["text_max_chars"],
         }
         aggregator = ScanAggregator(parser_profile["total_max_chars"])
+        cached_contexts = self._get_cached_contexts(planned_candidates["cached"])
+        cached_contexts_by_path = {
+            Path(context.file_path): context for context in cached_contexts
+        }
+
+        for cached_file in planned_candidates["cached"]:
+            cached_context = cached_contexts_by_path.get(cached_file)
+            if cached_context is None:
+                aggregator.add_context(
+                    FileContext(
+                        file_path=str(cached_file),
+                        file_type=cached_file.suffix.lower(),
+                        content="",
+                        error="cache hit missing context",
+                    )
+                )
+                continue
+            aggregator.add_cached_context(cached_context)
 
         # 并行处理文件
         with ThreadPoolExecutor(
@@ -142,6 +160,10 @@ class FileScanner:
         )
 
         return aggregator.build_result(planned_candidates["total_candidates"])
+
+    def _get_cached_contexts(self, cached_files: list[Path]) -> list[FileContext]:
+        """缓存上下文加载钩子，默认由后续任务接入外部缓存实现。"""
+        return []
 
     def _get_files_in_range(self, start_date: date, end_date: date) -> List[Path]:
         """获取日期范围内修改的文件列表

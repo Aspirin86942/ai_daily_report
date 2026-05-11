@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Union
 
 from ..models.schemas import FileContext, ScanResult
 
@@ -39,13 +40,18 @@ class ScanAggregator:
 
         self.contexts.append(context)
 
-    def add_exception(self, file_path: Path, error: Exception) -> None:
+    def add_cached_context(self, context: FileContext) -> None:
+        """缓存命中上下文沿用与实时解析相同的聚合规则。"""
+        self.add_context(context)
+
+    def add_exception(self, file_path: Union[Path, str], error: Exception) -> None:
         """把未捕获异常转为可审计的文件级错误。"""
+        normalized_path = Path(file_path)
         self.error_count += 1
         self.contexts.append(
             FileContext(
-                file_path=str(file_path),
-                file_type=file_path.suffix,
+                file_path=str(normalized_path),
+                file_type=normalized_path.suffix,
                 content="",
                 error=str(error),
             )
