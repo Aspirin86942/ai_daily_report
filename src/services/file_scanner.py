@@ -359,12 +359,7 @@ class FileScanner:
             )
             return self.parser_supervisor.handle_worker_timeout(file_path, file_type)
         if context is None:
-            return FileContext(
-                file_path=str(file_path),
-                file_type=file_type,
-                content="",
-                error="subprocess exited without result",
-            )
+            return self.parser_supervisor.handle_missing_result(file_path, file_type)
         return context
 
     def _run_extract_subprocess(
@@ -398,11 +393,9 @@ class FileScanner:
         except Exception as exc:
             logger.warning("子进程返回无效结果 %s: %s", file_path, exc)
             return (
-                FileContext(
-                    file_path=str(file_path),
-                    file_type=file_path.suffix.lower(),
-                    content="",
-                    error="subprocess returned invalid payload",
+                self.parser_supervisor.handle_invalid_payload(
+                    file_path,
+                    file_path.suffix.lower(),
                 ),
                 False,
             )

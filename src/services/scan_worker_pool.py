@@ -6,9 +6,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from ..core.logger import setup_logger
 from ..models.schemas import FileContext
 
 DEFAULT_FILE_TIMEOUT_SECONDS = 30.0
+logger = setup_logger()
 
 
 class ParserSupervisor:
@@ -32,9 +34,21 @@ class ParserSupervisor:
         try:
             timeout = float(timeout_value)
         except (TypeError, ValueError):
+            logger.warning(
+                "非法单文件超时配置 %r for %s，回退默认值 %ss",
+                timeout_value,
+                normalized_type,
+                f"{DEFAULT_FILE_TIMEOUT_SECONDS:g}",
+            )
             return DEFAULT_FILE_TIMEOUT_SECONDS
 
         if timeout <= 0:
+            logger.warning(
+                "非法单文件超时配置 %r for %s，回退默认值 %ss",
+                timeout_value,
+                normalized_type,
+                f"{DEFAULT_FILE_TIMEOUT_SECONDS:g}",
+            )
             return DEFAULT_FILE_TIMEOUT_SECONDS
         return timeout
 
@@ -65,4 +79,22 @@ class ParserSupervisor:
             file_type=file_type,
             content="",
             error=f"timeout: file parse exceeded {timeout_label}s",
+        )
+
+    def handle_missing_result(self, file_path: Path, file_type: str) -> FileContext:
+        """生成子进程未返回结果时的稳定 fallback。"""
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="",
+            error="subprocess exited without result",
+        )
+
+    def handle_invalid_payload(self, file_path: Path, file_type: str) -> FileContext:
+        """生成子进程返回无效 payload 时的稳定 fallback。"""
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="",
+            error="subprocess returned invalid payload",
         )

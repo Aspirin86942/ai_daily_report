@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from src.models.schemas import FileContext
 from src.services.scan_worker_pool import ParserSupervisor
 
@@ -54,4 +56,75 @@ def test_parser_supervisor_returns_timeout_error_for_extension_override():
         file_type=".pdf",
         content="",
         error="timeout: file parse exceeded 12s",
+    )
+
+
+@pytest.mark.parametrize(
+    ("file_timeout_seconds", "overrides", "file_type", "expected_raw"),
+    [
+        ("bad", {}, ".txt", "bad"),
+        (30, {".pdf": 0}, ".pdf", 0),
+        (30, {".pdf": "abc"}, ".pdf", "abc"),
+    ],
+)
+def test_parser_supervisor_logs_warning_for_invalid_timeout_config(
+    caplog: pytest.LogCaptureFixture,
+    file_timeout_seconds: object,
+    overrides: dict[str, object],
+    file_type: str,
+    expected_raw: object,
+):
+    """非法 timeout 配置回退默认值时必须记录 warning。"""
+    supervisor = ParserSupervisor(
+        file_timeout_seconds=file_timeout_seconds,
+        file_timeout_by_extension=overrides,
+    )
+
+    with caplog.at_level("WARNING"):
+        timeout = supervisor.resolve_timeout(file_type)
+
+    assert timeout == 30.0
+    assert any(
+        str(expected_raw) in record.message and file_type in record.message
+        for record in caplog.records
+    )
+
+
+def test_parser_supervisor_builds_missing_result_fallback():
+    """缺少子进程结果时应返回稳定的可审计错误。"""
+    supervisor = ParserSupervisor(
+        file_timeout_seconds=30,
+        file_timeout_by_extension={},
+    )
+
+    context = supervisor.handle_missing_result(
+        file_path=Path("report.txt"),
+        file_type=".txt",
+    )
+
+    assert context == FileContext(
+        file_path="report.txt",
+        file_type=".txt",
+        content="",
+        error="subprocess exited without result",
+    )
+
+
+def test_parser_supervisor_builds_invalid_payload_fallback():
+    """无效 payload 时应返回稳定的可审计错误。"""
+    supervisor = ParserSupervisor(
+        file_timeout_seconds=30,
+        file_timeout_by_extension={},
+    )
+
+    context = supervisor.handle_invalid_payload(
+        file_path=Path("report.txt"),
+        file_type=".txt",
+    )
+
+    assert context == FileContext(
+        file_path="report.txt",
+        file_type=".txt",
+        content="",
+        error="subprocess returned invalid payload",
     )

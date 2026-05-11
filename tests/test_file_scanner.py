@@ -311,6 +311,84 @@ def test_extract_content_with_timeout_uses_supervisor_extension_override(
     assert context.error == "timeout: file parse exceeded 45s"
 
 
+def test_extract_content_with_timeout_returns_missing_result_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """子进程退出但未返回结果时，scanner 应通过 supervisor 返回稳定错误文本。"""
+    scanner = _make_scanner(tmp_path, monkeypatch)
+    sample = tmp_path / "missing.txt"
+    sample.write_text("missing", encoding="utf-8")
+
+    monkeypatch.setattr(
+        scanner,
+        "_run_extract_subprocess",
+        lambda file_path, limits, timeout_seconds: (None, False),
+    )
+
+    context = scanner._extract_content_with_timeout(
+        sample,
+        {
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+        },
+    )
+
+    assert context.error == "subprocess exited without result"
+
+
+def test_run_extract_subprocess_returns_invalid_payload_error_via_supervisor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """无效 payload 路径应保持稳定错误文本，并通过 supervisor 构造 fallback。"""
+    scanner = _make_scanner(tmp_path, monkeypatch)
+    sample = tmp_path / "invalid.txt"
+    sample.write_text("invalid", encoding="utf-8")
+
+    class FakeQueue:
+        def __init__(self, maxsize: int):
+            self.maxsize = maxsize
+
+        def get_nowait(self):
+            return {"file_path": str(sample), "file_type": ".txt"}
+
+    class FakeProcess:
+        def __init__(self, target, args):
+            self._alive = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self._alive
+
+        def terminate(self):
+            self._alive = False
+
+    class FakeContext:
+        def Queue(self, maxsize: int):
+            return FakeQueue(maxsize)
+
+        def Process(self, target, args):
+            return FakeProcess(target, args)
+
+    monkeypatch.setattr(file_scanner_module.mp, "get_context", lambda mode: FakeContext())
+
+    context, timed_out = scanner._run_extract_subprocess(
+        sample,
+        {"text_max_chars": 10},
+        30,
+    )
+
+    assert timed_out is False
+    assert context is not None
+    assert context.error == "subprocess returned invalid payload"
+
+
 def test_extract_content_with_timeout_runs_real_subprocess(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
