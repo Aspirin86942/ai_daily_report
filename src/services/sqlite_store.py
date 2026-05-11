@@ -31,6 +31,97 @@ class SQLiteStore:
         conn.row_factory = sqlite3.Row
         return conn
 
+    @staticmethod
+    def _get_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
+        return {
+            row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+        }
+
+    @staticmethod
+    def _is_legacy_weekly_schema(columns: set[str]) -> bool:
+        return "overview" in columns and "self_growth" not in columns
+
+    def _migrate_weekly_schema(self, conn: sqlite3.Connection) -> None:
+        # 周报已从 overview 四段结构升级为七段正文；这里原地迁移列结构，
+        # 同时保留 raw_json 作为真实来源，避免历史数据在迁移阶段被强制重写。
+        conn.executescript(
+            """
+            ALTER TABLE weekly_reports RENAME TO weekly_reports_legacy;
+
+            CREATE TABLE weekly_reports (
+                week_label TEXT PRIMARY KEY,
+                date_range TEXT NOT NULL,
+                completed_work TEXT NOT NULL,
+                self_growth TEXT NOT NULL,
+                improvement_actions TEXT NOT NULL,
+                work_summary TEXT NOT NULL,
+                next_plan TEXT NOT NULL,
+                support_needed TEXT NOT NULL,
+                other_notes TEXT NOT NULL,
+                raw_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+
+            INSERT INTO weekly_reports (
+                week_label,
+                date_range,
+                completed_work,
+                self_growth,
+                improvement_actions,
+                work_summary,
+                next_plan,
+                support_needed,
+                other_notes,
+                raw_json,
+                created_at,
+                updated_at
+            )
+            SELECT
+                week_label,
+                date_range,
+                completed_work,
+                '',
+                '',
+                work_summary,
+                next_plan,
+                '',
+                '',
+                raw_json,
+                created_at,
+                updated_at
+            FROM weekly_reports_legacy;
+
+            DROP TABLE weekly_reports_legacy;
+            """
+        )
+
+    @staticmethod
+    def _load_weekly_report_payload(payload: dict, fallback_row: sqlite3.Row | None = None) -> WeeklyReportData:
+        if "self_growth" in payload:
+            return WeeklyReportData(**payload)
+
+        overview = str(payload.get("overview") or "")
+        completed_work = str(payload.get("completed_work") or "")
+        merged_completed_work = (
+            f"{overview}\n\n{completed_work}" if overview and completed_work else overview or completed_work
+        )
+        fallback = dict(fallback_row) if fallback_row is not None else {}
+
+        # 旧版周报没有七段字段，这里按评审要求做保守映射：
+        # 保留已有事实字段，把 overview 并入 completed_work，其余新增段落置空。
+        return WeeklyReportData(
+            week_label=str(payload.get("week_label") or fallback.get("week_label") or ""),
+            date_range=str(payload.get("date_range") or fallback.get("date_range") or ""),
+            completed_work=merged_completed_work,
+            self_growth="",
+            improvement_actions="",
+            work_summary=str(payload.get("work_summary") or fallback.get("work_summary") or ""),
+            next_plan=str(payload.get("next_plan") or fallback.get("next_plan") or ""),
+            support_needed="",
+            other_notes="",
+        )
+
     def _init_schema(self) -> None:
         with self._get_conn() as conn:
             conn.executescript(
@@ -48,10 +139,13 @@ class SQLiteStore:
                 CREATE TABLE IF NOT EXISTS weekly_reports (
                     week_label TEXT PRIMARY KEY,
                     date_range TEXT NOT NULL,
-                    overview TEXT NOT NULL,
                     completed_work TEXT NOT NULL,
+                    self_growth TEXT NOT NULL,
+                    improvement_actions TEXT NOT NULL,
                     work_summary TEXT NOT NULL,
                     next_plan TEXT NOT NULL,
+                    support_needed TEXT NOT NULL,
+                    other_notes TEXT NOT NULL,
                     raw_json TEXT NOT NULL,
                     created_at TEXT NOT NULL DEFAULT (datetime('now')),
                     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -73,14 +167,16 @@ class SQLiteStore:
             )
             conn.commit()
 
+            weekly_columns = self._get_table_columns(conn, "weekly_reports")
+            if self._is_legacy_weekly_schema(weekly_columns):
+                self._migrate_weekly_schema(conn)
+                conn.commit()
+
             # Verify schema is up-to-date to catch stale tables from prior versions
-            cols = {
-                r[1]
-                for r in conn.execute("PRAGMA table_info(daily_reports)").fetchall()
-            }
+            cols = self._get_table_columns(conn, "daily_reports")
             required = {"completed_work", "work_summary", "next_plan"}
             if not required.issubset(cols):
-                actual = {r[1] for r in conn.execute("PRAGMA table_info(daily_reports)").fetchall()}
+                actual = self._get_table_columns(conn, "daily_reports")
                 raise RuntimeError(
                     f"daily_reports schema is outdated (columns: {sorted(actual)}). "
                     "Create a backup of the existing SQLite database before you review the schema and rebuild the file if needed."
@@ -219,25 +315,32 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO weekly_reports (
-                    week_label, date_range, overview, completed_work, work_summary,
-                    next_plan, raw_json, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                    week_label, date_range, completed_work, self_growth,
+                    improvement_actions, work_summary, next_plan, support_needed,
+                    other_notes, raw_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
                 ON CONFLICT(week_label) DO UPDATE SET
                     date_range=excluded.date_range,
-                    overview=excluded.overview,
                     completed_work=excluded.completed_work,
+                    self_growth=excluded.self_growth,
+                    improvement_actions=excluded.improvement_actions,
                     work_summary=excluded.work_summary,
                     next_plan=excluded.next_plan,
+                    support_needed=excluded.support_needed,
+                    other_notes=excluded.other_notes,
                     raw_json=excluded.raw_json,
                     updated_at=datetime('now')
                 """,
                 (
                     report.week_label,
                     report.date_range,
-                    report.overview,
                     report.completed_work,
+                    report.self_growth,
+                    report.improvement_actions,
                     report.work_summary,
                     report.next_plan,
+                    report.support_needed,
+                    report.other_notes,
                     self._to_json(payload),
                 ),
             )
@@ -247,13 +350,18 @@ class SQLiteStore:
     def get_weekly_report(self, week_label: str) -> Optional[WeeklyReportData]:
         with self._get_conn() as conn:
             row = conn.execute(
-                "SELECT raw_json FROM weekly_reports WHERE week_label = ?",
+                """
+                SELECT week_label, date_range, completed_work, work_summary, next_plan, raw_json
+                FROM weekly_reports
+                WHERE week_label = ?
+                """,
                 (week_label,),
             ).fetchone()
         if row is None:
             return None
         try:
-            return WeeklyReportData(**json.loads(row["raw_json"]))
+            payload = json.loads(row["raw_json"])
+            return self._load_weekly_report_payload(payload, row)
         except Exception as exc:
             logger.warning("Failed to parse weekly report %s: %s", week_label, exc)
             return None

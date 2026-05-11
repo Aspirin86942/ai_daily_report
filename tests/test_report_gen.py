@@ -1,6 +1,7 @@
 """测试报告生成"""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -51,14 +52,20 @@ def test_render_weekly_markdown():
     )
 
     markdown = gen.render_weekly_markdown(report)
-    assert "2026-W05" in markdown
-    assert "## 1、本周主要工作完成情况（例行及专项，体现关键数据及进度情况）" in markdown
-    assert "## 2、自我成长（结合本周工作开展，收获了什么成长和领悟）" in markdown
-    assert "## 3、有待改善的地方及相关措施" in markdown
-    assert "## 4、本周工作小结（整体回顾分析本周的工作，直面问题进行思考，有评有论）" in markdown
-    assert "## 5、下周主要工作目标及计划（提炼关键目标，做好任务计划管理）" in markdown
-    assert "## 6、需要的协助与支持（针对工作过程中出现的困难等）" in markdown
-    assert "## 7、其他（建议等）" in markdown
+    headings = [
+        "## 1、本周主要工作完成情况（例行及专项，体现关键数据及进度情况）",
+        "## 2、自我成长（结合本周工作开展，收获了什么成长和领悟）",
+        "## 3、有待改善的地方及相关措施",
+        "## 4、本周工作小结（整体回顾分析本周的工作，直面问题进行思考，有评有论）",
+        "## 5、下周主要工作目标及计划（提炼关键目标，做好任务计划管理）",
+        "## 6、需要的协助与支持（针对工作过程中出现的困难等）",
+        "## 7、其他（建议等）",
+    ]
+    positions = [markdown.index(heading) for heading in headings]
+
+    assert markdown.startswith("# 2026-W05 审计周报")
+    assert positions == sorted(positions)
+    assert "报告生成时间" in markdown
     assert "项目A底稿复核" in markdown
     assert "跨项目协同" in markdown
     assert "资料催收记录还不够前置" in markdown
@@ -192,6 +199,30 @@ def test_generate_weekly_report_prompt_contains_period_context_and_metadata(
     assert "improvement_actions" in prompt
     assert "support_needed" in prompt
     assert "other_notes" in prompt
+
+
+def test_real_weekly_prompt_template_locks_seven_section_contract():
+    prompt_path = Path(__file__).resolve().parents[1] / "templates" / "weekly_prompt.md"
+    prompt_text = prompt_path.read_text(encoding="utf-8")
+
+    for field_name in (
+        "week_label",
+        "date_range",
+        "completed_work",
+        "self_growth",
+        "improvement_actions",
+        "work_summary",
+        "next_plan",
+        "support_needed",
+        "other_notes",
+    ):
+        assert field_name in prompt_text
+
+    assert "都必须使用自然段" in prompt_text
+    assert "不要使用项目符号、编号列表或表格" in prompt_text
+    assert "不要臆造量化结论" in prompt_text
+    assert "缺失信息不要编造" in prompt_text
+    assert "overview" not in prompt_text
 
 
 def test_generate_monthly_report_prompt_uses_empty_message_for_empty_reports(

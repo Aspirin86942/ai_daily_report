@@ -1,6 +1,7 @@
 """Tests for SQLite-based history storage."""
 
 import importlib
+import json
 import sqlite3
 import sys
 from datetime import date, datetime
@@ -60,10 +61,13 @@ def test_sqlite_store_init_creates_tables(tmp_path):
     assert weekly_columns == {
         "week_label",
         "date_range",
-        "overview",
         "completed_work",
+        "self_growth",
+        "improvement_actions",
         "work_summary",
         "next_plan",
+        "support_needed",
+        "other_notes",
         "raw_json",
         "created_at",
         "updated_at",
@@ -213,10 +217,13 @@ def test_save_and_get_weekly_monthly_reports(tmp_path):
     weekly = WeeklyReportData(
         week_label="2026-W06",
         date_range="2026-02-02 ~ 2026-02-08",
-        overview="本周围绕报告结构简化推进。",
         completed_work="完成了日报和周报新字段设计。",
+        self_growth="本周进一步强化了先锁合同再改实现的习惯。",
+        improvement_actions="需要继续梳理周报旧字段在存储层的遗留影响，并补齐迁移验证。",
         work_summary="整体工作集中在去掉列表结构和量化字段。",
         next_plan="下周继续修改模板和聚合逻辑。",
+        support_needed="如需兼容历史周报数据，需要后续任务补齐迁移处理。",
+        other_notes="本次先完成周报七段正文合同和存储一致性。",
     )
     monthly = MonthlyReportData(
         year_month="2026-02",
@@ -233,6 +240,67 @@ def test_save_and_get_weekly_monthly_reports(tmp_path):
     loaded_monthly = store.get_monthly_report("2026-02")
 
     assert loaded_weekly is not None
-    assert loaded_weekly.overview.startswith("本周")
+    assert loaded_weekly.completed_work == "完成了日报和周报新字段设计。"
+    assert loaded_weekly.self_growth.startswith("本周")
     assert loaded_monthly is not None
     assert loaded_monthly.overview.startswith("本月")
+
+
+def test_get_weekly_report_loads_legacy_raw_json_into_new_shape(tmp_path):
+    db_path = tmp_path / "reports.sqlite3"
+    legacy_payload = {
+        "week_label": "2026-W06",
+        "date_range": "2026-02-02 ~ 2026-02-08",
+        "overview": "本周围绕报告结构简化推进。",
+        "completed_work": "完成了日报和周报新字段设计。",
+        "work_summary": "整体工作集中在去掉列表结构和量化字段。",
+        "next_plan": "下周继续修改模板和聚合逻辑。",
+    }
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE weekly_reports (
+                week_label TEXT PRIMARY KEY,
+                date_range TEXT NOT NULL,
+                overview TEXT NOT NULL,
+                completed_work TEXT NOT NULL,
+                work_summary TEXT NOT NULL,
+                next_plan TEXT NOT NULL,
+                raw_json TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO weekly_reports (
+                week_label, date_range, overview, completed_work, work_summary,
+                next_plan, raw_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            """,
+            (
+                legacy_payload["week_label"],
+                legacy_payload["date_range"],
+                legacy_payload["overview"],
+                legacy_payload["completed_work"],
+                legacy_payload["work_summary"],
+                legacy_payload["next_plan"],
+                json.dumps(legacy_payload, ensure_ascii=False),
+            ),
+        )
+        conn.commit()
+
+    store = SQLiteStore(db_path=db_path)
+    loaded = store.get_weekly_report("2026-W06")
+
+    assert loaded is not None
+    assert (
+        loaded.completed_work
+        == "本周围绕报告结构简化推进。\n\n完成了日报和周报新字段设计。"
+    )
+    assert loaded.self_growth == ""
+    assert loaded.improvement_actions == ""
+    assert loaded.support_needed == ""
+    assert loaded.other_notes == ""

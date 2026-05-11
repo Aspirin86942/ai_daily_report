@@ -40,6 +40,22 @@ def test_weekly_report_data():
     assert report.self_growth.startswith("本周")
 
 
+def test_weekly_report_rejects_legacy_overview_field():
+    with pytest.raises(ValidationError):
+        WeeklyReportData(
+            week_label="2026-W14",
+            date_range="2026-03-30 ~ 2026-04-05",
+            overview="旧版周报概览字段",
+            completed_work="本周完成内容。",
+            self_growth="本周自我成长。",
+            improvement_actions="本周改善措施。",
+            work_summary="本周工作小结。",
+            next_plan="下周工作计划。",
+            support_needed="本周需要支持。",
+            other_notes="本周其他说明。",
+        )
+
+
 def test_monthly_report_data():
     report = MonthlyReportData(
         year_month="2026-04",
