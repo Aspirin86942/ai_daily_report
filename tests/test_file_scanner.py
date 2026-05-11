@@ -484,7 +484,7 @@ def test_scan_files_delegates_bootstrap_discovery(
 def test_scan_files_counts_cached_and_uncached_contexts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """存在 cached 与 uncached 候选时，两类上下文都应进入结果。"""
+    """存在 cached 与 uncached 候选时，两类上下文都应进入结果并落库指标。"""
     scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
     cached_file = scanner.work_dir / "cached.txt"
     uncached_file = scanner.work_dir / "uncached.txt"
@@ -537,6 +537,11 @@ def test_scan_files_counts_cached_and_uncached_contexts(
         str(cached_file),
         str(uncached_file),
     ]
+    assert scanner.scan_index_store.latest_scan_run() == {
+        "discovered_count": 2,
+        "reused_count": 1,
+        "reparsed_count": 1,
+    }
 
 
 def test_scan_files_emits_auditable_error_when_cached_context_missing(

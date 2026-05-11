@@ -223,6 +223,47 @@ class ScanIndexStore:
                 (discovery_key, checkpoint_value),
             )
 
+    def save_scan_run_metrics(
+        self,
+        discovered_count: int,
+        reused_count: int,
+        reparsed_count: int,
+    ) -> None:
+        """保存单次扫描的最小运行指标，供后续审计与回归验证使用。"""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO scan_runs (
+                    discovered_count,
+                    reused_count,
+                    reparsed_count
+                )
+                VALUES (?, ?, ?)
+                """,
+                (discovered_count, reused_count, reparsed_count),
+            )
+
+    def latest_scan_run(self) -> dict[str, int]:
+        """读取最新一条扫描运行指标；缺失时显式抛 KeyError。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT discovered_count, reused_count, reparsed_count
+                FROM scan_runs
+                ORDER BY run_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+        if row is None:
+            raise KeyError("scan_runs")
+
+        return {
+            "discovered_count": int(row["discovered_count"]),
+            "reused_count": int(row["reused_count"]),
+            "reparsed_count": int(row["reparsed_count"]),
+        }
+
     def load_checkpoint(self, discovery_key: str) -> str | None:
         """读取 checkpoint；缺失时返回 None，避免上层误判为空字符串。"""
         with self._connect() as conn:

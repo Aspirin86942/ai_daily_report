@@ -145,6 +145,12 @@ class FileScanner:
             end_date=end_date,
             cache_lookup=cache_lookup,
         )
+        # 记录本轮 planning 产出的最小指标，便于后续核对发现量与缓存复用效果。
+        self.scan_index_store.save_scan_run_metrics(
+            discovered_count=len(discovered_files),
+            reused_count=len(planned_candidates["cached"]),
+            reparsed_count=len(planned_candidates["uncached"]),
+        )
         limits = {
             "excel_max_rows": parser_profile["excel_max_rows"],
             "pdf_max_pages": parser_profile["pdf_max_pages"],

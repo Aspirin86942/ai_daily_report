@@ -309,3 +309,33 @@ def test_load_checkpoint_returns_none_when_missing(tmp_path: Path):
     store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
 
     assert store.load_checkpoint("missing") is None
+
+
+def test_save_scan_run_metrics(tmp_path: Path):
+    """扫描运行指标应写入 scan_runs，并可按最新一条读回。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    store.save_scan_run_metrics(
+        discovered_count=5,
+        reused_count=3,
+        reparsed_count=2,
+    )
+    store.save_scan_run_metrics(
+        discovered_count=8,
+        reused_count=6,
+        reparsed_count=2,
+    )
+
+    assert store.latest_scan_run() == {
+        "discovered_count": 8,
+        "reused_count": 6,
+        "reparsed_count": 2,
+    }
+
+
+def test_latest_scan_run_raises_when_missing(tmp_path: Path):
+    """缺失 scan_runs 数据时应抛稳定 KeyError，避免上层误读默认值。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    with pytest.raises(KeyError, match="scan_runs"):
+        store.latest_scan_run()
