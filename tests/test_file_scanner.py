@@ -118,6 +118,11 @@ def test_scan_files_empty_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     result = scanner.scan_files(start_date=old_start, end_date=old_end)
     assert result.total_files == 0
     assert result.success_count == 0
+    assert scanner.scan_index_store.latest_scan_run() == {
+        "discovered_count": 0,
+        "reused_count": 0,
+        "reparsed_count": 0,
+    }
 
 
 def test_scan_today_files_default_date_range(

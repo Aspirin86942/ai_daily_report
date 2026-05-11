@@ -108,6 +108,12 @@ class FileScanner:
         logger.info(f"发现 {len(discovered_files)} 个文件")
 
         if not discovered_files:
+            # 空扫描也要落一条 run 记录，避免 latest 指标停留在上一轮结果。
+            self.scan_index_store.save_scan_run_metrics(
+                discovered_count=0,
+                reused_count=0,
+                reparsed_count=0,
+            )
             return ScanResult(
                 total_files=0, success_count=0, error_count=0, contexts=[]
             )
