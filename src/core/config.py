@@ -86,6 +86,9 @@ class Config:
             "summary_pdf_max_pages",
             "summary_text_max_chars",
             "total_max_chars",
+            "max_file_size_mb",
+            "file_timeout_seconds",
+            "file_timeout_by_extension",
         ):
             if hasattr(scanner, key):
                 cfg[key] = getattr(scanner, key)

@@ -16,7 +16,7 @@ max_tokens = 8192  # 增加到 8192，确保有足够空间生成完整日报
 max_retries = 3
 
 [scanner]
-allowed_extensions = [".xlsx", ".xls", ".pptx", ".pdf", ".txt", ".md", ".docx"]
+allowed_extensions = [".xlsx", ".xls", ".pptx", ".pdf", ".txt", ".md", ".docx", ".csv", ".json", ".log"]
 ignored_patterns = ["~$*", "*.tmp"]
 excluded_dirs = ["D:\\01- 工作\\2025年\\03- 通用软件"]
 max_workers = 4
@@ -27,3 +27,6 @@ summary_excel_max_rows = 10
 summary_pdf_max_pages = 2
 summary_text_max_chars = 2000
 total_max_chars = 50000
+max_file_size_mb = 50
+file_timeout_seconds = 30
+file_timeout_by_extension = { ".pdf" = 45, ".xlsx" = 60, ".xls" = 60 }

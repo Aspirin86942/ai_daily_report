@@ -1,5 +1,7 @@
 """文件扫描服务"""
 
+import fnmatch
+import multiprocessing as mp
 import os
 from pathlib import Path
 from datetime import date, datetime, timedelta
@@ -15,6 +17,23 @@ from ..core.logger import setup_logger
 from ..utils.text_tools import truncate_text
 
 logger = setup_logger()
+
+TEXT_FILE_TYPES = {".txt", ".md", ".csv", ".json", ".log"}
+DEFAULT_FILE_TIMEOUT_SECONDS = 30.0
+
+
+def _extract_content_worker(
+    file_path_str: str,
+    limits: dict,
+    scanner_cfg: dict,
+    result_queue: mp.Queue,
+) -> None:
+    """子进程解析单个文件并返回可序列化结果。"""
+    scanner = object.__new__(FileScanner)
+    scanner.scanner_cfg = scanner_cfg
+    scanner.work_dir = Path(".")
+    context = scanner._extract_content(Path(file_path_str), limits)
+    result_queue.put(context.model_dump())
 
 
 class FileScanner:
@@ -96,7 +115,7 @@ class FileScanner:
             max_workers=self.scanner_cfg["max_workers"]
         ) as executor:
             future_to_file = {
-                executor.submit(self._extract_content, f, limits): f
+                executor.submit(self._extract_content_with_timeout, f, limits): f
                 for f in matched_files
             }
 
@@ -184,16 +203,18 @@ class FileScanner:
                 continue
 
             for filename in filenames:
-                # 检查扩展名
+                filename_lower = filename.lower()
+
+                # 检查扩展名。这里统一转小写，避免 .PDF/.XLSX 这类文件漏扫。
                 if not any(
-                    filename.endswith(ext)
+                    filename_lower.endswith(str(ext).lower())
                     for ext in self.scanner_cfg["allowed_extensions"]
                 ):
                     continue
 
-                # 检查忽略模式
+                # 检查忽略模式。使用 glob 语义，避免 "*.tmp" 只匹配 ".tmp" 前缀。
                 if any(
-                    filename.startswith(pattern.replace("*", ""))
+                    fnmatch.fnmatch(filename_lower, str(pattern).lower())
                     for pattern in self.scanner_cfg["ignored_patterns"]
                 ):
                     continue
@@ -207,6 +228,98 @@ class FileScanner:
                     logger.warning(f"无法读取文件时间 {file_path}: {e}")
 
         return files
+
+    def _extract_content_with_timeout(
+        self, file_path: Path, limits: Optional[dict] = None
+    ) -> FileContext:
+        """带单文件时间预算的内容提取入口。"""
+        file_type = file_path.suffix.lower()
+        timeout_seconds = self._resolve_file_timeout(file_type)
+        context, timed_out = self._run_extract_subprocess(
+            file_path,
+            limits,
+            timeout_seconds,
+        )
+        if timed_out:
+            timeout_label = f"{timeout_seconds:g}"
+            logger.warning(
+                "解析文件超时: %s (%ss)",
+                file_path,
+                timeout_label,
+            )
+            return FileContext(
+                file_path=str(file_path),
+                file_type=file_type,
+                content="",
+                error=f"timeout: file parse exceeded {timeout_label}s",
+            )
+        if context is None:
+            return FileContext(
+                file_path=str(file_path),
+                file_type=file_type,
+                content="",
+                error="subprocess exited without result",
+            )
+        return context
+
+    def _run_extract_subprocess(
+        self,
+        file_path: Path,
+        limits: Optional[dict],
+        timeout_seconds: float,
+    ) -> tuple[Optional[FileContext], bool]:
+        """在独立子进程中解析文件，返回结果和是否超时。"""
+        ctx = mp.get_context("spawn")
+        result_queue: mp.Queue = ctx.Queue(maxsize=1)
+        process = ctx.Process(
+            target=_extract_content_worker,
+            args=(str(file_path), limits or {}, dict(self.scanner_cfg), result_queue),
+        )
+        process.start()
+        process.join(timeout_seconds)
+
+        if process.is_alive():
+            process.terminate()
+            process.join()
+            return None, True
+
+        try:
+            payload = result_queue.get_nowait()
+        except Exception:
+            return None, False
+
+        try:
+            return FileContext(**payload), False
+        except Exception as exc:
+            logger.warning("子进程返回无效结果 %s: %s", file_path, exc)
+            return (
+                FileContext(
+                    file_path=str(file_path),
+                    file_type=file_path.suffix.lower(),
+                    content="",
+                    error="subprocess returned invalid payload",
+                ),
+                False,
+            )
+
+    def _resolve_file_timeout(self, file_type: str) -> float:
+        """解析单文件超时秒数，优先使用扩展名覆盖。"""
+        normalized_type = file_type.lower()
+        overrides = self.scanner_cfg.get("file_timeout_by_extension", {}) or {}
+        timeout_value = overrides.get(
+            normalized_type,
+            self.scanner_cfg.get("file_timeout_seconds", DEFAULT_FILE_TIMEOUT_SECONDS),
+        )
+        try:
+            timeout = float(timeout_value)
+        except (TypeError, ValueError):
+            logger.warning("非法单文件超时配置 %s，回退默认值 30s", timeout_value)
+            return DEFAULT_FILE_TIMEOUT_SECONDS
+
+        if timeout <= 0:
+            logger.warning("非法单文件超时配置 %s，回退默认值 30s", timeout_value)
+            return DEFAULT_FILE_TIMEOUT_SECONDS
+        return timeout
 
     def _extract_content(
         self, file_path: Path, limits: Optional[dict] = None
@@ -230,14 +343,29 @@ class FileScanner:
         file_type = file_path.suffix.lower()
 
         try:
+            max_file_size_mb = self.scanner_cfg.get("max_file_size_mb")
+            if max_file_size_mb is not None:
+                max_bytes = float(max_file_size_mb) * 1024 * 1024
+                file_size = file_path.stat().st_size
+                if file_size > max_bytes:
+                    return FileContext(
+                        file_path=str(file_path),
+                        file_type=file_type,
+                        content="",
+                        error=(
+                            f"file too large: {file_size} bytes exceeds "
+                            f"{max_file_size_mb} MB limit"
+                        ),
+                    )
+
             if file_type in [".xlsx", ".xls"]:
                 content = self._parse_excel(file_path, limits["excel_max_rows"])
             elif file_type == ".pdf":
                 content = self._parse_pdf(file_path, limits["pdf_max_pages"])
             elif file_type == ".pptx":
                 content = self._parse_pptx(file_path)
-            elif file_type in [".txt", ".md"]:
-                content = self._parse_text(file_path)
+            elif file_type in TEXT_FILE_TYPES:
+                content = self._parse_text(file_path, limits["text_max_chars"])
             elif file_type == ".docx":
                 content = self._parse_docx(file_path)
             else:
@@ -278,7 +406,7 @@ class FileScanner:
         excel_file = pd.ExcelFile(file_path)
 
         for sheet_name in excel_file.sheet_names:
-            df = pd.read_excel(file_path, sheet_name=sheet_name)
+            df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=max_rows)
 
             # 矢量化过滤空行
             df = df.dropna(how="all")
@@ -347,16 +475,21 @@ class FileScanner:
 
         return "\n\n".join(content_parts)
 
-    def _parse_text(self, file_path: Path) -> str:
+    def _parse_text(self, file_path: Path, max_chars: Optional[int] = None) -> str:
         """解析纯文本文件 (.txt, .md)
 
         Args:
             file_path: 文件路径
+            max_chars: 最大读取字符数
 
         Returns:
             文件文本内容
         """
-        return file_path.read_text(encoding="utf-8")
+        if max_chars is None:
+            max_chars = self.scanner_cfg["text_max_chars"]
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read(max_chars + 1)
+        return content
 
     def _parse_docx(self, file_path: Path) -> str:
         """解析 Word 文档

@@ -2,45 +2,93 @@
 
 from datetime import date, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import src.services.file_scanner as file_scanner_module
 from src.services.file_scanner import FileScanner
 
 
-def test_file_scanner_init():
+def _make_scanner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scanner_overrides: dict | None = None,
+) -> FileScanner:
+    """构造不依赖本机工作目录的扫描器。"""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    scanner_cfg = {
+        "allowed_extensions": [
+            ".xlsx",
+            ".xls",
+            ".pptx",
+            ".pdf",
+            ".txt",
+            ".md",
+            ".docx",
+            ".csv",
+            ".json",
+            ".log",
+        ],
+        "ignored_patterns": ["~$*", "*.tmp"],
+        "excluded_dirs": [],
+        "max_workers": 2,
+        "excel_max_rows": 50,
+        "pdf_max_pages": 5,
+        "text_max_chars": 6000,
+        "summary_excel_max_rows": 10,
+        "summary_pdf_max_pages": 2,
+        "summary_text_max_chars": 2000,
+        "total_max_chars": 50000,
+        "max_file_size_mb": 50,
+        "file_timeout_seconds": 30,
+        "file_timeout_by_extension": {},
+    }
+    if scanner_overrides:
+        scanner_cfg.update(scanner_overrides)
+
+    fake_config = SimpleNamespace(scanner_config=scanner_cfg, work_dir=work_dir)
+    monkeypatch.setattr(file_scanner_module, "config", fake_config)
+    return FileScanner()
+
+
+def test_file_scanner_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """测试扫描器初始化"""
-    scanner = FileScanner()
+    scanner = _make_scanner(tmp_path, monkeypatch)
     assert scanner.work_dir.exists()
     assert scanner.scanner_cfg["max_workers"] > 0
 
 
-def test_scan_files_default_dates():
+def test_scan_files_default_dates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """测试 scan_files 默认日期参数"""
-    scanner = FileScanner()
+    scanner = _make_scanner(tmp_path, monkeypatch)
     result = scanner.scan_files()
     assert result.total_files >= 0
     assert result.success_count + result.error_count == result.total_files
 
 
-def test_scan_files_with_date_range():
+def test_scan_files_with_date_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """测试 scan_files 指定日期范围"""
-    scanner = FileScanner()
+    scanner = _make_scanner(tmp_path, monkeypatch)
     today = date.today()
     yesterday = today - timedelta(days=1)
     result = scanner.scan_files(start_date=yesterday, end_date=today)
     assert result.total_files >= 0
 
 
-def test_scan_files_summary_mode():
+def test_scan_files_summary_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """测试 scan_files summary_mode 使用缩减限制"""
-    scanner = FileScanner()
+    scanner = _make_scanner(tmp_path, monkeypatch)
     today = date.today()
     yesterday = today - timedelta(days=1)
     result = scanner.scan_files(start_date=yesterday, end_date=today, summary_mode=True)
     assert result.total_files >= 0
 
 
-def test_scan_files_empty_range():
+def test_scan_files_empty_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """测试不存在文件的日期范围"""
-    scanner = FileScanner()
+    scanner = _make_scanner(tmp_path, monkeypatch)
     # 使用很远的过去日期，应该没有文件
     old_start = date(2000, 1, 1)
     old_end = date(2000, 1, 2)
@@ -49,16 +97,18 @@ def test_scan_files_empty_range():
     assert result.success_count == 0
 
 
-def test_scan_today_files_default_date_range():
+def test_scan_today_files_default_date_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """测试 scan_today_files 默认日期范围封装"""
-    scanner = FileScanner()
+    scanner = _make_scanner(tmp_path, monkeypatch)
     result = scanner.scan_today_files()
     assert result.total_files >= 0
 
 
-def test_get_files_in_range():
+def test_get_files_in_range(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """测试 _get_files_in_range 方法"""
-    scanner = FileScanner()
+    scanner = _make_scanner(tmp_path, monkeypatch)
     today = date.today()
     yesterday = today - timedelta(days=1)
     files = scanner._get_files_in_range(yesterday, today)
@@ -80,11 +130,179 @@ def test_get_files_in_range():
                     pass  # 正常，文件不在排除目录中
 
 
-def test_extract_content_allows_success(tmp_path):
+def test_extract_content_allows_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
     """成功路径应当构造 error=None 的 FileContext"""
-    scanner = FileScanner()
+    scanner = _make_scanner(tmp_path, monkeypatch)
     sample = tmp_path / "example.txt"
     sample.write_text("example content", encoding="utf-8")
     context = scanner._extract_content(sample)
     assert context.error is None
     assert "example" in context.content
+
+
+def test_get_files_in_range_matches_extensions_case_insensitively_and_uses_globs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """扩展名匹配应忽略大小写，忽略规则应按 glob 生效。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".md", ".tmp"]},
+    )
+    (scanner.work_dir / "KEEP.MD").write_text("keep", encoding="utf-8")
+    (scanner.work_dir / "~$lock.md").write_text("ignored", encoding="utf-8")
+    (scanner.work_dir / "scratch.tmp").write_text("ignored", encoding="utf-8")
+
+    files = scanner._get_files_in_range(date.today(), date.today())
+
+    assert [path.name for path in files] == ["KEEP.MD"]
+
+
+def test_extract_content_supports_csv_json_and_log_as_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """常见轻量文本数据文件应进入扫描上下文。"""
+    scanner = _make_scanner(tmp_path, monkeypatch)
+    samples = {
+        "sample.csv": "name,value\nalpha,1\n",
+        "sample.json": '{"name": "alpha"}',
+        "sample.log": "INFO finished",
+    }
+
+    for filename, content in samples.items():
+        sample = tmp_path / filename
+        sample.write_text(content, encoding="utf-8")
+        context = scanner._extract_content(sample)
+        assert context.error is None
+        assert "alpha" in context.content or "finished" in context.content
+
+
+def test_extract_content_skips_files_over_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """超出文件大小上限时应跳过解析并留下可审计错误。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"max_file_size_mb": 0.001})
+    sample = tmp_path / "large.txt"
+    sample.write_text("x" * 4096, encoding="utf-8")
+
+    context = scanner._extract_content(sample)
+
+    assert context.content == ""
+    assert context.error is not None
+    assert context.error.startswith("file too large:")
+
+
+def test_extract_content_truncates_text_without_reading_unbounded_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """文本类文件应按字符预算读取并截断，避免先整文件读入。"""
+    scanner = _make_scanner(tmp_path, monkeypatch)
+    sample = tmp_path / "long.log"
+    sample.write_text("a" * 100, encoding="utf-8")
+
+    context = scanner._extract_content(sample, {"text_max_chars": 10})
+
+    assert context.error is None
+    assert context.content == "a" * 10 + "\n...(内容过长已截断)"
+
+
+def test_resolve_file_timeout_uses_extension_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """单文件超时应支持按扩展名覆盖。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "file_timeout_seconds": 30,
+            "file_timeout_by_extension": {".pdf": 45},
+        },
+    )
+
+    assert scanner._resolve_file_timeout(".PDF") == 45
+    assert scanner._resolve_file_timeout(".txt") == 30
+
+
+def test_extract_content_with_timeout_returns_auditable_timeout_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """超时控制入口应返回稳定 timeout 错误，而不是抛异常中断扫描。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"file_timeout_seconds": 12})
+    sample = tmp_path / "slow.txt"
+    sample.write_text("slow", encoding="utf-8")
+
+    monkeypatch.setattr(
+        scanner,
+        "_run_extract_subprocess",
+        lambda file_path, limits, timeout_seconds: (None, True),
+    )
+
+    context = scanner._extract_content_with_timeout(
+        sample,
+        {
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+        },
+    )
+
+    assert context.file_path == str(sample)
+    assert context.file_type == ".txt"
+    assert context.content == ""
+    assert context.error == "timeout: file parse exceeded 12s"
+
+
+def test_extract_content_with_timeout_runs_real_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """真实子进程路径应能返回解析结果。"""
+    scanner = _make_scanner(tmp_path, monkeypatch)
+    sample = tmp_path / "real.txt"
+    sample.write_text("real subprocess content", encoding="utf-8")
+
+    context = scanner._extract_content_with_timeout(
+        sample,
+        {
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+        },
+    )
+
+    assert context.error is None
+    assert "real subprocess content" in context.content
+
+
+def test_scan_files_records_timeout_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """单文件超时应计入错误并继续处理其他文件。"""
+    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    (scanner.work_dir / "fast.txt").write_text("fast", encoding="utf-8")
+    (scanner.work_dir / "slow.txt").write_text("slow", encoding="utf-8")
+
+    def fake_extract(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        if file_path.name == "slow.txt":
+            return file_scanner_module.FileContext(
+                file_path=str(file_path),
+                file_type=".txt",
+                content="",
+                error="timeout: file parse exceeded 30s",
+            )
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".txt",
+            content="fast",
+            error=None,
+        )
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fake_extract)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.total_files == 2
+    assert result.success_count == 1
+    assert result.error_count == 1
+    assert any(ctx.error and ctx.error.startswith("timeout:") for ctx in result.contexts)

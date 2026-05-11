@@ -19,7 +19,7 @@ logger = setup_logger()
 
 
 class LLMClient:
-    """LLM 客户端，支持 DeepSeek / Gemini / OpenAI。"""
+    """LLM 客户端，支持 DeepSeek / OpenAI。"""
 
     def __init__(self):
         """初始化客户端并加载 prompt 模板。"""
