@@ -28,6 +28,11 @@ class ScanPlanner:
             }
 
         profile["total_max_chars"] = self.scanner_cfg.get("total_max_chars", 50000)
+        profile["summary_mode"] = summary_mode
+        profile["parser_profile_version"] = self.scanner_cfg.get(
+            "parser_profile_version",
+            "v1",
+        )
         return profile
 
     def plan_candidates(

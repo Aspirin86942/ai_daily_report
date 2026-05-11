@@ -45,6 +45,8 @@ def _make_scanner(
         "max_file_size_mb": 50,
         "file_timeout_seconds": 30,
         "file_timeout_by_extension": {},
+        "index_db_path": str(tmp_path / "data" / "db" / "scan_index.sqlite3"),
+        "parser_profile_version": "v1",
     }
     if scanner_overrides:
         scanner_cfg.update(scanner_overrides)
@@ -59,6 +61,10 @@ def test_file_scanner_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     scanner = _make_scanner(tmp_path, monkeypatch)
     assert scanner.work_dir.exists()
     assert scanner.scanner_cfg["max_workers"] > 0
+    assert (
+        scanner.scan_index_store.db_path
+        == tmp_path / "data" / "db" / "scan_index.sqlite3"
+    )
 
 
 def test_scan_files_default_dates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

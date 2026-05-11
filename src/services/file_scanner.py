@@ -15,6 +15,7 @@ from ..core.logger import setup_logger
 from ..utils.text_tools import truncate_text
 from .scan_aggregator import ScanAggregator
 from .scan_discovery import FileDiscoveryService
+from .scan_index_store import ScanIndexStore
 from .scan_planner import ScanPlanner
 
 logger = setup_logger()
@@ -46,6 +47,18 @@ class FileScanner:
         self.work_dir = config.work_dir
         self.discovery_service = FileDiscoveryService(self.work_dir, self.scanner_cfg)
         self.scan_planner = ScanPlanner(self.scanner_cfg)
+        self.scan_index_store = ScanIndexStore(
+            self._resolve_project_path(self.scanner_cfg["index_db_path"])
+        )
+
+    @staticmethod
+    def _resolve_project_path(path_value: str | Path) -> Path:
+        """把相对配置路径解析到项目根目录，避免随运行目录漂移。"""
+        path = Path(path_value)
+        if path.is_absolute():
+            return path
+        project_root = Path(__file__).resolve().parent.parent.parent
+        return project_root / path
 
     def scan_today_files(self) -> ScanResult:
         """扫描今日修改的文件（默认日期范围封装）

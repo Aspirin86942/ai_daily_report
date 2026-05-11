@@ -4,6 +4,7 @@ from .file_scanner import FileScanner
 from .report_gen import ReportGenerator
 from .scan_aggregator import ScanAggregator
 from .scan_discovery import FileDiscoveryService
+from .scan_index_store import ScanIndexStore
 from .scan_planner import ScanPlanner
 from .sqlite_store import SQLiteStore
 
@@ -12,6 +13,7 @@ __all__ = [
     "FileScanner",
     "ReportGenerator",
     "ScanAggregator",
+    "ScanIndexStore",
     "ScanPlanner",
     "SQLiteStore",
 ]

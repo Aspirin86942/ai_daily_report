@@ -16,6 +16,7 @@ def test_build_parser_profile_uses_summary_limits_when_requested():
             "summary_pdf_max_pages": 2,
             "summary_text_max_chars": 2000,
             "total_max_chars": 50000,
+            "parser_profile_version": "v7",
         }
     )
 
@@ -26,6 +27,8 @@ def test_build_parser_profile_uses_summary_limits_when_requested():
         "pdf_max_pages": 2,
         "text_max_chars": 2000,
         "total_max_chars": 50000,
+        "summary_mode": True,
+        "parser_profile_version": "v7",
     }
 
 
