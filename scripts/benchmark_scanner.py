@@ -15,7 +15,52 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.models.schemas import ScanResult  # noqa: E402
 from src.services.file_scanner import FileScanner  # noqa: E402
+from src.services.light_text_parser import LIGHT_TEXT_PARSER_BACKEND  # noqa: E402
 from src.services.scan_metrics import ExtensionMetrics, ReparseDetail  # noqa: E402
+
+
+SUBPROCESS_PARSER_BACKEND = "subprocess"
+TRUNCATED_SUMMARY_KEY = "truncated"
+BASE_BACKEND_KEYS = (LIGHT_TEXT_PARSER_BACKEND, SUBPROCESS_PARSER_BACKEND)
+
+
+def _new_extension_backend_summary() -> dict[str, int]:
+    return {
+        LIGHT_TEXT_PARSER_BACKEND: 0,
+        SUBPROCESS_PARSER_BACKEND: 0,
+        TRUNCATED_SUMMARY_KEY: 0,
+    }
+
+
+def _sort_extension_backend_summary(item: dict[str, int]) -> dict[str, int]:
+    ordered: dict[str, int] = {
+        LIGHT_TEXT_PARSER_BACKEND: item.get(LIGHT_TEXT_PARSER_BACKEND, 0),
+        SUBPROCESS_PARSER_BACKEND: item.get(SUBPROCESS_PARSER_BACKEND, 0),
+    }
+    extra_backends = sorted(
+        key
+        for key in item
+        if key not in BASE_BACKEND_KEYS and key != TRUNCATED_SUMMARY_KEY
+    )
+    for backend in extra_backends:
+        ordered[backend] = item[backend]
+    ordered[TRUNCATED_SUMMARY_KEY] = item.get(TRUNCATED_SUMMARY_KEY, 0)
+    return ordered
+
+
+def _iter_backend_summary_rows(item: dict[str, int]) -> list[str]:
+    extra_backends = sorted(
+        key
+        for key, count in item.items()
+        if key not in BASE_BACKEND_KEYS
+        and key != TRUNCATED_SUMMARY_KEY
+        and count > 0
+    )
+    return [
+        backend
+        for backend in (*BASE_BACKEND_KEYS, *extra_backends)
+        if item.get(backend, 0) > 0
+    ]
 
 
 def build_parser_backend_summary(
@@ -29,25 +74,25 @@ def build_parser_backend_summary(
         "by_extension": {},
     }
     for detail in reparse_details:
-        backend = detail.parser_backend or "subprocess"
+        backend = detail.parser_backend or SUBPROCESS_PARSER_BACKEND
         extension = detail.extension
         by_extension = summary["by_extension"].setdefault(
             extension,
-            {
-                "light_text_v1": 0,
-                "subprocess": 0,
-                "truncated": 0,
-            },
+            _new_extension_backend_summary(),
         )
-        if backend == "light_text_v1":
-            summary["direct_count"] += 1
-            by_extension["light_text_v1"] += 1
-        else:
+        if backend == SUBPROCESS_PARSER_BACKEND:
             summary["subprocess_count"] += 1
-            by_extension["subprocess"] += 1
+        else:
+            summary["direct_count"] += 1
+        by_extension[backend] = by_extension.get(backend, 0) + 1
         if detail.truncated:
             summary["truncated_count"] += 1
-            by_extension["truncated"] += 1
+            by_extension[TRUNCATED_SUMMARY_KEY] += 1
+
+    summary["by_extension"] = {
+        extension: _sort_extension_backend_summary(item)
+        for extension, item in sorted(summary["by_extension"].items())
+    }
     return summary
 
 
@@ -154,20 +199,25 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
             f"- subprocess_count: `{parser_backend_summary['subprocess_count']}`",
             f"- truncated_count: `{parser_backend_summary['truncated_count']}`",
             "",
-            "| extension | backend | light_text_v1 | subprocess | truncated |",
+            "| extension | backend | backend_count | subprocess_count | extension_truncated_count |",
             "|---|---|---:|---:|---:|",
         ]
     )
     by_extension = parser_backend_summary.get("by_extension", {})
     if by_extension:
-        for extension, item in by_extension.items():
-            lines.append(
-                "| {extension} | light_text_v1 | {light_text_v1} | "
-                "{subprocess} | {truncated} |".format(
-                    extension=extension,
-                    **item,
+        for extension in sorted(by_extension):
+            item = by_extension[extension]
+            for backend in _iter_backend_summary_rows(item):
+                lines.append(
+                    "| {extension} | {backend} | {backend_count} | "
+                    "{subprocess_count} | {truncated_count} |".format(
+                        extension=extension,
+                        backend=backend,
+                        backend_count=item[backend],
+                        subprocess_count=item.get(SUBPROCESS_PARSER_BACKEND, 0),
+                        truncated_count=item.get(TRUNCATED_SUMMARY_KEY, 0),
+                    )
                 )
-            )
     else:
         lines.append("| (none) | - | 0 | 0 | 0 |")
 

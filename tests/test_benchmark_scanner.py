@@ -5,11 +5,87 @@ from pathlib import Path
 
 from scripts.benchmark_scanner import (
     build_benchmark_payload,
+    build_parser_backend_summary,
     render_markdown_report,
     write_report_files,
 )
 from src.models.schemas import FileContext, ScanResult
+from src.services.light_text_parser import LIGHT_TEXT_PARSER_BACKEND
 from src.services.scan_metrics import ExtensionMetrics, ReparseDetail
+
+
+def _make_reparse_detail(
+    extension: str,
+    parser_backend: str,
+    truncated: bool,
+    path: str = "D:\\work\\report.md",
+) -> ReparseDetail:
+    return ReparseDetail(
+        path=path,
+        extension=extension,
+        file_identity=f"bootstrap:{path.lower()}",
+        source_version="mtime=2:size=10",
+        cache_status="miss",
+        cache_miss_reason="source_version_changed",
+        previous_source_version="mtime=1:size=10",
+        parse_duration_ms=12,
+        parse_status="success",
+        parse_error="",
+        parser_backend=parser_backend,
+        truncated=truncated,
+    )
+
+
+def test_build_parser_backend_summary_returns_empty_summary():
+    """没有重解析明细时应返回稳定的空 summary。"""
+    assert build_parser_backend_summary([]) == {
+        "direct_count": 0,
+        "subprocess_count": 0,
+        "truncated_count": 0,
+        "by_extension": {},
+    }
+
+
+def test_build_parser_backend_summary_preserves_backend_dimensions_and_sorting():
+    """summary 应保留真实 backend 维度，并按 extension 稳定排序。"""
+    summary = build_parser_backend_summary(
+        [
+            _make_reparse_detail(
+                extension=".txt",
+                parser_backend="custom_backend",
+                truncated=True,
+                path="D:\\work\\custom.txt",
+            ),
+            _make_reparse_detail(
+                extension=".md",
+                parser_backend="",
+                truncated=False,
+                path="D:\\work\\fallback.md",
+            ),
+            _make_reparse_detail(
+                extension=".txt",
+                parser_backend=LIGHT_TEXT_PARSER_BACKEND,
+                truncated=True,
+                path="D:\\work\\light.txt",
+            ),
+        ]
+    )
+
+    assert summary["direct_count"] == 2
+    assert summary["subprocess_count"] == 1
+    assert summary["truncated_count"] == 2
+    assert list(summary["by_extension"]) == [".md", ".txt"]
+    assert summary["by_extension"][".txt"] == {
+        LIGHT_TEXT_PARSER_BACKEND: 1,
+        "subprocess": 0,
+        "custom_backend": 1,
+        "truncated": 2,
+    }
+    assert summary["by_extension"][".md"] == {
+        LIGHT_TEXT_PARSER_BACKEND: 0,
+        "subprocess": 1,
+        "truncated": 0,
+    }
 
 
 def test_build_benchmark_payload_uses_scan_result_and_metrics():
@@ -63,7 +139,7 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             parse_duration_ms=12,
             parse_status="success",
             parse_error="",
-            parser_backend="light_text_v1",
+            parser_backend=LIGHT_TEXT_PARSER_BACKEND,
             truncated=True,
         )
     ]
@@ -111,7 +187,7 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             "parse_duration_ms": 12,
             "parse_status": "success",
             "parse_error": "",
-            "parser_backend": "light_text_v1",
+            "parser_backend": LIGHT_TEXT_PARSER_BACKEND,
             "truncated": True,
         }
     ]
@@ -121,7 +197,7 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
         "truncated_count": 1,
         "by_extension": {
             ".md": {
-                "light_text_v1": 1,
+                LIGHT_TEXT_PARSER_BACKEND: 1,
                 "subprocess": 0,
                 "truncated": 1,
             }
@@ -178,7 +254,7 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
                 "parse_duration_ms": 12,
                 "parse_status": "success",
                 "parse_error": "",
-                "parser_backend": "light_text_v1",
+                "parser_backend": LIGHT_TEXT_PARSER_BACKEND,
                 "truncated": True,
             }
         ],
@@ -188,7 +264,7 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
             "truncated_count": 1,
             "by_extension": {
                 ".md": {
-                    "light_text_v1": 1,
+                    LIGHT_TEXT_PARSER_BACKEND: 1,
                     "subprocess": 0,
                     "truncated": 1,
                 }
@@ -209,6 +285,71 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
     assert "| .md | light_text_v1 | 1 | 0 | 1 |" in markdown
     assert "## Reparse Details" in markdown
     assert "| .md | source_version_changed | 12 | success | D:\\work\\report.md |" in markdown
+
+
+def test_render_markdown_report_orders_backend_summary_rows_stably():
+    """Markdown backend summary 应按 extension/backend 稳定输出真实 backend 行。"""
+    payload = {
+        "parameters": {
+            "start_date": "2026-05-23",
+            "end_date": "2026-05-24",
+            "summary_mode": False,
+        },
+        "scan_result": {
+            "total_files": 0,
+            "success_count": 0,
+            "error_count": 0,
+        },
+        "metrics": {
+            "run_id": 7,
+            "discovered_count": 0,
+            "reused_count": 0,
+            "reparsed_count": 0,
+            "total_duration_ms": 0,
+            "discovery_duration_ms": 0,
+            "inventory_cache_duration_ms": 0,
+            "parse_duration_ms": 0,
+            "aggregation_duration_ms": 0,
+            "success_count": 0,
+            "error_count": 0,
+            "timeout_count": 0,
+        },
+        "extension_metrics": [],
+        "reparse_details": [],
+        "parser_backend_summary": build_parser_backend_summary(
+            [
+                _make_reparse_detail(
+                    extension=".txt",
+                    parser_backend="custom_backend",
+                    truncated=True,
+                    path="D:\\work\\custom.txt",
+                ),
+                _make_reparse_detail(
+                    extension=".md",
+                    parser_backend="",
+                    truncated=False,
+                    path="D:\\work\\fallback.md",
+                ),
+                _make_reparse_detail(
+                    extension=".txt",
+                    parser_backend=LIGHT_TEXT_PARSER_BACKEND,
+                    truncated=True,
+                    path="D:\\work\\light.txt",
+                ),
+            ]
+        ),
+    }
+
+    markdown = render_markdown_report(payload)
+
+    subprocess_row = "| .md | subprocess | 1 | 1 | 0 |"
+    light_row = "| .txt | light_text_v1 | 1 | 0 | 2 |"
+    custom_row = "| .txt | custom_backend | 1 | 0 | 2 |"
+    assert subprocess_row in markdown
+    assert light_row in markdown
+    assert custom_row in markdown
+    assert markdown.index(subprocess_row) < markdown.index(light_row)
+    assert markdown.index(light_row) < markdown.index(custom_row)
 
 
 def test_write_report_files_writes_utf8_json_and_markdown(tmp_path: Path):
