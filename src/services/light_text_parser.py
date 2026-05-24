@@ -178,6 +178,14 @@ def _build_json_content(
     raw_excerpt: _RawExcerpt,
     max_output_chars: int,
 ) -> tuple[str, bool]:
+    if raw_excerpt.truncated:
+        return _build_text_content(
+            raw_excerpt,
+            title="JSON preview",
+            max_output_chars=max_output_chars,
+            warning="JSON_PREVIEW_FALLBACK",
+        )
+
     try:
         payload = json.loads(raw_excerpt.text)
     except json.JSONDecodeError:

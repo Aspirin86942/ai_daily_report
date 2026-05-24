@@ -91,6 +91,24 @@ def test_parse_truncated_json_falls_back_to_text_excerpt(tmp_path: Path):
     assert '{"name"' in context.content
 
 
+def test_parse_valid_json_prefix_with_trailing_bytes_falls_back(tmp_path: Path):
+    sample = tmp_path / "payload.json"
+    valid_prefix = '{"a": 1}'
+    sample.write_text(f"{valid_prefix} trailing bytes", encoding="utf-8")
+
+    context = parse_text_like_file(
+        sample,
+        ".json",
+        {"text_max_chars": 200},
+        _options(read_head_bytes=len(valid_prefix)),
+    )
+
+    assert context.error is None
+    assert context.truncated is True
+    assert "warning: JSON_PREVIEW_FALLBACK" in context.content
+    assert "JSON object preview" not in context.content
+
+
 def test_parse_csv_outputs_header_and_preview_rows(tmp_path: Path):
     sample = tmp_path / "table.csv"
     sample.write_text("name,amount\nalpha,10\nbeta,20\n", encoding="utf-8")
