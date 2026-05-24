@@ -69,8 +69,10 @@ class ReparseDetail:
     parse_duration_ms: int = 0
     parse_status: str = "success"
     parse_error: str = ""
+    parser_backend: str = ""
+    truncated: bool = False
 
-    def to_dict(self) -> dict[str, int | str | None]:
+    def to_dict(self) -> dict[str, int | str | bool | None]:
         """转成 benchmark JSON / Markdown 共用的稳定结构。"""
         return {
             "path": self.path,
@@ -83,6 +85,8 @@ class ReparseDetail:
             "parse_duration_ms": max(0, int(self.parse_duration_ms)),
             "parse_status": self.parse_status,
             "parse_error": self.parse_error,
+            "parser_backend": self.parser_backend,
+            "truncated": bool(self.truncated),
         }
 
 

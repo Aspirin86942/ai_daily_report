@@ -52,6 +52,11 @@ class FileContext(BaseModel):
     file_type: str = Field(description="文件类型")
     content: str = Field(description="抽取文本")
     error: Optional[str] = Field(default=None, description="发现的问题摘要")
+    parser_backend: Optional[str] = Field(
+        default=None,
+        description="解析后端标识，用于 scanner benchmark 和审计",
+    )
+    truncated: bool = Field(default=False, description="抽取内容是否被读取预算截断")
 
 
 class ScanResult(BaseModel):

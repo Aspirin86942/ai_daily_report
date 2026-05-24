@@ -20,6 +20,8 @@ def test_reparse_detail_serializes_stable_payload():
         parse_duration_ms=12,
         parse_status="success",
         parse_error="",
+        parser_backend="light_text_v1",
+        truncated=True,
     )
 
     assert detail.to_dict() == {
@@ -33,6 +35,8 @@ def test_reparse_detail_serializes_stable_payload():
         "parse_duration_ms": 12,
         "parse_status": "success",
         "parse_error": "",
+        "parser_backend": "light_text_v1",
+        "truncated": True,
     }
 
 
@@ -53,6 +57,8 @@ def test_reparse_detail_normalizes_duration_and_none_version():
 
     assert payload["parse_duration_ms"] == 0
     assert payload["previous_source_version"] is None
+    assert payload["parser_backend"] == ""
+    assert payload["truncated"] is False
 
 
 def test_metrics_collector_builds_scan_run_detail():
