@@ -158,6 +158,99 @@ def test_context_run_and_decisions_round_trip(tmp_path: Path):
     ]
 
 
+def test_save_context_run_with_decisions_rolls_back_run_when_decision_fails(
+    tmp_path: Path,
+) -> None:
+    """原子保存失败时，不应留下误导性的 success context run。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    bad_decision = ContextDecision(
+        file_path="bad.md",
+        extension=".md",
+        size_bytes=100,
+        parser_backend="light_text_v1",
+        worker_lane="direct",
+        cache_status="fresh",
+        action=None,  # type: ignore[arg-type]
+        reason="small_file_keep",
+        priority=10,
+        input_chars=100,
+        output_chars=100,
+        truncated=False,
+        error=None,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.save_context_run_with_decisions(
+            report_mode="weekly",
+            start_date=date(2026, 5, 10),
+            end_date=date(2026, 5, 24),
+            compression_profile="weekly_balanced_v1",
+            context_profile_key='{"version":"context_scheduler_v1"}',
+            scan_run_id=None,
+            source_file_count=1,
+            included_file_count=1,
+            omitted_file_count=0,
+            metadata_only_count=0,
+            compressed_file_count=0,
+            error_file_count=0,
+            truncated_file_count=0,
+            input_chars=100,
+            output_chars=100,
+            duration_ms=1,
+            status="success",
+            error="",
+            decisions=[bad_decision],
+        )
+
+    assert store.latest_context_run() is None
+
+
+def test_save_context_run_with_decisions_round_trip(tmp_path: Path) -> None:
+    """context run 和 decisions 应能在一个事务内一起保存并读回。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    decision = ContextDecision(
+        file_path="atomic.md",
+        extension=".md",
+        size_bytes=100,
+        parser_backend="light_text_v1",
+        worker_lane="direct",
+        cache_status="fresh",
+        action="keep",
+        reason="small_file_keep",
+        priority=10,
+        input_chars=100,
+        output_chars=120,
+        truncated=False,
+        error=None,
+    )
+
+    run_id = store.save_context_run_with_decisions(
+        report_mode="weekly",
+        start_date=date(2026, 5, 10),
+        end_date=date(2026, 5, 24),
+        compression_profile="weekly_balanced_v1",
+        context_profile_key='{"version":"context_scheduler_v1"}',
+        scan_run_id=None,
+        source_file_count=1,
+        included_file_count=1,
+        omitted_file_count=0,
+        metadata_only_count=0,
+        compressed_file_count=0,
+        error_file_count=0,
+        truncated_file_count=0,
+        input_chars=100,
+        output_chars=120,
+        duration_ms=3,
+        status="success",
+        error="",
+        decisions=[decision],
+    )
+
+    assert store.latest_context_run()["context_run_id"] == run_id
+    assert store.latest_context_run()["status"] == "success"
+    assert store.list_context_decisions(run_id)[0]["path"] == "atomic.md"
+
+
 def test_save_context_run_rejects_invalid_scan_run_id(tmp_path: Path):
     """context run 不应引用不存在的 scan run。"""
     store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")

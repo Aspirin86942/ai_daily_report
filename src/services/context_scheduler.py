@@ -72,6 +72,31 @@ class _ContextStore(Protocol):
     ) -> None:
         ...
 
+    def save_context_run_with_decisions(
+        self,
+        *,
+        report_mode: str,
+        start_date: date,
+        end_date: date,
+        compression_profile: str,
+        context_profile_key: str,
+        scan_run_id: int | None,
+        source_file_count: int,
+        included_file_count: int,
+        omitted_file_count: int,
+        metadata_only_count: int,
+        compressed_file_count: int,
+        error_file_count: int,
+        truncated_file_count: int,
+        input_chars: int,
+        output_chars: int,
+        duration_ms: int,
+        decisions: list[ContextDecision],
+        status: str = "success",
+        error: str = "",
+    ) -> int:
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class ContextScheduleRequest:
@@ -133,18 +158,16 @@ class ContextScheduler:
                 profile=profile,
             )
             duration_ms = self._duration_ms(started_at)
-            context_run_id = self._save_context_run(
+            context_run_id = self._save_context_run_with_decisions(
                 store=store,
                 request=request,
                 profile=profile,
                 profile_key=profile_key,
                 scan_run_id=self._latest_scan_run_id(store),
                 compressed=compressed,
+                decisions=compressed.decisions,
                 duration_ms=duration_ms,
-                status="success",
-                error="",
             )
-            store.save_context_decisions(context_run_id, compressed.decisions)
             return ContextScheduleResult(
                 file_context=compressed.content,
                 compressed_context=compressed,
@@ -339,6 +362,42 @@ class ContextScheduler:
             duration_ms=duration_ms,
             status=status,
             error=error,
+        )
+
+    def _save_context_run_with_decisions(
+        self,
+        *,
+        store: _ContextStore,
+        request: ContextScheduleRequest,
+        profile: ContextProfile,
+        profile_key: str,
+        scan_run_id: int | None,
+        compressed: CompressedContext,
+        decisions: list[ContextDecision],
+        duration_ms: int,
+    ) -> int:
+        # 成功审计必须和逐文件决策同事务写入；否则 decisions 失败会留下
+        # “成功但不可解释”的 context run，后续复盘会误判报告证据完整。
+        return store.save_context_run_with_decisions(
+            report_mode=profile.report_mode,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            compression_profile=profile.compression_profile,
+            context_profile_key=profile_key,
+            scan_run_id=scan_run_id,
+            source_file_count=compressed.source_file_count,
+            included_file_count=compressed.included_file_count,
+            omitted_file_count=compressed.omitted_file_count,
+            metadata_only_count=compressed.metadata_only_count,
+            compressed_file_count=compressed.compressed_file_count,
+            error_file_count=compressed.error_file_count,
+            truncated_file_count=compressed.truncated_file_count,
+            input_chars=compressed.input_chars,
+            output_chars=compressed.output_chars,
+            duration_ms=duration_ms,
+            status="success",
+            error="",
+            decisions=decisions,
         )
 
     def _try_save_error_run(

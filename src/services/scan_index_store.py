@@ -478,56 +478,79 @@ class ScanIndexStore:
         error: str = "",
     ) -> int:
         """保存一次 ContextScheduler 运行级审计记录并返回 run id。"""
-        normalized_scan_run_id = None if scan_run_id is None else int(scan_run_id)
         with self._connect() as conn:
-            # 即使本次上下文构建没有文件或最终失败，也要先落 run 级记录；
-            # 这是 CLI 单次运行能追溯输入规模、压缩策略和失败原因的依据。
-            cursor = conn.execute(
-                """
-                INSERT INTO context_runs (
-                    report_mode,
-                    start_date,
-                    end_date,
-                    compression_profile,
-                    context_profile_key,
-                    scan_run_id,
-                    source_file_count,
-                    included_file_count,
-                    omitted_file_count,
-                    metadata_only_count,
-                    compressed_file_count,
-                    error_file_count,
-                    truncated_file_count,
-                    input_chars,
-                    output_chars,
-                    duration_ms,
-                    status,
-                    error
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    report_mode,
-                    start_date.isoformat(),
-                    end_date.isoformat(),
-                    compression_profile,
-                    context_profile_key,
-                    normalized_scan_run_id,
-                    self._non_negative_int(source_file_count),
-                    self._non_negative_int(included_file_count),
-                    self._non_negative_int(omitted_file_count),
-                    self._non_negative_int(metadata_only_count),
-                    self._non_negative_int(compressed_file_count),
-                    self._non_negative_int(error_file_count),
-                    self._non_negative_int(truncated_file_count),
-                    self._non_negative_int(input_chars),
-                    self._non_negative_int(output_chars),
-                    self._non_negative_int(duration_ms),
-                    status,
-                    error or "",
-                ),
+            return self._insert_context_run(
+                conn,
+                report_mode=report_mode,
+                start_date=start_date,
+                end_date=end_date,
+                compression_profile=compression_profile,
+                context_profile_key=context_profile_key,
+                scan_run_id=scan_run_id,
+                source_file_count=source_file_count,
+                included_file_count=included_file_count,
+                omitted_file_count=omitted_file_count,
+                metadata_only_count=metadata_only_count,
+                compressed_file_count=compressed_file_count,
+                error_file_count=error_file_count,
+                truncated_file_count=truncated_file_count,
+                input_chars=input_chars,
+                output_chars=output_chars,
+                duration_ms=duration_ms,
+                status=status,
+                error=error,
             )
-            return int(cursor.lastrowid)
+
+    def save_context_run_with_decisions(
+        self,
+        *,
+        report_mode: str,
+        start_date: date,
+        end_date: date,
+        compression_profile: str,
+        context_profile_key: str,
+        scan_run_id: int | None,
+        source_file_count: int,
+        included_file_count: int,
+        omitted_file_count: int,
+        metadata_only_count: int,
+        compressed_file_count: int,
+        error_file_count: int,
+        truncated_file_count: int,
+        input_chars: int,
+        output_chars: int,
+        duration_ms: int,
+        decisions: list[ContextDecision],
+        status: str = "success",
+        error: str = "",
+    ) -> int:
+        """在同一事务内保存 context run 和逐文件决策。"""
+        with self._connect() as conn:
+            # success run 与逐文件 decisions 必须原子写入；否则 decisions 失败时，
+            # 审计表会显示本次上下文构建成功，实际却缺少解释文件取舍的明细。
+            context_run_id = self._insert_context_run(
+                conn,
+                report_mode=report_mode,
+                start_date=start_date,
+                end_date=end_date,
+                compression_profile=compression_profile,
+                context_profile_key=context_profile_key,
+                scan_run_id=scan_run_id,
+                source_file_count=source_file_count,
+                included_file_count=included_file_count,
+                omitted_file_count=omitted_file_count,
+                metadata_only_count=metadata_only_count,
+                compressed_file_count=compressed_file_count,
+                error_file_count=error_file_count,
+                truncated_file_count=truncated_file_count,
+                input_chars=input_chars,
+                output_chars=output_chars,
+                duration_ms=duration_ms,
+                status=status,
+                error=error,
+            )
+            self._insert_context_decisions(conn, context_run_id, decisions)
+            return context_run_id
 
     def save_context_decisions(
         self,
@@ -536,50 +559,131 @@ class ScanIndexStore:
     ) -> None:
         """保存一次 ContextScheduler 的逐文件决策审计明细。"""
         with self._connect() as conn:
-            # 决策明细保留 keep/compress/omit/error 的原始原因，后续 benchmark
-            # 才能解释一次 CLI 输出为何包含或省略某个文件。
-            conn.executemany(
-                """
-                INSERT INTO context_decisions (
-                    context_run_id,
-                    file_identity,
-                    path,
-                    extension,
-                    size_bytes,
-                    parser_backend,
-                    worker_lane,
-                    cache_status,
-                    action,
-                    reason,
-                    priority,
-                    input_chars,
-                    output_chars,
-                    truncated,
-                    error
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        int(context_run_id),
-                        "",
-                        decision.file_path,
-                        decision.extension,
-                        self._non_negative_int(decision.size_bytes),
-                        decision.parser_backend or "",
-                        decision.worker_lane or "",
-                        decision.cache_status or "",
-                        decision.action,
-                        decision.reason,
-                        self._non_negative_int(decision.priority),
-                        self._non_negative_int(decision.input_chars),
-                        self._non_negative_int(decision.output_chars),
-                        int(bool(decision.truncated)),
-                        decision.error or "",
-                    )
-                    for decision in decisions
-                ],
+            self._insert_context_decisions(conn, context_run_id, decisions)
+
+    def _insert_context_run(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        report_mode: str,
+        start_date: date,
+        end_date: date,
+        compression_profile: str,
+        context_profile_key: str,
+        scan_run_id: int | None,
+        source_file_count: int,
+        included_file_count: int,
+        omitted_file_count: int,
+        metadata_only_count: int,
+        compressed_file_count: int,
+        error_file_count: int,
+        truncated_file_count: int,
+        input_chars: int,
+        output_chars: int,
+        duration_ms: int,
+        status: str = "success",
+        error: str = "",
+    ) -> int:
+        normalized_scan_run_id = None if scan_run_id is None else int(scan_run_id)
+        # 即使本次上下文构建没有文件或最终失败，也要先落 run 级记录；
+        # 这是 CLI 单次运行能追溯输入规模、压缩策略和失败原因的依据。
+        cursor = conn.execute(
+            """
+            INSERT INTO context_runs (
+                report_mode,
+                start_date,
+                end_date,
+                compression_profile,
+                context_profile_key,
+                scan_run_id,
+                source_file_count,
+                included_file_count,
+                omitted_file_count,
+                metadata_only_count,
+                compressed_file_count,
+                error_file_count,
+                truncated_file_count,
+                input_chars,
+                output_chars,
+                duration_ms,
+                status,
+                error
             )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report_mode,
+                start_date.isoformat(),
+                end_date.isoformat(),
+                compression_profile,
+                context_profile_key,
+                normalized_scan_run_id,
+                self._non_negative_int(source_file_count),
+                self._non_negative_int(included_file_count),
+                self._non_negative_int(omitted_file_count),
+                self._non_negative_int(metadata_only_count),
+                self._non_negative_int(compressed_file_count),
+                self._non_negative_int(error_file_count),
+                self._non_negative_int(truncated_file_count),
+                self._non_negative_int(input_chars),
+                self._non_negative_int(output_chars),
+                self._non_negative_int(duration_ms),
+                status,
+                error or "",
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def _insert_context_decisions(
+        self,
+        conn: sqlite3.Connection,
+        context_run_id: int,
+        decisions: list[ContextDecision],
+    ) -> None:
+        # 决策明细保留 keep/compress/omit/error 的原始原因，后续 benchmark
+        # 才能解释一次 CLI 输出为何包含或省略某个文件。
+        conn.executemany(
+            """
+            INSERT INTO context_decisions (
+                context_run_id,
+                file_identity,
+                path,
+                extension,
+                size_bytes,
+                parser_backend,
+                worker_lane,
+                cache_status,
+                action,
+                reason,
+                priority,
+                input_chars,
+                output_chars,
+                truncated,
+                error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    int(context_run_id),
+                    "",
+                    decision.file_path,
+                    decision.extension,
+                    self._non_negative_int(decision.size_bytes),
+                    decision.parser_backend or "",
+                    decision.worker_lane or "",
+                    decision.cache_status or "",
+                    decision.action,
+                    decision.reason,
+                    self._non_negative_int(decision.priority),
+                    self._non_negative_int(decision.input_chars),
+                    self._non_negative_int(decision.output_chars),
+                    int(bool(decision.truncated)),
+                    decision.error or "",
+                )
+                for decision in decisions
+            ],
+        )
 
     def latest_context_run(self) -> dict[str, int | str | None] | None:
         """读取最新一条 context run；缺失时返回 None。"""

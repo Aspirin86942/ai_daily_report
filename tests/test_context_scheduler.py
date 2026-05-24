@@ -27,12 +27,25 @@ class StubStore:
     def save_context_decisions(self, context_run_id: int, decisions) -> None:
         self.context_decisions.append((context_run_id, list(decisions)))
 
+    def save_context_run_with_decisions(self, *, decisions, **kwargs) -> int:
+        context_run_id = self.save_context_run(**kwargs)
+        self.save_context_decisions(context_run_id, decisions)
+        return context_run_id
+
+
+class FailingDecisionStore(StubStore):
+    def save_context_decisions(self, context_run_id: int, decisions) -> None:
+        raise RuntimeError("decision insert failed")
+
+    def save_context_run_with_decisions(self, *, decisions, **kwargs) -> int:
+        raise RuntimeError("decision insert failed")
+
 
 class StubScanner:
-    def __init__(self, scan_result: ScanResult) -> None:
+    def __init__(self, scan_result: ScanResult, store: StubStore | None = None) -> None:
         self.scan_result = scan_result
         self.calls: list[tuple[date, date, bool]] = []
-        self.scan_index_store = StubStore()
+        self.scan_index_store = store or StubStore()
 
     def scan_files(
         self,
@@ -172,3 +185,40 @@ def test_scheduler_records_error_run_when_compressor_fails(tmp_path: Path) -> No
     assert "文件上下文构建失败" in result.file_context
     assert scanner.scan_index_store.context_runs[0]["status"] == "error"
     assert scanner.scan_index_store.context_runs[0]["error"] == "compress failed"
+
+
+def test_scheduler_does_not_leave_success_run_when_decision_save_fails(
+    tmp_path: Path,
+) -> None:
+    """逐文件决策落库失败时，不应残留误导性的 success run。"""
+    sample_file = tmp_path / "weekly.md"
+    sample_file.write_text("weekly evidence", encoding="utf-8")
+    scan_result = ScanResult(
+        total_files=1,
+        success_count=1,
+        error_count=0,
+        contexts=[
+            FileContext(
+                file_path=str(sample_file),
+                file_type=".md",
+                content="weekly evidence",
+                parser_backend="light_text_v1",
+            )
+        ],
+    )
+    store = FailingDecisionStore()
+    scanner = StubScanner(scan_result, store=store)
+    scheduler = ContextScheduler(scanner_factory=lambda: scanner)
+
+    result = scheduler.build_context(
+        ContextScheduleRequest(
+            report_mode="weekly",
+            source="scan",
+            start_date=date(2026, 5, 10),
+            end_date=date(2026, 5, 24),
+        )
+    )
+
+    assert result.error == "decision insert failed"
+    assert "文件上下文构建失败" in result.file_context
+    assert [run["status"] for run in store.context_runs] == ["error"]
