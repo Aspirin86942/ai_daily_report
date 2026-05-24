@@ -41,6 +41,11 @@ class FailingDecisionStore(StubStore):
         raise RuntimeError("decision insert failed")
 
 
+class AtomicSaveFailingStore(StubStore):
+    def save_context_run_with_decisions(self, *, decisions, **kwargs) -> int:
+        raise RuntimeError("atomic save failed")
+
+
 class StubScanner:
     def __init__(self, scan_result: ScanResult, store: StubStore | None = None) -> None:
         self.scan_result = scan_result
@@ -222,3 +227,51 @@ def test_scheduler_does_not_leave_success_run_when_decision_save_fails(
     assert result.error == "decision insert failed"
     assert "文件上下文构建失败" in result.file_context
     assert [run["status"] for run in store.context_runs] == ["error"]
+
+
+def test_scheduler_preserves_compressed_audit_when_atomic_save_fails(
+    tmp_path: Path,
+) -> None:
+    """压缩成功后持久化失败时，error audit 应保留真实压缩统计和决策。"""
+    sample_file = tmp_path / "weekly.md"
+    sample_file.write_text("weekly evidence", encoding="utf-8")
+    scan_result = ScanResult(
+        total_files=1,
+        success_count=1,
+        error_count=0,
+        contexts=[
+            FileContext(
+                file_path=str(sample_file),
+                file_type=".md",
+                content="weekly evidence",
+                parser_backend="light_text_v1",
+            )
+        ],
+    )
+    store = AtomicSaveFailingStore()
+    scanner = StubScanner(scan_result, store=store)
+    scheduler = ContextScheduler(scanner_factory=lambda: scanner)
+
+    result = scheduler.build_context(
+        ContextScheduleRequest(
+            report_mode="weekly",
+            source="scan",
+            start_date=date(2026, 5, 10),
+            end_date=date(2026, 5, 24),
+        )
+    )
+
+    assert result.error == "atomic save failed"
+    assert "文件上下文构建失败" in result.file_context
+    assert [run["status"] for run in store.context_runs] == ["error"]
+    error_run = store.context_runs[0]
+    assert error_run["included_file_count"] == 1
+    assert error_run["input_chars"] > 0
+    assert error_run["output_chars"] > 0
+
+    saved_context_run_id, saved_decisions = store.context_decisions[0]
+    assert saved_context_run_id == 123
+    assert saved_decisions[0].action == ACTION_KEEP
+    assert saved_decisions[0].output_chars > 0
+    assert result.decisions[0].action == ACTION_KEEP
+    assert result.decisions[0].output_chars > 0

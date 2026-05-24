@@ -140,6 +140,7 @@ class ContextScheduler:
         profile_key = self._serialize_profile(profile)
         scan_result: ScanResult | None = None
         decisions: list[ContextDecision] = []
+        compressed: CompressedContext | None = None
         context_run_id: int | None = None
         store: _ContextStore | None = None
 
@@ -177,9 +178,15 @@ class ContextScheduler:
             )
         except Exception as exc:
             error_text = str(exc) or exc.__class__.__name__
-            fallback = CompressedContext.empty(
-                error=f"文件上下文构建失败: {error_text}"
-            )
+            failure_message = f"文件上下文构建失败: {error_text}"
+            if compressed is None:
+                fallback = CompressedContext.empty(error=failure_message)
+                audit_decisions = decisions
+            else:
+                # 压缩已经成功时，持久化失败不应抹掉真实压缩统计；
+                # 只在正文和 warnings 中补充失败原因，保留 normalized decisions。
+                fallback = self._compressed_error_fallback(compressed, failure_message)
+                audit_decisions = fallback.decisions
             duration_ms = self._duration_ms(started_at)
             # 异常 fallback 仍尽量落 run 级审计，因为用户需要知道本次报告为什么缺少文件上下文。
             if store is not None:
@@ -189,7 +196,7 @@ class ContextScheduler:
                     profile=profile,
                     profile_key=profile_key,
                     scan_result=scan_result,
-                    decisions=decisions,
+                    decisions=audit_decisions,
                     fallback=fallback,
                     duration_ms=duration_ms,
                     error_text=error_text,
@@ -200,7 +207,7 @@ class ContextScheduler:
                 compressed_context=fallback,
                 scan_result=scan_result,
                 context_run_id=context_run_id,
-                decisions=decisions,
+                decisions=audit_decisions,
                 error=error_text,
             )
 
@@ -438,6 +445,31 @@ class ContextScheduler:
             except Exception:
                 return context_run_id
         return context_run_id
+
+    def _compressed_error_fallback(
+        self,
+        compressed: CompressedContext,
+        failure_message: str,
+    ) -> CompressedContext:
+        warning_lines = list(compressed.warnings)
+        if failure_message not in warning_lines:
+            warning_lines.append(failure_message)
+
+        failure_section = "\n".join(
+            [
+                "## 上下文构建异常",
+                f"- {failure_message}",
+                "- 已保留压缩后的文件统计和逐文件决策，便于复盘持久化失败前的真实上下文状态。",
+            ]
+        )
+        content = compressed.content.rstrip() + "\n\n" + failure_section + "\n"
+        return replace(
+            compressed,
+            content=content,
+            output_chars=len(content),
+            warnings=warning_lines,
+            decisions=compressed.decisions,
+        )
 
     def _fallback_with_scan_stats(
         self,
