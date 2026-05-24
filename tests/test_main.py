@@ -498,14 +498,22 @@ def test_generate_monthly_report_scan_uses_context_scheduler(monkeypatch):
     monkeypatch.setattr(main, "Markdown", lambda text: text)
 
     main.generate_monthly_report_cmd(
-        Namespace(month="2026-05", source="scan", input=None, no_save=False)
+        Namespace(
+            month="2026-05",
+            source="scan",
+            input="月报补充内容",
+            no_save=False,
+        )
     )
 
     assert (
         "build_context",
         ("monthly", "scan", "2026-05-01", "2026-05-31"),
     ) in calls
-    assert ("generate_monthly_report", "scheduler monthly context") in calls
+    assert (
+        "generate_monthly_report",
+        "scheduler monthly context\n\n---\n\n用户补充: 月报补充内容",
+    ) in calls
     assert any("月报预览" in text for text in printed)
 
 
