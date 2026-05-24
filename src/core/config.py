@@ -91,6 +91,9 @@ class Config:
             "ignored_patterns": self._to_builtin_value(
                 self._settings.scanner.ignored_patterns
             ),
+            "excluded_dirs": self._to_builtin_value(
+                getattr(self._settings.scanner, "excluded_dirs", [])
+            ),
             "max_workers": self._settings.scanner.max_workers,
             "excel_max_rows": self._settings.scanner.excel_max_rows,
             "pdf_max_pages": self._settings.scanner.pdf_max_pages,

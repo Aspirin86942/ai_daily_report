@@ -25,6 +25,28 @@ def test_scanner_config_exposes_scan_index_defaults_when_keys_absent():
     assert scanner_config["index_db_path"] == "data/db/scan_index.sqlite3"
     assert scanner_config["parser_profile_version"] == "v1"
     assert scanner_config["worker_lane_mode"] == "direct"
+    assert scanner_config["excluded_dirs"] == []
+
+
+def test_scanner_config_passes_excluded_dirs_as_builtin_list():
+    """excluded_dirs 必须从 settings 透传到 scanner，并转成普通 list。"""
+    cfg = object.__new__(Config)
+    cfg._settings = SimpleNamespace(
+        scanner=SimpleNamespace(
+            allowed_extensions=[".txt"],
+            ignored_patterns=[],
+            excluded_dirs=["D:\\work\\skip", "D:\\work\\logs"],
+            max_workers=1,
+            excel_max_rows=50,
+            pdf_max_pages=5,
+            text_max_chars=6000,
+        )
+    )
+
+    scanner_config = cfg.scanner_config
+
+    assert scanner_config["excluded_dirs"] == ["D:\\work\\skip", "D:\\work\\logs"]
+    assert isinstance(scanner_config["excluded_dirs"], list)
 
 
 def test_scanner_config_uses_builtin_containers_and_is_picklable():
@@ -33,6 +55,7 @@ def test_scanner_config_uses_builtin_containers_and_is_picklable():
 
     assert isinstance(scanner_config["allowed_extensions"], list)
     assert isinstance(scanner_config["ignored_patterns"], list)
+    assert isinstance(scanner_config["excluded_dirs"], list)
     assert isinstance(scanner_config["file_timeout_by_extension"], dict)
 
     pickle.dumps(scanner_config)
