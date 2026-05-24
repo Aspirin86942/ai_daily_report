@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from src.services.scan_index_store import InventoryItem, ScanIndexStore
+from src.services.scan_metrics import ExtensionMetrics, ScanRunMetrics
 
 
 def test_index_store_creates_inventory_and_cache_tables(tmp_path: Path):
@@ -331,6 +332,113 @@ def test_save_scan_run_metrics(tmp_path: Path):
         "reused_count": 6,
         "reparsed_count": 2,
     }
+
+
+def test_scan_runs_schema_includes_performance_columns(tmp_path: Path):
+    """scan_runs 应保存阶段耗时和结果计数，同时保留旧三字段。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    with store._connect() as conn:
+        rows = conn.execute("PRAGMA table_info(scan_runs)").fetchall()
+
+    column_names = {row["name"] for row in rows}
+    assert {
+        "total_duration_ms",
+        "discovery_duration_ms",
+        "inventory_cache_duration_ms",
+        "parse_duration_ms",
+        "aggregation_duration_ms",
+        "success_count",
+        "error_count",
+        "timeout_count",
+    } <= column_names
+
+
+def test_save_scan_run_metrics_persists_detail_and_extension_metrics(tmp_path: Path):
+    """完整指标应写入 scan_runs detail 和 scan_extension_metrics 明细表。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    run_metrics = ScanRunMetrics(
+        total_duration_ms=120,
+        discovery_duration_ms=10,
+        inventory_cache_duration_ms=20,
+        parse_duration_ms=70,
+        aggregation_duration_ms=5,
+        discovered_count=4,
+        reused_count=1,
+        reparsed_count=3,
+        success_count=2,
+        error_count=1,
+        timeout_count=1,
+        extension_metrics=[
+            ExtensionMetrics(
+                extension=".pdf",
+                file_count=2,
+                parse_duration_ms=60,
+                success_count=1,
+                error_count=1,
+                timeout_count=1,
+            ),
+            ExtensionMetrics(
+                extension=".txt",
+                file_count=1,
+                parse_duration_ms=10,
+                success_count=1,
+                error_count=0,
+                timeout_count=0,
+            ),
+        ],
+    )
+
+    run_id = store.save_scan_run_metrics(run_metrics=run_metrics)
+
+    assert store.latest_scan_run() == {
+        "discovered_count": 4,
+        "reused_count": 1,
+        "reparsed_count": 3,
+    }
+    assert store.latest_scan_run_detail() == {
+        "run_id": run_id,
+        "discovered_count": 4,
+        "reused_count": 1,
+        "reparsed_count": 3,
+        "total_duration_ms": 120,
+        "discovery_duration_ms": 10,
+        "inventory_cache_duration_ms": 20,
+        "parse_duration_ms": 70,
+        "aggregation_duration_ms": 5,
+        "success_count": 2,
+        "error_count": 1,
+        "timeout_count": 1,
+    }
+    assert store.list_extension_metrics(run_id) == run_metrics.extension_metrics
+
+
+def test_existing_scan_runs_table_is_migrated_to_performance_schema(tmp_path: Path):
+    """旧 scan_runs 表只有三项计数时，应无损补齐性能列。"""
+    db_path = tmp_path / "scan_index.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE scan_runs (
+                run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                discovered_count INTEGER NOT NULL DEFAULT 0,
+                reused_count INTEGER NOT NULL DEFAULT 0,
+                reparsed_count INTEGER NOT NULL DEFAULT 0
+            );
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO scan_runs (discovered_count, reused_count, reparsed_count)
+            VALUES (3, 1, 2)
+            """
+        )
+
+    store = ScanIndexStore(db_path=db_path)
+
+    assert store.latest_scan_run_detail()["total_duration_ms"] == 0
+    assert store.latest_scan_run_detail()["discovered_count"] == 3
 
 
 def test_latest_scan_run_raises_when_missing(tmp_path: Path):

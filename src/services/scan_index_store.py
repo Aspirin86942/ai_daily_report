@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from .scan_metrics import ExtensionMetrics, ScanRunMetrics
+
 
 @dataclass(slots=True)
 class InventoryItem:
@@ -65,7 +67,27 @@ class ScanIndexStore:
                     started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     discovered_count INTEGER NOT NULL DEFAULT 0,
                     reused_count INTEGER NOT NULL DEFAULT 0,
-                    reparsed_count INTEGER NOT NULL DEFAULT 0
+                    reparsed_count INTEGER NOT NULL DEFAULT 0,
+                    total_duration_ms INTEGER NOT NULL DEFAULT 0,
+                    discovery_duration_ms INTEGER NOT NULL DEFAULT 0,
+                    inventory_cache_duration_ms INTEGER NOT NULL DEFAULT 0,
+                    parse_duration_ms INTEGER NOT NULL DEFAULT 0,
+                    aggregation_duration_ms INTEGER NOT NULL DEFAULT 0,
+                    success_count INTEGER NOT NULL DEFAULT 0,
+                    error_count INTEGER NOT NULL DEFAULT 0,
+                    timeout_count INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE TABLE IF NOT EXISTS scan_extension_metrics (
+                    run_id INTEGER NOT NULL,
+                    extension TEXT NOT NULL,
+                    file_count INTEGER NOT NULL DEFAULT 0,
+                    parse_duration_ms INTEGER NOT NULL DEFAULT 0,
+                    success_count INTEGER NOT NULL DEFAULT 0,
+                    error_count INTEGER NOT NULL DEFAULT 0,
+                    timeout_count INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (run_id, extension),
+                    FOREIGN KEY (run_id) REFERENCES scan_runs(run_id)
                 );
 
                 CREATE TABLE IF NOT EXISTS discovery_checkpoints (
@@ -74,6 +96,7 @@ class ScanIndexStore:
                 );
                 """
             )
+            self._migrate_scan_metrics_schema(conn)
 
     def _migrate_existing_schema(self, conn: sqlite3.Connection) -> None:
         """迁移早期 Task 2 索引库，避免列名和缓存版本契约漂移。"""
@@ -125,6 +148,29 @@ class ScanIndexStore:
 
                     DROP TABLE file_inventory_legacy;
                     """
+                )
+
+    def _migrate_scan_metrics_schema(self, conn: sqlite3.Connection) -> None:
+        """为旧 scan_runs 表补齐性能指标列。"""
+        table_names = self._list_table_names(conn)
+        if "scan_runs" not in table_names:
+            return
+
+        existing_columns = self._list_column_names(conn, "scan_runs")
+        required_columns = {
+            "total_duration_ms": "INTEGER NOT NULL DEFAULT 0",
+            "discovery_duration_ms": "INTEGER NOT NULL DEFAULT 0",
+            "inventory_cache_duration_ms": "INTEGER NOT NULL DEFAULT 0",
+            "parse_duration_ms": "INTEGER NOT NULL DEFAULT 0",
+            "aggregation_duration_ms": "INTEGER NOT NULL DEFAULT 0",
+            "success_count": "INTEGER NOT NULL DEFAULT 0",
+            "error_count": "INTEGER NOT NULL DEFAULT 0",
+            "timeout_count": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for column_name, column_def in required_columns.items():
+            if column_name not in existing_columns:
+                conn.execute(
+                    f"ALTER TABLE scan_runs ADD COLUMN {column_name} {column_def}"
                 )
 
         if "parse_cache" in table_names:
@@ -225,23 +271,95 @@ class ScanIndexStore:
 
     def save_scan_run_metrics(
         self,
-        discovered_count: int,
-        reused_count: int,
-        reparsed_count: int,
-    ) -> None:
-        """保存单次扫描的最小运行指标，供后续审计与回归验证使用。"""
+        discovered_count: int | None = None,
+        reused_count: int | None = None,
+        reparsed_count: int | None = None,
+        *,
+        run_metrics: ScanRunMetrics | None = None,
+        extension_metrics: list[ExtensionMetrics] | None = None,
+    ) -> int:
+        """保存单次扫描指标；兼容旧三计数调用并支持完整性能指标。"""
+        if run_metrics is None:
+            if (
+                discovered_count is None
+                or reused_count is None
+                or reparsed_count is None
+            ):
+                raise TypeError(
+                    "save_scan_run_metrics requires either run_metrics "
+                    "or discovered/reused/reparsed counts"
+                )
+            run_metrics = ScanRunMetrics(
+                discovered_count=discovered_count,
+                reused_count=reused_count,
+                reparsed_count=reparsed_count,
+            )
+
+        detail_extension_metrics = (
+            extension_metrics
+            if extension_metrics is not None
+            else run_metrics.extension_metrics
+        )
         with self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO scan_runs (
                     discovered_count,
                     reused_count,
-                    reparsed_count
+                    reparsed_count,
+                    total_duration_ms,
+                    discovery_duration_ms,
+                    inventory_cache_duration_ms,
+                    parse_duration_ms,
+                    aggregation_duration_ms,
+                    success_count,
+                    error_count,
+                    timeout_count
                 )
-                VALUES (?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (discovered_count, reused_count, reparsed_count),
+                (
+                    run_metrics.discovered_count,
+                    run_metrics.reused_count,
+                    run_metrics.reparsed_count,
+                    run_metrics.total_duration_ms,
+                    run_metrics.discovery_duration_ms,
+                    run_metrics.inventory_cache_duration_ms,
+                    run_metrics.parse_duration_ms,
+                    run_metrics.aggregation_duration_ms,
+                    run_metrics.success_count,
+                    run_metrics.error_count,
+                    run_metrics.timeout_count,
+                ),
             )
+            run_id = int(cursor.lastrowid)
+            conn.executemany(
+                """
+                INSERT INTO scan_extension_metrics (
+                    run_id,
+                    extension,
+                    file_count,
+                    parse_duration_ms,
+                    success_count,
+                    error_count,
+                    timeout_count
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        run_id,
+                        item.extension,
+                        item.file_count,
+                        item.parse_duration_ms,
+                        item.success_count,
+                        item.error_count,
+                        item.timeout_count,
+                    )
+                    for item in detail_extension_metrics
+                ],
+            )
+        return run_id
 
     def latest_scan_run(self) -> dict[str, int]:
         """读取最新一条扫描运行指标；缺失时显式抛 KeyError。"""
@@ -263,6 +381,79 @@ class ScanIndexStore:
             "reused_count": int(row["reused_count"]),
             "reparsed_count": int(row["reparsed_count"]),
         }
+
+    def latest_scan_run_detail(self) -> dict[str, int]:
+        """读取最新一条完整扫描指标，保留 run_id 便于查询扩展名明细。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    run_id,
+                    discovered_count,
+                    reused_count,
+                    reparsed_count,
+                    total_duration_ms,
+                    discovery_duration_ms,
+                    inventory_cache_duration_ms,
+                    parse_duration_ms,
+                    aggregation_duration_ms,
+                    success_count,
+                    error_count,
+                    timeout_count
+                FROM scan_runs
+                ORDER BY run_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+        if row is None:
+            raise KeyError("scan_runs")
+
+        return {
+            "run_id": int(row["run_id"]),
+            "discovered_count": int(row["discovered_count"]),
+            "reused_count": int(row["reused_count"]),
+            "reparsed_count": int(row["reparsed_count"]),
+            "total_duration_ms": int(row["total_duration_ms"]),
+            "discovery_duration_ms": int(row["discovery_duration_ms"]),
+            "inventory_cache_duration_ms": int(row["inventory_cache_duration_ms"]),
+            "parse_duration_ms": int(row["parse_duration_ms"]),
+            "aggregation_duration_ms": int(row["aggregation_duration_ms"]),
+            "success_count": int(row["success_count"]),
+            "error_count": int(row["error_count"]),
+            "timeout_count": int(row["timeout_count"]),
+        }
+
+    def list_extension_metrics(self, run_id: int) -> list[ExtensionMetrics]:
+        """按扩展名读取某次 scan run 的重解析明细。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    extension,
+                    file_count,
+                    parse_duration_ms,
+                    success_count,
+                    error_count,
+                    timeout_count
+                FROM scan_extension_metrics
+                WHERE run_id = ?
+                ORDER BY extension
+                """,
+                (run_id,),
+            ).fetchall()
+
+        return [
+            ExtensionMetrics(
+                extension=str(row["extension"]),
+                file_count=int(row["file_count"]),
+                parse_duration_ms=int(row["parse_duration_ms"]),
+                success_count=int(row["success_count"]),
+                error_count=int(row["error_count"]),
+                timeout_count=int(row["timeout_count"]),
+            )
+            for row in rows
+        ]
 
     def load_checkpoint(self, discovery_key: str) -> str | None:
         """读取 checkpoint；缺失时返回 None，避免上层误判为空字符串。"""
