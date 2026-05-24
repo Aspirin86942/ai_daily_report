@@ -22,6 +22,18 @@ class InventoryItem:
     source_version: str
 
 
+@dataclass(frozen=True, slots=True)
+class CacheProbe:
+    """解释一次 parse cache freshness 判断结果。"""
+
+    file_identity: str
+    parser_profile: str
+    source_version: str
+    cache_status: str
+    cache_miss_reason: str
+    previous_source_version: str | None = None
+
+
 class ScanIndexStore:
     """保存扫描库存、解析缓存和扫描运行记录的最小存储层。"""
 
@@ -529,6 +541,95 @@ class ScanIndexStore:
                 (file_identity, parser_profile, source_version),
             ).fetchone()
         return row is not None
+
+    def probe_parse_cache(
+        self,
+        file_identity: str,
+        parser_profile: str,
+        source_version: str = "",
+    ) -> CacheProbe:
+        """解释 parse cache 是否 fresh，以及不 fresh 的原因。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT parser_profile, source_version, parse_status, updated_at
+                FROM parse_cache
+                WHERE file_identity = ?
+                ORDER BY updated_at DESC
+                """,
+                (file_identity,),
+            ).fetchall()
+
+        if not rows:
+            return CacheProbe(
+                file_identity=file_identity,
+                parser_profile=parser_profile,
+                source_version=source_version,
+                cache_status="miss",
+                cache_miss_reason="new_file",
+            )
+
+        exact_rows = [
+            row
+            for row in rows
+            if str(row["parser_profile"]) == parser_profile
+            and str(row["source_version"]) == source_version
+        ]
+        if exact_rows:
+            latest_exact = exact_rows[0]
+            if str(latest_exact["parse_status"]) == "success":
+                return CacheProbe(
+                    file_identity=file_identity,
+                    parser_profile=parser_profile,
+                    source_version=source_version,
+                    cache_status="fresh",
+                    cache_miss_reason="",
+                )
+            return CacheProbe(
+                file_identity=file_identity,
+                parser_profile=parser_profile,
+                source_version=source_version,
+                cache_status="miss",
+                cache_miss_reason="error_cache",
+                previous_source_version=str(latest_exact["source_version"]),
+            )
+
+        same_profile_rows = [
+            row
+            for row in rows
+            if str(row["parser_profile"]) == parser_profile
+        ]
+        same_profile_success = [
+            row for row in same_profile_rows if str(row["parse_status"]) == "success"
+        ]
+        if same_profile_success:
+            return CacheProbe(
+                file_identity=file_identity,
+                parser_profile=parser_profile,
+                source_version=source_version,
+                cache_status="miss",
+                cache_miss_reason="source_version_changed",
+                previous_source_version=str(same_profile_success[0]["source_version"]),
+            )
+
+        if same_profile_rows:
+            return CacheProbe(
+                file_identity=file_identity,
+                parser_profile=parser_profile,
+                source_version=source_version,
+                cache_status="miss",
+                cache_miss_reason="source_version_changed",
+                previous_source_version=str(same_profile_rows[0]["source_version"]),
+            )
+
+        return CacheProbe(
+            file_identity=file_identity,
+            parser_profile=parser_profile,
+            source_version=source_version,
+            cache_status="miss",
+            cache_miss_reason="parser_profile_changed",
+            previous_source_version=str(rows[0]["source_version"]),
+        )
 
     def load_parse_cache(
         self,

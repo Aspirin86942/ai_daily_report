@@ -447,3 +447,110 @@ def test_latest_scan_run_raises_when_missing(tmp_path: Path):
 
     with pytest.raises(KeyError, match="scan_runs"):
         store.latest_scan_run()
+
+
+def test_probe_parse_cache_returns_fresh_for_exact_success(tmp_path: Path):
+    """完全匹配的 success cache 应解释为 fresh。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    store.upsert_parse_cache(
+        file_identity="file-1",
+        parser_profile="profile-a",
+        source_version="mtime=1:size=10",
+        content_excerpt="cached",
+        parse_status="success",
+        parse_error="",
+    )
+
+    probe = store.probe_parse_cache(
+        "file-1",
+        "profile-a",
+        source_version="mtime=1:size=10",
+    )
+
+    assert probe.cache_status == "fresh"
+    assert probe.cache_miss_reason == ""
+    assert probe.previous_source_version is None
+
+
+def test_probe_parse_cache_returns_new_file_when_no_history(tmp_path: Path):
+    """完全无历史 cache 时应解释为 new_file。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    probe = store.probe_parse_cache(
+        "missing",
+        "profile-a",
+        source_version="mtime=1:size=10",
+    )
+
+    assert probe.cache_status == "miss"
+    assert probe.cache_miss_reason == "new_file"
+    assert probe.previous_source_version is None
+
+
+def test_probe_parse_cache_returns_source_version_changed(tmp_path: Path):
+    """同身份同 profile 但 source_version 不同时，应解释为 source_version_changed。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    store.upsert_parse_cache(
+        file_identity="file-1",
+        parser_profile="profile-a",
+        source_version="mtime=1:size=10",
+        content_excerpt="old",
+        parse_status="success",
+        parse_error="",
+    )
+
+    probe = store.probe_parse_cache(
+        "file-1",
+        "profile-a",
+        source_version="mtime=2:size=10",
+    )
+
+    assert probe.cache_status == "miss"
+    assert probe.cache_miss_reason == "source_version_changed"
+    assert probe.previous_source_version == "mtime=1:size=10"
+
+
+def test_probe_parse_cache_returns_parser_profile_changed(tmp_path: Path):
+    """同身份存在 cache 但 profile 不同时，应解释为 parser_profile_changed。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    store.upsert_parse_cache(
+        file_identity="file-1",
+        parser_profile="profile-a",
+        source_version="mtime=1:size=10",
+        content_excerpt="old",
+        parse_status="success",
+        parse_error="",
+    )
+
+    probe = store.probe_parse_cache(
+        "file-1",
+        "profile-b",
+        source_version="mtime=1:size=10",
+    )
+
+    assert probe.cache_status == "miss"
+    assert probe.cache_miss_reason == "parser_profile_changed"
+    assert probe.previous_source_version == "mtime=1:size=10"
+
+
+def test_probe_parse_cache_returns_error_cache_for_exact_error(tmp_path: Path):
+    """同版本只有 error cache 时，应解释为 error_cache 而不是 fresh。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    store.upsert_parse_cache(
+        file_identity="file-1",
+        parser_profile="profile-a",
+        source_version="mtime=1:size=10",
+        content_excerpt="",
+        parse_status="error",
+        parse_error="boom",
+    )
+
+    probe = store.probe_parse_cache(
+        "file-1",
+        "profile-a",
+        source_version="mtime=1:size=10",
+    )
+
+    assert probe.cache_status == "miss"
+    assert probe.cache_miss_reason == "error_cache"
+    assert probe.previous_source_version == "mtime=1:size=10"
