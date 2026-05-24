@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from .context_compressor import ContextDecision
 from .scan_metrics import ExtensionMetrics, ScanRunMetrics
 
 
@@ -43,8 +44,11 @@ class ScanIndexStore:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        """创建启用 Row 访问的 SQLite 连接。"""
+        """创建启用 Row 访问和外键约束的 SQLite 连接。"""
         conn = sqlite3.connect(self.db_path)
+        # SQLite 每个连接默认不执行已声明的 FK；context 审计记录必须阻止
+        # 孤儿 run/decision 行，否则后续 CLI 复盘会拿到不可追溯的数据。
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.row_factory = sqlite3.Row
         return conn
 
@@ -108,6 +112,51 @@ class ScanIndexStore:
                 CREATE TABLE IF NOT EXISTS discovery_checkpoints (
                     discovery_key TEXT PRIMARY KEY,
                     checkpoint_value TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS context_runs (
+                    context_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    report_mode TEXT NOT NULL,
+                    start_date TEXT NOT NULL,
+                    end_date TEXT NOT NULL,
+                    compression_profile TEXT NOT NULL,
+                    context_profile_key TEXT NOT NULL,
+                    scan_run_id INTEGER,
+                    source_file_count INTEGER NOT NULL DEFAULT 0,
+                    included_file_count INTEGER NOT NULL DEFAULT 0,
+                    omitted_file_count INTEGER NOT NULL DEFAULT 0,
+                    metadata_only_count INTEGER NOT NULL DEFAULT 0,
+                    compressed_file_count INTEGER NOT NULL DEFAULT 0,
+                    error_file_count INTEGER NOT NULL DEFAULT 0,
+                    truncated_file_count INTEGER NOT NULL DEFAULT 0,
+                    input_chars INTEGER NOT NULL DEFAULT 0,
+                    output_chars INTEGER NOT NULL DEFAULT 0,
+                    duration_ms INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'success',
+                    error TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY (scan_run_id) REFERENCES scan_runs(run_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS context_decisions (
+                    context_decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    context_run_id INTEGER NOT NULL,
+                    file_identity TEXT NOT NULL DEFAULT '',
+                    path TEXT NOT NULL,
+                    extension TEXT NOT NULL,
+                    size_bytes INTEGER,
+                    parser_backend TEXT NOT NULL DEFAULT '',
+                    worker_lane TEXT NOT NULL DEFAULT '',
+                    cache_status TEXT NOT NULL DEFAULT '',
+                    action TEXT NOT NULL,
+                    reason TEXT NOT NULL,
+                    priority INTEGER NOT NULL DEFAULT 0,
+                    input_chars INTEGER NOT NULL DEFAULT 0,
+                    output_chars INTEGER NOT NULL DEFAULT 0,
+                    truncated INTEGER NOT NULL DEFAULT 0,
+                    error TEXT NOT NULL DEFAULT '',
+                    FOREIGN KEY (context_run_id)
+                        REFERENCES context_runs(context_run_id)
                 );
                 """
             )
@@ -289,6 +338,10 @@ class ScanIndexStore:
         primary_key_rows.sort(key=lambda row: int(row["pk"]))
         return [str(row["name"]) for row in primary_key_rows]
 
+    def _non_negative_int(self, value: int) -> int:
+        """把审计计数归一为非负整数，避免异常路径污染后续统计。"""
+        return max(0, int(value))
+
     def list_tables(self) -> set[str]:
         """返回当前 SQLite 文件内的表名集合。"""
         with self._connect() as conn:
@@ -402,6 +455,388 @@ class ScanIndexStore:
             )
         return run_id
 
+    def save_context_run(
+        self,
+        *,
+        report_mode: str,
+        start_date: date,
+        end_date: date,
+        compression_profile: str,
+        context_profile_key: str,
+        scan_run_id: int | None,
+        source_file_count: int,
+        included_file_count: int,
+        omitted_file_count: int,
+        metadata_only_count: int,
+        compressed_file_count: int,
+        error_file_count: int,
+        truncated_file_count: int,
+        input_chars: int,
+        output_chars: int,
+        duration_ms: int,
+        status: str = "success",
+        error: str = "",
+    ) -> int:
+        """保存一次 ContextScheduler 运行级审计记录并返回 run id。"""
+        with self._connect() as conn:
+            return self._insert_context_run(
+                conn,
+                report_mode=report_mode,
+                start_date=start_date,
+                end_date=end_date,
+                compression_profile=compression_profile,
+                context_profile_key=context_profile_key,
+                scan_run_id=scan_run_id,
+                source_file_count=source_file_count,
+                included_file_count=included_file_count,
+                omitted_file_count=omitted_file_count,
+                metadata_only_count=metadata_only_count,
+                compressed_file_count=compressed_file_count,
+                error_file_count=error_file_count,
+                truncated_file_count=truncated_file_count,
+                input_chars=input_chars,
+                output_chars=output_chars,
+                duration_ms=duration_ms,
+                status=status,
+                error=error,
+            )
+
+    def save_context_run_with_decisions(
+        self,
+        *,
+        report_mode: str,
+        start_date: date,
+        end_date: date,
+        compression_profile: str,
+        context_profile_key: str,
+        scan_run_id: int | None,
+        source_file_count: int,
+        included_file_count: int,
+        omitted_file_count: int,
+        metadata_only_count: int,
+        compressed_file_count: int,
+        error_file_count: int,
+        truncated_file_count: int,
+        input_chars: int,
+        output_chars: int,
+        duration_ms: int,
+        decisions: list[ContextDecision],
+        status: str = "success",
+        error: str = "",
+    ) -> int:
+        """在同一事务内保存 context run 和逐文件决策。"""
+        with self._connect() as conn:
+            # success run 与逐文件 decisions 必须原子写入；否则 decisions 失败时，
+            # 审计表会显示本次上下文构建成功，实际却缺少解释文件取舍的明细。
+            context_run_id = self._insert_context_run(
+                conn,
+                report_mode=report_mode,
+                start_date=start_date,
+                end_date=end_date,
+                compression_profile=compression_profile,
+                context_profile_key=context_profile_key,
+                scan_run_id=scan_run_id,
+                source_file_count=source_file_count,
+                included_file_count=included_file_count,
+                omitted_file_count=omitted_file_count,
+                metadata_only_count=metadata_only_count,
+                compressed_file_count=compressed_file_count,
+                error_file_count=error_file_count,
+                truncated_file_count=truncated_file_count,
+                input_chars=input_chars,
+                output_chars=output_chars,
+                duration_ms=duration_ms,
+                status=status,
+                error=error,
+            )
+            self._insert_context_decisions(conn, context_run_id, decisions)
+            return context_run_id
+
+    def save_context_decisions(
+        self,
+        context_run_id: int,
+        decisions: list[ContextDecision],
+    ) -> None:
+        """保存一次 ContextScheduler 的逐文件决策审计明细。"""
+        with self._connect() as conn:
+            self._insert_context_decisions(conn, context_run_id, decisions)
+
+    def _insert_context_run(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        report_mode: str,
+        start_date: date,
+        end_date: date,
+        compression_profile: str,
+        context_profile_key: str,
+        scan_run_id: int | None,
+        source_file_count: int,
+        included_file_count: int,
+        omitted_file_count: int,
+        metadata_only_count: int,
+        compressed_file_count: int,
+        error_file_count: int,
+        truncated_file_count: int,
+        input_chars: int,
+        output_chars: int,
+        duration_ms: int,
+        status: str = "success",
+        error: str = "",
+    ) -> int:
+        normalized_scan_run_id = None if scan_run_id is None else int(scan_run_id)
+        # 即使本次上下文构建没有文件或最终失败，也要先落 run 级记录；
+        # 这是 CLI 单次运行能追溯输入规模、压缩策略和失败原因的依据。
+        cursor = conn.execute(
+            """
+            INSERT INTO context_runs (
+                report_mode,
+                start_date,
+                end_date,
+                compression_profile,
+                context_profile_key,
+                scan_run_id,
+                source_file_count,
+                included_file_count,
+                omitted_file_count,
+                metadata_only_count,
+                compressed_file_count,
+                error_file_count,
+                truncated_file_count,
+                input_chars,
+                output_chars,
+                duration_ms,
+                status,
+                error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                report_mode,
+                start_date.isoformat(),
+                end_date.isoformat(),
+                compression_profile,
+                context_profile_key,
+                normalized_scan_run_id,
+                self._non_negative_int(source_file_count),
+                self._non_negative_int(included_file_count),
+                self._non_negative_int(omitted_file_count),
+                self._non_negative_int(metadata_only_count),
+                self._non_negative_int(compressed_file_count),
+                self._non_negative_int(error_file_count),
+                self._non_negative_int(truncated_file_count),
+                self._non_negative_int(input_chars),
+                self._non_negative_int(output_chars),
+                self._non_negative_int(duration_ms),
+                status,
+                error or "",
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    def _insert_context_decisions(
+        self,
+        conn: sqlite3.Connection,
+        context_run_id: int,
+        decisions: list[ContextDecision],
+    ) -> None:
+        # 决策明细保留 keep/compress/omit/error 的原始原因，后续 benchmark
+        # 才能解释一次 CLI 输出为何包含或省略某个文件。
+        conn.executemany(
+            """
+            INSERT INTO context_decisions (
+                context_run_id,
+                file_identity,
+                path,
+                extension,
+                size_bytes,
+                parser_backend,
+                worker_lane,
+                cache_status,
+                action,
+                reason,
+                priority,
+                input_chars,
+                output_chars,
+                truncated,
+                error
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    int(context_run_id),
+                    "",
+                    decision.file_path,
+                    decision.extension,
+                    self._non_negative_int(decision.size_bytes),
+                    decision.parser_backend or "",
+                    decision.worker_lane or "",
+                    decision.cache_status or "",
+                    decision.action,
+                    decision.reason,
+                    self._non_negative_int(decision.priority),
+                    self._non_negative_int(decision.input_chars),
+                    self._non_negative_int(decision.output_chars),
+                    int(bool(decision.truncated)),
+                    decision.error or "",
+                )
+                for decision in decisions
+            ],
+        )
+
+    def latest_context_run(self) -> dict[str, int | str | None] | None:
+        """读取最新一条 context run；缺失时返回 None。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    context_run_id,
+                    report_mode,
+                    start_date,
+                    end_date,
+                    compression_profile,
+                    context_profile_key,
+                    scan_run_id,
+                    source_file_count,
+                    included_file_count,
+                    omitted_file_count,
+                    metadata_only_count,
+                    compressed_file_count,
+                    error_file_count,
+                    truncated_file_count,
+                    input_chars,
+                    output_chars,
+                    duration_ms,
+                    status,
+                    error
+                FROM context_runs
+                ORDER BY context_run_id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+
+        return None if row is None else self._context_run_row_to_dict(row)
+
+    def get_context_run(
+        self,
+        context_run_id: int,
+    ) -> dict[str, int | str | None] | None:
+        """按 id 读取指定 context run；缺失时返回 None。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    context_run_id,
+                    report_mode,
+                    start_date,
+                    end_date,
+                    compression_profile,
+                    context_profile_key,
+                    scan_run_id,
+                    source_file_count,
+                    included_file_count,
+                    omitted_file_count,
+                    metadata_only_count,
+                    compressed_file_count,
+                    error_file_count,
+                    truncated_file_count,
+                    input_chars,
+                    output_chars,
+                    duration_ms,
+                    status,
+                    error
+                FROM context_runs
+                WHERE context_run_id = ?
+                LIMIT 1
+                """,
+                (int(context_run_id),),
+            ).fetchone()
+
+        return None if row is None else self._context_run_row_to_dict(row)
+
+    def _context_run_row_to_dict(
+        self,
+        row: sqlite3.Row,
+    ) -> dict[str, int | str | None]:
+        """把 context run 行统一转为审计字典，避免 latest/by-id 字段漂移。"""
+        scan_run_id = row["scan_run_id"]
+        return {
+            "context_run_id": int(row["context_run_id"]),
+            "report_mode": str(row["report_mode"]),
+            "start_date": str(row["start_date"]),
+            "end_date": str(row["end_date"]),
+            "compression_profile": str(row["compression_profile"]),
+            "context_profile_key": str(row["context_profile_key"]),
+            "scan_run_id": None if scan_run_id is None else int(scan_run_id),
+            "source_file_count": int(row["source_file_count"]),
+            "included_file_count": int(row["included_file_count"]),
+            "omitted_file_count": int(row["omitted_file_count"]),
+            "metadata_only_count": int(row["metadata_only_count"]),
+            "compressed_file_count": int(row["compressed_file_count"]),
+            "error_file_count": int(row["error_file_count"]),
+            "truncated_file_count": int(row["truncated_file_count"]),
+            "input_chars": int(row["input_chars"]),
+            "output_chars": int(row["output_chars"]),
+            "duration_ms": int(row["duration_ms"]),
+            "status": str(row["status"]),
+            "error": str(row["error"]),
+        }
+
+    def list_context_decisions(
+        self,
+        context_run_id: int,
+    ) -> list[dict[str, int | str | bool | None]]:
+        """按插入顺序读取某次 context run 的逐文件决策。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT
+                    context_run_id,
+                    file_identity,
+                    path,
+                    extension,
+                    size_bytes,
+                    parser_backend,
+                    worker_lane,
+                    cache_status,
+                    action,
+                    reason,
+                    priority,
+                    input_chars,
+                    output_chars,
+                    truncated,
+                    error
+                FROM context_decisions
+                WHERE context_run_id = ?
+                ORDER BY context_decision_id
+                """,
+                (int(context_run_id),),
+            ).fetchall()
+
+        return [
+            {
+                "context_run_id": int(row["context_run_id"]),
+                "file_identity": str(row["file_identity"]),
+                "path": str(row["path"]),
+                "extension": str(row["extension"]),
+                "size_bytes": (
+                    None if row["size_bytes"] is None else int(row["size_bytes"])
+                ),
+                "parser_backend": str(row["parser_backend"]),
+                "worker_lane": str(row["worker_lane"]),
+                "cache_status": str(row["cache_status"]),
+                "action": str(row["action"]),
+                "reason": str(row["reason"]),
+                "priority": int(row["priority"]),
+                "input_chars": int(row["input_chars"]),
+                "output_chars": int(row["output_chars"]),
+                "truncated": bool(int(row["truncated"])),
+                "error": str(row["error"]),
+            }
+            for row in rows
+        ]
+
     def latest_scan_run(self) -> dict[str, int]:
         """读取最新一条扫描运行指标；缺失时显式抛 KeyError。"""
         with self._connect() as conn:
@@ -450,6 +885,37 @@ class ScanIndexStore:
         if row is None:
             raise KeyError("scan_runs")
 
+        return self._scan_run_detail_row_to_dict(row)
+
+    def get_scan_run_detail(self, run_id: int) -> dict[str, int] | None:
+        """按 id 读取指定 scan run detail；缺失时返回 None。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    run_id,
+                    discovered_count,
+                    reused_count,
+                    reparsed_count,
+                    total_duration_ms,
+                    discovery_duration_ms,
+                    inventory_cache_duration_ms,
+                    parse_duration_ms,
+                    aggregation_duration_ms,
+                    success_count,
+                    error_count,
+                    timeout_count
+                FROM scan_runs
+                WHERE run_id = ?
+                LIMIT 1
+                """,
+                (int(run_id),),
+            ).fetchone()
+
+        return None if row is None else self._scan_run_detail_row_to_dict(row)
+
+    def _scan_run_detail_row_to_dict(self, row: sqlite3.Row) -> dict[str, int]:
+        """把 scan run 行统一转为完整指标字典，避免 latest/by-id 字段漂移。"""
         return {
             "run_id": int(row["run_id"]),
             "discovered_count": int(row["discovered_count"]),

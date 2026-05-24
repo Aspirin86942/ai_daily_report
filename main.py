@@ -2,7 +2,7 @@
 
 import argparse
 import sys
-from datetime import date
+from datetime import date, timedelta
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -11,7 +11,11 @@ from src.core.healthcheck import collect_healthcheck
 from src.core.logger import setup_logger
 from src.core.llm import LLMClient
 from src.models.schemas import ScanResult
-from src.services.file_scanner import FileScanner
+from src.services.context_scheduler import (
+    ContextScheduleRequest,
+    ContextScheduleResult,
+    ContextScheduler,
+)
 from src.services.report_gen import ReportGenerator
 from src.services.sqlite_store import SQLiteStore
 from src.utils.text_tools import parse_week_label, get_month_date_range
@@ -95,6 +99,16 @@ def build_file_context(scan_result: ScanResult) -> str:
     return "\n\n---\n\n".join(parts) if parts else "无文件证据"
 
 
+def _print_context_scheduler_warning(context_result: ContextScheduleResult) -> None:
+    """打印上下文调度降级警告。"""
+    if not context_result.error:
+        return
+
+    # 调度器 fallback 仍允许报表继续生成，但必须让操作者看到上下文不完整。
+    console.print(f"[yellow]![/yellow] 文件上下文构建降级: {context_result.error}\n")
+    logger.warning("文件上下文构建降级: %s", context_result.error)
+
+
 def get_user_input() -> str:
     """获取用户交互输入"""
     console.print("\n[bold cyan]请描述今日工作内容:[/bold cyan]")
@@ -118,27 +132,38 @@ def generate_daily_report(args: argparse.Namespace) -> None:
     console.print("\n[bold green]===== 审计日报生成器 v5.0 =====[/bold green]\n")
 
     # 初始化服务
-    scanner = FileScanner()
+    scheduler = ContextScheduler()
     store = SQLiteStore()
     report_gen = ReportGenerator()
     llm_client = LLMClient()
 
-    # 1. 扫描文件
+    # 1. 构建文件上下文
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
         console=console,
     ) as progress:
-        task = progress.add_task("扫描今日修改的文件...", total=None)
-        scan_result = scanner.scan_today_files()
+        task = progress.add_task("构建今日文件上下文...", total=None)
+        today = date.today()
+        # scan 路径统一交给调度器，避免 CLI 继续散落 scanner/parser 细节。
+        context_result = scheduler.build_context(
+            ContextScheduleRequest(
+                report_mode="daily",
+                source="scan",
+                start_date=today - timedelta(days=1),
+                end_date=today,
+            )
+        )
         progress.update(task, completed=True)
 
-    console.print(
-        f"[green]✓[/green] 扫描完成: {scan_result.success_count}/{scan_result.total_files} 个文件\n"
-    )
+    _print_context_scheduler_warning(context_result)
+    if context_result.scan_result is not None:
+        scan_result = context_result.scan_result
+        console.print(
+            f"[green]✓[/green] 扫描完成: {scan_result.success_count}/{scan_result.total_files} 个文件\n"
+        )
 
-    # 构建文件上下文
-    file_context = build_file_context(scan_result)
+    file_context = context_result.file_context
 
     # 2. 读取昨日计划
     yesterday_plan = store.get_yesterday_plan()
@@ -240,23 +265,32 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
             )
 
         case "scan":
-            # 扫描文件
-            scanner = FileScanner()
+            # scan 路径统一交给调度器，周报 CLI 只负责传入周期边界。
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 console=console,
             ) as progress:
                 task = progress.add_task(
-                    f"扫描 {monday} ~ {sunday} 文件...", total=None
+                    f"构建 {monday} ~ {sunday} 文件上下文...", total=None
                 )
-                scan_result = scanner.scan_files(monday, sunday, summary_mode=True)
+                context_result = ContextScheduler().build_context(
+                    ContextScheduleRequest(
+                        report_mode="weekly",
+                        source="scan",
+                        start_date=monday,
+                        end_date=sunday,
+                    )
+                )
                 progress.update(task, completed=True)
 
-            console.print(
-                f"[green]✓[/green] 扫描完成: {scan_result.success_count}/{scan_result.total_files} 个文件\n"
-            )
-            file_context = build_file_context(scan_result)
+            _print_context_scheduler_warning(context_result)
+            if context_result.scan_result is not None:
+                scan_result = context_result.scan_result
+                console.print(
+                    f"[green]✓[/green] 扫描完成: {scan_result.success_count}/{scan_result.total_files} 个文件\n"
+                )
+            file_context = context_result.file_context
 
     # 用户补充输入
     if args.input:
@@ -340,24 +374,32 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
             )
 
         case "scan":
-            scanner = FileScanner()
+            # scan 路径统一交给调度器，月报 CLI 只负责传入月份边界。
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
                 console=console,
             ) as progress:
                 task = progress.add_task(
-                    f"扫描 {start_date} ~ {end_date} 文件...", total=None
+                    f"构建 {start_date} ~ {end_date} 文件上下文...", total=None
                 )
-                scan_result = scanner.scan_files(
-                    start_date, end_date, summary_mode=True
+                context_result = ContextScheduler().build_context(
+                    ContextScheduleRequest(
+                        report_mode="monthly",
+                        source="scan",
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
                 )
                 progress.update(task, completed=True)
 
-            console.print(
-                f"[green]✓[/green] 扫描完成: {scan_result.success_count}/{scan_result.total_files} 个文件\n"
-            )
-            file_context = build_file_context(scan_result)
+            _print_context_scheduler_warning(context_result)
+            if context_result.scan_result is not None:
+                scan_result = context_result.scan_result
+                console.print(
+                    f"[green]✓[/green] 扫描完成: {scan_result.success_count}/{scan_result.total_files} 个文件\n"
+                )
+            file_context = context_result.file_context
 
     # 用户补充输入
     if args.input:

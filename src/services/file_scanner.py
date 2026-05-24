@@ -164,7 +164,11 @@ class FileScanner:
             with metrics.measure_stage("aggregation"):
                 pass
             run_metrics = metrics.finish()
-            self.scan_index_store.save_scan_run_metrics(run_metrics=run_metrics)
+            run_id = self.scan_index_store.save_scan_run_metrics(
+                run_metrics=run_metrics
+            )
+            # 后续 context run 必须绑定本次扫描，而不能再从 SQLite 读取 latest。
+            result = result.model_copy(update={"scan_run_id": run_id})
             logger.info(run_metrics.to_summary_line())
             return result
 
@@ -327,7 +331,9 @@ class FileScanner:
             error_count=result.error_count,
         )
         run_metrics = metrics.finish()
-        self.scan_index_store.save_scan_run_metrics(run_metrics=run_metrics)
+        run_id = self.scan_index_store.save_scan_run_metrics(run_metrics=run_metrics)
+        # 显式随结果返回 run_id，避免多个 CLI run 共享 SQLite 时审计串号。
+        result = result.model_copy(update={"scan_run_id": run_id})
         logger.info(run_metrics.to_summary_line())
 
         return result

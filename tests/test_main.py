@@ -1,11 +1,14 @@
 """Smoke tests for CLI entrypoints in main.py."""
 
 from argparse import Namespace
+from datetime import date as real_date
 from pathlib import Path
 
 import main
 from src.core.healthcheck import HealthCheckResult
 from src.models.schemas import DailyReportData, MonthlyReportData, ScanResult, WeeklyReportData
+from src.services.context_compressor import CompressedContext
+from src.services.context_scheduler import ContextScheduleResult
 
 
 class DummyProgress:
@@ -36,13 +39,49 @@ def _patch_progress(monkeypatch) -> None:
     monkeypatch.setattr(main, "Progress", lambda *args, **kwargs: DummyProgress())
 
 
-def test_generate_daily_report_uses_sqlite_store(monkeypatch):
+def _schedule_result(
+    file_context: str,
+    *,
+    include_scan_result: bool = True,
+    error: str | None = None,
+) -> ContextScheduleResult:
+    compressed = CompressedContext.empty()
+    compressed.content = file_context
+    compressed.output_chars = len(file_context)
+    return ContextScheduleResult(
+        file_context=file_context,
+        compressed_context=compressed,
+        scan_result=ScanResult(total_files=1, success_count=1, error_count=0, contexts=[])
+        if include_scan_result
+        else None,
+        context_run_id=1,
+        decisions=[],
+        error=error,
+    )
+
+
+def test_generate_daily_report_uses_context_scheduler(monkeypatch):
     calls: list[tuple[str, object]] = []
 
-    class StubFileScanner:
-        def scan_today_files(self) -> ScanResult:
-            calls.append(("scan_today_files", None))
-            return ScanResult(total_files=0, success_count=0, error_count=0, contexts=[])
+    class FixedDate(real_date):
+        @classmethod
+        def today(cls) -> real_date:
+            return real_date(2026, 5, 25)
+
+    class StubContextScheduler:
+        def build_context(self, request) -> ContextScheduleResult:
+            calls.append(
+                (
+                    "build_context",
+                    (
+                        request.report_mode,
+                        request.source,
+                        request.start_date.isoformat(),
+                        request.end_date.isoformat(),
+                    ),
+                )
+            )
+            return _schedule_result("scheduler daily context")
 
     class StubSQLiteStore:
         def __init__(self) -> None:
@@ -67,7 +106,7 @@ def test_generate_daily_report_uses_sqlite_store(monkeypatch):
         def generate_report(
             self, user_input: str, file_context: str, yesterday_plan: str
         ) -> DailyReportData:
-            calls.append(("generate_report", yesterday_plan))
+            calls.append(("generate_report", (file_context, yesterday_plan)))
             return DailyReportData(
                 date="2026-02-03",
                 completed_work="完成日报",
@@ -77,7 +116,8 @@ def test_generate_daily_report_uses_sqlite_store(monkeypatch):
 
     printed = _patch_console(monkeypatch)
     _patch_progress(monkeypatch)
-    monkeypatch.setattr(main, "FileScanner", StubFileScanner)
+    monkeypatch.setattr(main, "date", FixedDate)
+    monkeypatch.setattr(main, "ContextScheduler", StubContextScheduler)
     monkeypatch.setattr(main, "SQLiteStore", StubSQLiteStore)
     monkeypatch.setattr(main, "ReportGenerator", StubReportGenerator)
     monkeypatch.setattr(main, "LLMClient", StubLLMClient)
@@ -89,14 +129,82 @@ def test_generate_daily_report_uses_sqlite_store(monkeypatch):
 
     assert [name for name, _ in calls] == [
         "init",
-        "scan_today_files",
+        "build_context",
         "get_yesterday_plan",
         "generate_report",
         "render_markdown",
         "save_report",
         "save_markdown",
     ]
+    assert ("build_context", ("daily", "scan", "2026-05-24", "2026-05-25")) in calls
+    assert ("generate_report", ("scheduler daily context", "昨日计划")) in calls
     assert any("日报预览" in text for text in printed)
+
+
+def test_generate_daily_report_warns_when_context_scheduler_falls_back(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class StubLogger:
+        def warning(self, message: str, *args) -> None:
+            calls.append(("logger_warning", message % args))
+
+    class StubContextScheduler:
+        def build_context(self, request) -> ContextScheduleResult:
+            calls.append(("build_context", request.report_mode))
+            return _schedule_result(
+                "fallback context",
+                include_scan_result=False,
+                error="scheduler failed",
+            )
+
+    class StubSQLiteStore:
+        def __init__(self) -> None:
+            calls.append(("init", None))
+
+        def get_yesterday_plan(self) -> str:
+            calls.append(("get_yesterday_plan", None))
+            return ""
+
+        def save_report(self, report: DailyReportData) -> None:
+            calls.append(("save_report", report.date))
+
+    class StubReportGenerator:
+        def render_markdown(self, report: DailyReportData) -> str:
+            calls.append(("render_markdown", report.date))
+            return "daily markdown"
+
+        def save_markdown(self, markdown: str, report_date: str) -> None:
+            calls.append(("save_markdown", report_date))
+
+    class StubLLMClient:
+        def generate_report(
+            self, user_input: str, file_context: str, yesterday_plan: str
+        ) -> DailyReportData:
+            calls.append(("generate_report", file_context))
+            return DailyReportData(
+                date="2026-02-04",
+                completed_work="fallback 后继续生成",
+                work_summary="fallback 摘要",
+                next_plan="fallback 后续",
+            )
+
+    printed = _patch_console(monkeypatch)
+    _patch_progress(monkeypatch)
+    monkeypatch.setattr(main, "logger", StubLogger())
+    monkeypatch.setattr(main, "ContextScheduler", StubContextScheduler)
+    monkeypatch.setattr(main, "SQLiteStore", StubSQLiteStore)
+    monkeypatch.setattr(main, "ReportGenerator", StubReportGenerator)
+    monkeypatch.setattr(main, "LLMClient", StubLLMClient)
+    monkeypatch.setattr(main, "Markdown", lambda text: text)
+
+    main.generate_daily_report(
+        Namespace(input="今天工作", no_save=False, date=None)
+    )
+
+    assert any("文件上下文构建降级" in text for text in printed)
+    assert any("scheduler failed" in text for text in printed)
+    assert ("logger_warning", "文件上下文构建降级: scheduler failed") in calls
+    assert ("generate_report", "fallback context") in calls
 
 
 def test_generate_weekly_report_db_uses_sqlite_store(monkeypatch):
@@ -175,6 +283,90 @@ def test_generate_weekly_report_db_uses_sqlite_store(monkeypatch):
     assert any("周报预览" in text for text in printed)
 
 
+def test_generate_weekly_report_scan_uses_context_scheduler(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class StubContextScheduler:
+        def build_context(self, request) -> ContextScheduleResult:
+            calls.append(
+                (
+                    "build_context",
+                    (
+                        request.report_mode,
+                        request.source,
+                        request.start_date.isoformat(),
+                        request.end_date.isoformat(),
+                    ),
+                )
+            )
+            return _schedule_result("scheduler weekly context")
+
+    class StubSQLiteStore:
+        def __init__(self) -> None:
+            calls.append(("init", None))
+
+        def save_weekly_report(self, report: WeeklyReportData) -> None:
+            calls.append(("save_weekly_report", report.week_label))
+
+    class StubReportGenerator:
+        def render_weekly_markdown(self, report: WeeklyReportData) -> str:
+            calls.append(("render_weekly_markdown", report.week_label))
+            return "weekly markdown"
+
+        def save_weekly_markdown(self, markdown: str, year: int, week: int) -> None:
+            calls.append(("save_weekly_markdown", (year, week)))
+
+    class StubLLMClient:
+        def generate_weekly_report(
+            self,
+            reports,
+            file_context: str,
+            year: int,
+            week: int,
+            missing_days: list[str],
+            data_source: str,
+        ) -> WeeklyReportData:
+            calls.append(("generate_weekly_report", file_context))
+            return WeeklyReportData(
+                week_label=f"{year}-W{week:02d}",
+                date_range="2026-05-11 ~ 2026-05-17",
+                completed_work="完成周报",
+                self_growth="自我成长",
+                improvement_actions="改善措施",
+                work_summary="周报总结",
+                next_plan="下周计划",
+                support_needed="需要支持",
+                other_notes="其他说明",
+            )
+
+    printed = _patch_console(monkeypatch)
+    _patch_progress(monkeypatch)
+    monkeypatch.setattr(main, "ContextScheduler", StubContextScheduler)
+    monkeypatch.setattr(main, "SQLiteStore", StubSQLiteStore)
+    monkeypatch.setattr(main, "ReportGenerator", StubReportGenerator)
+    monkeypatch.setattr(main, "LLMClient", StubLLMClient)
+    monkeypatch.setattr(main, "Markdown", lambda text: text)
+
+    main.generate_weekly_report_cmd(
+        Namespace(
+            week="2026-W20",
+            source="scan",
+            input="用户补充内容",
+            no_save=False,
+        )
+    )
+
+    assert (
+        "build_context",
+        ("weekly", "scan", "2026-05-11", "2026-05-17"),
+    ) in calls
+    assert (
+        "generate_weekly_report",
+        "scheduler weekly context\n\n---\n\n用户补充: 用户补充内容",
+    ) in calls
+    assert any("周报预览" in text for text in printed)
+
+
 def test_generate_monthly_report_db_uses_sqlite_store(monkeypatch):
     calls: list[tuple[str, object]] = []
 
@@ -243,6 +435,85 @@ def test_generate_monthly_report_db_uses_sqlite_store(monkeypatch):
         "save_monthly_report",
         "save_monthly_markdown",
     ]
+    assert any("月报预览" in text for text in printed)
+
+
+def test_generate_monthly_report_scan_uses_context_scheduler(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class StubContextScheduler:
+        def build_context(self, request) -> ContextScheduleResult:
+            calls.append(
+                (
+                    "build_context",
+                    (
+                        request.report_mode,
+                        request.source,
+                        request.start_date.isoformat(),
+                        request.end_date.isoformat(),
+                    ),
+                )
+            )
+            return _schedule_result("scheduler monthly context")
+
+    class StubSQLiteStore:
+        def __init__(self) -> None:
+            calls.append(("init", None))
+
+        def save_monthly_report(self, report: MonthlyReportData) -> None:
+            calls.append(("save_monthly_report", report.year_month))
+
+    class StubReportGenerator:
+        def render_monthly_markdown(self, report: MonthlyReportData) -> str:
+            calls.append(("render_monthly_markdown", report.year_month))
+            return "monthly markdown"
+
+        def save_monthly_markdown(self, markdown: str, year_month: str) -> None:
+            calls.append(("save_monthly_markdown", year_month))
+
+    class StubLLMClient:
+        def generate_monthly_report(
+            self,
+            reports,
+            file_context: str,
+            year_month: str,
+            missing_days: list[str],
+            data_source: str,
+        ) -> MonthlyReportData:
+            calls.append(("generate_monthly_report", file_context))
+            return MonthlyReportData(
+                year_month=year_month,
+                overview="月报概览",
+                completed_work="完成月报",
+                work_summary="月报总结",
+                next_plan="下月计划",
+            )
+
+    printed = _patch_console(monkeypatch)
+    _patch_progress(monkeypatch)
+    monkeypatch.setattr(main, "ContextScheduler", StubContextScheduler)
+    monkeypatch.setattr(main, "SQLiteStore", StubSQLiteStore)
+    monkeypatch.setattr(main, "ReportGenerator", StubReportGenerator)
+    monkeypatch.setattr(main, "LLMClient", StubLLMClient)
+    monkeypatch.setattr(main, "Markdown", lambda text: text)
+
+    main.generate_monthly_report_cmd(
+        Namespace(
+            month="2026-05",
+            source="scan",
+            input="月报补充内容",
+            no_save=False,
+        )
+    )
+
+    assert (
+        "build_context",
+        ("monthly", "scan", "2026-05-01", "2026-05-31"),
+    ) in calls
+    assert (
+        "generate_monthly_report",
+        "scheduler monthly context\n\n---\n\n用户补充: 月报补充内容",
+    ) in calls
     assert any("月报预览" in text for text in printed)
 
 
