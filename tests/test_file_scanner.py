@@ -129,7 +129,11 @@ def test_scan_files_empty_range_clears_inventory_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """空扫描也应覆盖 inventory 快照，避免沿用上一轮发现结果。"""
-    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
     sample = scanner.work_dir / "report.txt"
     sample.write_text("hello", encoding="utf-8")
     discovered = [_build_discovered_file(sample, "mtime_ns=1:size=5")]
@@ -458,7 +462,11 @@ def test_scan_files_records_timeout_and_continues(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """单文件超时应计入错误并继续处理其他文件。"""
-    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
     (scanner.work_dir / "fast.txt").write_text("fast", encoding="utf-8")
     (scanner.work_dir / "slow.txt").write_text("slow", encoding="utf-8")
 
@@ -502,7 +510,11 @@ def test_scan_files_delegates_bootstrap_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """scan_files 应把启动阶段的文件发现委托给 FileDiscoveryService。"""
-    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
     expected = [scanner.work_dir / "delegated.txt"]
     expected[0].write_text("delegated", encoding="utf-8")
     calls: list[tuple[date, date]] = []
@@ -540,7 +552,11 @@ def test_scan_files_counts_cached_and_uncached_contexts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """存在 cached 与 uncached 候选时，两类上下文都应进入结果并落库指标。"""
-    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
     cached_file = scanner.work_dir / "cached.txt"
     uncached_file = scanner.work_dir / "uncached.txt"
     cached_file.write_text("cached", encoding="utf-8")
@@ -709,7 +725,11 @@ def test_scan_files_reparses_when_source_version_changes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """source_version 变化后，即使 file_identity 不变也必须重解析。"""
-    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
     sample = scanner.work_dir / "report.txt"
     sample.write_text("new content", encoding="utf-8")
     file_identity = f"bootstrap:{str(sample.resolve()).lower()}"
@@ -787,7 +807,11 @@ def test_scan_files_writes_error_cache_when_parser_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """解析器抛异常时应留下可复用的 error cache，而不是只记运行时日志。"""
-    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
     sample = scanner.work_dir / "broken.txt"
     sample.write_text("broken", encoding="utf-8")
     discovered = [_build_discovered_file(sample, "mtime_ns=3:size=6")]
@@ -830,7 +854,11 @@ def test_scan_files_reparses_when_only_error_cache_exists_for_same_source_versio
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """同版本只有 error cache 时，下一次扫描仍应重解析并用 success 覆盖。"""
-    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
     sample = scanner.work_dir / "retry.txt"
     sample.write_text("retry", encoding="utf-8")
     discovered = [_build_discovered_file(sample, "mtime_ns=4:size=5")]
@@ -898,3 +926,124 @@ def test_scan_files_reparses_when_only_error_cache_exists_for_same_source_versio
             "parse_error": "",
         }
     )
+
+
+def test_scan_files_uses_direct_parse_for_text_like_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """direct 模式下 text-like 文件不应进入 subprocess 路径。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".md"], "worker_lane_mode": "direct"},
+    )
+    sample = scanner.work_dir / "direct.md"
+    sample.write_text("direct content", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=14")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    def fail_subprocess(file_path: Path, limits: dict):
+        raise AssertionError("text-like file should not use subprocess")
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fail_subprocess)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.total_files == 1
+    assert result.success_count == 1
+    assert result.contexts[0].content == "direct content"
+    assert [detail.cache_miss_reason for detail in scanner.last_reparse_details] == [
+        "new_file"
+    ]
+
+
+def test_scan_files_keeps_subprocess_path_for_pdf_in_direct_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """direct 模式只覆盖 text-like 文件，PDF 仍走 timeout/subprocess 入口。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".pdf"], "worker_lane_mode": "direct"},
+    )
+    sample = scanner.work_dir / "report.pdf"
+    sample.write_text("not a real pdf", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=14")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    subprocess_calls: list[Path] = []
+
+    def fake_subprocess(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        subprocess_calls.append(file_path)
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".pdf",
+            content="pdf parsed through subprocess",
+            error=None,
+        )
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fake_subprocess)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert subprocess_calls == [sample]
+    assert result.success_count == 1
+    assert result.contexts[0].content == "pdf parsed through subprocess"
+
+
+def test_scan_files_records_source_version_changed_reparse_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """source_version 变化时，重解析明细应保留原因和上一版本。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
+    sample = scanner.work_dir / "report.txt"
+    sample.write_text("new content", encoding="utf-8")
+    file_identity = f"bootstrap:{str(sample.resolve()).lower()}"
+    parser_profile_key = scanner.scan_planner.serialize_parser_profile(
+        scanner.scan_planner.build_parser_profile(summary_mode=False)
+    )
+    scanner.scan_index_store.upsert_parse_cache(
+        file_identity=file_identity,
+        parser_profile=parser_profile_key,
+        content_excerpt="old cached content",
+        parse_status="success",
+        parse_error="",
+        source_version="mtime_ns=1:size=11",
+    )
+    discovered = [_build_discovered_file(sample, "mtime_ns=2:size=11")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_extract_content_with_timeout",
+        lambda file_path, limits: file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".txt",
+            content="new parsed content",
+            error=None,
+        ),
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.success_count == 1
+    assert len(scanner.last_reparse_details) == 1
+    detail = scanner.last_reparse_details[0]
+    assert detail.cache_status == "miss"
+    assert detail.cache_miss_reason == "source_version_changed"
+    assert detail.previous_source_version == "mtime_ns=1:size=11"
+    assert detail.parse_status == "success"

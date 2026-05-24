@@ -17,7 +17,7 @@ from ..utils.text_tools import truncate_text
 from .scan_aggregator import ScanAggregator
 from .scan_discovery import DiscoveredFile, FileDiscoveryService
 from .scan_index_store import InventoryItem, ScanIndexStore
-from .scan_metrics import ScanMetricsCollector
+from .scan_metrics import ReparseDetail, ScanMetricsCollector
 from .scan_planner import ScanPlanner
 from .scan_worker_pool import ParserSupervisor
 
@@ -58,6 +58,7 @@ class FileScanner:
                 self.scanner_cfg.get("file_timeout_by_extension", {}) or {}
             ),
         )
+        self.last_reparse_details: list[ReparseDetail] = []
 
     @staticmethod
     def _resolve_project_path(path_value: str | Path) -> Path:
@@ -104,6 +105,7 @@ class FileScanner:
         )
 
         metrics = ScanMetricsCollector.start()
+        self.last_reparse_details = []
 
         # 发现边界只负责找候选文件，不承担解析与汇总逻辑。
         with metrics.measure_stage("discovery"):
@@ -154,13 +156,17 @@ class FileScanner:
                 ]
             )
             inventory_items = self.scan_index_store.query_inventory(start_date, end_date)
-            cache_lookup = {
-                item.file_identity: self.scan_index_store.has_fresh_cache(
+            cache_probes = {
+                item.file_identity: self.scan_index_store.probe_parse_cache(
                     item.file_identity,
                     parser_profile_key,
                     source_version=item.source_version,
                 )
                 for item in inventory_items
+            }
+            cache_lookup = {
+                file_identity: probe.cache_status == "fresh"
+                for file_identity, probe in cache_probes.items()
             }
             planned_candidates = self.scan_planner.plan_candidates(
                 candidates=inventory_items,
@@ -209,8 +215,8 @@ class FileScanner:
             ) as executor:
                 future_to_file = {
                     executor.submit(
-                        self._extract_content_with_duration,
-                        self._item_path(item),
+                        self._extract_uncached_content_with_duration,
+                        item,
                         limits,
                     ): item
                     for item in planned_candidates["uncached"]
@@ -225,6 +231,12 @@ class FileScanner:
                             self._item_extension(inventory_item),
                             duration_ms,
                             context.error,
+                        )
+                        self._record_reparse_detail(
+                            inventory_item,
+                            cache_probes[self._item_identity(inventory_item)],
+                            duration_ms,
+                            context,
                         )
                         self._write_parse_cache(
                             inventory_item,
@@ -255,6 +267,11 @@ class FileScanner:
                             parse_status="error",
                             parse_error=str(e),
                             source_version=self._item_source_version(inventory_item),
+                        )
+                        self._record_reparse_exception(
+                            inventory_item,
+                            cache_probes[self._item_identity(inventory_item)],
+                            str(e),
                         )
                         aggregator.add_exception(file_path, e)
 
@@ -388,6 +405,51 @@ class FileScanner:
             source_version=self._item_source_version(item),
         )
 
+    def _record_reparse_detail(
+        self,
+        item: Path | InventoryItem,
+        cache_probe,
+        duration_ms: int,
+        context: FileContext,
+    ) -> None:
+        """记录单个重解析文件的 cache miss 原因和解析结果。"""
+        self.last_reparse_details.append(
+            ReparseDetail(
+                path=str(self._item_path(item)),
+                extension=self._item_extension(item),
+                file_identity=self._item_identity(item),
+                source_version=self._item_source_version(item),
+                cache_status=cache_probe.cache_status,
+                cache_miss_reason=cache_probe.cache_miss_reason,
+                previous_source_version=cache_probe.previous_source_version,
+                parse_duration_ms=duration_ms,
+                parse_status="error" if context.error else "success",
+                parse_error=context.error or "",
+            )
+        )
+
+    def _record_reparse_exception(
+        self,
+        item: Path | InventoryItem,
+        cache_probe,
+        parse_error: str,
+    ) -> None:
+        """解析入口抛异常时，也要留下 benchmark 可见的重解析明细。"""
+        self.last_reparse_details.append(
+            ReparseDetail(
+                path=str(self._item_path(item)),
+                extension=self._item_extension(item),
+                file_identity=self._item_identity(item),
+                source_version=self._item_source_version(item),
+                cache_status=cache_probe.cache_status,
+                cache_miss_reason=cache_probe.cache_miss_reason,
+                previous_source_version=cache_probe.previous_source_version,
+                parse_duration_ms=0,
+                parse_status="error",
+                parse_error=parse_error,
+            )
+        )
+
     def _extract_content_with_timeout(
         self, file_path: Path, limits: Optional[dict] = None
     ) -> FileContext:
@@ -420,6 +482,44 @@ class FileScanner:
         context = self._extract_content_with_timeout(file_path, limits)
         duration_ms = int(round((perf_counter() - started_at) * 1000))
         return context, max(0, duration_ms)
+
+    def _extract_uncached_content_with_duration(
+        self,
+        item: Path | InventoryItem,
+        limits: Optional[dict] = None,
+    ) -> tuple[FileContext, int]:
+        """解析未缓存文件，并返回本 worker 内部 wall clock 耗时。"""
+        started_at = perf_counter()
+        context = self._extract_uncached_content(
+            self._item_path(item),
+            self._item_extension(item),
+            limits,
+        )
+        duration_ms = int(round((perf_counter() - started_at) * 1000))
+        return context, max(0, duration_ms)
+
+    def _extract_uncached_content(
+        self,
+        file_path: Path,
+        file_type: str,
+        limits: Optional[dict] = None,
+    ) -> FileContext:
+        """根据文件类型选择 direct text lane 或 subprocess timeout lane。"""
+        if self._should_parse_direct(file_type):
+            return self.parser_supervisor.parse_file(
+                file_path=file_path,
+                file_type=file_type,
+                limits=limits or {},
+                direct_parse=self._extract_content,
+            )
+        return self._extract_content_with_timeout(file_path, limits)
+
+    def _should_parse_direct(self, file_type: str) -> bool:
+        """text-like 文件读取受限，direct 模式下避免 Windows spawn 固定开销。"""
+        return (
+            str(self.scanner_cfg.get("worker_lane_mode", "direct")).lower() == "direct"
+            and file_type.lower() in TEXT_FILE_TYPES
+        )
 
     def _run_extract_subprocess(
         self,
