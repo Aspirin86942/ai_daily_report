@@ -1,7 +1,6 @@
 """测试 scanner 性能指标模型。"""
 
 from src.services.scan_metrics import (
-    ExtensionMetrics,
     ReparseDetail,
     ScanMetricsCollector,
     is_timeout_error,
@@ -35,6 +34,25 @@ def test_reparse_detail_serializes_stable_payload():
         "parse_status": "success",
         "parse_error": "",
     }
+
+
+def test_reparse_detail_normalizes_duration_and_none_version():
+    """重解析明细应稳定保留 None，并把负耗时归零。"""
+    detail = ReparseDetail(
+        path="D:\\work\\report.md",
+        extension=".md",
+        file_identity="bootstrap:d:\\work\\report.md",
+        source_version="mtime=2:size=10",
+        cache_status="miss",
+        cache_miss_reason="source_version_changed",
+        previous_source_version=None,
+        parse_duration_ms=-1,
+    )
+
+    payload = detail.to_dict()
+
+    assert payload["parse_duration_ms"] == 0
+    assert payload["previous_source_version"] is None
 
 
 def test_metrics_collector_builds_scan_run_detail():
