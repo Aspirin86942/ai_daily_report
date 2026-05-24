@@ -11,7 +11,11 @@ from src.core.healthcheck import collect_healthcheck
 from src.core.logger import setup_logger
 from src.core.llm import LLMClient
 from src.models.schemas import ScanResult
-from src.services.context_scheduler import ContextScheduleRequest, ContextScheduler
+from src.services.context_scheduler import (
+    ContextScheduleRequest,
+    ContextScheduleResult,
+    ContextScheduler,
+)
 from src.services.report_gen import ReportGenerator
 from src.services.sqlite_store import SQLiteStore
 from src.utils.text_tools import parse_week_label, get_month_date_range
@@ -95,6 +99,16 @@ def build_file_context(scan_result: ScanResult) -> str:
     return "\n\n---\n\n".join(parts) if parts else "无文件证据"
 
 
+def _print_context_scheduler_warning(context_result: ContextScheduleResult) -> None:
+    """打印上下文调度降级警告。"""
+    if not context_result.error:
+        return
+
+    # 调度器 fallback 仍允许报表继续生成，但必须让操作者看到上下文不完整。
+    console.print(f"[yellow]![/yellow] 文件上下文构建降级: {context_result.error}\n")
+    logger.warning("文件上下文构建降级: %s", context_result.error)
+
+
 def get_user_input() -> str:
     """获取用户交互输入"""
     console.print("\n[bold cyan]请描述今日工作内容:[/bold cyan]")
@@ -142,6 +156,7 @@ def generate_daily_report(args: argparse.Namespace) -> None:
         )
         progress.update(task, completed=True)
 
+    _print_context_scheduler_warning(context_result)
     if context_result.scan_result is not None:
         scan_result = context_result.scan_result
         console.print(
@@ -269,6 +284,7 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
                 )
                 progress.update(task, completed=True)
 
+            _print_context_scheduler_warning(context_result)
             if context_result.scan_result is not None:
                 scan_result = context_result.scan_result
                 console.print(
@@ -377,6 +393,7 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
                 )
                 progress.update(task, completed=True)
 
+            _print_context_scheduler_warning(context_result)
             if context_result.scan_result is not None:
                 scan_result = context_result.scan_result
                 console.print(
