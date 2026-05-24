@@ -70,6 +70,7 @@ class ReparseDetail:
     parse_status: str = "success"
     parse_error: str = ""
     parser_backend: str = ""
+    worker_lane: str = ""
     truncated: bool = False
 
     def to_dict(self) -> dict[str, int | str | bool | None]:
@@ -86,6 +87,7 @@ class ReparseDetail:
             "parse_status": self.parse_status,
             "parse_error": self.parse_error,
             "parser_backend": self.parser_backend,
+            "worker_lane": self.worker_lane,
             "truncated": bool(self.truncated),
         }
 

@@ -28,6 +28,17 @@ def test_build_parser_profile_uses_summary_limits_when_requested():
         "excel_max_rows": 10,
         "pdf_max_pages": 2,
         "text_max_chars": 2000,
+        "office_parser_backend": "office_v1",
+        "pdf_parser_backend": "pdf_text_v1",
+        "excel_max_sheets": 2,
+        "excel_max_columns": 12,
+        "docx_max_paragraphs": 80,
+        "docx_max_tables": 8,
+        "docx_table_max_rows": 20,
+        "docx_table_max_cols": 8,
+        "pptx_max_slides": 15,
+        "document_excerpt_max_chars": 2000,
+        "pptx_include_notes": True,
         "total_max_chars": 50000,
         "summary_mode": True,
         "parser_profile_version": "v7",
@@ -56,6 +67,76 @@ def test_build_parser_profile_includes_light_text_parser_defaults():
     assert profile["direct_text_read_bytes"] == 262144
     assert profile["log_tail_read_bytes"] == 262144
     assert profile["text_excerpt_max_chars"] == 6000
+
+
+def test_build_parser_profile_includes_document_parser_defaults():
+    """Office/PDF parser 预算必须进入 profile，避免旧缓存错误复用。"""
+    planner = ScanPlanner(
+        scanner_cfg={
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+            "total_max_chars": 50000,
+            "parser_profile_version": "v9",
+        }
+    )
+
+    profile = planner.build_parser_profile(summary_mode=False)
+
+    assert profile["office_parser_backend"] == "office_v1"
+    assert profile["pdf_parser_backend"] == "pdf_text_v1"
+    assert profile["excel_max_sheets"] == 5
+    assert profile["excel_max_columns"] == 20
+    assert profile["docx_max_paragraphs"] == 200
+    assert profile["docx_max_tables"] == 20
+    assert profile["docx_table_max_rows"] == 50
+    assert profile["docx_table_max_cols"] == 12
+    assert profile["pptx_max_slides"] == 50
+    assert profile["pptx_include_notes"] is True
+    assert profile["document_excerpt_max_chars"] == 6000
+
+
+def test_build_parser_profile_uses_summary_document_limits():
+    """summary mode 应使用 Office/PDF 的缩减预算。"""
+    planner = ScanPlanner(
+        scanner_cfg={
+            "excel_max_rows": 50,
+            "summary_excel_max_rows": 10,
+            "excel_max_sheets": 6,
+            "summary_excel_max_sheets": 2,
+            "excel_max_columns": 20,
+            "summary_excel_max_columns": 8,
+            "pdf_max_pages": 5,
+            "summary_pdf_max_pages": 2,
+            "text_max_chars": 6000,
+            "summary_text_max_chars": 2000,
+            "docx_max_paragraphs": 200,
+            "summary_docx_max_paragraphs": 80,
+            "docx_max_tables": 20,
+            "summary_docx_max_tables": 5,
+            "docx_table_max_rows": 50,
+            "summary_docx_table_max_rows": 10,
+            "docx_table_max_cols": 12,
+            "summary_docx_table_max_cols": 6,
+            "pptx_max_slides": 50,
+            "summary_pptx_max_slides": 12,
+            "document_excerpt_max_chars": 6000,
+            "summary_document_excerpt_max_chars": 2000,
+        }
+    )
+
+    profile = planner.build_parser_profile(summary_mode=True)
+
+    assert profile["excel_max_rows"] == 10
+    assert profile["excel_max_sheets"] == 2
+    assert profile["excel_max_columns"] == 8
+    assert profile["pdf_max_pages"] == 2
+    assert profile["docx_max_paragraphs"] == 80
+    assert profile["docx_max_tables"] == 5
+    assert profile["docx_table_max_rows"] == 10
+    assert profile["docx_table_max_cols"] == 6
+    assert profile["pptx_max_slides"] == 12
+    assert profile["document_excerpt_max_chars"] == 2000
 
 
 def test_build_parser_profile_uses_legacy_direct_text_max_bytes_as_read_budget():

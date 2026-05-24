@@ -24,6 +24,10 @@ from .light_text_parser import (
     build_light_text_budget,
     parse_text_like_file,
 )
+from .document_parser import (
+    DocumentParserOptions,
+    parse_document_file,
+)
 from .scan_metrics import ReparseDetail, ScanMetricsCollector
 from .scan_planner import ScanPlanner
 from .scan_worker_pool import ParserSupervisor
@@ -31,6 +35,7 @@ from .scan_worker_pool import ParserSupervisor
 logger = setup_logger()
 
 TEXT_FILE_TYPES = {".txt", ".md", ".csv", ".json", ".log"}
+DOCUMENT_FILE_TYPES = {".docx", ".xlsx", ".pptx", ".pdf"}
 NOT_PARSED_PARSER_BACKEND = "not_parsed"
 
 
@@ -45,6 +50,27 @@ def _extract_content_worker(
     scanner.scanner_cfg = scanner_cfg
     scanner.work_dir = Path(".")
     context = scanner._extract_content(Path(file_path_str), limits)
+    result_queue.put(context.model_dump())
+
+
+def _extract_document_content_worker(
+    file_path_str: str,
+    file_type: str,
+    limits: dict,
+    scanner_cfg: dict,
+    result_queue: mp.Queue,
+) -> None:
+    """子进程解析 Office/PDF 文件并返回可序列化结果。"""
+    context = parse_document_file(
+        file_path=Path(file_path_str),
+        file_type=file_type,
+        limits=limits,
+        options=DocumentParserOptions(
+            office_parser_backend=scanner_cfg.get("office_parser_backend", "office_v1"),
+            pdf_parser_backend=scanner_cfg.get("pdf_parser_backend", "pdf_text_v1"),
+            include_pptx_notes=bool(scanner_cfg.get("pptx_include_notes", True)),
+        ),
+    )
     result_queue.put(context.model_dump())
 
 
@@ -187,9 +213,9 @@ class FileScanner:
                 reparsed_count=len(planned_candidates["uncached"]),
             )
             limits = {
-                "excel_max_rows": parser_profile["excel_max_rows"],
-                "pdf_max_pages": parser_profile["pdf_max_pages"],
-                "text_max_chars": parser_profile["text_max_chars"],
+                key: value
+                for key, value in parser_profile.items()
+                if key not in {"total_max_chars", "summary_mode"}
             }
             cached_contexts = self._get_cached_contexts(
                 planned_candidates["cached"],
@@ -438,6 +464,10 @@ class FileScanner:
                 parse_status="error" if context.error else "success",
                 parse_error=context.error or "",
                 parser_backend=context.parser_backend or "subprocess",
+                worker_lane=self._infer_worker_lane(
+                    self._item_extension(item),
+                    context,
+                ),
                 truncated=context.truncated,
             )
         )
@@ -462,6 +492,7 @@ class FileScanner:
                 parse_status="error",
                 parse_error=parse_error,
                 parser_backend=NOT_PARSED_PARSER_BACKEND,
+                worker_lane="not_parsed",
                 truncated=False,
             )
         )
@@ -522,18 +553,24 @@ class FileScanner:
     ) -> FileContext:
         """根据文件类型选择 light text parser 或 subprocess timeout lane。"""
         effective_limits = limits or {}
+        too_large_context = self._build_file_too_large_context(
+            file_path,
+            file_type,
+        )
+        if too_large_context is not None:
+            return too_large_context
+
         if self._should_parse_direct(file_type):
-            too_large_context = self._build_file_too_large_context(
-                file_path,
-                file_type,
-            )
-            if too_large_context is not None:
-                return too_large_context
             return parse_text_like_file(
                 file_path=file_path,
                 file_type=file_type,
                 limits=effective_limits,
                 options=self._build_light_text_options(effective_limits),
+            )
+        if self._should_parse_document_direct(file_type):
+            return self._extract_document_content_with_timeout(
+                file_path,
+                effective_limits,
             )
         return self._extract_content_with_timeout(file_path, effective_limits)
 
@@ -542,6 +579,12 @@ class FileScanner:
         if str(self.scanner_cfg.get("worker_lane_mode", "direct")).lower() != "direct":
             return False
         return file_type.lower() in TEXT_FILE_TYPES
+
+    def _should_parse_document_direct(self, file_type: str) -> bool:
+        """Office/PDF 使用正式 backend，但仍通过子进程保留 hard timeout。"""
+        if str(self.scanner_cfg.get("worker_lane_mode", "direct")).lower() != "direct":
+            return False
+        return file_type.lower() in DOCUMENT_FILE_TYPES
 
     def _build_light_text_options(self, limits: dict) -> LightTextParserOptions:
         """把 scanner 配置转换为 light parser 的有界读取选项。"""
@@ -559,6 +602,20 @@ class FileScanner:
             read_tail_bytes=light_text_budget.log_tail_read_bytes,
             max_output_chars=light_text_budget.text_excerpt_max_chars,
             parser_backend_version=LIGHT_TEXT_PARSER_BACKEND,
+        )
+
+    def _build_document_parser_options(self) -> DocumentParserOptions:
+        """把 scanner 配置转换为 document parser 选项。"""
+        return DocumentParserOptions(
+            office_parser_backend=self.scanner_cfg.get(
+                "office_parser_backend",
+                "office_v1",
+            ),
+            pdf_parser_backend=self.scanner_cfg.get(
+                "pdf_parser_backend",
+                "pdf_text_v1",
+            ),
+            include_pptx_notes=bool(self.scanner_cfg.get("pptx_include_notes", True)),
         )
 
     def _warn_invalid_light_text_budget(
@@ -648,6 +705,74 @@ class FileScanner:
                 False,
             )
 
+    def _extract_document_content_with_timeout(
+        self,
+        file_path: Path,
+        limits: Optional[dict] = None,
+    ) -> FileContext:
+        """带 timeout 的 Office/PDF 正式 backend 入口。"""
+        file_type = file_path.suffix.lower()
+        timeout_seconds = self.parser_supervisor.resolve_timeout(file_type)
+        context, timed_out = self._run_extract_document_subprocess(
+            file_path,
+            limits,
+            timeout_seconds,
+        )
+        if timed_out:
+            logger.warning(
+                "解析文件超时: %s (%ss)",
+                file_path,
+                f"{timeout_seconds:g}",
+            )
+            return self.parser_supervisor.handle_worker_timeout(file_path, file_type)
+        if context is None:
+            return self.parser_supervisor.handle_missing_result(file_path, file_type)
+        return context
+
+    def _run_extract_document_subprocess(
+        self,
+        file_path: Path,
+        limits: Optional[dict],
+        timeout_seconds: float,
+    ) -> tuple[Optional[FileContext], bool]:
+        """在独立子进程中运行 Office/PDF backend，避免坏文件拖死主进程。"""
+        ctx = mp.get_context("spawn")
+        result_queue: mp.Queue = ctx.Queue(maxsize=1)
+        process = ctx.Process(
+            target=_extract_document_content_worker,
+            args=(
+                str(file_path),
+                file_path.suffix.lower(),
+                limits or {},
+                dict(self.scanner_cfg),
+                result_queue,
+            ),
+        )
+        process.start()
+        process.join(timeout_seconds)
+
+        if process.is_alive():
+            process.terminate()
+            process.join()
+            return None, True
+
+        try:
+            payload = result_queue.get_nowait()
+        except Exception:
+            return None, False
+
+        try:
+            return FileContext(**payload), False
+        except Exception as exc:
+            logger.warning("子进程返回无效结果 %s: %s", file_path, exc)
+            return (
+                self.parser_supervisor.handle_invalid_payload(
+                    file_path,
+                    file_path.suffix.lower(),
+                ),
+                False,
+            )
+
     def _resolve_file_timeout(self, file_type: str) -> float:
         """兼容旧调用点，内部转发给 supervisor。"""
         return self.parser_supervisor.resolve_timeout(file_type)
@@ -693,16 +818,17 @@ class FileScanner:
             if too_large_context is not None:
                 return too_large_context
 
-            if file_type in [".xlsx", ".xls"]:
+            if file_type in DOCUMENT_FILE_TYPES:
+                return parse_document_file(
+                    file_path=file_path,
+                    file_type=file_type,
+                    limits=limits,
+                    options=self._build_document_parser_options(),
+                )
+            if file_type in [".xls"]:
                 content = self._parse_excel(file_path, limits["excel_max_rows"])
-            elif file_type == ".pdf":
-                content = self._parse_pdf(file_path, limits["pdf_max_pages"])
-            elif file_type == ".pptx":
-                content = self._parse_pptx(file_path)
             elif file_type in TEXT_FILE_TYPES:
                 content = self._parse_text(file_path, limits["text_max_chars"])
-            elif file_type == ".docx":
-                content = self._parse_docx(file_path)
             else:
                 content = ""
 
@@ -721,6 +847,19 @@ class FileScanner:
             return FileContext(
                 file_path=str(file_path), file_type=file_type, content="", error=str(e)
             )
+
+    def _infer_worker_lane(self, file_type: str, context: FileContext) -> str:
+        """区分执行通道和 parser backend，避免 benchmark 把两者混在一起。"""
+        if context.parser_backend == NOT_PARSED_PARSER_BACKEND:
+            return "not_parsed"
+        if str(self.scanner_cfg.get("worker_lane_mode", "direct")).lower() != "direct":
+            return "subprocess"
+        if file_type.lower() in TEXT_FILE_TYPES:
+            return "direct"
+        if file_type.lower() in DOCUMENT_FILE_TYPES:
+            # Office/PDF 虽然是正式 backend，但仍由子进程提供 hard timeout 隔离。
+            return "subprocess"
+        return "subprocess"
 
     def _parse_excel(self, file_path: Path, max_rows: Optional[int] = None) -> str:
         """解析 Excel 文件

@@ -20,6 +20,7 @@ def _make_reparse_detail(
     parser_backend: str,
     truncated: bool,
     path: str = "D:\\work\\report.md",
+    worker_lane: str = "",
 ) -> ReparseDetail:
     return ReparseDetail(
         path=path,
@@ -33,6 +34,7 @@ def _make_reparse_detail(
         parse_status="success",
         parse_error="",
         parser_backend=parser_backend,
+        worker_lane=worker_lane,
         truncated=truncated,
     )
 
@@ -93,6 +95,52 @@ def test_build_parser_backend_summary_preserves_backend_dimensions_and_sorting()
     }
 
 
+def test_build_parser_backend_summary_uses_worker_lane_for_office_pdf_backends():
+    """summary 应用 worker_lane 统计 subprocess，用 backend 展示真实解析器。"""
+    summary = build_parser_backend_summary(
+        [
+            _make_reparse_detail(
+                extension=".docx",
+                parser_backend="office_v1",
+                worker_lane="subprocess",
+                truncated=True,
+                path="D:\\work\\report.docx",
+            ),
+            _make_reparse_detail(
+                extension=".pdf",
+                parser_backend="pdf_text_v1",
+                worker_lane="subprocess",
+                truncated=False,
+                path="D:\\work\\report.pdf",
+            ),
+            _make_reparse_detail(
+                extension=".md",
+                parser_backend=LIGHT_TEXT_PARSER_BACKEND,
+                worker_lane="direct",
+                truncated=False,
+                path="D:\\work\\note.md",
+            ),
+            _make_reparse_detail(
+                extension=".pptx",
+                parser_backend=NOT_PARSED_PARSER_BACKEND,
+                worker_lane="not_parsed",
+                truncated=False,
+                path="D:\\work\\large.pptx",
+            ),
+        ]
+    )
+
+    assert summary["direct_count"] == 1
+    assert summary["subprocess_count"] == 2
+    assert summary["not_parsed_count"] == 1
+    assert summary["truncated_count"] == 1
+    assert summary["by_extension"][".docx"]["office_v1"] == 1
+    assert summary["by_extension"][".docx"]["subprocess"] == 1
+    assert summary["by_extension"][".pdf"]["pdf_text_v1"] == 1
+    assert summary["by_extension"][".pdf"]["subprocess"] == 1
+    assert summary["by_extension"][".pptx"][NOT_PARSED_PARSER_BACKEND] == 1
+
+
 def test_build_benchmark_payload_uses_scan_result_and_metrics():
     """benchmark payload 应组合扫描结果、run detail 和扩展名明细。"""
     scan_result = ScanResult(
@@ -145,6 +193,7 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             parse_status="success",
             parse_error="",
             parser_backend=LIGHT_TEXT_PARSER_BACKEND,
+            worker_lane="direct",
             truncated=True,
         )
     ]
@@ -193,6 +242,7 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             "parse_status": "success",
             "parse_error": "",
             "parser_backend": LIGHT_TEXT_PARSER_BACKEND,
+            "worker_lane": "direct",
             "truncated": True,
         }
     ]

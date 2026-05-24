@@ -65,9 +65,20 @@ def _iter_backend_summary_rows(item: dict[str, int]) -> list[str]:
         and key != TRUNCATED_SUMMARY_KEY
         and count > 0
     )
+    standard_backend_rows = [
+        LIGHT_TEXT_PARSER_BACKEND,
+        NOT_PARSED_PARSER_BACKEND,
+    ]
+    visible_rows = [
+        backend
+        for backend in (*standard_backend_rows, *extra_backends)
+        if item.get(backend, 0) > 0
+    ]
+    if visible_rows:
+        return visible_rows
     return [
         backend
-        for backend in (*SUMMARY_BACKEND_KEYS, *extra_backends)
+        for backend in (SUBPROCESS_PARSER_BACKEND,)
         if item.get(backend, 0) > 0
     ]
 
@@ -85,18 +96,21 @@ def build_parser_backend_summary(
     }
     for detail in reparse_details:
         backend = detail.parser_backend or NOT_PARSED_PARSER_BACKEND
+        worker_lane = _resolve_worker_lane(detail, backend)
         extension = detail.extension
         by_extension = summary["by_extension"].setdefault(
             extension,
             _new_extension_backend_summary(),
         )
-        if backend == SUBPROCESS_PARSER_BACKEND:
+        if worker_lane == SUBPROCESS_PARSER_BACKEND:
             summary["subprocess_count"] += 1
-        elif backend == NOT_PARSED_PARSER_BACKEND:
+            by_extension[SUBPROCESS_PARSER_BACKEND] += 1
+        elif worker_lane == NOT_PARSED_PARSER_BACKEND:
             summary["not_parsed_count"] += 1
         else:
             summary["direct_count"] += 1
-        by_extension[backend] = by_extension.get(backend, 0) + 1
+        if backend != SUBPROCESS_PARSER_BACKEND:
+            by_extension[backend] = by_extension.get(backend, 0) + 1
         if detail.truncated:
             summary["truncated_count"] += 1
             by_extension[TRUNCATED_SUMMARY_KEY] += 1
@@ -106,6 +120,16 @@ def build_parser_backend_summary(
         for extension, item in sorted(summary["by_extension"].items())
     }
     return summary
+
+
+def _resolve_worker_lane(detail: ReparseDetail, backend: str) -> str:
+    """优先使用显式执行通道，兼容旧 reparse detail 的 backend 推断。"""
+    worker_lane = getattr(detail, "worker_lane", "") or ""
+    if worker_lane:
+        return worker_lane
+    if backend in {SUBPROCESS_PARSER_BACKEND, NOT_PARSED_PARSER_BACKEND}:
+        return backend
+    return "direct"
 
 
 def build_benchmark_payload(
