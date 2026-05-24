@@ -109,6 +109,8 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             "parse_duration_ms": 12,
             "parse_status": "success",
             "parse_error": "",
+            "parser_backend": "",
+            "truncated": False,
         }
     ]
 
@@ -162,6 +164,8 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
                 "parse_duration_ms": 12,
                 "parse_status": "success",
                 "parse_error": "",
+                "parser_backend": "",
+                "truncated": False,
             }
         ],
     }
