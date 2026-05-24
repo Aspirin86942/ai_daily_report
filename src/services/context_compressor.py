@@ -197,9 +197,11 @@ class ContextCompressor:
         profile: ContextProfile,
     ) -> CompressedContext:
         """按 decision 顺序和预算渲染 Markdown-like 文件证据上下文。"""
-        if not scan_result.contexts:
+        if not scan_result.contexts and not decisions:
             return CompressedContext.empty()
 
+        # ContextCompressor 是纯压缩层，不能把全局预算或一致性修正泄漏回 scheduler/store。
+        internal_decisions = [replace(decision) for decision in decisions]
         context_by_path = {context.file_path: context for context in scan_result.contexts}
         processed_paths: set[str] = set()
         ordered_decisions: list[ContextDecision] = []
@@ -215,13 +217,14 @@ class ContextCompressor:
             "## 文件证据",
         ]
 
-        for decision in decisions:
+        for decision in internal_decisions:
             context = context_by_path.get(decision.file_path)
             ordered_decisions.append(decision)
             if context is None:
                 self._process_decision_without_context(
                     decision,
-                    omitted_decisions,
+                    parse_issue_lines,
+                    warnings,
                     stats,
                 )
                 continue
@@ -279,15 +282,23 @@ class ContextCompressor:
     def _process_decision_without_context(
         self,
         decision: ContextDecision,
-        omitted_decisions: list[ContextDecision],
+        parse_issue_lines: list[str],
+        warnings: list[str],
         stats: _CompressionStats,
     ) -> None:
         stats.input_chars += decision.input_chars
-        if decision.action == ACTION_OMIT:
-            omitted_decisions.append(decision)
-            stats.omitted_file_count += 1
-        elif decision.action == ACTION_ERROR:
-            stats.error_file_count += 1
+        warning = f"missing context for {decision.file_path}"
+        if warning not in warnings:
+            warnings.append(warning)
+        decision.action = ACTION_ERROR
+        decision.reason = "missing_context"
+        decision.output_chars = 0
+        decision.truncated = False
+        decision.error = warning
+        stats.error_file_count += 1
+        parse_issue_lines.append(
+            f"- {decision.file_path} | reason=missing_context | error={warning}"
+        )
 
     def _process_context_decision(
         self,

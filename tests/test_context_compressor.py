@@ -5,6 +5,7 @@ from pathlib import Path
 from src.models.schemas import FileContext, ScanResult
 from src.services.context_compressor import (
     ACTION_COMPRESS,
+    ACTION_ERROR,
     ACTION_KEEP,
     ACTION_METADATA_ONLY,
     ACTION_OMIT,
@@ -269,3 +270,58 @@ def test_parse_issue_warning_respects_tiny_global_budget() -> None:
     assert compressed.output_chars == len(compressed.content)
     assert len(compressed.content) <= profile.global_context_max_chars
     assert "预算不足" in compressed.content or any("预算不足" in warning for warning in compressed.warnings)
+
+
+def test_compress_does_not_mutate_caller_decisions_when_omitting() -> None:
+    profile = ContextProfile.for_report_mode("weekly")
+    profile = profile.with_budget(global_context_max_chars=1300, per_file_max_chars=500)
+    compressor = ContextCompressor()
+    contexts = [
+        FileContext(file_path="D:/work/a.md", file_type=".md", content="A" * 500, parser_backend="light_text_v1"),
+        FileContext(file_path="D:/work/b.md", file_type=".md", content="B" * 500, parser_backend="light_text_v1"),
+    ]
+    first_decision = _decision("D:/work/a.md", ACTION_KEEP, "small_file_keep", input_chars=500)
+    second_decision = _decision("D:/work/b.md", ACTION_KEEP, "small_file_keep", input_chars=500)
+    scan_result = ScanResult(total_files=2, success_count=2, error_count=0, contexts=contexts)
+
+    compressed = compressor.compress(
+        scan_result=scan_result,
+        decisions=[first_decision, second_decision],
+        profile=profile,
+    )
+
+    assert second_decision.action == ACTION_KEEP
+    assert second_decision.reason == "small_file_keep"
+    assert second_decision.output_chars == 0
+    assert second_decision.truncated is False
+    assert compressed.decisions[1].action == ACTION_OMIT
+    assert compressed.decisions[1].reason == "global_budget_exceeded"
+
+
+def test_compress_reports_missing_context_decision_as_error() -> None:
+    profile = ContextProfile.for_report_mode("weekly")
+    compressor = ContextCompressor()
+    valid_context = FileContext(
+        file_path="D:/work/a.md",
+        file_type=".md",
+        content="A evidence",
+        parser_backend="light_text_v1",
+    )
+    scan_result = ScanResult(total_files=1, success_count=1, error_count=0, contexts=[valid_context])
+
+    compressed = compressor.compress(
+        scan_result=scan_result,
+        decisions=[
+            _decision("D:/work/a.md", ACTION_KEEP, "small_file_keep", input_chars=len(valid_context.content)),
+            _decision("D:/work/missing.md", ACTION_KEEP, "small_file_keep", input_chars=10),
+        ],
+        profile=profile,
+    )
+
+    missing_decision = compressed.decisions[1]
+    assert any("D:/work/missing.md" in warning for warning in compressed.warnings)
+    assert compressed.error_file_count == 1
+    assert missing_decision.action == ACTION_ERROR
+    assert missing_decision.reason == "missing_context"
+    assert "D:/work/missing.md" in compressed.content
+    assert "missing_context" in compressed.content
