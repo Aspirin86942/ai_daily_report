@@ -1007,6 +1007,47 @@ def test_direct_text_lane_uses_light_parser_for_large_text_file(
     assert scanner.last_reparse_details[0].truncated is True
 
 
+def test_direct_text_lane_enforces_max_file_size_before_light_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """direct text-like 解析前仍必须遵守 scanner 的文件大小门禁。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".md"],
+            "worker_lane_mode": "direct",
+            "max_file_size_mb": 0.000001,
+        },
+    )
+    sample = scanner.work_dir / "oversized.md"
+    sample.write_text("x" * 100, encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=100")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    def fail_subprocess(file_path: Path, limits: dict):
+        raise AssertionError("oversized direct text file should not use subprocess")
+
+    def fail_light_parser(*args, **kwargs):
+        raise AssertionError("oversized direct text file should not use light parser")
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fail_subprocess)
+    monkeypatch.setattr(file_scanner_module, "parse_text_like_file", fail_light_parser)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.total_files == 1
+    assert result.success_count == 0
+    assert result.error_count == 1
+    assert result.contexts[0].content == ""
+    assert result.contexts[0].error is not None
+    assert result.contexts[0].error.startswith("file too large:")
+
+
 def test_scan_files_passes_light_parser_options(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
@@ -1057,6 +1098,35 @@ def test_scan_files_passes_light_parser_options(
     assert captured["options"].read_head_bytes == 123
     assert captured["options"].read_tail_bytes == 45
     assert captured["options"].max_output_chars == 67
+
+
+def test_build_light_text_options_matches_normalized_parser_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """runtime light parser options 必须与 parser profile 的归一化预算一致。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".md"],
+            "worker_lane_mode": "direct",
+            "text_max_chars": 0,
+            "direct_text_max_bytes": "bad",
+            "direct_text_read_bytes": -1,
+            "log_tail_read_bytes": None,
+            "text_excerpt_max_chars": 0,
+        },
+    )
+    profile = scanner.scan_planner.build_parser_profile(summary_mode=False)
+
+    options = scanner._build_light_text_options(
+        {"text_max_chars": profile["text_max_chars"]}
+    )
+
+    assert profile["text_max_chars"] == 6000
+    assert options.read_head_bytes == profile["direct_text_read_bytes"] == 262144
+    assert options.read_tail_bytes == profile["log_tail_read_bytes"] == 262144
+    assert options.max_output_chars == profile["text_excerpt_max_chars"] == 6000
 
 
 def test_scan_files_keeps_subprocess_path_for_pdf_in_direct_mode(

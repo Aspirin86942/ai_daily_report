@@ -18,10 +18,10 @@ from .scan_aggregator import ScanAggregator
 from .scan_discovery import DiscoveredFile, FileDiscoveryService
 from .scan_index_store import InventoryItem, ScanIndexStore
 from .light_text_parser import (
-    DEFAULT_DIRECT_TEXT_READ_BYTES,
-    DEFAULT_LOG_TAIL_READ_BYTES,
+    DEFAULT_TEXT_MAX_CHARS,
     LIGHT_TEXT_PARSER_BACKEND,
     LightTextParserOptions,
+    build_light_text_budget,
     parse_text_like_file,
 )
 from .scan_metrics import ReparseDetail, ScanMetricsCollector
@@ -518,6 +518,12 @@ class FileScanner:
         """根据文件类型选择 light text parser 或 subprocess timeout lane。"""
         effective_limits = limits or {}
         if self._should_parse_direct(file_type):
+            too_large_context = self._build_file_too_large_context(
+                file_path,
+                file_type,
+            )
+            if too_large_context is not None:
+                return too_large_context
             return parse_text_like_file(
                 file_path=file_path,
                 file_type=file_type,
@@ -534,61 +540,69 @@ class FileScanner:
 
     def _build_light_text_options(self, limits: dict) -> LightTextParserOptions:
         """把 scanner 配置转换为 light parser 的有界读取选项。"""
-        direct_read_default = self._positive_int_config(
-            "direct_text_max_bytes",
-            DEFAULT_DIRECT_TEXT_READ_BYTES,
-        )
-        default_text_max_chars = self._positive_int_config("text_max_chars", 6000)
-        effective_text_max_chars = self._positive_int_value(
-            limits.get("text_max_chars", default_text_max_chars),
-            default_text_max_chars,
-            "text_max_chars",
+        light_text_budget = build_light_text_budget(
+            self.scanner_cfg,
+            text_max_chars=limits.get(
+                "text_max_chars",
+                self.scanner_cfg.get("text_max_chars", DEFAULT_TEXT_MAX_CHARS),
+            ),
+            default_text_max_chars=DEFAULT_TEXT_MAX_CHARS,
+            on_invalid=self._warn_invalid_light_text_budget,
         )
         return LightTextParserOptions(
-            read_head_bytes=self._positive_int_config(
-                "direct_text_read_bytes",
-                direct_read_default,
-            ),
-            read_tail_bytes=self._positive_int_config(
-                "log_tail_read_bytes",
-                DEFAULT_LOG_TAIL_READ_BYTES,
-            ),
-            max_output_chars=self._positive_int_config(
-                "text_excerpt_max_chars",
-                effective_text_max_chars,
-            ),
+            read_head_bytes=light_text_budget.direct_text_read_bytes,
+            read_tail_bytes=light_text_budget.log_tail_read_bytes,
+            max_output_chars=light_text_budget.text_excerpt_max_chars,
             parser_backend_version=LIGHT_TEXT_PARSER_BACKEND,
         )
 
-    def _positive_int_config(self, key: str, default: int) -> int:
-        """读取正整数配置；非法值回退默认值，避免解析预算失控。"""
-        raw_value = self.scanner_cfg.get(
-            key,
-            default,
-        )
-        return self._positive_int_value(raw_value, default, key)
-
-    def _positive_int_value(self, raw_value: object, default: int, label: str) -> int:
-        """解析正整数；无效或非正值记录 warning 后回退。"""
-        try:
-            value = int(raw_value)
-        except (TypeError, ValueError):
+    def _warn_invalid_light_text_budget(
+        self,
+        key: str,
+        raw_value: object,
+        default: int,
+        reason: str,
+    ) -> None:
+        """运行时记录无效预算配置；planner 只负责静默归一化 cache key。"""
+        if reason == "invalid":
             logger.warning(
                 "%s 配置无效，使用默认值 %s: %r",
-                label,
+                key,
                 default,
                 raw_value,
             )
-            return default
-        if value <= 0:
-            logger.warning(
-                "%s 配置必须为正整数，使用默认值 %s: %r",
-                label,
-                default,
-                raw_value,
-            )
-            return default
-        return value
+            return
+        logger.warning(
+            "%s 配置必须为正整数，使用默认值 %s: %r",
+            key,
+            default,
+            raw_value,
+        )
+
+    def _build_file_too_large_context(
+        self,
+        file_path: Path,
+        file_type: str,
+    ) -> FileContext | None:
+        """复用 scanner 既有 max_file_size_mb 策略，避免 direct lane 绕过门禁。"""
+        max_file_size_mb = self.scanner_cfg.get("max_file_size_mb")
+        if max_file_size_mb is None:
+            return None
+
+        max_bytes = float(max_file_size_mb) * 1024 * 1024
+        file_size = file_path.stat().st_size
+        if file_size <= max_bytes:
+            return None
+
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="",
+            error=(
+                f"file too large: {file_size} bytes exceeds "
+                f"{max_file_size_mb} MB limit"
+            ),
+        )
 
     def _run_extract_subprocess(
         self,
@@ -666,20 +680,12 @@ class FileScanner:
         file_type = file_path.suffix.lower()
 
         try:
-            max_file_size_mb = self.scanner_cfg.get("max_file_size_mb")
-            if max_file_size_mb is not None:
-                max_bytes = float(max_file_size_mb) * 1024 * 1024
-                file_size = file_path.stat().st_size
-                if file_size > max_bytes:
-                    return FileContext(
-                        file_path=str(file_path),
-                        file_type=file_type,
-                        content="",
-                        error=(
-                            f"file too large: {file_size} bytes exceeds "
-                            f"{max_file_size_mb} MB limit"
-                        ),
-                    )
+            too_large_context = self._build_file_too_large_context(
+                file_path,
+                file_type,
+            )
+            if too_large_context is not None:
+                return too_large_context
 
             if file_type in [".xlsx", ".xls"]:
                 content = self._parse_excel(file_path, limits["excel_max_rows"])

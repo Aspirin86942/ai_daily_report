@@ -5,20 +5,32 @@ from __future__ import annotations
 import csv
 import io
 import json
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..models.schemas import FileContext
 
 
 LIGHT_TEXT_PARSER_BACKEND = "light_text_v1"
+DEFAULT_TEXT_MAX_CHARS = 6000
+DEFAULT_SUMMARY_TEXT_MAX_CHARS = 2000
 DEFAULT_DIRECT_TEXT_READ_BYTES = 256 * 1024
 DEFAULT_LOG_TAIL_READ_BYTES = 256 * 1024
 
 LOG_FILE_TYPES = {".log"}
 JSON_FILE_TYPES = {".json"}
 CSV_FILE_TYPES = {".csv"}
+InvalidPositiveIntReporter = Callable[[str, Any, int, str], None]
+
+
+@dataclass(frozen=True, slots=True)
+class LightTextBudget:
+    text_max_chars: int
+    direct_text_read_bytes: int
+    log_tail_read_bytes: int
+    text_excerpt_max_chars: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +40,87 @@ class LightTextParserOptions:
     max_output_chars: int = 6000
     encoding: str = "utf-8"
     parser_backend_version: str = LIGHT_TEXT_PARSER_BACKEND
+
+
+def build_light_text_budget(
+    config: Mapping[str, Any],
+    *,
+    text_max_chars: Any,
+    default_text_max_chars: int = DEFAULT_TEXT_MAX_CHARS,
+    on_invalid: InvalidPositiveIntReporter | None = None,
+) -> LightTextBudget:
+    """统一归一化 light parser 预算，保证 profile 与运行时 cache key 一致。"""
+    effective_text_max_chars = normalize_positive_int(
+        text_max_chars,
+        default_text_max_chars,
+        key="text_max_chars",
+        on_invalid=on_invalid,
+    )
+    direct_read_default = _normalize_config_positive_int(
+        config,
+        "direct_text_max_bytes",
+        DEFAULT_DIRECT_TEXT_READ_BYTES,
+        on_invalid,
+    )
+    return LightTextBudget(
+        text_max_chars=effective_text_max_chars,
+        direct_text_read_bytes=_normalize_config_positive_int(
+            config,
+            "direct_text_read_bytes",
+            direct_read_default,
+            on_invalid,
+        ),
+        log_tail_read_bytes=_normalize_config_positive_int(
+            config,
+            "log_tail_read_bytes",
+            DEFAULT_LOG_TAIL_READ_BYTES,
+            on_invalid,
+        ),
+        text_excerpt_max_chars=_normalize_config_positive_int(
+            config,
+            "text_excerpt_max_chars",
+            effective_text_max_chars,
+            on_invalid,
+        ),
+    )
+
+
+def normalize_positive_int(
+    value: Any,
+    default: int,
+    *,
+    key: str | None = None,
+    on_invalid: InvalidPositiveIntReporter | None = None,
+) -> int:
+    """把任意输入归一化为正整数；非法值使用调用方传入的默认值。"""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        if key and on_invalid:
+            on_invalid(key, value, default, "invalid")
+        return default
+
+    if parsed <= 0:
+        if key and on_invalid:
+            on_invalid(key, value, default, "non_positive")
+        return default
+    return parsed
+
+
+def _normalize_config_positive_int(
+    config: Mapping[str, Any],
+    key: str,
+    default: int,
+    on_invalid: InvalidPositiveIntReporter | None,
+) -> int:
+    raw_value = config.get(key, default)
+    reporter_key = key if key in config else None
+    return normalize_positive_int(
+        raw_value,
+        default,
+        key=reporter_key,
+        on_invalid=on_invalid,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -367,8 +460,4 @@ def _coerce_non_negative_int(value: Any) -> int:
 
 
 def _coerce_positive_int(value: Any, default: int) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return default
-    return parsed if parsed > 0 else default
+    return normalize_positive_int(value, default)

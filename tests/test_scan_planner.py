@@ -74,6 +74,28 @@ def test_build_parser_profile_uses_legacy_direct_text_max_bytes_as_read_budget()
     assert profile["direct_text_read_bytes"] == 8192
 
 
+def test_build_parser_profile_normalizes_invalid_light_text_budgets():
+    """无效/非正 text-like 预算必须归一化，避免 cache key 与运行时漂移。"""
+    planner = ScanPlanner(
+        scanner_cfg={
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 0,
+            "direct_text_max_bytes": "bad",
+            "direct_text_read_bytes": -1,
+            "log_tail_read_bytes": None,
+            "text_excerpt_max_chars": 0,
+        }
+    )
+
+    profile = planner.build_parser_profile(summary_mode=False)
+
+    assert profile["text_max_chars"] == 6000
+    assert profile["direct_text_read_bytes"] == 262144
+    assert profile["log_tail_read_bytes"] == 262144
+    assert profile["text_excerpt_max_chars"] == 6000
+
+
 def test_plan_candidates_splits_cache_hits_and_misses(tmp_path: Path):
     """规划器应把候选文件拆分为缓存命中和未命中两组。"""
     first = tmp_path / "first.md"
