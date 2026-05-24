@@ -158,6 +158,56 @@ def test_context_run_and_decisions_round_trip(tmp_path: Path):
     ]
 
 
+def test_save_context_run_rejects_invalid_scan_run_id(tmp_path: Path):
+    """context run 不应引用不存在的 scan run。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.save_context_run(
+            report_mode="weekly",
+            start_date=date(2026, 5, 10),
+            end_date=date(2026, 5, 24),
+            compression_profile="weekly_balanced_v1",
+            context_profile_key='{"version":"context_scheduler_v1"}',
+            scan_run_id=999,
+            source_file_count=1,
+            included_file_count=1,
+            omitted_file_count=0,
+            metadata_only_count=0,
+            compressed_file_count=0,
+            error_file_count=0,
+            truncated_file_count=0,
+            input_chars=100,
+            output_chars=100,
+            duration_ms=1,
+            status="success",
+            error="",
+        )
+
+
+def test_save_context_decisions_rejects_invalid_context_run_id(tmp_path: Path):
+    """context decision 不应成为脱离 context run 的孤儿审计行。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    decision = ContextDecision(
+        file_path="orphan.md",
+        extension=".md",
+        size_bytes=100,
+        parser_backend="light_text_v1",
+        worker_lane="direct",
+        cache_status="fresh",
+        action="keep",
+        reason="small_file_keep",
+        priority=10,
+        input_chars=100,
+        output_chars=100,
+        truncated=False,
+        error=None,
+    )
+
+    with pytest.raises(sqlite3.IntegrityError):
+        store.save_context_decisions(999, [decision])
+
+
 def test_parse_cache_round_trip_and_fresh_lookup(tmp_path: Path):
     """相同文件身份和 parser profile 应能命中并读回解析缓存。"""
     store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")

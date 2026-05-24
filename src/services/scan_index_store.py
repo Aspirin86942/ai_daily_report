@@ -44,8 +44,11 @@ class ScanIndexStore:
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        """创建启用 Row 访问的 SQLite 连接。"""
+        """创建启用 Row 访问和外键约束的 SQLite 连接。"""
         conn = sqlite3.connect(self.db_path)
+        # SQLite 每个连接默认不执行已声明的 FK；context 审计记录必须阻止
+        # 孤儿 run/decision 行，否则后续 CLI 复盘会拿到不可追溯的数据。
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.row_factory = sqlite3.Row
         return conn
 
