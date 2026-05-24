@@ -13,45 +13,52 @@ ACTION_METADATA_ONLY = "metadata_only"
 ACTION_OMIT = "omit"
 ACTION_ERROR = "error"
 
-_PROFILE_VERSION = "context_compressor_v1"
 _GLOBAL_BUDGET_REASON = "global_budget_exceeded"
+_WARNING_PARSE_ISSUE_BUDGET = "预算不足，解析问题明细未展开。"
+_WARNING_FINAL_BUDGET = "预算不足，已压缩最终上下文到全局预算。"
 
 
 @dataclass(frozen=True, slots=True)
 class ContextProfile:
-    """定义本轮报告上下文预算，供 scheduler 和审计侧稳定复用。"""
+    """定义上下文压缩 profile，字段名保持 scheduler 计划合同稳定。"""
 
     report_mode: str
+    compression_profile: str
     global_context_max_chars: int
     per_file_max_chars: int
-    profile_version: str = _PROFILE_VERSION
+    small_file_max_bytes: int = 64 * 1024
+    medium_file_max_bytes: int = 1024 * 1024
+    large_file_max_bytes: int = 10 * 1024 * 1024
+    version: str = "context_scheduler_v1"
+    priority_policy: str = "default_v1"
+    compression_policy: str = "markdown_context_v1"
 
     @classmethod
     def for_report_mode(cls, report_mode: str) -> "ContextProfile":
-        """按报告模式生成默认预算，避免调用方散落硬编码。"""
+        """按报告模式生成固定默认预算，避免后续任务重复散落常量。"""
         normalized_mode = report_mode.strip().lower()
         defaults = {
-            "daily": (12_000, 3_000),
-            "weekly": (30_000, 5_000),
-            "monthly": (45_000, 6_000),
+            "daily": ("daily_balanced_v1", 50_000, 8_000),
+            "weekly": ("weekly_balanced_v1", 50_000, 5_000),
+            "monthly": ("monthly_balanced_v1", 60_000, 4_000),
         }
         if normalized_mode not in defaults:
             raise ValueError(f"unsupported report_mode: {report_mode!r}")
 
-        global_budget, per_file_budget = defaults[normalized_mode]
+        compression_profile, global_budget, per_file_budget = defaults[normalized_mode]
         return cls(
             report_mode=normalized_mode,
+            compression_profile=compression_profile,
             global_context_max_chars=global_budget,
             per_file_max_chars=per_file_budget,
         )
 
     def with_budget(
         self,
-        *,
-        global_context_max_chars: int | None = None,
-        per_file_max_chars: int | None = None,
+        global_context_max_chars: int,
+        per_file_max_chars: int,
     ) -> "ContextProfile":
-        """返回预算覆盖后的新 profile，保持原 profile 不被隐式改写。"""
+        """返回预算覆盖后的新 profile；非正数回退到当前预算，避免无效预算传播。"""
         return replace(
             self,
             global_context_max_chars=_positive_int(
@@ -65,12 +72,18 @@ class ContextProfile:
         )
 
     def to_profile_dict(self) -> dict[str, Any]:
-        """输出可序列化 profile，供日志、cache key 或审计摘要使用。"""
+        """输出完整可序列化 profile，供日志、cache key 和审计摘要复用。"""
         return {
+            "version": self.version,
             "report_mode": self.report_mode,
+            "compression_profile": self.compression_profile,
             "global_context_max_chars": self.global_context_max_chars,
             "per_file_max_chars": self.per_file_max_chars,
-            "profile_version": self.profile_version,
+            "small_file_max_bytes": self.small_file_max_bytes,
+            "medium_file_max_bytes": self.medium_file_max_bytes,
+            "large_file_max_bytes": self.large_file_max_bytes,
+            "priority_policy": self.priority_policy,
+            "compression_policy": self.compression_policy,
         }
 
 
@@ -95,43 +108,48 @@ class ContextDecision:
 
 @dataclass(slots=True)
 class CompressedContext:
-    """压缩后的上下文正文和统计结果。"""
+    """压缩后的上下文正文和统计结果，字段保持计划合同稳定。"""
 
     content: str
-    decisions: list[ContextDecision]
-    profile: ContextProfile
     source_file_count: int
     included_file_count: int
-    compressed_file_count: int
-    metadata_only_count: int
     omitted_file_count: int
+    metadata_only_count: int
+    compressed_file_count: int
     error_file_count: int
+    truncated_file_count: int
+    input_chars: int
     output_chars: int
+    warnings: list[str]
+    decisions: list[ContextDecision]
 
     @classmethod
-    def empty(cls, profile: ContextProfile | None = None) -> "CompressedContext":
-        """构造无文件证据时仍可审计的上下文。"""
-        resolved_profile = profile or ContextProfile.for_report_mode("daily")
+    def empty(cls, error: str | None = None) -> "CompressedContext":
+        """构造无文件证据时仍可审计的上下文，不依赖外部 profile。"""
+        warning_lines = [f"- {error}"] if error else ["- 未发现解析问题。"]
         content = _join_sections(
             [
                 "# 文件证据上下文",
                 "## 本轮摘要\n- 扫描文件数: 0\n- 纳入文件数: 0\n- 省略文件数: 0",
                 "## 重要提示\n- 无文件证据：本轮扫描未提供可用于报告生成的文件内容。",
                 "## 文件证据\n无文件证据",
-                "## 解析问题\n- 未发现解析问题。",
+                "## 解析问题\n" + "\n".join(warning_lines),
             ]
         )
+        warnings = [error] if error else []
         return cls(
             content=content,
-            decisions=[],
-            profile=resolved_profile,
             source_file_count=0,
             included_file_count=0,
-            compressed_file_count=0,
-            metadata_only_count=0,
             omitted_file_count=0,
-            error_file_count=0,
+            metadata_only_count=0,
+            compressed_file_count=0,
+            error_file_count=1 if error else 0,
+            truncated_file_count=0,
+            input_chars=0,
             output_chars=len(content),
+            warnings=warnings,
+            decisions=[],
         )
 
     def to_summary(self) -> dict[str, Any]:
@@ -139,13 +157,33 @@ class CompressedContext:
         return {
             "source_file_count": self.source_file_count,
             "included_file_count": self.included_file_count,
-            "compressed_file_count": self.compressed_file_count,
-            "metadata_only_count": self.metadata_only_count,
             "omitted_file_count": self.omitted_file_count,
+            "metadata_only_count": self.metadata_only_count,
+            "compressed_file_count": self.compressed_file_count,
             "error_file_count": self.error_file_count,
+            "truncated_file_count": self.truncated_file_count,
+            "input_chars": self.input_chars,
             "output_chars": self.output_chars,
-            "profile": self.profile.to_profile_dict(),
+            "compression_ratio": self._compression_ratio(),
+            "warnings": list(self.warnings),
         }
+
+    def _compression_ratio(self) -> float:
+        if self.input_chars <= 0:
+            return 0.0
+        return self.output_chars / self.input_chars
+
+
+@dataclass(slots=True)
+class _CompressionStats:
+    source_file_count: int
+    included_file_count: int = 0
+    omitted_file_count: int = 0
+    metadata_only_count: int = 0
+    compressed_file_count: int = 0
+    error_file_count: int = 0
+    truncated_file_count: int = 0
+    input_chars: int = 0
 
 
 class ContextCompressor:
@@ -158,20 +196,17 @@ class ContextCompressor:
         decisions: list[ContextDecision],
         profile: ContextProfile,
     ) -> CompressedContext:
-        """按已给决策和预算渲染 Markdown-like 文件证据上下文。"""
+        """按 decision 顺序和预算渲染 Markdown-like 文件证据上下文。"""
         if not scan_result.contexts:
-            return CompressedContext.empty(profile)
+            return CompressedContext.empty()
 
-        decision_by_path = {decision.file_path: decision for decision in decisions}
+        context_by_path = {context.file_path: context for context in scan_result.contexts}
+        processed_paths: set[str] = set()
         ordered_decisions: list[ContextDecision] = []
         omitted_decisions: list[ContextDecision] = []
         parse_issue_lines: list[str] = []
-
-        included_file_count = 0
-        compressed_file_count = 0
-        metadata_only_count = 0
-        omitted_file_count = 0
-        error_file_count = 0
+        warnings: list[str] = []
+        stats = _CompressionStats(source_file_count=scan_result.total_files)
 
         sections = [
             "# 文件证据上下文",
@@ -180,63 +215,123 @@ class ContextCompressor:
             "## 文件证据",
         ]
 
-        for context in scan_result.contexts:
-            decision = decision_by_path.get(context.file_path)
-            if decision is None:
-                decision = self._default_decision(context)
-            ordered_decisions.append(decision)
-
-            if context.error or decision.action == ACTION_ERROR:
-                decision.action = ACTION_ERROR
-                decision.reason = decision.reason or "parse_error"
-                decision.error = decision.error or context.error
-                decision.output_chars = 0
-                error_file_count += 1
-                parse_issue_lines.append(self._render_parse_issue(context, decision))
-                continue
-
-            candidate = self._render_file_section(context, decision, profile)
-            if not self._can_append_with_footer(sections, candidate, profile):
-                self._mutate_to_global_omit(decision)
-                omitted_decisions.append(decision)
-                omitted_file_count += 1
-                continue
-
-            sections.append(candidate)
-            included_file_count += 1
-            if decision.action == ACTION_COMPRESS:
-                compressed_file_count += 1
-            elif decision.action == ACTION_METADATA_ONLY:
-                metadata_only_count += 1
-
         for decision in decisions:
-            if decision.file_path not in {item.file_path for item in ordered_decisions}:
-                ordered_decisions.append(decision)
-                if decision.action == ACTION_OMIT:
-                    omitted_decisions.append(decision)
-                    omitted_file_count += 1
+            context = context_by_path.get(decision.file_path)
+            ordered_decisions.append(decision)
+            if context is None:
+                self._process_decision_without_context(
+                    decision,
+                    omitted_decisions,
+                    stats,
+                )
+                continue
 
-        if included_file_count == 0:
+            processed_paths.add(context.file_path)
+            self._process_context_decision(
+                sections=sections,
+                context=context,
+                decision=decision,
+                profile=profile,
+                omitted_decisions=omitted_decisions,
+                parse_issue_lines=parse_issue_lines,
+                stats=stats,
+            )
+
+        for context in scan_result.contexts:
+            if context.file_path in processed_paths:
+                continue
+            decision = self._default_decision(context)
+            ordered_decisions.append(decision)
+            self._process_context_decision(
+                sections=sections,
+                context=context,
+                decision=decision,
+                profile=profile,
+                omitted_decisions=omitted_decisions,
+                parse_issue_lines=parse_issue_lines,
+                stats=stats,
+            )
+
+        if stats.included_file_count == 0:
             sections.append("无文件证据")
 
         if omitted_decisions:
             sections.append(self._render_omitted_summary(omitted_decisions))
 
-        self._append_parse_issues(sections, parse_issue_lines, profile)
-        content = _join_sections(sections)
+        self._append_parse_issues(sections, parse_issue_lines, profile, warnings)
+        content = self._fit_content_to_budget(sections, profile, warnings)
 
         return CompressedContext(
             content=content,
-            decisions=ordered_decisions,
-            profile=profile,
-            source_file_count=scan_result.total_files,
-            included_file_count=included_file_count,
-            compressed_file_count=compressed_file_count,
-            metadata_only_count=metadata_only_count,
-            omitted_file_count=omitted_file_count,
-            error_file_count=error_file_count,
+            source_file_count=stats.source_file_count,
+            included_file_count=stats.included_file_count,
+            omitted_file_count=stats.omitted_file_count,
+            metadata_only_count=stats.metadata_only_count,
+            compressed_file_count=stats.compressed_file_count,
+            error_file_count=stats.error_file_count,
+            truncated_file_count=stats.truncated_file_count,
+            input_chars=stats.input_chars,
             output_chars=len(content),
+            warnings=warnings,
+            decisions=ordered_decisions,
         )
+
+    def _process_decision_without_context(
+        self,
+        decision: ContextDecision,
+        omitted_decisions: list[ContextDecision],
+        stats: _CompressionStats,
+    ) -> None:
+        stats.input_chars += decision.input_chars
+        if decision.action == ACTION_OMIT:
+            omitted_decisions.append(decision)
+            stats.omitted_file_count += 1
+        elif decision.action == ACTION_ERROR:
+            stats.error_file_count += 1
+
+    def _process_context_decision(
+        self,
+        *,
+        sections: list[str],
+        context: FileContext,
+        decision: ContextDecision,
+        profile: ContextProfile,
+        omitted_decisions: list[ContextDecision],
+        parse_issue_lines: list[str],
+        stats: _CompressionStats,
+    ) -> None:
+        stats.input_chars += decision.input_chars if decision.input_chars else len(context.content)
+
+        if context.error or decision.action == ACTION_ERROR:
+            decision.action = ACTION_ERROR
+            decision.reason = decision.reason or "parse_error"
+            decision.error = decision.error or context.error
+            decision.output_chars = 0
+            stats.error_file_count += 1
+            parse_issue_lines.append(self._render_parse_issue(context, decision))
+            return
+
+        if decision.action == ACTION_OMIT:
+            decision.output_chars = 0
+            omitted_decisions.append(decision)
+            stats.omitted_file_count += 1
+            return
+
+        candidate = self._render_file_section(context, decision, profile)
+        if not self._can_append_with_footer(sections, candidate, profile):
+            self._mutate_to_global_omit(decision)
+            omitted_decisions.append(decision)
+            stats.omitted_file_count += 1
+            return
+
+        sections.append(candidate)
+        stats.included_file_count += 1
+        if decision.action == ACTION_COMPRESS:
+            stats.compressed_file_count += 1
+        elif decision.action == ACTION_METADATA_ONLY:
+            stats.metadata_only_count += 1
+        if decision.truncated or context.truncated:
+            stats.truncated_file_count += 1
 
     def _render_run_summary(
         self,
@@ -247,12 +342,13 @@ class ContextCompressor:
             [
                 "## 本轮摘要",
                 f"- 报告模式: {profile.report_mode}",
+                f"- 压缩 profile: {profile.compression_profile}",
                 f"- 扫描文件数: {scan_result.total_files}",
                 f"- 成功解析数: {scan_result.success_count}",
                 f"- 失败解析数: {scan_result.error_count}",
                 f"- 全局上下文预算: {profile.global_context_max_chars}",
                 f"- 单文件正文预算: {profile.per_file_max_chars}",
-                f"- 压缩 profile: {profile.profile_version}",
+                f"- 压缩策略: {profile.compression_policy}",
             ]
         )
 
@@ -329,6 +425,7 @@ class ContextCompressor:
         sections: list[str],
         parse_issue_lines: list[str],
         profile: ContextProfile,
+        warnings: list[str],
     ) -> None:
         issue_body = parse_issue_lines or ["- 未发现解析问题。"]
         section = "## 解析问题\n" + "\n".join(issue_body)
@@ -336,8 +433,11 @@ class ContextCompressor:
             sections.append(section)
             return
 
-        warning = "## 解析问题\n- 全局预算不足，解析问题明细未展开。"
-        sections.append(warning)
+        if _WARNING_PARSE_ISSUE_BUDGET not in warnings:
+            warnings.append(_WARNING_PARSE_ISSUE_BUDGET)
+        warning_section = f"## 解析问题\n- {_WARNING_PARSE_ISSUE_BUDGET}"
+        if self._can_append_exact(sections, warning_section, profile):
+            sections.append(warning_section)
 
     def _render_parse_issue(
         self,
@@ -366,6 +466,31 @@ class ContextCompressor:
         projected = _join_sections([*sections, candidate])
         return len(projected) <= profile.global_context_max_chars
 
+    def _fit_content_to_budget(
+        self,
+        sections: list[str],
+        profile: ContextProfile,
+        warnings: list[str],
+    ) -> str:
+        content = _join_sections(sections)
+        if len(content) <= profile.global_context_max_chars:
+            return content
+
+        if _WARNING_FINAL_BUDGET not in warnings:
+            warnings.append(_WARNING_FINAL_BUDGET)
+
+        # 极小预算下，完整审计头和 parse issue 小节无法同时保留；
+        # 因此降级为最短可审计提示，并把具体原因放入 warnings。
+        fallback = "# 文件证据上下文\n预算不足\n"
+        if len(fallback) <= profile.global_context_max_chars:
+            return fallback
+
+        short_fallback = "预算不足\n"
+        if len(short_fallback) <= profile.global_context_max_chars:
+            return short_fallback
+
+        return short_fallback[: profile.global_context_max_chars]
+
     def _mutate_to_global_omit(self, decision: ContextDecision) -> None:
         decision.action = ACTION_OMIT
         decision.reason = _GLOBAL_BUDGET_REASON
@@ -390,9 +515,7 @@ class ContextCompressor:
         )
 
 
-def _positive_int(value: int | None, default: int) -> int:
-    if value is None:
-        return default
+def _positive_int(value: int, default: int) -> int:
     return value if value > 0 else default
 
 

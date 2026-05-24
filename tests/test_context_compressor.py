@@ -154,3 +154,118 @@ def test_compress_empty_scan_returns_auditable_empty_context() -> None:
     assert compressed.source_file_count == 0
     assert compressed.included_file_count == 0
     assert compressed.omitted_file_count == 0
+
+
+def test_profile_contract_defaults_and_summary_fields() -> None:
+    daily = ContextProfile.for_report_mode("daily")
+    weekly = ContextProfile.for_report_mode("weekly")
+    monthly = ContextProfile.for_report_mode("monthly")
+
+    assert daily.compression_profile == "daily_balanced_v1"
+    assert daily.global_context_max_chars == 50000
+    assert daily.per_file_max_chars == 8000
+    assert weekly.compression_profile == "weekly_balanced_v1"
+    assert weekly.global_context_max_chars == 50000
+    assert weekly.per_file_max_chars == 5000
+    assert monthly.compression_profile == "monthly_balanced_v1"
+    assert monthly.global_context_max_chars == 60000
+    assert monthly.per_file_max_chars == 4000
+
+    assert daily.to_profile_dict() == {
+        "version": "context_scheduler_v1",
+        "report_mode": "daily",
+        "compression_profile": "daily_balanced_v1",
+        "global_context_max_chars": 50000,
+        "per_file_max_chars": 8000,
+        "small_file_max_bytes": 64 * 1024,
+        "medium_file_max_bytes": 1024 * 1024,
+        "large_file_max_bytes": 10 * 1024 * 1024,
+        "priority_policy": "default_v1",
+        "compression_policy": "markdown_context_v1",
+    }
+
+
+def test_compressed_context_summary_exposes_plan_contract_fields() -> None:
+    profile = ContextProfile.for_report_mode("daily")
+    compressor = ContextCompressor()
+    content = "daily evidence"
+    scan_result = ScanResult(
+        total_files=1,
+        success_count=1,
+        error_count=0,
+        contexts=[FileContext(file_path="D:/work/a.md", file_type=".md", content=content, parser_backend="light_text_v1")],
+    )
+
+    compressed = compressor.compress(
+        scan_result=scan_result,
+        decisions=[_decision("D:/work/a.md", ACTION_KEEP, "small_file_keep", input_chars=len(content))],
+        profile=profile,
+    )
+    summary = compressed.to_summary()
+
+    assert compressed.input_chars == len(content)
+    assert compressed.output_chars == len(compressed.content)
+    assert compressed.truncated_file_count == 0
+    assert compressed.warnings == []
+    assert summary["input_chars"] == len(content)
+    assert summary["output_chars"] == len(compressed.content)
+    assert summary["compression_ratio"] == compressed.output_chars / compressed.input_chars
+
+
+def test_compress_respects_decision_order_over_context_order() -> None:
+    profile = ContextProfile.for_report_mode("weekly")
+    compressor = ContextCompressor()
+    contexts = [
+        FileContext(file_path="D:/work/b.md", file_type=".md", content="B evidence", parser_backend="light_text_v1"),
+        FileContext(file_path="D:/work/a.md", file_type=".md", content="A evidence", parser_backend="light_text_v1"),
+    ]
+    scan_result = ScanResult(total_files=2, success_count=2, error_count=0, contexts=contexts)
+
+    compressed = compressor.compress(
+        scan_result=scan_result,
+        decisions=[
+            _decision("D:/work/a.md", ACTION_KEEP, "priority_first", priority=1, input_chars=10),
+            _decision("D:/work/b.md", ACTION_KEEP, "priority_second", priority=2, input_chars=10),
+        ],
+        profile=profile,
+    )
+
+    assert compressed.content.index("D:/work/a.md") < compressed.content.index("D:/work/b.md")
+    assert [decision.file_path for decision in compressed.decisions] == ["D:/work/a.md", "D:/work/b.md"]
+
+
+def test_parse_issue_warning_respects_tiny_global_budget() -> None:
+    profile = ContextProfile.for_report_mode("weekly")
+    profile = profile.with_budget(global_context_max_chars=120, per_file_max_chars=40)
+    compressor = ContextCompressor()
+    scan_result = ScanResult(
+        total_files=1,
+        success_count=0,
+        error_count=1,
+        contexts=[
+            FileContext(
+                file_path="D:/work/bad.md",
+                file_type=".md",
+                content="",
+                error="parser exploded with long diagnostic text",
+                parser_backend="light_text_v1",
+            )
+        ],
+    )
+
+    compressed = compressor.compress(
+        scan_result=scan_result,
+        decisions=[
+            _decision(
+                "D:/work/bad.md",
+                ACTION_OMIT,
+                "parse_error",
+                input_chars=0,
+            )
+        ],
+        profile=profile,
+    )
+
+    assert compressed.output_chars == len(compressed.content)
+    assert len(compressed.content) <= profile.global_context_max_chars
+    assert "预算不足" in compressed.content or any("预算不足" in warning for warning in compressed.warnings)
