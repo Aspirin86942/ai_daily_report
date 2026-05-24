@@ -831,6 +831,17 @@ def compress(scan_result, decisions, profile):
     )
 ```
 
+## Implementation Notes
+
+以下为 Task 1-5 已落地实现的对齐说明，只记录当前实现事实：
+
+- context profile 使用 `ContextProfile` 表示，作为调度与压缩共享的 profile 对象。
+- `ContextDecision` 定义在 `context_compressor.py`，因为 scheduler、compressor、store 复用同一个文件级决策模型。
+- 第一版未实现 `context_cache`，持久化范围为 `context_runs` 和 `context_decisions`。
+- 成功路径通过 `ScanIndexStore.save_context_run_with_decisions(...)` 原子写入 context run 与 decisions，避免 run / decision 审计不一致；`save_context_run()` 和 `save_context_decisions()` 保留给错误路径或测试使用。
+- benchmark 绑定本次 `ContextScheduler` run：通过 `get_context_run(context_run_id)` 和 `get_scan_run_detail(scan_run_id)` 读取 payload，不以全局 latest 作为真相源。
+- CLI scan 路径会消费 `ContextScheduleResult.error` 并打印 / 记录降级 warning，随后使用 fallback context 继续生成报告。
+
 ## 实施顺序建议
 
 等用户 review 并确认后，再进入 implementation plan。建议顺序：
