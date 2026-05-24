@@ -63,6 +63,8 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             parse_duration_ms=12,
             parse_status="success",
             parse_error="",
+            parser_backend="light_text_v1",
+            truncated=True,
         )
     ]
 
@@ -109,10 +111,22 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             "parse_duration_ms": 12,
             "parse_status": "success",
             "parse_error": "",
-            "parser_backend": "",
-            "truncated": False,
+            "parser_backend": "light_text_v1",
+            "truncated": True,
         }
     ]
+    assert payload["parser_backend_summary"] == {
+        "direct_count": 1,
+        "subprocess_count": 0,
+        "truncated_count": 1,
+        "by_extension": {
+            ".md": {
+                "light_text_v1": 1,
+                "subprocess": 0,
+                "truncated": 1,
+            }
+        },
+    }
 
 
 def test_render_markdown_report_contains_stage_and_extension_metrics():
@@ -164,10 +178,22 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
                 "parse_duration_ms": 12,
                 "parse_status": "success",
                 "parse_error": "",
-                "parser_backend": "",
-                "truncated": False,
+                "parser_backend": "light_text_v1",
+                "truncated": True,
             }
         ],
+        "parser_backend_summary": {
+            "direct_count": 1,
+            "subprocess_count": 0,
+            "truncated_count": 1,
+            "by_extension": {
+                ".md": {
+                    "light_text_v1": 1,
+                    "subprocess": 0,
+                    "truncated": 1,
+                }
+            },
+        },
     }
 
     markdown = render_markdown_report(payload)
@@ -176,6 +202,11 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
     assert "| total | 120 |" in markdown
     assert "| discovery | 10 |" in markdown
     assert "| .txt | 2 | 80 | 1 | 1 | 1 |" in markdown
+    assert "## Parser Backend Summary" in markdown
+    assert "- direct_count: `1`" in markdown
+    assert "- subprocess_count: `0`" in markdown
+    assert "- truncated_count: `1`" in markdown
+    assert "| .md | light_text_v1 | 1 | 0 | 1 |" in markdown
     assert "## Reparse Details" in markdown
     assert "| .md | source_version_changed | 12 | success | D:\\work\\report.md |" in markdown
 

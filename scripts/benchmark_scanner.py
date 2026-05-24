@@ -18,6 +18,39 @@ from src.services.file_scanner import FileScanner  # noqa: E402
 from src.services.scan_metrics import ExtensionMetrics, ReparseDetail  # noqa: E402
 
 
+def build_parser_backend_summary(
+    reparse_details: list[ReparseDetail],
+) -> dict[str, Any]:
+    """按解析后端聚合本轮重解析文件数量。"""
+    summary: dict[str, Any] = {
+        "direct_count": 0,
+        "subprocess_count": 0,
+        "truncated_count": 0,
+        "by_extension": {},
+    }
+    for detail in reparse_details:
+        backend = detail.parser_backend or "subprocess"
+        extension = detail.extension
+        by_extension = summary["by_extension"].setdefault(
+            extension,
+            {
+                "light_text_v1": 0,
+                "subprocess": 0,
+                "truncated": 0,
+            },
+        )
+        if backend == "light_text_v1":
+            summary["direct_count"] += 1
+            by_extension["light_text_v1"] += 1
+        else:
+            summary["subprocess_count"] += 1
+            by_extension["subprocess"] += 1
+        if detail.truncated:
+            summary["truncated_count"] += 1
+            by_extension["truncated"] += 1
+    return summary
+
+
 def build_benchmark_payload(
     scan_result: ScanResult,
     run_detail: dict[str, int],
@@ -42,6 +75,7 @@ def build_benchmark_payload(
         "metrics": dict(run_detail),
         "extension_metrics": [item.to_dict() for item in extension_metrics],
         "reparse_details": [item.to_dict() for item in reparse_details],
+        "parser_backend_summary": build_parser_backend_summary(reparse_details),
     }
 
 
@@ -52,6 +86,15 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
     metrics = payload["metrics"]
     extension_metrics = payload["extension_metrics"]
     reparse_details = payload.get("reparse_details", [])
+    parser_backend_summary = payload.get(
+        "parser_backend_summary",
+        {
+            "direct_count": 0,
+            "subprocess_count": 0,
+            "truncated_count": 0,
+            "by_extension": {},
+        },
+    )
 
     lines = [
         "# Scanner Benchmark Report",
@@ -101,6 +144,32 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
             )
     else:
         lines.append("| (none) | 0 | 0 | 0 | 0 | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Parser Backend Summary",
+            "",
+            f"- direct_count: `{parser_backend_summary['direct_count']}`",
+            f"- subprocess_count: `{parser_backend_summary['subprocess_count']}`",
+            f"- truncated_count: `{parser_backend_summary['truncated_count']}`",
+            "",
+            "| extension | backend | light_text_v1 | subprocess | truncated |",
+            "|---|---|---:|---:|---:|",
+        ]
+    )
+    by_extension = parser_backend_summary.get("by_extension", {})
+    if by_extension:
+        for extension, item in by_extension.items():
+            lines.append(
+                "| {extension} | light_text_v1 | {light_text_v1} | "
+                "{subprocess} | {truncated} |".format(
+                    extension=extension,
+                    **item,
+                )
+            )
+    else:
+        lines.append("| (none) | - | 0 | 0 | 0 |")
 
     lines.extend(
         [
