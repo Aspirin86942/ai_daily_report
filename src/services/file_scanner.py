@@ -426,6 +426,8 @@ class FileScanner:
                 parse_duration_ms=duration_ms,
                 parse_status="error" if context.error else "success",
                 parse_error=context.error or "",
+                parser_backend=context.parser_backend or "subprocess",
+                truncated=context.truncated,
             )
         )
 
@@ -448,6 +450,8 @@ class FileScanner:
                 parse_duration_ms=0,
                 parse_status="error",
                 parse_error=parse_error,
+                parser_backend="",
+                truncated=False,
             )
         )
 

@@ -1097,3 +1097,42 @@ def test_scan_files_records_source_version_changed_reparse_detail(
     assert detail.cache_miss_reason == "source_version_changed"
     assert detail.previous_source_version == "mtime_ns=1:size=11"
     assert detail.parse_status == "success"
+
+
+def test_scan_files_records_parser_metadata_in_reparse_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """重解析明细应保留解析器返回的后端标识和截断状态。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
+    sample = scanner.work_dir / "metadata.txt"
+    sample.write_text("new content", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=11")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_extract_content_with_timeout",
+        lambda file_path, limits: file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".txt",
+            content="new parsed content",
+            error=None,
+            parser_backend="custom_backend",
+            truncated=True,
+        ),
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.success_count == 1
+    assert len(scanner.last_reparse_details) == 1
+    detail = scanner.last_reparse_details[0]
+    assert detail.parser_backend == "custom_backend"
+    assert detail.truncated is True
