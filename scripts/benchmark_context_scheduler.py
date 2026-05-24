@@ -30,7 +30,18 @@ def build_context_scheduler_summary(
     compressed_context: CompressedContext,
 ) -> dict[str, Any]:
     """返回 ContextScheduler 压缩摘要，保留 warnings 等非数值字段。"""
-    return compressed_context.to_summary()
+    summary = compressed_context.to_summary()
+    # action/backend 汇总用于证明 scheduler 策略真实生效；
+    # 否则 benchmark 只能看到总数，无法复盘文件为什么被纳入或省略。
+    summary["action_counts"] = _count_decision_field(
+        compressed_context,
+        "action",
+    )
+    summary["parser_backend_counts"] = _count_decision_field(
+        compressed_context,
+        "parser_backend",
+    )
+    return summary
 
 
 def build_benchmark_payload(
@@ -120,6 +131,18 @@ def _format_markdown_value(value: Any) -> str:
     if isinstance(value, (dict, list)):
         return "`" + json.dumps(value, ensure_ascii=False, sort_keys=True) + "`"
     return f"`{value}`"
+
+
+def _count_decision_field(
+    compressed_context: CompressedContext,
+    field_name: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for decision in compressed_context.decisions:
+        raw_value = getattr(decision, field_name)
+        value = str(raw_value or "unknown")
+        counts[value] = counts.get(value, 0) + 1
+    return dict(sorted(counts.items()))
 
 
 def _build_parser() -> argparse.ArgumentParser:

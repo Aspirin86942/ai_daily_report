@@ -14,7 +14,7 @@ from scripts.benchmark_context_scheduler import (
     run_benchmark,
     write_report_files,
 )
-from src.services.context_compressor import CompressedContext
+from src.services.context_compressor import CompressedContext, ContextDecision
 
 
 def _make_compressed_context() -> CompressedContext:
@@ -28,7 +28,38 @@ def _make_compressed_context() -> CompressedContext:
     compressed.truncated_file_count = 1
     compressed.input_chars = 1000
     compressed.output_chars = 250
-    compressed.decisions = []
+    compressed.decisions = [
+        ContextDecision(
+            file_path="D:/work/a.md",
+            extension=".md",
+            size_bytes=10,
+            parser_backend="light_text_v1",
+            worker_lane="direct",
+            cache_status="fresh",
+            action="keep",
+            reason="small_file_keep",
+            priority=10,
+            input_chars=100,
+            output_chars=100,
+            truncated=False,
+            error=None,
+        ),
+        ContextDecision(
+            file_path="D:/work/b.pdf",
+            extension=".pdf",
+            size_bytes=20,
+            parser_backend="pdf_text_v1",
+            worker_lane="subprocess",
+            cache_status="miss",
+            action="compress",
+            reason="large_document_summary",
+            priority=20,
+            input_chars=900,
+            output_chars=150,
+            truncated=True,
+            error=None,
+        ),
+    ]
     return compressed
 
 
@@ -49,6 +80,11 @@ def test_build_context_scheduler_summary_counts_actions_and_backends() -> None:
 
     assert summary["source_file_count"] == 3
     assert summary["compression_ratio"] == 0.25
+    assert summary["action_counts"] == {"compress": 1, "keep": 1}
+    assert summary["parser_backend_counts"] == {
+        "light_text_v1": 1,
+        "pdf_text_v1": 1,
+    }
 
 
 def test_build_benchmark_payload_contains_context_summary() -> None:

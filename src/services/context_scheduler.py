@@ -38,9 +38,6 @@ _TEXT_KEEP_EXTENSIONS = {".md", ".txt"}
 
 
 class _ContextStore(Protocol):
-    def latest_scan_run_detail(self) -> dict[str, int]:
-        ...
-
     def save_context_run(
         self,
         *,
@@ -164,7 +161,8 @@ class ContextScheduler:
                 request=request,
                 profile=profile,
                 profile_key=profile_key,
-                scan_run_id=self._latest_scan_run_id(store),
+                # 必须绑定 scan_files 返回的本次 run_id；读 latest 会在并发 CLI run 下串号。
+                scan_run_id=scan_result.scan_run_id,
                 compressed=compressed,
                 decisions=compressed.decisions,
                 duration_ms=duration_ms,
@@ -329,14 +327,6 @@ class ContextScheduler:
         except OSError:
             return 0
 
-    def _latest_scan_run_id(self, store: _ContextStore) -> int | None:
-        try:
-            detail = store.latest_scan_run_detail()
-            run_id = detail.get("run_id")
-        except Exception:
-            return None
-        return None if run_id is None else int(run_id)
-
     def _save_context_run(
         self,
         *,
@@ -430,7 +420,8 @@ class ContextScheduler:
                 request=request,
                 profile=profile,
                 profile_key=profile_key,
-                scan_run_id=self._latest_scan_run_id(store),
+                # error run 同样只绑定本次 scan_result，避免 fallback 审计误连到其他扫描。
+                scan_run_id=None if scan_result is None else scan_result.scan_run_id,
                 compressed=fallback_for_audit,
                 duration_ms=duration_ms,
                 status="error",

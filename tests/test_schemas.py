@@ -92,4 +92,11 @@ def test_scanner_models_available():
     assert ctx.error is None
     assert ctx.parser_backend is None
     assert ctx.truncated is False
-    assert ScanResult(total_files=0, success_count=0, error_count=0, contexts=[ctx])
+    scan_result = ScanResult(
+        total_files=0,
+        success_count=0,
+        error_count=0,
+        contexts=[ctx],
+        scan_run_id=123,
+    )
+    assert scan_result.scan_run_id == 123

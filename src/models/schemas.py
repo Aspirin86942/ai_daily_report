@@ -64,3 +64,7 @@ class ScanResult(BaseModel):
     success_count: int = Field(description="成功解析数")
     error_count: int = Field(description="失败解析数")
     contexts: list[FileContext] = Field(description="文件级上下文")
+    scan_run_id: Optional[int] = Field(
+        default=None,
+        description="本次 scanner run 的持久化 ID，用于绑定后续 context run 审计",
+    )

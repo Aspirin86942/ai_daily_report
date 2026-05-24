@@ -839,7 +839,10 @@ def compress(scan_result, decisions, profile):
 - `ContextDecision` 定义在 `context_compressor.py`，因为 scheduler、compressor、store 复用同一个文件级决策模型。
 - 第一版未实现 `context_cache`，持久化范围为 `context_runs` 和 `context_decisions`。
 - 成功路径通过 `ScanIndexStore.save_context_run_with_decisions(...)` 原子写入 context run 与 decisions，避免 run / decision 审计不一致；`save_context_run()` 和 `save_context_decisions()` 保留给错误路径或测试使用。
+- `ScanResult` 显式携带 `scan_run_id`，context run 绑定该 ID；避免多个 CLI run 共享 SQLite 时通过 latest scan run 串号。
 - benchmark 绑定本次 `ContextScheduler` run：通过 `get_context_run(context_run_id)` 和 `get_scan_run_detail(scan_run_id)` 读取 payload，不以全局 latest 作为真相源。
+- benchmark summary 包含 `action_counts` 与 `parser_backend_counts`，用于证明 scheduler 策略和 parser backend 分布。
+- compressor 最终预算收口只截断尾部审计摘要，不把已进入正文预算的文件证据整体替换成“预算不足”。
 - CLI scan 路径会消费 `ContextScheduleResult.error` 并打印 / 记录降级 warning，随后使用 fallback context 继续生成报告。
 
 ## 实施顺序建议

@@ -618,6 +618,7 @@ def test_scan_files_counts_cached_and_uncached_contexts(
         "reparsed_count": 1,
     }
     detail = scanner.scan_index_store.latest_scan_run_detail()
+    assert result.scan_run_id == detail["run_id"]
     assert detail["success_count"] == 2
     assert detail["error_count"] == 0
     extension_metrics = scanner.scan_index_store.list_extension_metrics(detail["run_id"])

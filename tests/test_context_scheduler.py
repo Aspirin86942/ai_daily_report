@@ -94,6 +94,7 @@ def test_scheduler_builds_weekly_context_and_records_audit(tmp_path: Path) -> No
                 parser_backend="light_text_v1",
             ),
         ],
+        scan_run_id=77,
     )
     scanner = StubScanner(scan_result)
     scheduler = ContextScheduler(scanner_factory=lambda: scanner)
@@ -117,6 +118,47 @@ def test_scheduler_builds_weekly_context_and_records_audit(tmp_path: Path) -> No
     assert scanner.scan_index_store.context_runs[0]["report_mode"] == "weekly"
     assert scanner.scan_index_store.context_runs[0]["scan_run_id"] == 77
     assert scanner.scan_index_store.context_decisions[0][0] == 123
+
+
+def test_scheduler_uses_scan_result_run_id_instead_of_latest_scan_run(
+    tmp_path: Path,
+) -> None:
+    """scan_run_id 必须绑定本次 scan result，避免并发 CLI run 读到别人的 latest。"""
+    sample_file = tmp_path / "weekly.md"
+    sample_file.write_text("weekly evidence", encoding="utf-8")
+    scan_result = ScanResult(
+        total_files=1,
+        success_count=1,
+        error_count=0,
+        contexts=[
+            FileContext(
+                file_path=str(sample_file),
+                file_type=".md",
+                content="weekly evidence",
+                parser_backend="light_text_v1",
+            )
+        ],
+        scan_run_id=77,
+    )
+
+    class RacingStore(StubStore):
+        def latest_scan_run_detail(self) -> dict[str, int]:
+            return {"run_id": 999}
+
+    store = RacingStore()
+    scanner = StubScanner(scan_result, store=store)
+    scheduler = ContextScheduler(scanner_factory=lambda: scanner)
+
+    scheduler.build_context(
+        ContextScheduleRequest(
+            report_mode="weekly",
+            source="scan",
+            start_date=date(2026, 5, 10),
+            end_date=date(2026, 5, 24),
+        )
+    )
+
+    assert store.context_runs[0]["scan_run_id"] == 77
 
 
 def test_scheduler_marks_oversized_file_as_metadata_only(tmp_path: Path) -> None:

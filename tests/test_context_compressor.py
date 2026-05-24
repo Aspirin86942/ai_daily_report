@@ -144,6 +144,98 @@ def test_compress_moves_over_budget_files_to_omitted_summary() -> None:
     assert compressed.decisions[1].reason == "global_budget_exceeded"
 
 
+def test_final_budget_trim_preserves_included_evidence_when_omitted_summary_overflows() -> None:
+    """省略摘要过长时不能把已纳入的正文整体降级成“预算不足”。"""
+    profile = ContextProfile.for_report_mode("weekly")
+    profile = profile.with_budget(global_context_max_chars=2500, per_file_max_chars=500)
+    compressor = ContextCompressor()
+    keep_context = FileContext(
+        file_path="D:/work/keep.md",
+        file_type=".md",
+        content="KEEP_ME weekly evidence",
+        parser_backend="light_text_v1",
+    )
+    omitted_contexts = [
+        FileContext(
+            file_path=f"D:/work/omitted-{index:03d}.log",
+            file_type=".log",
+            content="omitted evidence",
+            parser_backend="light_text_v1",
+        )
+        for index in range(80)
+    ]
+    scan_result = ScanResult(
+        total_files=81,
+        success_count=81,
+        error_count=0,
+        contexts=[keep_context, *omitted_contexts],
+    )
+
+    compressed = compressor.compress(
+        scan_result=scan_result,
+        decisions=[
+            _decision(
+                "D:/work/keep.md",
+                ACTION_KEEP,
+                "small_file_keep",
+                input_chars=len(keep_context.content),
+            ),
+            *[
+                _decision(
+                    context.file_path,
+                    ACTION_OMIT,
+                    "low_priority",
+                    input_chars=len(context.content),
+                )
+                for context in omitted_contexts
+            ],
+        ],
+        profile=profile,
+    )
+
+    assert len(compressed.content) <= profile.global_context_max_chars
+    assert "KEEP_ME weekly evidence" in compressed.content
+    assert compressed.included_file_count == 1
+    assert compressed.omitted_file_count == 80
+    assert compressed.output_chars > 1000
+
+
+def test_truncated_omitted_file_still_counts_as_truncated() -> None:
+    """truncated 是源解析事实，即使正文被省略也必须进入审计计数。"""
+    profile = ContextProfile.for_report_mode("weekly")
+    compressor = ContextCompressor()
+    context = FileContext(
+        file_path="D:/work/truncated.pdf",
+        file_type=".pdf",
+        content="text layer preview",
+        parser_backend="pdf_text_v1",
+        truncated=True,
+    )
+    scan_result = ScanResult(
+        total_files=1,
+        success_count=1,
+        error_count=0,
+        contexts=[context],
+    )
+
+    compressed = compressor.compress(
+        scan_result=scan_result,
+        decisions=[
+            _decision(
+                "D:/work/truncated.pdf",
+                ACTION_OMIT,
+                "low_priority",
+                parser_backend="pdf_text_v1",
+                input_chars=len(context.content),
+            )
+        ],
+        profile=profile,
+    )
+
+    assert compressed.truncated_file_count == 1
+    assert compressed.decisions[0].truncated is True
+
+
 def test_compress_empty_scan_returns_auditable_empty_context() -> None:
     profile = ContextProfile.for_report_mode("monthly")
     compressor = ContextCompressor()

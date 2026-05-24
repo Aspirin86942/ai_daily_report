@@ -16,6 +16,7 @@ ACTION_ERROR = "error"
 _GLOBAL_BUDGET_REASON = "global_budget_exceeded"
 _WARNING_PARSE_ISSUE_BUDGET = "预算不足，解析问题明细未展开。"
 _WARNING_FINAL_BUDGET = "预算不足，已压缩最终上下文到全局预算。"
+_WARNING_OMITTED_SUMMARY_BUDGET = "预算不足，省略文件摘要已截断。"
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +183,6 @@ class _CompressionStats:
     metadata_only_count: int = 0
     compressed_file_count: int = 0
     error_file_count: int = 0
-    truncated_file_count: int = 0
     input_chars: int = 0
 
 
@@ -259,10 +259,16 @@ class ContextCompressor:
             sections.append("无文件证据")
 
         if omitted_decisions:
-            sections.append(self._render_omitted_summary(omitted_decisions))
+            self._append_omitted_summary(
+                sections,
+                omitted_decisions,
+                profile,
+                warnings,
+            )
 
         self._append_parse_issues(sections, parse_issue_lines, profile, warnings)
         content = self._fit_content_to_budget(sections, profile, warnings)
+        truncated_file_count = self._count_truncated_files(ordered_decisions)
 
         return CompressedContext(
             content=content,
@@ -272,7 +278,7 @@ class ContextCompressor:
             metadata_only_count=stats.metadata_only_count,
             compressed_file_count=stats.compressed_file_count,
             error_file_count=stats.error_file_count,
-            truncated_file_count=stats.truncated_file_count,
+            truncated_file_count=truncated_file_count,
             input_chars=stats.input_chars,
             output_chars=len(content),
             warnings=warnings,
@@ -312,6 +318,8 @@ class ContextCompressor:
         stats: _CompressionStats,
     ) -> None:
         stats.input_chars += decision.input_chars if decision.input_chars else len(context.content)
+        # truncated 是解析层事实，后续即使被 metadata/omit 策略省略，也要保留审计口径。
+        decision.truncated = decision.truncated or context.truncated
 
         if context.error or decision.action == ACTION_ERROR:
             decision.action = ACTION_ERROR
@@ -341,8 +349,6 @@ class ContextCompressor:
             stats.compressed_file_count += 1
         elif decision.action == ACTION_METADATA_ONLY:
             stats.metadata_only_count += 1
-        if decision.truncated or context.truncated:
-            stats.truncated_file_count += 1
 
     def _render_run_summary(
         self,
@@ -421,15 +427,57 @@ class ContextCompressor:
             ]
         )
 
-    def _render_omitted_summary(self, omitted_decisions: list[ContextDecision]) -> str:
-        lines = ["## 省略文件摘要"]
+    def _append_omitted_summary(
+        self,
+        sections: list[str],
+        omitted_decisions: list[ContextDecision],
+        profile: ContextProfile,
+        warnings: list[str],
+    ) -> None:
+        footer = "## 解析问题\n- 未发现解析问题。"
+
+        def can_fit(lines: list[str]) -> bool:
+            candidate = "\n".join(lines)
+            # 省略摘要是审计信息，不应挤掉后面的解析问题入口；
+            # 因此这里保守预留一个最小 footer，避免最终预算收口再整体截断正文。
+            projected = _join_sections([*sections, candidate, footer])
+            return len(projected) <= profile.global_context_max_chars
+
+        lines = ["## 省略文件摘要", f"- 省略文件数: {len(omitted_decisions)}"]
+        if not can_fit(lines):
+            self._append_warning(warnings, _WARNING_OMITTED_SUMMARY_BUDGET)
+            compact_lines = [
+                "## 省略文件摘要",
+                f"- 省略文件数: {len(omitted_decisions)}",
+                f"- {_WARNING_OMITTED_SUMMARY_BUDGET}",
+            ]
+            if self._can_append_with_footer(sections, "\n".join(compact_lines), profile):
+                sections.append("\n".join(compact_lines))
+            return
+
+        summary_truncated = False
         for decision in omitted_decisions:
-            lines.append(
+            line = (
                 "- "
                 f"{decision.file_path} | action={decision.action} | "
                 f"reason={decision.reason} | input_chars={decision.input_chars}"
             )
-        return "\n".join(lines)
+            if can_fit([*lines, line]):
+                lines.append(line)
+                continue
+            summary_truncated = True
+            break
+
+        if summary_truncated:
+            self._append_warning(warnings, _WARNING_OMITTED_SUMMARY_BUDGET)
+            warning_line = (
+                f"- {_WARNING_OMITTED_SUMMARY_BUDGET} "
+                "完整逐文件决策请查看 context_decisions。"
+            )
+            if can_fit([*lines, warning_line]):
+                lines.append(warning_line)
+
+        sections.append("\n".join(lines))
 
     def _append_parse_issues(
         self,
@@ -445,7 +493,7 @@ class ContextCompressor:
             return
 
         if _WARNING_PARSE_ISSUE_BUDGET not in warnings:
-            warnings.append(_WARNING_PARSE_ISSUE_BUDGET)
+            self._append_warning(warnings, _WARNING_PARSE_ISSUE_BUDGET)
         warning_section = f"## 解析问题\n- {_WARNING_PARSE_ISSUE_BUDGET}"
         if self._can_append_exact(sections, warning_section, profile):
             sections.append(warning_section)
@@ -488,25 +536,25 @@ class ContextCompressor:
             return content
 
         if _WARNING_FINAL_BUDGET not in warnings:
-            warnings.append(_WARNING_FINAL_BUDGET)
+            self._append_warning(warnings, _WARNING_FINAL_BUDGET)
 
-        # 极小预算下，完整审计头和 parse issue 小节无法同时保留；
-        # 因此降级为最短可审计提示，并把具体原因放入 warnings。
-        fallback = "# 文件证据上下文\n预算不足\n"
-        if len(fallback) <= profile.global_context_max_chars:
-            return fallback
-
-        short_fallback = "预算不足\n"
-        if len(short_fallback) <= profile.global_context_max_chars:
-            return short_fallback
-
-        return short_fallback[: profile.global_context_max_chars]
+        return _truncate_content_to_budget(
+            content,
+            profile.global_context_max_chars,
+        )
 
     def _mutate_to_global_omit(self, decision: ContextDecision) -> None:
         decision.action = ACTION_OMIT
         decision.reason = _GLOBAL_BUDGET_REASON
         decision.output_chars = 0
-        decision.truncated = False
+
+    def _count_truncated_files(self, decisions: list[ContextDecision]) -> int:
+        """按文件去重统计 truncated 事实，避免同一文件多次决策时重复计数。"""
+        return len({decision.file_path for decision in decisions if decision.truncated})
+
+    def _append_warning(self, warnings: list[str], warning: str) -> None:
+        if warning not in warnings:
+            warnings.append(warning)
 
     def _default_decision(self, context: FileContext) -> ContextDecision:
         return ContextDecision(
@@ -532,6 +580,27 @@ def _positive_int(value: int, default: int) -> int:
 
 def _join_sections(sections: list[str]) -> str:
     return "\n\n".join(section.rstrip() for section in sections).rstrip() + "\n"
+
+
+def _truncate_content_to_budget(content: str, budget: int) -> str:
+    if budget <= 0:
+        return ""
+
+    note = (
+        "\n\n## 预算提示\n"
+        "- 已按全局上下文预算截断尾部内容，完整逐文件决策请查看 context_decisions。\n"
+    )
+    if budget <= len(note) + 20:
+        return content[:budget]
+
+    keep_chars = budget - len(note)
+    prefix = content[:keep_chars].rstrip()
+    newline_index = prefix.rfind("\n")
+    if newline_index >= keep_chars - 200:
+        prefix = prefix[:newline_index].rstrip()
+
+    # 最终兜底只截断尾部低价值审计内容，不能把已进入正文预算的文件证据整体替换掉。
+    return (prefix + note)[:budget]
 
 
 __all__ = [
