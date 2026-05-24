@@ -3,7 +3,7 @@ name = "审计日报生成器"
 version = "5.0.0"
 
 [paths]
-work_dir = "D:\\01- 工作"
+work_dir = "D:\\bochu_work"
 data_dir = "data"
 reports_dir = "data/reports"
 db_dir = "data/db"
