@@ -56,6 +56,37 @@ class ExtensionMetrics:
 
 
 @dataclass(slots=True)
+class ReparseDetail:
+    """单个重解析文件的 cache miss 与解析结果明细。"""
+
+    path: str
+    extension: str
+    file_identity: str
+    source_version: str
+    cache_status: str
+    cache_miss_reason: str
+    previous_source_version: str | None = None
+    parse_duration_ms: int = 0
+    parse_status: str = "success"
+    parse_error: str = ""
+
+    def to_dict(self) -> dict[str, int | str | None]:
+        """转成 benchmark JSON / Markdown 共用的稳定结构。"""
+        return {
+            "path": self.path,
+            "extension": self.extension,
+            "file_identity": self.file_identity,
+            "source_version": self.source_version,
+            "cache_status": self.cache_status,
+            "cache_miss_reason": self.cache_miss_reason,
+            "previous_source_version": self.previous_source_version,
+            "parse_duration_ms": max(0, int(self.parse_duration_ms)),
+            "parse_status": self.parse_status,
+            "parse_error": self.parse_error,
+        }
+
+
+@dataclass(slots=True)
 class ScanRunMetrics:
     """单次 scanner 运行的完整指标。"""
 

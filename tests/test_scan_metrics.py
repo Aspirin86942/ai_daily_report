@@ -1,6 +1,40 @@
 """测试 scanner 性能指标模型。"""
 
-from src.services.scan_metrics import ScanMetricsCollector, is_timeout_error
+from src.services.scan_metrics import (
+    ExtensionMetrics,
+    ReparseDetail,
+    ScanMetricsCollector,
+    is_timeout_error,
+)
+
+
+def test_reparse_detail_serializes_stable_payload():
+    """重解析明细应输出 benchmark 需要的稳定字段。"""
+    detail = ReparseDetail(
+        path="D:\\work\\report.md",
+        extension=".md",
+        file_identity="bootstrap:d:\\work\\report.md",
+        source_version="mtime=2:size=10",
+        cache_status="miss",
+        cache_miss_reason="source_version_changed",
+        previous_source_version="mtime=1:size=10",
+        parse_duration_ms=12,
+        parse_status="success",
+        parse_error="",
+    )
+
+    assert detail.to_dict() == {
+        "path": "D:\\work\\report.md",
+        "extension": ".md",
+        "file_identity": "bootstrap:d:\\work\\report.md",
+        "source_version": "mtime=2:size=10",
+        "cache_status": "miss",
+        "cache_miss_reason": "source_version_changed",
+        "previous_source_version": "mtime=1:size=10",
+        "parse_duration_ms": 12,
+        "parse_status": "success",
+        "parse_error": "",
+    }
 
 
 def test_metrics_collector_builds_scan_run_detail():
