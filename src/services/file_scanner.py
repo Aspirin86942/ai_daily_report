@@ -24,6 +24,7 @@ from .scan_worker_pool import ParserSupervisor
 logger = setup_logger()
 
 TEXT_FILE_TYPES = {".txt", ".md", ".csv", ".json", ".log"}
+DIRECT_TEXT_MAX_BYTES_DEFAULT = 64 * 1024
 
 
 def _extract_content_worker(
@@ -505,7 +506,7 @@ class FileScanner:
         limits: Optional[dict] = None,
     ) -> FileContext:
         """根据文件类型选择 direct text lane 或 subprocess timeout lane。"""
-        if self._should_parse_direct(file_type):
+        if self._should_parse_direct(file_path, file_type):
             return self.parser_supervisor.parse_file(
                 file_path=file_path,
                 file_type=file_type,
@@ -514,12 +515,42 @@ class FileScanner:
             )
         return self._extract_content_with_timeout(file_path, limits)
 
-    def _should_parse_direct(self, file_type: str) -> bool:
+    def _should_parse_direct(self, file_path: Path, file_type: str) -> bool:
         """text-like 文件读取受限，direct 模式下避免 Windows spawn 固定开销。"""
-        return (
-            str(self.scanner_cfg.get("worker_lane_mode", "direct")).lower() == "direct"
-            and file_type.lower() in TEXT_FILE_TYPES
+        if str(self.scanner_cfg.get("worker_lane_mode", "direct")).lower() != "direct":
+            return False
+        if file_type.lower() not in TEXT_FILE_TYPES:
+            return False
+
+        try:
+            size_bytes = file_path.stat().st_size
+        except OSError as exc:
+            logger.warning(
+                "无法获取文件大小，回退到 subprocess 解析: %s (%s)",
+                file_path,
+                exc,
+            )
+            return False
+
+        max_bytes = self._direct_text_max_bytes()
+        # direct lane 没有 subprocess kill 边界，所以只允许已知大小的小文本文件绕过 worker。
+        return size_bytes <= max_bytes
+
+    def _direct_text_max_bytes(self) -> int:
+        """返回 direct text lane 的最大安全字节数。"""
+        raw_value = self.scanner_cfg.get(
+            "direct_text_max_bytes",
+            DIRECT_TEXT_MAX_BYTES_DEFAULT,
         )
+        try:
+            return int(raw_value)
+        except (TypeError, ValueError):
+            logger.warning(
+                "direct_text_max_bytes 配置无效，使用默认值 %s: %r",
+                DIRECT_TEXT_MAX_BYTES_DEFAULT,
+                raw_value,
+            )
+            return DIRECT_TEXT_MAX_BYTES_DEFAULT
 
     def _run_extract_subprocess(
         self,

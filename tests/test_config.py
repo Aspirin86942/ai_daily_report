@@ -49,6 +49,26 @@ def test_scanner_config_passes_excluded_dirs_as_builtin_list():
     assert isinstance(scanner_config["excluded_dirs"], list)
 
 
+def test_scanner_config_passes_direct_text_max_bytes_when_present():
+    """direct_text_max_bytes 是扫描 lane 安全阈值，应从 settings 透传给 scanner。"""
+    cfg = object.__new__(Config)
+    cfg._settings = SimpleNamespace(
+        scanner=SimpleNamespace(
+            allowed_extensions=[".txt"],
+            ignored_patterns=[],
+            max_workers=1,
+            excel_max_rows=50,
+            pdf_max_pages=5,
+            text_max_chars=6000,
+            direct_text_max_bytes=8192,
+        )
+    )
+
+    scanner_config = cfg.scanner_config
+
+    assert scanner_config["direct_text_max_bytes"] == 8192
+
+
 def test_scanner_config_uses_builtin_containers_and_is_picklable():
     """扫描配置必须可 pickle，确保 Windows spawn 能把参数安全传给子进程。"""
     scanner_config = config.scanner_config

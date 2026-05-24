@@ -124,6 +124,7 @@ class Config:
             "max_file_size_mb",
             "file_timeout_seconds",
             "file_timeout_by_extension",
+            "direct_text_max_bytes",
         ):
             if hasattr(scanner, key):
                 cfg[key] = self._to_builtin_value(getattr(scanner, key))

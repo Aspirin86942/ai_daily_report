@@ -965,6 +965,52 @@ def test_scan_files_uses_direct_parse_for_text_like_files(
     ]
 
 
+def test_direct_text_lane_falls_back_to_subprocess_for_large_text_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """direct 模式下超过 direct_text_max_bytes 的 text-like 文件仍走 timeout/subprocess。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".md"],
+            "worker_lane_mode": "direct",
+            "direct_text_max_bytes": 8,
+        },
+    )
+    sample = scanner.work_dir / "large.md"
+    sample.write_text("large direct content", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=20")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    def fail_direct(*args, **kwargs):
+        raise AssertionError("large text file should not use direct lane")
+
+    subprocess_calls: list[Path] = []
+
+    def fake_subprocess(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        subprocess_calls.append(file_path)
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".md",
+            content="parsed through subprocess",
+            error=None,
+        )
+
+    monkeypatch.setattr(scanner.parser_supervisor, "parse_file", fail_direct)
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fake_subprocess)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert subprocess_calls == [sample]
+    assert result.success_count == 1
+    assert result.contexts[0].content == "parsed through subprocess"
+
+
 def test_scan_files_keeps_subprocess_path_for_pdf_in_direct_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
