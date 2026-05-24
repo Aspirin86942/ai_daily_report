@@ -664,7 +664,11 @@ def test_scan_files_reuses_fresh_parse_cache_without_parsing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """fresh cache 命中时应直接复用缓存，不再调用解析器。"""
-    scanner = _make_scanner(tmp_path, monkeypatch, {"allowed_extensions": [".txt"]})
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".txt"], "worker_lane_mode": "subprocess"},
+    )
     cached_file = scanner.work_dir / "cached.txt"
     cached_file.write_text("cached content", encoding="utf-8")
     source_version = "mtime_ns=1:size=14"
