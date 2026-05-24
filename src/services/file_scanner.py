@@ -31,6 +31,7 @@ from .scan_worker_pool import ParserSupervisor
 logger = setup_logger()
 
 TEXT_FILE_TYPES = {".txt", ".md", ".csv", ".json", ".log"}
+NOT_PARSED_PARSER_BACKEND = "not_parsed"
 
 
 def _extract_content_worker(
@@ -460,7 +461,7 @@ class FileScanner:
                 parse_duration_ms=0,
                 parse_status="error",
                 parse_error=parse_error,
-                parser_backend="",
+                parser_backend=NOT_PARSED_PARSER_BACKEND,
                 truncated=False,
             )
         )
@@ -606,6 +607,7 @@ class FileScanner:
                 f"file too large: {file_size} bytes exceeds "
                 f"{max_file_size_mb} MB limit"
             ),
+            parser_backend=NOT_PARSED_PARSER_BACKEND,
         )
 
     def _run_extract_subprocess(

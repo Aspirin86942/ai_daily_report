@@ -14,20 +14,28 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.models.schemas import ScanResult  # noqa: E402
-from src.services.file_scanner import FileScanner  # noqa: E402
+from src.services.file_scanner import (  # noqa: E402
+    FileScanner,
+    NOT_PARSED_PARSER_BACKEND,
+)
 from src.services.light_text_parser import LIGHT_TEXT_PARSER_BACKEND  # noqa: E402
 from src.services.scan_metrics import ExtensionMetrics, ReparseDetail  # noqa: E402
 
 
 SUBPROCESS_PARSER_BACKEND = "subprocess"
 TRUNCATED_SUMMARY_KEY = "truncated"
-BASE_BACKEND_KEYS = (LIGHT_TEXT_PARSER_BACKEND, SUBPROCESS_PARSER_BACKEND)
+SUMMARY_BACKEND_KEYS = (
+    LIGHT_TEXT_PARSER_BACKEND,
+    SUBPROCESS_PARSER_BACKEND,
+    NOT_PARSED_PARSER_BACKEND,
+)
 
 
 def _new_extension_backend_summary() -> dict[str, int]:
     return {
         LIGHT_TEXT_PARSER_BACKEND: 0,
         SUBPROCESS_PARSER_BACKEND: 0,
+        NOT_PARSED_PARSER_BACKEND: 0,
         TRUNCATED_SUMMARY_KEY: 0,
     }
 
@@ -36,11 +44,12 @@ def _sort_extension_backend_summary(item: dict[str, int]) -> dict[str, int]:
     ordered: dict[str, int] = {
         LIGHT_TEXT_PARSER_BACKEND: item.get(LIGHT_TEXT_PARSER_BACKEND, 0),
         SUBPROCESS_PARSER_BACKEND: item.get(SUBPROCESS_PARSER_BACKEND, 0),
+        NOT_PARSED_PARSER_BACKEND: item.get(NOT_PARSED_PARSER_BACKEND, 0),
     }
     extra_backends = sorted(
         key
         for key in item
-        if key not in BASE_BACKEND_KEYS and key != TRUNCATED_SUMMARY_KEY
+        if key not in SUMMARY_BACKEND_KEYS and key != TRUNCATED_SUMMARY_KEY
     )
     for backend in extra_backends:
         ordered[backend] = item[backend]
@@ -52,13 +61,13 @@ def _iter_backend_summary_rows(item: dict[str, int]) -> list[str]:
     extra_backends = sorted(
         key
         for key, count in item.items()
-        if key not in BASE_BACKEND_KEYS
+        if key not in SUMMARY_BACKEND_KEYS
         and key != TRUNCATED_SUMMARY_KEY
         and count > 0
     )
     return [
         backend
-        for backend in (*BASE_BACKEND_KEYS, *extra_backends)
+        for backend in (*SUMMARY_BACKEND_KEYS, *extra_backends)
         if item.get(backend, 0) > 0
     ]
 
@@ -69,12 +78,13 @@ def build_parser_backend_summary(
     """按解析后端聚合本轮重解析文件数量。"""
     summary: dict[str, Any] = {
         "direct_count": 0,
+        "not_parsed_count": 0,
         "subprocess_count": 0,
         "truncated_count": 0,
         "by_extension": {},
     }
     for detail in reparse_details:
-        backend = detail.parser_backend or SUBPROCESS_PARSER_BACKEND
+        backend = detail.parser_backend or NOT_PARSED_PARSER_BACKEND
         extension = detail.extension
         by_extension = summary["by_extension"].setdefault(
             extension,
@@ -82,6 +92,8 @@ def build_parser_backend_summary(
         )
         if backend == SUBPROCESS_PARSER_BACKEND:
             summary["subprocess_count"] += 1
+        elif backend == NOT_PARSED_PARSER_BACKEND:
+            summary["not_parsed_count"] += 1
         else:
             summary["direct_count"] += 1
         by_extension[backend] = by_extension.get(backend, 0) + 1
@@ -135,6 +147,7 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
         "parser_backend_summary",
         {
             "direct_count": 0,
+            "not_parsed_count": 0,
             "subprocess_count": 0,
             "truncated_count": 0,
             "by_extension": {},
@@ -195,9 +208,13 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
             "",
             "## Parser Backend Summary",
             "",
-            f"- direct_count: `{parser_backend_summary['direct_count']}`",
-            f"- subprocess_count: `{parser_backend_summary['subprocess_count']}`",
-            f"- truncated_count: `{parser_backend_summary['truncated_count']}`",
+            f"- direct_count: `{parser_backend_summary.get('direct_count', 0)}`",
+            "- not_parsed_count: "
+            f"`{parser_backend_summary.get('not_parsed_count', 0)}`",
+            "- subprocess_count: "
+            f"`{parser_backend_summary.get('subprocess_count', 0)}`",
+            "- truncated_count: "
+            f"`{parser_backend_summary.get('truncated_count', 0)}`",
             "",
             "| extension | backend | backend_count | subprocess_count | extension_truncated_count |",
             "|---|---|---:|---:|---:|",

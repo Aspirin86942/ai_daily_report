@@ -1093,6 +1093,13 @@ def test_direct_text_lane_enforces_max_file_size_before_light_parser(
     assert result.contexts[0].content == ""
     assert result.contexts[0].error is not None
     assert result.contexts[0].error.startswith("file too large:")
+    assert (
+        result.contexts[0].parser_backend
+        == file_scanner_module.NOT_PARSED_PARSER_BACKEND
+    )
+    assert scanner.last_reparse_details[0].parser_backend == (
+        file_scanner_module.NOT_PARSED_PARSER_BACKEND
+    )
 
 
 def test_scan_files_passes_light_parser_options(

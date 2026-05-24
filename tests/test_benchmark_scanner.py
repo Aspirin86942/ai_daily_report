@@ -10,6 +10,7 @@ from scripts.benchmark_scanner import (
     write_report_files,
 )
 from src.models.schemas import FileContext, ScanResult
+from src.services.file_scanner import NOT_PARSED_PARSER_BACKEND
 from src.services.light_text_parser import LIGHT_TEXT_PARSER_BACKEND
 from src.services.scan_metrics import ExtensionMetrics, ReparseDetail
 
@@ -40,6 +41,7 @@ def test_build_parser_backend_summary_returns_empty_summary():
     """没有重解析明细时应返回稳定的空 summary。"""
     assert build_parser_backend_summary([]) == {
         "direct_count": 0,
+        "not_parsed_count": 0,
         "subprocess_count": 0,
         "truncated_count": 0,
         "by_extension": {},
@@ -72,18 +74,21 @@ def test_build_parser_backend_summary_preserves_backend_dimensions_and_sorting()
     )
 
     assert summary["direct_count"] == 2
-    assert summary["subprocess_count"] == 1
+    assert summary["not_parsed_count"] == 1
+    assert summary["subprocess_count"] == 0
     assert summary["truncated_count"] == 2
     assert list(summary["by_extension"]) == [".md", ".txt"]
     assert summary["by_extension"][".txt"] == {
         LIGHT_TEXT_PARSER_BACKEND: 1,
         "subprocess": 0,
         "custom_backend": 1,
+        NOT_PARSED_PARSER_BACKEND: 0,
         "truncated": 2,
     }
     assert summary["by_extension"][".md"] == {
         LIGHT_TEXT_PARSER_BACKEND: 0,
-        "subprocess": 1,
+        "subprocess": 0,
+        NOT_PARSED_PARSER_BACKEND: 1,
         "truncated": 0,
     }
 
@@ -193,12 +198,14 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
     ]
     assert payload["parser_backend_summary"] == {
         "direct_count": 1,
+        "not_parsed_count": 0,
         "subprocess_count": 0,
         "truncated_count": 1,
         "by_extension": {
             ".md": {
                 LIGHT_TEXT_PARSER_BACKEND: 1,
                 "subprocess": 0,
+                NOT_PARSED_PARSER_BACKEND: 0,
                 "truncated": 1,
             }
         },
@@ -280,6 +287,7 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
     assert "| .txt | 2 | 80 | 1 | 1 | 1 |" in markdown
     assert "## Parser Backend Summary" in markdown
     assert "- direct_count: `1`" in markdown
+    assert "- not_parsed_count: `0`" in markdown
     assert "- subprocess_count: `0`" in markdown
     assert "- truncated_count: `1`" in markdown
     assert "| .md | light_text_v1 | 1 | 0 | 1 |" in markdown
@@ -342,13 +350,14 @@ def test_render_markdown_report_orders_backend_summary_rows_stably():
 
     markdown = render_markdown_report(payload)
 
-    subprocess_row = "| .md | subprocess | 1 | 1 | 0 |"
+    not_parsed_row = "| .md | not_parsed | 1 | 0 | 0 |"
     light_row = "| .txt | light_text_v1 | 1 | 0 | 2 |"
     custom_row = "| .txt | custom_backend | 1 | 0 | 2 |"
-    assert subprocess_row in markdown
+    assert "- not_parsed_count: `1`" in markdown
+    assert not_parsed_row in markdown
     assert light_row in markdown
     assert custom_row in markdown
-    assert markdown.index(subprocess_row) < markdown.index(light_row)
+    assert markdown.index(not_parsed_row) < markdown.index(light_row)
     assert markdown.index(light_row) < markdown.index(custom_row)
 
 
