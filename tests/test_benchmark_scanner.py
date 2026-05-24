@@ -9,7 +9,7 @@ from scripts.benchmark_scanner import (
     write_report_files,
 )
 from src.models.schemas import FileContext, ScanResult
-from src.services.scan_metrics import ExtensionMetrics
+from src.services.scan_metrics import ExtensionMetrics, ReparseDetail
 
 
 def test_build_benchmark_payload_uses_scan_result_and_metrics():
@@ -51,11 +51,26 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             timeout_count=1,
         )
     ]
+    reparse_details = [
+        ReparseDetail(
+            path="D:\\work\\report.md",
+            extension=".md",
+            file_identity="bootstrap:d:\\work\\report.md",
+            source_version="mtime=2:size=10",
+            cache_status="miss",
+            cache_miss_reason="source_version_changed",
+            previous_source_version="mtime=1:size=10",
+            parse_duration_ms=12,
+            parse_status="success",
+            parse_error="",
+        )
+    ]
 
     payload = build_benchmark_payload(
         scan_result=scan_result,
         run_detail=run_detail,
         extension_metrics=extension_metrics,
+        reparse_details=reparse_details,
         start_date=date(2026, 5, 23),
         end_date=date(2026, 5, 24),
         summary_mode=True,
@@ -80,6 +95,20 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             "success_count": 1,
             "error_count": 1,
             "timeout_count": 1,
+        }
+    ]
+    assert payload["reparse_details"] == [
+        {
+            "path": "D:\\work\\report.md",
+            "extension": ".md",
+            "file_identity": "bootstrap:d:\\work\\report.md",
+            "source_version": "mtime=2:size=10",
+            "cache_status": "miss",
+            "cache_miss_reason": "source_version_changed",
+            "previous_source_version": "mtime=1:size=10",
+            "parse_duration_ms": 12,
+            "parse_status": "success",
+            "parse_error": "",
         }
     ]
 
@@ -121,6 +150,20 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
                 "timeout_count": 1,
             }
         ],
+        "reparse_details": [
+            {
+                "path": "D:\\work\\report.md",
+                "extension": ".md",
+                "file_identity": "bootstrap:d:\\work\\report.md",
+                "source_version": "mtime=2:size=10",
+                "cache_status": "miss",
+                "cache_miss_reason": "source_version_changed",
+                "previous_source_version": "mtime=1:size=10",
+                "parse_duration_ms": 12,
+                "parse_status": "success",
+                "parse_error": "",
+            }
+        ],
     }
 
     markdown = render_markdown_report(payload)
@@ -129,6 +172,8 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
     assert "| total | 120 |" in markdown
     assert "| discovery | 10 |" in markdown
     assert "| .txt | 2 | 80 | 1 | 1 | 1 |" in markdown
+    assert "## Reparse Details" in markdown
+    assert "| .md | source_version_changed | 12 | success | D:\\work\\report.md |" in markdown
 
 
 def test_write_report_files_writes_utf8_json_and_markdown(tmp_path: Path):
@@ -159,6 +204,7 @@ def test_write_report_files_writes_utf8_json_and_markdown(tmp_path: Path):
             "timeout_count": 0,
         },
         "extension_metrics": [],
+        "reparse_details": [],
     }
     json_out = tmp_path / "benchmark.json"
     markdown_out = tmp_path / "benchmark.md"

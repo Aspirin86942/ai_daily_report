@@ -15,13 +15,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src.models.schemas import ScanResult  # noqa: E402
 from src.services.file_scanner import FileScanner  # noqa: E402
-from src.services.scan_metrics import ExtensionMetrics  # noqa: E402
+from src.services.scan_metrics import ExtensionMetrics, ReparseDetail  # noqa: E402
 
 
 def build_benchmark_payload(
     scan_result: ScanResult,
     run_detail: dict[str, int],
     extension_metrics: list[ExtensionMetrics],
+    reparse_details: list[ReparseDetail],
     start_date: date,
     end_date: date,
     summary_mode: bool,
@@ -40,6 +41,7 @@ def build_benchmark_payload(
         },
         "metrics": dict(run_detail),
         "extension_metrics": [item.to_dict() for item in extension_metrics],
+        "reparse_details": [item.to_dict() for item in reparse_details],
     }
 
 
@@ -49,6 +51,7 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
     scan_result = payload["scan_result"]
     metrics = payload["metrics"]
     extension_metrics = payload["extension_metrics"]
+    reparse_details = payload.get("reparse_details", [])
 
     lines = [
         "# Scanner Benchmark Report",
@@ -98,6 +101,24 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
             )
     else:
         lines.append("| (none) | 0 | 0 | 0 | 0 | 0 |")
+
+    lines.extend(
+        [
+            "",
+            "## Reparse Details",
+            "",
+            "| extension | cache_miss_reason | parse_duration_ms | parse_status | path |",
+            "|---|---|---:|---|---|",
+        ]
+    )
+    if reparse_details:
+        for item in reparse_details:
+            lines.append(
+                "| {extension} | {cache_miss_reason} | {parse_duration_ms} | "
+                "{parse_status} | {path} |".format(**item)
+            )
+    else:
+        lines.append("| (none) |  | 0 |  |  |")
 
     return "\n".join(lines) + "\n"
 
@@ -170,6 +191,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         scan_result=scan_result,
         run_detail=run_detail,
         extension_metrics=extension_metrics,
+        reparse_details=scanner.last_reparse_details,
         start_date=args.start_date,
         end_date=args.end_date,
         summary_mode=args.summary_mode,
