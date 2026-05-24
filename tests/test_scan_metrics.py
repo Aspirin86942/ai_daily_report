@@ -21,6 +21,7 @@ def test_reparse_detail_serializes_stable_payload():
         parse_status="success",
         parse_error="",
         parser_backend="light_text_v1",
+        worker_lane="direct",
         truncated=True,
     )
 
@@ -36,6 +37,7 @@ def test_reparse_detail_serializes_stable_payload():
         "parse_status": "success",
         "parse_error": "",
         "parser_backend": "light_text_v1",
+        "worker_lane": "direct",
         "truncated": True,
     }
 
@@ -58,6 +60,7 @@ def test_reparse_detail_normalizes_duration_and_none_version():
     assert payload["parse_duration_ms"] == 0
     assert payload["previous_source_version"] is None
     assert payload["parser_backend"] == ""
+    assert payload["worker_lane"] == ""
     assert payload["truncated"] is False
 
 

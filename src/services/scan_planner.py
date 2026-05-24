@@ -11,7 +11,29 @@ from .light_text_parser import (
     DEFAULT_TEXT_MAX_CHARS,
     LIGHT_TEXT_PARSER_BACKEND,
     build_light_text_budget,
+    normalize_positive_int,
 )
+from .document_parser import (
+    DEFAULT_DOCX_MAX_PARAGRAPHS,
+    DEFAULT_DOCX_MAX_TABLES,
+    DEFAULT_DOCX_TABLE_MAX_COLS,
+    DEFAULT_DOCX_TABLE_MAX_ROWS,
+    DEFAULT_DOCUMENT_EXCERPT_MAX_CHARS,
+    DEFAULT_EXCEL_MAX_COLUMNS,
+    DEFAULT_EXCEL_MAX_ROWS,
+    DEFAULT_EXCEL_MAX_SHEETS,
+    DEFAULT_PPTX_MAX_SLIDES,
+    OFFICE_PARSER_BACKEND,
+    PDF_TEXT_PARSER_BACKEND,
+)
+
+DEFAULT_SUMMARY_EXCEL_MAX_SHEETS = 2
+DEFAULT_SUMMARY_EXCEL_MAX_COLUMNS = 12
+DEFAULT_SUMMARY_DOCX_MAX_PARAGRAPHS = 80
+DEFAULT_SUMMARY_DOCX_MAX_TABLES = 8
+DEFAULT_SUMMARY_DOCX_TABLE_MAX_ROWS = 20
+DEFAULT_SUMMARY_DOCX_TABLE_MAX_COLS = 8
+DEFAULT_SUMMARY_PPTX_MAX_SLIDES = 15
 
 
 class ScanPlanner:
@@ -33,10 +55,21 @@ class ScanPlanner:
                 default_text_max_chars=DEFAULT_SUMMARY_TEXT_MAX_CHARS,
             )
             profile = {
-                "excel_max_rows": self.scanner_cfg.get("summary_excel_max_rows", 10),
-                "pdf_max_pages": self.scanner_cfg.get("summary_pdf_max_pages", 2),
+                "excel_max_rows": self._positive_profile_value(
+                    "summary_excel_max_rows",
+                    10,
+                ),
+                "pdf_max_pages": self._positive_profile_value(
+                    "summary_pdf_max_pages",
+                    2,
+                ),
                 "text_max_chars": light_text_budget.text_max_chars,
             }
+            self._add_document_profile(
+                profile,
+                summary_mode=True,
+                document_excerpt_default=light_text_budget.text_max_chars,
+            )
         else:
             text_max_chars = self.scanner_cfg.get(
                 "text_max_chars",
@@ -48,10 +81,18 @@ class ScanPlanner:
                 default_text_max_chars=DEFAULT_TEXT_MAX_CHARS,
             )
             profile = {
-                "excel_max_rows": self.scanner_cfg["excel_max_rows"],
-                "pdf_max_pages": self.scanner_cfg["pdf_max_pages"],
+                "excel_max_rows": self._positive_profile_value(
+                    "excel_max_rows",
+                    DEFAULT_EXCEL_MAX_ROWS,
+                ),
+                "pdf_max_pages": self._positive_profile_value("pdf_max_pages", 5),
                 "text_max_chars": light_text_budget.text_max_chars,
             }
+            self._add_document_profile(
+                profile,
+                summary_mode=False,
+                document_excerpt_default=light_text_budget.text_max_chars,
+            )
 
         profile["total_max_chars"] = self.scanner_cfg.get("total_max_chars", 50000)
         profile["summary_mode"] = summary_mode
@@ -64,6 +105,97 @@ class ScanPlanner:
         profile["log_tail_read_bytes"] = light_text_budget.log_tail_read_bytes
         profile["text_excerpt_max_chars"] = light_text_budget.text_excerpt_max_chars
         return profile
+
+    def _add_document_profile(
+        self,
+        profile: dict,
+        *,
+        summary_mode: bool,
+        document_excerpt_default: int,
+    ) -> None:
+        """补齐 Office/PDF 解析预算，确保 cache key 能反映 parser profile 变化。"""
+        profile["office_parser_backend"] = self.scanner_cfg.get(
+            "office_parser_backend",
+            OFFICE_PARSER_BACKEND,
+        )
+        profile["pdf_parser_backend"] = self.scanner_cfg.get(
+            "pdf_parser_backend",
+            PDF_TEXT_PARSER_BACKEND,
+        )
+        if summary_mode:
+            profile["excel_max_sheets"] = self._positive_profile_value(
+                "summary_excel_max_sheets",
+                DEFAULT_SUMMARY_EXCEL_MAX_SHEETS,
+            )
+            profile["excel_max_columns"] = self._positive_profile_value(
+                "summary_excel_max_columns",
+                DEFAULT_SUMMARY_EXCEL_MAX_COLUMNS,
+            )
+            profile["docx_max_paragraphs"] = self._positive_profile_value(
+                "summary_docx_max_paragraphs",
+                DEFAULT_SUMMARY_DOCX_MAX_PARAGRAPHS,
+            )
+            profile["docx_max_tables"] = self._positive_profile_value(
+                "summary_docx_max_tables",
+                DEFAULT_SUMMARY_DOCX_MAX_TABLES,
+            )
+            profile["docx_table_max_rows"] = self._positive_profile_value(
+                "summary_docx_table_max_rows",
+                DEFAULT_SUMMARY_DOCX_TABLE_MAX_ROWS,
+            )
+            profile["docx_table_max_cols"] = self._positive_profile_value(
+                "summary_docx_table_max_cols",
+                DEFAULT_SUMMARY_DOCX_TABLE_MAX_COLS,
+            )
+            profile["pptx_max_slides"] = self._positive_profile_value(
+                "summary_pptx_max_slides",
+                DEFAULT_SUMMARY_PPTX_MAX_SLIDES,
+            )
+            profile["document_excerpt_max_chars"] = self._positive_profile_value(
+                "summary_document_excerpt_max_chars",
+                document_excerpt_default,
+            )
+        else:
+            profile["excel_max_sheets"] = self._positive_profile_value(
+                "excel_max_sheets",
+                DEFAULT_EXCEL_MAX_SHEETS,
+            )
+            profile["excel_max_columns"] = self._positive_profile_value(
+                "excel_max_columns",
+                DEFAULT_EXCEL_MAX_COLUMNS,
+            )
+            profile["docx_max_paragraphs"] = self._positive_profile_value(
+                "docx_max_paragraphs",
+                DEFAULT_DOCX_MAX_PARAGRAPHS,
+            )
+            profile["docx_max_tables"] = self._positive_profile_value(
+                "docx_max_tables",
+                DEFAULT_DOCX_MAX_TABLES,
+            )
+            profile["docx_table_max_rows"] = self._positive_profile_value(
+                "docx_table_max_rows",
+                DEFAULT_DOCX_TABLE_MAX_ROWS,
+            )
+            profile["docx_table_max_cols"] = self._positive_profile_value(
+                "docx_table_max_cols",
+                DEFAULT_DOCX_TABLE_MAX_COLS,
+            )
+            profile["pptx_max_slides"] = self._positive_profile_value(
+                "pptx_max_slides",
+                DEFAULT_PPTX_MAX_SLIDES,
+            )
+            profile["document_excerpt_max_chars"] = self._positive_profile_value(
+                "document_excerpt_max_chars",
+                document_excerpt_default,
+            )
+
+        profile["pptx_include_notes"] = bool(
+            self.scanner_cfg.get("pptx_include_notes", True)
+        )
+
+    def _positive_profile_value(self, key: str, default: int) -> int:
+        """profile 使用归一化正整数，避免运行时预算与 cache key 漂移。"""
+        return normalize_positive_int(self.scanner_cfg.get(key, default), default)
 
     def serialize_parser_profile(self, profile: dict) -> str:
         """稳定序列化 parser profile，避免 cache key 因键顺序漂移。"""

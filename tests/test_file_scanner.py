@@ -1183,10 +1183,10 @@ def test_build_light_text_options_matches_normalized_parser_profile(
     assert options.max_output_chars == profile["text_excerpt_max_chars"] == 6000
 
 
-def test_scan_files_keeps_subprocess_path_for_pdf_in_direct_mode(
+def test_scan_files_uses_document_backend_for_pdf_in_direct_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """direct 模式只覆盖 text-like 文件，PDF 仍走 timeout/subprocess 入口。"""
+    """direct 模式下 PDF 应走 document backend，并保留 parser backend metadata。"""
     scanner = _make_scanner(
         tmp_path,
         monkeypatch,
@@ -1200,24 +1200,312 @@ def test_scan_files_keeps_subprocess_path_for_pdf_in_direct_mode(
         "bootstrap_full_scan",
         lambda start_date, end_date: discovered,
     )
-    subprocess_calls: list[Path] = []
+    document_calls: list[Path] = []
 
-    def fake_subprocess(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
-        subprocess_calls.append(file_path)
+    def fake_document_backend(
+        file_path: Path,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
+        document_calls.append(file_path)
         return file_scanner_module.FileContext(
             file_path=str(file_path),
             file_type=".pdf",
-            content="pdf parsed through subprocess",
+            content="pdf parsed through document backend",
             error=None,
+            parser_backend="pdf_text_v1",
         )
 
-    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fake_subprocess)
+    def fail_legacy_subprocess(
+        file_path: Path,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
+        raise AssertionError("direct PDF should bypass legacy subprocess")
+
+    monkeypatch.setattr(
+        scanner,
+        "_extract_document_content_with_timeout",
+        fake_document_backend,
+        raising=False,
+    )
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fail_legacy_subprocess)
 
     result = scanner.scan_files(date.today(), date.today())
 
-    assert subprocess_calls == [sample]
+    assert document_calls == [sample]
     assert result.success_count == 1
-    assert result.contexts[0].content == "pdf parsed through subprocess"
+    assert result.contexts[0].content == "pdf parsed through document backend"
+    assert result.contexts[0].parser_backend == "pdf_text_v1"
+
+
+def test_scan_files_uses_document_backend_for_docx_in_direct_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """direct 模式下 DOCX 应走 document backend，而不是旧 subprocess 入口。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".docx"], "worker_lane_mode": "direct"},
+    )
+    sample = scanner.work_dir / "report.docx"
+    sample.write_bytes(b"docx bytes are not parsed by this routing test")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=42")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    document_calls: list[Path] = []
+
+    def fake_document_backend(
+        file_path: Path,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
+        document_calls.append(file_path)
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".docx",
+            content="docx parsed through document backend",
+            error=None,
+            parser_backend="office_v1",
+            truncated=True,
+        )
+
+    def fail_legacy_subprocess(
+        file_path: Path,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
+        raise AssertionError("direct document backend should bypass legacy subprocess")
+
+    monkeypatch.setattr(
+        scanner,
+        "_extract_document_content_with_timeout",
+        fake_document_backend,
+        raising=False,
+    )
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fail_legacy_subprocess)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert document_calls == [sample]
+    assert result.success_count == 1
+    assert result.contexts[0].parser_backend == "office_v1"
+    assert result.contexts[0].truncated is True
+    assert scanner.last_reparse_details[0].parser_backend == "office_v1"
+    assert scanner.last_reparse_details[0].worker_lane == "subprocess"
+
+
+def test_document_backend_enforces_max_file_size_before_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Office/PDF 超过 max_file_size_mb 时应在父进程标记 not_parsed。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".docx"],
+            "worker_lane_mode": "direct",
+            "max_file_size_mb": 0.000001,
+        },
+    )
+    sample = scanner.work_dir / "oversized.docx"
+    sample.write_bytes(b"x" * 100)
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=100")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    def fail_any_parser(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        raise AssertionError("oversized document should not start any parser lane")
+
+    monkeypatch.setattr(
+        scanner,
+        "_extract_document_content_with_timeout",
+        fail_any_parser,
+        raising=False,
+    )
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fail_any_parser)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.total_files == 1
+    assert result.success_count == 0
+    assert result.error_count == 1
+    assert result.contexts[0].error is not None
+    assert result.contexts[0].error.startswith("file too large:")
+    assert result.contexts[0].parser_backend == "not_parsed"
+    assert scanner.last_reparse_details[0].parser_backend == "not_parsed"
+    assert scanner.last_reparse_details[0].worker_lane == "not_parsed"
+
+
+def test_scan_files_preserves_document_parser_metadata_from_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Office/PDF 命中 parse cache 后仍应恢复 backend 和 truncated。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".docx"], "worker_lane_mode": "direct"},
+    )
+    sample = scanner.work_dir / "cached.docx"
+    sample.write_bytes(b"docx bytes are not parsed by this cache test")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=42")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    monkeypatch.setattr(
+        scanner,
+        "_extract_document_content_with_timeout",
+        lambda file_path, limits: file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".docx",
+            content="cached document content",
+            error=None,
+            parser_backend="office_v1",
+            truncated=True,
+        ),
+        raising=False,
+    )
+
+    first_result = scanner.scan_files(date.today(), date.today())
+
+    assert first_result.success_count == 1
+    assert first_result.contexts[0].parser_backend == "office_v1"
+    assert first_result.contexts[0].truncated is True
+
+    def fail_reparse(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+        raise AssertionError("fresh document parse cache should avoid reparsing")
+
+    monkeypatch.setattr(
+        scanner,
+        "_extract_document_content_with_timeout",
+        fail_reparse,
+        raising=False,
+    )
+
+    second_result = scanner.scan_files(date.today(), date.today())
+
+    assert second_result.success_count == 1
+    assert second_result.contexts[0].parser_backend == "office_v1"
+    assert second_result.contexts[0].truncated is True
+
+
+def test_scan_files_keeps_legacy_subprocess_when_worker_lane_mode_subprocess_for_docx(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """worker_lane_mode=subprocess 时 DOCX 应保留旧 subprocess 入口。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".docx"], "worker_lane_mode": "subprocess"},
+    )
+    sample = scanner.work_dir / "legacy.docx"
+    sample.write_bytes(b"docx bytes are not parsed by this compatibility test")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=42")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    legacy_calls: list[Path] = []
+
+    def fake_legacy_subprocess(
+        file_path: Path,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
+        legacy_calls.append(file_path)
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".docx",
+            content="legacy subprocess content",
+            error=None,
+            parser_backend="subprocess",
+            truncated=False,
+        )
+
+    def fail_document_backend(
+        file_path: Path,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
+        raise AssertionError("subprocess mode should keep legacy path")
+
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fake_legacy_subprocess)
+    monkeypatch.setattr(
+        scanner,
+        "_extract_document_content_with_timeout",
+        fail_document_backend,
+        raising=False,
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert legacy_calls == [sample]
+    assert result.success_count == 1
+    assert result.contexts[0].content == "legacy subprocess content"
+    assert scanner.last_reparse_details[0].worker_lane == "subprocess"
+
+
+def test_parser_profile_change_reparses_document_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """document parser profile 变化后应重新解析，不能复用旧缓存。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".docx"],
+            "worker_lane_mode": "direct",
+            "parser_profile_version": "v1",
+        },
+    )
+    sample = scanner.work_dir / "profile.docx"
+    sample.write_bytes(b"docx bytes are not parsed by this profile test")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=42")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    parse_calls: list[str] = []
+
+    def fake_document_backend(
+        file_path: Path,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
+        parse_calls.append(scanner.scanner_cfg["parser_profile_version"])
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".docx",
+            content=f"content {parse_calls[-1]}",
+            error=None,
+            parser_backend="office_v1",
+            truncated=False,
+        )
+
+    monkeypatch.setattr(
+        scanner,
+        "_extract_document_content_with_timeout",
+        fake_document_backend,
+        raising=False,
+    )
+
+    first_result = scanner.scan_files(date.today(), date.today())
+    scanner.scanner_cfg["parser_profile_version"] = "v2"
+    second_result = scanner.scan_files(date.today(), date.today())
+
+    assert [context.content for context in first_result.contexts] == ["content v1"]
+    assert [context.content for context in second_result.contexts] == ["content v2"]
+    assert parse_calls == ["v1", "v2"]
+    assert scanner.last_reparse_details[0].cache_miss_reason == "parser_profile_changed"
 
 
 def test_scan_files_records_source_version_changed_reparse_detail(
