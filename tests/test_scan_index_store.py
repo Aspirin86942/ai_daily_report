@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.services.context_compressor import ContextDecision
 from src.services.scan_index_store import InventoryItem, ScanIndexStore
 from src.services.scan_metrics import ExtensionMetrics, ScanRunMetrics
 
@@ -23,6 +24,138 @@ def test_index_store_creates_inventory_and_cache_tables(tmp_path: Path):
         "scan_runs",
         "discovery_checkpoints",
     } <= table_names
+
+
+def test_index_store_creates_context_run_and_decision_tables(tmp_path: Path):
+    """初始化索引库时应创建 context scheduler 审计表。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    table_names = store.list_tables()
+
+    assert {"context_runs", "context_decisions"} <= table_names
+
+
+def test_context_run_and_decisions_round_trip(tmp_path: Path):
+    """context run 和逐文件决策应可完整落库并读回。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    scan_run_id = store.save_scan_run_metrics(
+        discovered_count=2,
+        reused_count=1,
+        reparsed_count=1,
+    )
+
+    run_id = store.save_context_run(
+        report_mode="weekly",
+        start_date=date(2026, 5, 10),
+        end_date=date(2026, 5, 24),
+        compression_profile="weekly_balanced_v1",
+        context_profile_key='{"version":"context_scheduler_v1"}',
+        scan_run_id=scan_run_id,
+        source_file_count=2,
+        included_file_count=1,
+        omitted_file_count=1,
+        metadata_only_count=0,
+        compressed_file_count=1,
+        error_file_count=0,
+        truncated_file_count=1,
+        input_chars=1200,
+        output_chars=500,
+        duration_ms=33,
+        status="success",
+        error="",
+    )
+    decisions = [
+        ContextDecision(
+            file_path="a.md",
+            extension=".md",
+            size_bytes=100,
+            parser_backend="light_text_v1",
+            worker_lane="direct",
+            cache_status="fresh",
+            action="keep",
+            reason="small_file_keep",
+            priority=10,
+            input_chars=100,
+            output_chars=120,
+            truncated=False,
+            error=None,
+        ),
+        ContextDecision(
+            file_path="b.xlsx",
+            extension=".xlsx",
+            size_bytes=5_000_000,
+            parser_backend="office_v1",
+            worker_lane="subprocess",
+            cache_status="miss",
+            action="compress",
+            reason="large_document_summary",
+            priority=30,
+            input_chars=1100,
+            output_chars=380,
+            truncated=True,
+            error=None,
+        ),
+    ]
+
+    store.save_context_decisions(run_id, decisions)
+
+    assert store.latest_context_run() == {
+        "context_run_id": run_id,
+        "report_mode": "weekly",
+        "start_date": "2026-05-10",
+        "end_date": "2026-05-24",
+        "compression_profile": "weekly_balanced_v1",
+        "context_profile_key": '{"version":"context_scheduler_v1"}',
+        "scan_run_id": scan_run_id,
+        "source_file_count": 2,
+        "included_file_count": 1,
+        "omitted_file_count": 1,
+        "metadata_only_count": 0,
+        "compressed_file_count": 1,
+        "error_file_count": 0,
+        "truncated_file_count": 1,
+        "input_chars": 1200,
+        "output_chars": 500,
+        "duration_ms": 33,
+        "status": "success",
+        "error": "",
+    }
+    assert store.list_context_decisions(run_id) == [
+        {
+            "context_run_id": run_id,
+            "file_identity": "",
+            "path": "a.md",
+            "extension": ".md",
+            "size_bytes": 100,
+            "parser_backend": "light_text_v1",
+            "worker_lane": "direct",
+            "cache_status": "fresh",
+            "action": "keep",
+            "reason": "small_file_keep",
+            "priority": 10,
+            "input_chars": 100,
+            "output_chars": 120,
+            "truncated": False,
+            "error": "",
+        },
+        {
+            "context_run_id": run_id,
+            "file_identity": "",
+            "path": "b.xlsx",
+            "extension": ".xlsx",
+            "size_bytes": 5_000_000,
+            "parser_backend": "office_v1",
+            "worker_lane": "subprocess",
+            "cache_status": "miss",
+            "action": "compress",
+            "reason": "large_document_summary",
+            "priority": 30,
+            "input_chars": 1100,
+            "output_chars": 380,
+            "truncated": True,
+            "error": "",
+        },
+    ]
 
 
 def test_parse_cache_round_trip_and_fresh_lookup(tmp_path: Path):
