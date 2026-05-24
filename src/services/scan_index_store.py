@@ -555,7 +555,7 @@ class ScanIndexStore:
                 SELECT parser_profile, source_version, parse_status, updated_at
                 FROM parse_cache
                 WHERE file_identity = ?
-                ORDER BY updated_at DESC
+                ORDER BY updated_at DESC, rowid DESC
                 """,
                 (file_identity,),
             ).fetchall()

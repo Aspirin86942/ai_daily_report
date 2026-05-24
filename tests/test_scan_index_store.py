@@ -510,6 +510,48 @@ def test_probe_parse_cache_returns_source_version_changed(tmp_path: Path):
     assert probe.previous_source_version == "mtime=1:size=10"
 
 
+def test_probe_parse_cache_uses_latest_inserted_history_when_updated_at_ties(
+    tmp_path: Path,
+):
+    """同秒写入多条历史时，应按插入顺序稳定选择最近历史。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    store.upsert_parse_cache(
+        file_identity="file-1",
+        parser_profile="profile-a",
+        source_version="mtime=1:size=10",
+        content_excerpt="old",
+        parse_status="success",
+        parse_error="",
+    )
+    store.upsert_parse_cache(
+        file_identity="file-1",
+        parser_profile="profile-a",
+        source_version="mtime=2:size=10",
+        content_excerpt="newer",
+        parse_status="success",
+        parse_error="",
+    )
+    with store._connect() as conn:
+        conn.execute(
+            """
+            UPDATE parse_cache
+            SET updated_at = '2026-01-01 00:00:00'
+            WHERE file_identity = ?
+            """,
+            ("file-1",),
+        )
+
+    probe = store.probe_parse_cache(
+        "file-1",
+        "profile-a",
+        source_version="mtime=3:size=10",
+    )
+
+    assert probe.cache_status == "miss"
+    assert probe.cache_miss_reason == "source_version_changed"
+    assert probe.previous_source_version == "mtime=2:size=10"
+
+
 def test_probe_parse_cache_returns_parser_profile_changed(tmp_path: Path):
     """同身份存在 cache 但 profile 不同时，应解释为 parser_profile_changed。"""
     store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
