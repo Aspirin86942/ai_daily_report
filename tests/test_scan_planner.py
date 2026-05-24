@@ -31,7 +31,47 @@ def test_build_parser_profile_uses_summary_limits_when_requested():
         "total_max_chars": 50000,
         "summary_mode": True,
         "parser_profile_version": "v7",
+        "text_parser_backend": "light_text_v1",
+        "direct_text_read_bytes": 262144,
+        "log_tail_read_bytes": 262144,
+        "text_excerpt_max_chars": 2000,
     }
+
+
+def test_build_parser_profile_includes_light_text_parser_defaults():
+    """parser profile 必须包含轻量文本解析参数，避免 cache 错误复用。"""
+    planner = ScanPlanner(
+        scanner_cfg={
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+            "total_max_chars": 50000,
+            "parser_profile_version": "v8",
+        }
+    )
+
+    profile = planner.build_parser_profile(summary_mode=False)
+
+    assert profile["text_parser_backend"] == "light_text_v1"
+    assert profile["direct_text_read_bytes"] == 262144
+    assert profile["log_tail_read_bytes"] == 262144
+    assert profile["text_excerpt_max_chars"] == 6000
+
+
+def test_build_parser_profile_uses_legacy_direct_text_max_bytes_as_read_budget():
+    """旧配置只设置 direct_text_max_bytes 时，应作为读取预算兼容。"""
+    planner = ScanPlanner(
+        scanner_cfg={
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+            "direct_text_max_bytes": 8192,
+        }
+    )
+
+    profile = planner.build_parser_profile(summary_mode=False)
+
+    assert profile["direct_text_read_bytes"] == 8192
 
 
 def test_plan_candidates_splits_cache_hits_and_misses(tmp_path: Path):

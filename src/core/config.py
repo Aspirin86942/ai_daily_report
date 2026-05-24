@@ -125,6 +125,9 @@ class Config:
             "file_timeout_seconds",
             "file_timeout_by_extension",
             "direct_text_max_bytes",
+            "direct_text_read_bytes",
+            "log_tail_read_bytes",
+            "text_excerpt_max_chars",
         ):
             if hasattr(scanner, key):
                 cfg[key] = self._to_builtin_value(getattr(scanner, key))

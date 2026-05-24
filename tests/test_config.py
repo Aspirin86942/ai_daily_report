@@ -79,3 +79,27 @@ def test_scanner_config_uses_builtin_containers_and_is_picklable():
     assert isinstance(scanner_config["file_timeout_by_extension"], dict)
 
     pickle.dumps(scanner_config)
+
+
+def test_scanner_config_passes_light_text_parser_options_when_present():
+    """轻量文本解析预算应从 settings 透传到 scanner 配置。"""
+    cfg = object.__new__(Config)
+    cfg._settings = SimpleNamespace(
+        scanner=SimpleNamespace(
+            allowed_extensions=[".md"],
+            ignored_patterns=[],
+            max_workers=1,
+            excel_max_rows=50,
+            pdf_max_pages=5,
+            text_max_chars=6000,
+            direct_text_read_bytes=131072,
+            log_tail_read_bytes=65536,
+            text_excerpt_max_chars=3000,
+        )
+    )
+
+    scanner_config = cfg.scanner_config
+
+    assert scanner_config["direct_text_read_bytes"] == 131072
+    assert scanner_config["log_tail_read_bytes"] == 65536
+    assert scanner_config["text_excerpt_max_chars"] == 3000
