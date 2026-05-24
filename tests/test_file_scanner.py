@@ -485,6 +485,17 @@ def test_scan_files_records_timeout_and_continues(
     assert result.success_count == 1
     assert result.error_count == 1
     assert any(ctx.error and ctx.error.startswith("timeout:") for ctx in result.contexts)
+    detail = scanner.scan_index_store.latest_scan_run_detail()
+    assert detail["success_count"] == 1
+    assert detail["error_count"] == 1
+    assert detail["timeout_count"] == 1
+    extension_metrics = scanner.scan_index_store.list_extension_metrics(detail["run_id"])
+    assert len(extension_metrics) == 1
+    assert extension_metrics[0].extension == ".txt"
+    assert extension_metrics[0].file_count == 2
+    assert extension_metrics[0].success_count == 1
+    assert extension_metrics[0].error_count == 1
+    assert extension_metrics[0].timeout_count == 1
 
 
 def test_scan_files_delegates_bootstrap_discovery(
@@ -586,6 +597,14 @@ def test_scan_files_counts_cached_and_uncached_contexts(
         "reused_count": 1,
         "reparsed_count": 1,
     }
+    detail = scanner.scan_index_store.latest_scan_run_detail()
+    assert detail["success_count"] == 2
+    assert detail["error_count"] == 0
+    extension_metrics = scanner.scan_index_store.list_extension_metrics(detail["run_id"])
+    assert len(extension_metrics) == 1
+    assert extension_metrics[0].extension == ".txt"
+    assert extension_metrics[0].file_count == 1
+    assert extension_metrics[0].success_count == 1
 
 
 def test_scan_files_emits_auditable_error_when_cached_context_missing(
