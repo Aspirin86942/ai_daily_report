@@ -21,6 +21,27 @@ def test_global_limit_replaces_first_over_budget_success_context():
     assert aggregator.contexts[0].error is None
 
 
+def test_global_limit_placeholder_preserves_parser_metadata():
+    """全局省略占位上下文应保留解析后端和截断元数据。"""
+    aggregator = ScanAggregator(total_max_chars=5)
+
+    aggregator.add_context(
+        FileContext(
+            file_path="first.log",
+            file_type=".log",
+            content="123456",
+            error=None,
+            parser_backend="light_text_v1",
+            truncated=True,
+        )
+    )
+
+    stored_context = aggregator.contexts[0]
+    assert stored_context.content == "(已达全局字符上限，内容省略)"
+    assert stored_context.parser_backend == "light_text_v1"
+    assert stored_context.truncated is True
+
+
 def test_error_context_preserved_after_global_limit():
     """进入全局省略后，错误上下文仍应保留原始错误信息。"""
     aggregator = ScanAggregator(total_max_chars=5)

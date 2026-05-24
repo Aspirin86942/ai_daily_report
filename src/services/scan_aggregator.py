@@ -36,6 +36,8 @@ class ScanAggregator:
                 file_type=context.file_type,
                 content="(已达全局字符上限，内容省略)",
                 error=None,
+                parser_backend=context.parser_backend,
+                truncated=context.truncated,
             )
 
         self.contexts.append(context)
