@@ -45,6 +45,10 @@ def _make_scanner(
         "max_file_size_mb": 50,
         "file_timeout_seconds": 30,
         "file_timeout_by_extension": {},
+        "worker_lane_mode": "direct",
+        "direct_text_read_bytes": 262144,
+        "log_tail_read_bytes": 262144,
+        "text_excerpt_max_chars": 6000,
         "index_db_path": str(tmp_path / "data" / "db" / "scan_index.sqlite3"),
         "parser_profile_version": "v1",
     }
@@ -959,23 +963,24 @@ def test_scan_files_uses_direct_parse_for_text_like_files(
 
     assert result.total_files == 1
     assert result.success_count == 1
-    assert result.contexts[0].content == "direct content"
+    assert "direct content" in result.contexts[0].content
     assert [detail.cache_miss_reason for detail in scanner.last_reparse_details] == [
         "new_file"
     ]
 
 
-def test_direct_text_lane_falls_back_to_subprocess_for_large_text_file(
+def test_direct_text_lane_uses_light_parser_for_large_text_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """direct 模式下超过 direct_text_max_bytes 的 text-like 文件仍走 timeout/subprocess。"""
+    """大 text-like 文件也应走 light parser，只按读取预算截断。"""
     scanner = _make_scanner(
         tmp_path,
         monkeypatch,
         {
             "allowed_extensions": [".md"],
             "worker_lane_mode": "direct",
-            "direct_text_max_bytes": 8,
+            "direct_text_read_bytes": 8,
+            "text_excerpt_max_chars": 100,
         },
     )
     sample = scanner.work_dir / "large.md"
@@ -987,28 +992,71 @@ def test_direct_text_lane_falls_back_to_subprocess_for_large_text_file(
         lambda start_date, end_date: discovered,
     )
 
-    def fail_direct(*args, **kwargs):
-        raise AssertionError("large text file should not use direct lane")
+    def fail_subprocess(file_path: Path, limits: dict):
+        raise AssertionError("large text-like file should not use subprocess")
 
-    subprocess_calls: list[Path] = []
-
-    def fake_subprocess(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
-        subprocess_calls.append(file_path)
-        return file_scanner_module.FileContext(
-            file_path=str(file_path),
-            file_type=".md",
-            content="parsed through subprocess",
-            error=None,
-        )
-
-    monkeypatch.setattr(scanner.parser_supervisor, "parse_file", fail_direct)
-    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fake_subprocess)
+    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fail_subprocess)
 
     result = scanner.scan_files(date.today(), date.today())
 
-    assert subprocess_calls == [sample]
     assert result.success_count == 1
-    assert result.contexts[0].content == "parsed through subprocess"
+    assert result.contexts[0].parser_backend == "light_text_v1"
+    assert result.contexts[0].truncated is True
+    assert "large di" in result.contexts[0].content
+    assert scanner.last_reparse_details[0].parser_backend == "light_text_v1"
+    assert scanner.last_reparse_details[0].truncated is True
+
+
+def test_scan_files_passes_light_parser_options(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """FileScanner 应把配置解析成 LightTextParserOptions 后传给 light parser。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".log"],
+            "worker_lane_mode": "direct",
+            "direct_text_read_bytes": 123,
+            "log_tail_read_bytes": 45,
+            "text_excerpt_max_chars": 67,
+        },
+    )
+    sample = scanner.work_dir / "app.log"
+    sample.write_text("old\nnew", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=7")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    captured = {}
+
+    def fake_parse(file_path, file_type, limits, options):
+        captured["file_path"] = file_path
+        captured["file_type"] = file_type
+        captured["limits"] = limits
+        captured["options"] = options
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="light",
+            error=None,
+            parser_backend=options.parser_backend_version,
+            truncated=False,
+        )
+
+    monkeypatch.setattr(file_scanner_module, "parse_text_like_file", fake_parse)
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.success_count == 1
+    assert captured["file_path"] == sample
+    assert captured["file_type"] == ".log"
+    assert captured["limits"]["text_max_chars"] == 6000
+    assert captured["options"].read_head_bytes == 123
+    assert captured["options"].read_tail_bytes == 45
+    assert captured["options"].max_output_chars == 67
 
 
 def test_scan_files_keeps_subprocess_path_for_pdf_in_direct_mode(

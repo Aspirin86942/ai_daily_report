@@ -17,6 +17,13 @@ from ..utils.text_tools import truncate_text
 from .scan_aggregator import ScanAggregator
 from .scan_discovery import DiscoveredFile, FileDiscoveryService
 from .scan_index_store import InventoryItem, ScanIndexStore
+from .light_text_parser import (
+    DEFAULT_DIRECT_TEXT_READ_BYTES,
+    DEFAULT_LOG_TAIL_READ_BYTES,
+    LIGHT_TEXT_PARSER_BACKEND,
+    LightTextParserOptions,
+    parse_text_like_file,
+)
 from .scan_metrics import ReparseDetail, ScanMetricsCollector
 from .scan_planner import ScanPlanner
 from .scan_worker_pool import ParserSupervisor
@@ -24,7 +31,6 @@ from .scan_worker_pool import ParserSupervisor
 logger = setup_logger()
 
 TEXT_FILE_TYPES = {".txt", ".md", ".csv", ".json", ".log"}
-DIRECT_TEXT_MAX_BYTES_DEFAULT = 64 * 1024
 
 
 def _extract_content_worker(
@@ -509,52 +515,80 @@ class FileScanner:
         file_type: str,
         limits: Optional[dict] = None,
     ) -> FileContext:
-        """根据文件类型选择 direct text lane 或 subprocess timeout lane。"""
-        if self._should_parse_direct(file_path, file_type):
-            return self.parser_supervisor.parse_file(
+        """根据文件类型选择 light text parser 或 subprocess timeout lane。"""
+        effective_limits = limits or {}
+        if self._should_parse_direct(file_type):
+            return parse_text_like_file(
                 file_path=file_path,
                 file_type=file_type,
-                limits=limits or {},
-                direct_parse=self._extract_content,
+                limits=effective_limits,
+                options=self._build_light_text_options(effective_limits),
             )
-        return self._extract_content_with_timeout(file_path, limits)
+        return self._extract_content_with_timeout(file_path, effective_limits)
 
-    def _should_parse_direct(self, file_path: Path, file_type: str) -> bool:
-        """text-like 文件读取受限，direct 模式下避免 Windows spawn 固定开销。"""
+    def _should_parse_direct(self, file_type: str) -> bool:
+        """text-like 文件使用 bounded direct parser，避免 Windows spawn 固定开销。"""
         if str(self.scanner_cfg.get("worker_lane_mode", "direct")).lower() != "direct":
             return False
-        if file_type.lower() not in TEXT_FILE_TYPES:
-            return False
+        return file_type.lower() in TEXT_FILE_TYPES
 
-        try:
-            size_bytes = file_path.stat().st_size
-        except OSError as exc:
-            logger.warning(
-                "无法获取文件大小，回退到 subprocess 解析: %s (%s)",
-                file_path,
-                exc,
-            )
-            return False
-
-        max_bytes = self._direct_text_max_bytes()
-        # direct lane 没有 subprocess kill 边界，所以只允许已知大小的小文本文件绕过 worker。
-        return size_bytes <= max_bytes
-
-    def _direct_text_max_bytes(self) -> int:
-        """返回 direct text lane 的最大安全字节数。"""
-        raw_value = self.scanner_cfg.get(
+    def _build_light_text_options(self, limits: dict) -> LightTextParserOptions:
+        """把 scanner 配置转换为 light parser 的有界读取选项。"""
+        direct_read_default = self._positive_int_config(
             "direct_text_max_bytes",
-            DIRECT_TEXT_MAX_BYTES_DEFAULT,
+            DEFAULT_DIRECT_TEXT_READ_BYTES,
         )
+        default_text_max_chars = self._positive_int_config("text_max_chars", 6000)
+        effective_text_max_chars = self._positive_int_value(
+            limits.get("text_max_chars", default_text_max_chars),
+            default_text_max_chars,
+            "text_max_chars",
+        )
+        return LightTextParserOptions(
+            read_head_bytes=self._positive_int_config(
+                "direct_text_read_bytes",
+                direct_read_default,
+            ),
+            read_tail_bytes=self._positive_int_config(
+                "log_tail_read_bytes",
+                DEFAULT_LOG_TAIL_READ_BYTES,
+            ),
+            max_output_chars=self._positive_int_config(
+                "text_excerpt_max_chars",
+                effective_text_max_chars,
+            ),
+            parser_backend_version=LIGHT_TEXT_PARSER_BACKEND,
+        )
+
+    def _positive_int_config(self, key: str, default: int) -> int:
+        """读取正整数配置；非法值回退默认值，避免解析预算失控。"""
+        raw_value = self.scanner_cfg.get(
+            key,
+            default,
+        )
+        return self._positive_int_value(raw_value, default, key)
+
+    def _positive_int_value(self, raw_value: object, default: int, label: str) -> int:
+        """解析正整数；无效或非正值记录 warning 后回退。"""
         try:
-            return int(raw_value)
+            value = int(raw_value)
         except (TypeError, ValueError):
             logger.warning(
-                "direct_text_max_bytes 配置无效，使用默认值 %s: %r",
-                DIRECT_TEXT_MAX_BYTES_DEFAULT,
+                "%s 配置无效，使用默认值 %s: %r",
+                label,
+                default,
                 raw_value,
             )
-            return DIRECT_TEXT_MAX_BYTES_DEFAULT
+            return default
+        if value <= 0:
+            logger.warning(
+                "%s 配置必须为正整数，使用默认值 %s: %r",
+                label,
+                default,
+                raw_value,
+            )
+            return default
+        return value
 
     def _run_extract_subprocess(
         self,
