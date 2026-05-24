@@ -263,6 +263,14 @@ def _build_csv_content(
     raw_excerpt: _RawExcerpt,
     max_output_chars: int,
 ) -> tuple[str, bool]:
+    if raw_excerpt.truncated:
+        return _build_text_content(
+            raw_excerpt,
+            title="Text preview",
+            max_output_chars=max_output_chars,
+            warning="CSV_PREVIEW_FALLBACK",
+        )
+
     try:
         rows = list(csv.reader(io.StringIO(raw_excerpt.text), strict=True))
     except csv.Error:

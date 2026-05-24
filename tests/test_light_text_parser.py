@@ -162,6 +162,26 @@ def test_parse_csv_outputs_header_and_preview_rows(tmp_path: Path):
     assert "row 1: alpha | 10" in context.content
 
 
+def test_parse_truncated_csv_falls_back_without_validating_prefix_only(
+    tmp_path: Path,
+):
+    sample = tmp_path / "truncated.csv"
+    valid_prefix = "name,amount\n"
+    sample.write_text(f'{valid_prefix}"broken', encoding="utf-8")
+
+    context = parse_text_like_file(
+        sample,
+        ".csv",
+        {"text_max_chars": 200},
+        _options(read_head_bytes=len(valid_prefix)),
+    )
+
+    assert context.error is None
+    assert context.truncated is True
+    assert "warning: CSV_PREVIEW_FALLBACK" in context.content
+    assert "CSV preview" not in context.content
+
+
 def test_parse_malformed_csv_falls_back_to_text_excerpt(tmp_path: Path):
     sample = tmp_path / "broken.csv"
     sample.write_text('name,amount\n"alpha,10\nbeta,20\n', encoding="utf-8")
