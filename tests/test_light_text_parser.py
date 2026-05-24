@@ -58,6 +58,42 @@ def test_parse_log_reads_tail_excerpt(tmp_path: Path):
     assert "old line" not in context.content
 
 
+def test_parse_log_tail_starts_inside_valid_utf8_character(tmp_path: Path):
+    sample = tmp_path / "utf8.log"
+    raw = "AAAA中later line".encode("utf-8")
+    start_at_first_continuation = raw.index("中".encode("utf-8")) + 1
+    sample.write_bytes(raw)
+
+    context = parse_text_like_file(
+        sample,
+        ".log",
+        {"text_max_chars": 200},
+        _options(read_tail_bytes=len(raw) - start_at_first_continuation),
+    )
+
+    assert context.error is None
+    assert context.truncated is True
+    assert "later line" in context.content
+
+
+def test_parse_log_tail_invalid_leading_continuation_byte_fails(tmp_path: Path):
+    sample = tmp_path / "bad.log"
+    raw = b"AAAA\x80later line"
+    sample.write_bytes(raw)
+
+    context = parse_text_like_file(
+        sample,
+        ".log",
+        {"text_max_chars": 200},
+        _options(read_tail_bytes=len(raw) - 4),
+    )
+
+    assert context.content == ""
+    assert context.parser_backend == "light_text_v1"
+    assert context.error is not None
+    assert context.error.startswith("TEXT_DECODE_FAILED:")
+
+
 def test_parse_json_outputs_top_level_keys(tmp_path: Path):
     sample = tmp_path / "payload.json"
     sample.write_text('{"name": "demo", "items": [1, 2]}', encoding="utf-8")

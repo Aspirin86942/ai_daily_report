@@ -116,14 +116,19 @@ def _read_bounded_excerpt(
         read_bytes = _coerce_non_negative_int(options.read_tail_bytes)
         start_offset = max(file_size - read_bytes, 0)
         with file_path.open("rb") as file:
-            file.seek(start_offset)
-            raw = file.read(read_bytes)
+            context_offset = max(start_offset - 3, 0)
+            file.seek(context_offset)
+            prefix_and_raw = file.read(start_offset - context_offset + read_bytes)
+        leading_context_length = start_offset - context_offset
+        leading_context = prefix_and_raw[:leading_context_length]
+        raw = prefix_and_raw[leading_context_length:]
         truncated = start_offset > 0
         text = _decode_bounded(
             raw,
             options.encoding,
             trim_leading_fragment=truncated,
             trim_trailing_fragment=False,
+            leading_context=leading_context,
         )
         return _RawExcerpt(text=text, source="tail", truncated=truncated)
 
@@ -146,12 +151,13 @@ def _decode_bounded(
     *,
     trim_leading_fragment: bool,
     trim_trailing_fragment: bool,
+    leading_context: bytes = b"",
 ) -> str:
     """严格解码，只裁剪读取边界切断的 UTF-8 半字符。"""
     encoding_name = encoding.lower().replace("_", "-")
     if encoding_name == "utf-8" and trim_leading_fragment:
-        # tail 读取可能从 UTF-8 continuation byte 开始；只丢弃边界残片。
-        raw = _trim_leading_utf8_fragment(raw)
+        # tail 读取可能从 UTF-8 continuation byte 开始；先用窗口前字节证明它确实是跨边界字符。
+        raw = _trim_leading_utf8_fragment(raw, leading_context)
 
     try:
         return raw.decode(encoding)
@@ -167,11 +173,48 @@ def _decode_bounded(
         raise
 
 
-def _trim_leading_utf8_fragment(raw: bytes) -> bytes:
-    trimmed = 0
-    while trimmed < len(raw) and trimmed < 3 and 0x80 <= raw[trimmed] <= 0xBF:
-        trimmed += 1
-    return raw[trimmed:]
+def _trim_leading_utf8_fragment(raw: bytes, leading_context: bytes) -> bytes:
+    if not raw or not _is_utf8_continuation(raw[0]):
+        return raw
+
+    boundary_index = len(leading_context)
+    combined = leading_context + raw[:3]
+    for lead_index in range(max(0, boundary_index - 3), boundary_index):
+        sequence_length = _utf8_sequence_length(combined[lead_index])
+        if sequence_length == 0:
+            continue
+
+        sequence_end = lead_index + sequence_length
+        if not lead_index < boundary_index < sequence_end:
+            continue
+        if sequence_end > len(combined):
+            continue
+
+        sequence = combined[lead_index:sequence_end]
+        try:
+            sequence.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+
+        # 只有完整跨边界字符可证明时，才丢弃窗口内属于该字符的残片。
+        raw_fragment_length = sequence_end - boundary_index
+        return raw[raw_fragment_length:]
+
+    return raw
+
+
+def _is_utf8_continuation(value: int) -> bool:
+    return 0x80 <= value <= 0xBF
+
+
+def _utf8_sequence_length(first_byte: int) -> int:
+    if 0xC2 <= first_byte <= 0xDF:
+        return 2
+    if 0xE0 <= first_byte <= 0xEF:
+        return 3
+    if 0xF0 <= first_byte <= 0xF4:
+        return 4
+    return 0
 
 
 def _build_json_content(
