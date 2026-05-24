@@ -126,6 +126,39 @@ def test_parse_csv_outputs_header_and_preview_rows(tmp_path: Path):
     assert "row 1: alpha | 10" in context.content
 
 
+def test_parse_malformed_csv_falls_back_to_text_excerpt(tmp_path: Path):
+    sample = tmp_path / "broken.csv"
+    sample.write_text('name,amount\n"alpha,10\nbeta,20\n', encoding="utf-8")
+
+    context = parse_text_like_file(
+        sample,
+        ".csv",
+        {"text_max_chars": 200},
+        _options(read_head_bytes=256),
+    )
+
+    assert context.error is None
+    assert "warning: CSV_PREVIEW_FALLBACK" in context.content
+    assert "CSV preview" not in context.content
+
+
+def test_parse_utf8_head_boundary_does_not_fail_decode(tmp_path: Path):
+    sample = tmp_path / "utf8.txt"
+    sample.write_text("abc中文", encoding="utf-8")
+
+    context = parse_text_like_file(
+        sample,
+        ".txt",
+        {"text_max_chars": 200},
+        _options(read_head_bytes=4),
+    )
+
+    assert context.error is None
+    assert context.truncated is True
+    assert not (context.error or "").startswith("TEXT_DECODE_FAILED:")
+    assert "abc" in context.content
+
+
 def test_parse_decode_failure_returns_auditable_error(tmp_path: Path):
     sample = tmp_path / "bad.txt"
     sample.write_bytes(b"\xff\xfe\xfa")

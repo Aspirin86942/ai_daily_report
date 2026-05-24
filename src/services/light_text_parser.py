@@ -225,7 +225,7 @@ def _build_csv_content(
     except csv.Error:
         return _build_text_content(
             raw_excerpt,
-            title="CSV preview",
+            title="Text preview",
             max_output_chars=max_output_chars,
             warning="CSV_PREVIEW_FALLBACK",
         )
