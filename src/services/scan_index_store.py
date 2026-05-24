@@ -52,6 +52,7 @@ class ScanIndexStore:
         """初始化扫描索引、缓存和 checkpoint 占位表。"""
         with self._connect() as conn:
             self._migrate_existing_schema(conn)
+            self._migrate_parse_cache_schema(conn)
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS file_inventory (
@@ -70,6 +71,8 @@ class ScanIndexStore:
                     content_excerpt TEXT NOT NULL,
                     parse_status TEXT NOT NULL,
                     parse_error TEXT NOT NULL,
+                    parser_backend TEXT NOT NULL DEFAULT '',
+                    truncated INTEGER NOT NULL DEFAULT 0,
                     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (file_identity, parser_profile, source_version)
                 );
@@ -162,6 +165,84 @@ class ScanIndexStore:
                     """
                 )
 
+    def _migrate_parse_cache_schema(self, conn: sqlite3.Connection) -> None:
+        """迁移 parse_cache，补齐 source_version 主键和 parser metadata 字段。"""
+        table_names = self._list_table_names(conn)
+        if "parse_cache" not in table_names:
+            return
+
+        cache_columns = self._list_column_names(conn, "parse_cache")
+        cache_primary_key = self._list_primary_key_columns(conn, "parse_cache")
+        expected_primary_key = [
+            "file_identity",
+            "parser_profile",
+            "source_version",
+        ]
+        if "source_version" not in cache_columns or cache_primary_key != expected_primary_key:
+            source_version_expr = (
+                "source_version" if "source_version" in cache_columns else "''"
+            )
+            parser_backend_expr = (
+                "parser_backend" if "parser_backend" in cache_columns else "''"
+            )
+            truncated_expr = "truncated" if "truncated" in cache_columns else "0"
+            updated_at_expr = (
+                "updated_at" if "updated_at" in cache_columns else "CURRENT_TIMESTAMP"
+            )
+            conn.executescript(
+                f"""
+                ALTER TABLE parse_cache RENAME TO parse_cache_legacy;
+
+                CREATE TABLE parse_cache (
+                    file_identity TEXT NOT NULL,
+                    parser_profile TEXT NOT NULL,
+                    source_version TEXT NOT NULL DEFAULT '',
+                    content_excerpt TEXT NOT NULL,
+                    parse_status TEXT NOT NULL,
+                    parse_error TEXT NOT NULL,
+                    parser_backend TEXT NOT NULL DEFAULT '',
+                    truncated INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (file_identity, parser_profile, source_version)
+                );
+
+                INSERT INTO parse_cache (
+                    file_identity,
+                    parser_profile,
+                    source_version,
+                    content_excerpt,
+                    parse_status,
+                    parse_error,
+                    parser_backend,
+                    truncated,
+                    updated_at
+                )
+                SELECT
+                    file_identity,
+                    parser_profile,
+                    {source_version_expr},
+                    content_excerpt,
+                    parse_status,
+                    parse_error,
+                    {parser_backend_expr},
+                    {truncated_expr},
+                    {updated_at_expr}
+                FROM parse_cache_legacy;
+
+                DROP TABLE parse_cache_legacy;
+                """
+            )
+            return
+
+        if "parser_backend" not in cache_columns:
+            conn.execute(
+                "ALTER TABLE parse_cache ADD COLUMN parser_backend TEXT NOT NULL DEFAULT ''"
+            )
+        if "truncated" not in cache_columns:
+            conn.execute(
+                "ALTER TABLE parse_cache ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0"
+            )
+
     def _migrate_scan_metrics_schema(self, conn: sqlite3.Connection) -> None:
         """为旧 scan_runs 表补齐性能指标列。"""
         table_names = self._list_table_names(conn)
@@ -183,58 +264,6 @@ class ScanIndexStore:
             if column_name not in existing_columns:
                 conn.execute(
                     f"ALTER TABLE scan_runs ADD COLUMN {column_name} {column_def}"
-                )
-
-        if "parse_cache" in table_names:
-            cache_columns = self._list_column_names(conn, "parse_cache")
-            cache_primary_key = self._list_primary_key_columns(conn, "parse_cache")
-            if "source_version" not in cache_columns or cache_primary_key != [
-                "file_identity",
-                "parser_profile",
-                "source_version",
-            ]:
-                source_version_expr = (
-                    "source_version" if "source_version" in cache_columns else "''"
-                )
-                updated_at_expr = (
-                    "updated_at" if "updated_at" in cache_columns else "CURRENT_TIMESTAMP"
-                )
-                conn.executescript(
-                    f"""
-                    ALTER TABLE parse_cache RENAME TO parse_cache_legacy;
-
-                    CREATE TABLE parse_cache (
-                        file_identity TEXT NOT NULL,
-                        parser_profile TEXT NOT NULL,
-                        source_version TEXT NOT NULL DEFAULT '',
-                        content_excerpt TEXT NOT NULL,
-                        parse_status TEXT NOT NULL,
-                        parse_error TEXT NOT NULL,
-                        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                        PRIMARY KEY (file_identity, parser_profile, source_version)
-                    );
-
-                    INSERT INTO parse_cache (
-                        file_identity,
-                        parser_profile,
-                        source_version,
-                        content_excerpt,
-                        parse_status,
-                        parse_error,
-                        updated_at
-                    )
-                    SELECT
-                        file_identity,
-                        parser_profile,
-                        {source_version_expr},
-                        content_excerpt,
-                        parse_status,
-                        parse_error,
-                        {updated_at_expr}
-                    FROM parse_cache_legacy;
-
-                    DROP TABLE parse_cache_legacy;
-                    """
                 )
 
     def _list_table_names(self, conn: sqlite3.Connection) -> set[str]:
@@ -491,6 +520,8 @@ class ScanIndexStore:
         parse_status: str,
         parse_error: str,
         source_version: str = "",
+        parser_backend: str = "",
+        truncated: bool = False,
     ) -> None:
         """按文件身份和 parser profile 写入或更新解析缓存。"""
         with self._connect() as conn:
@@ -502,13 +533,17 @@ class ScanIndexStore:
                     source_version,
                     content_excerpt,
                     parse_status,
-                    parse_error
+                    parse_error,
+                    parser_backend,
+                    truncated
                 )
-                VALUES (?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(file_identity, parser_profile, source_version) DO UPDATE SET
                     content_excerpt = excluded.content_excerpt,
                     parse_status = excluded.parse_status,
                     parse_error = excluded.parse_error,
+                    parser_backend = excluded.parser_backend,
+                    truncated = excluded.truncated,
                     updated_at = CURRENT_TIMESTAMP
                 """,
                 (
@@ -518,6 +553,8 @@ class ScanIndexStore:
                     content_excerpt,
                     parse_status,
                     parse_error,
+                    parser_backend,
+                    int(bool(truncated)),
                 ),
             )
 
@@ -636,12 +673,18 @@ class ScanIndexStore:
         file_identity: str,
         parser_profile: str,
         source_version: str = "",
-    ) -> dict[str, str]:
+    ) -> dict[str, str | bool]:
         """读取解析缓存，缺失时抛出 KeyError。"""
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT content_excerpt, parse_status, parse_error, source_version
+                SELECT
+                    content_excerpt,
+                    parse_status,
+                    parse_error,
+                    parser_backend,
+                    truncated,
+                    source_version
                 FROM parse_cache
                 WHERE file_identity = ?
                     AND parser_profile = ?
@@ -657,6 +700,8 @@ class ScanIndexStore:
             "content_excerpt": str(row["content_excerpt"]),
             "parse_status": str(row["parse_status"]),
             "parse_error": str(row["parse_error"]),
+            "parser_backend": str(row["parser_backend"]),
+            "truncated": bool(int(row["truncated"])),
         }
 
     def replace_inventory(self, items: list[dict[str, object]]) -> None:

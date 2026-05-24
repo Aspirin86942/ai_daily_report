@@ -854,6 +854,8 @@ def test_scan_files_writes_error_cache_when_parser_raises(
             "content_excerpt": "",
             "parse_status": "error",
             "parse_error": "boom",
+            "parser_backend": "",
+            "truncated": False,
         }
     )
 
@@ -899,6 +901,8 @@ def test_scan_files_reparses_when_only_error_cache_exists_for_same_source_versio
             "content_excerpt": "",
             "parse_status": "error",
             "parse_error": "boom once",
+            "parser_backend": "",
+            "truncated": False,
         }
     )
 
@@ -932,6 +936,8 @@ def test_scan_files_reparses_when_only_error_cache_exists_for_same_source_versio
             "content_excerpt": "parsed on retry",
             "parse_status": "success",
             "parse_error": "",
+            "parser_backend": "",
+            "truncated": False,
         }
     )
 
@@ -1005,6 +1011,47 @@ def test_direct_text_lane_uses_light_parser_for_large_text_file(
     assert "large di" in result.contexts[0].content
     assert scanner.last_reparse_details[0].parser_backend == "light_text_v1"
     assert scanner.last_reparse_details[0].truncated is True
+
+
+def test_scan_files_restores_light_parser_metadata_from_parse_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """text-like 文件命中 parse cache 后仍应保留 parser backend 和截断状态。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".md"],
+            "worker_lane_mode": "direct",
+            "direct_text_read_bytes": 8,
+            "text_excerpt_max_chars": 100,
+        },
+    )
+    sample = scanner.work_dir / "cached-large.md"
+    sample.write_text("large direct content", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=20")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    first_result = scanner.scan_files(date.today(), date.today())
+
+    assert first_result.success_count == 1
+    assert first_result.contexts[0].parser_backend == "light_text_v1"
+    assert first_result.contexts[0].truncated is True
+
+    def fail_light_parser(*args, **kwargs):
+        raise AssertionError("fresh parse cache should avoid reparsing")
+
+    monkeypatch.setattr(file_scanner_module, "parse_text_like_file", fail_light_parser)
+
+    second_result = scanner.scan_files(date.today(), date.today())
+
+    assert second_result.success_count == 1
+    assert second_result.contexts[0].parser_backend == "light_text_v1"
+    assert second_result.contexts[0].truncated is True
 
 
 def test_direct_text_lane_enforces_max_file_size_before_light_parser(

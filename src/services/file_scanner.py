@@ -354,6 +354,8 @@ class FileScanner:
                     file_type=self._item_extension(item),
                     content=cached["content_excerpt"],
                     error=parse_error if parse_status != "success" else None,
+                    parser_backend=cached["parser_backend"] or None,
+                    truncated=bool(cached["truncated"]),
                 )
             )
         return contexts
@@ -410,6 +412,8 @@ class FileScanner:
             parse_status="success" if is_success else "error",
             parse_error=context.error or "",
             source_version=self._item_source_version(item),
+            parser_backend=context.parser_backend or "",
+            truncated=context.truncated,
         )
 
     def _record_reparse_detail(

@@ -36,6 +36,8 @@ def test_parse_cache_round_trip_and_fresh_lookup(tmp_path: Path):
         content_excerpt="hello",
         parse_status="success",
         parse_error="",
+        parser_backend="light_text_v1",
+        truncated=True,
     )
 
     assert store.has_fresh_cache("vol-1:frn-1", parser_profile) is True
@@ -51,6 +53,8 @@ def test_parse_cache_round_trip_and_fresh_lookup(tmp_path: Path):
         "content_excerpt": "hello",
         "parse_status": "success",
         "parse_error": "",
+        "parser_backend": "light_text_v1",
+        "truncated": True,
     }
 
 
@@ -282,6 +286,8 @@ def test_existing_task2_database_is_migrated_to_source_version_schema(tmp_path: 
     assert "modified_at" not in inventory_columns
     assert "source_version" in inventory_columns
     assert "source_version" in cache_columns
+    assert "parser_backend" in cache_columns
+    assert "truncated" in cache_columns
     assert inventory_row["modified_date"] == "2026-05-11"
     assert store.has_fresh_cache("file-1", "{}", source_version="") is True
     assert store.has_fresh_cache("file-1", "{}", source_version="changed") is False
