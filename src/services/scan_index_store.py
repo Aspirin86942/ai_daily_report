@@ -716,9 +716,50 @@ class ScanIndexStore:
                 """
             ).fetchone()
 
-        if row is None:
-            return None
+        return None if row is None else self._context_run_row_to_dict(row)
 
+    def get_context_run(
+        self,
+        context_run_id: int,
+    ) -> dict[str, int | str | None] | None:
+        """按 id 读取指定 context run；缺失时返回 None。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    context_run_id,
+                    report_mode,
+                    start_date,
+                    end_date,
+                    compression_profile,
+                    context_profile_key,
+                    scan_run_id,
+                    source_file_count,
+                    included_file_count,
+                    omitted_file_count,
+                    metadata_only_count,
+                    compressed_file_count,
+                    error_file_count,
+                    truncated_file_count,
+                    input_chars,
+                    output_chars,
+                    duration_ms,
+                    status,
+                    error
+                FROM context_runs
+                WHERE context_run_id = ?
+                LIMIT 1
+                """,
+                (int(context_run_id),),
+            ).fetchone()
+
+        return None if row is None else self._context_run_row_to_dict(row)
+
+    def _context_run_row_to_dict(
+        self,
+        row: sqlite3.Row,
+    ) -> dict[str, int | str | None]:
+        """把 context run 行统一转为审计字典，避免 latest/by-id 字段漂移。"""
         scan_run_id = row["scan_run_id"]
         return {
             "context_run_id": int(row["context_run_id"]),
@@ -844,6 +885,37 @@ class ScanIndexStore:
         if row is None:
             raise KeyError("scan_runs")
 
+        return self._scan_run_detail_row_to_dict(row)
+
+    def get_scan_run_detail(self, run_id: int) -> dict[str, int] | None:
+        """按 id 读取指定 scan run detail；缺失时返回 None。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    run_id,
+                    discovered_count,
+                    reused_count,
+                    reparsed_count,
+                    total_duration_ms,
+                    discovery_duration_ms,
+                    inventory_cache_duration_ms,
+                    parse_duration_ms,
+                    aggregation_duration_ms,
+                    success_count,
+                    error_count,
+                    timeout_count
+                FROM scan_runs
+                WHERE run_id = ?
+                LIMIT 1
+                """,
+                (int(run_id),),
+            ).fetchone()
+
+        return None if row is None else self._scan_run_detail_row_to_dict(row)
+
+    def _scan_run_detail_row_to_dict(self, row: sqlite3.Row) -> dict[str, int]:
+        """把 scan run 行统一转为完整指标字典，避免 latest/by-id 字段漂移。"""
         return {
             "run_id": int(row["run_id"]),
             "discovered_count": int(row["discovered_count"]),

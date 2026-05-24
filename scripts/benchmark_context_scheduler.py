@@ -167,8 +167,17 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     # benchmark 要绑定刚刚的 ContextScheduler run；这里只读取同一默认 store，
     # 避免第二次 scan 污染 scan run、cache 命中率和压缩审计指标。
     store = FileScanner().scan_index_store
-    context_run = store.latest_context_run()
-    scan_run = _latest_scan_run_detail_or_none(store)
+    context_run = (
+        None
+        if result.context_run_id is None
+        else store.get_context_run(result.context_run_id)
+    )
+    scan_run_id = None if context_run is None else context_run.get("scan_run_id")
+    scan_run = (
+        None
+        if scan_run_id is None
+        else store.get_scan_run_detail(int(scan_run_id))
+    )
     compression_profile = _resolve_compression_profile(
         context_run=context_run,
         requested_profile=args.compression_profile,
@@ -187,13 +196,6 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         parameters=parameters,
         scan_run=scan_run,
     )
-
-
-def _latest_scan_run_detail_or_none(store: Any) -> dict[str, Any] | None:
-    try:
-        return dict(store.latest_scan_run_detail())
-    except Exception:
-        return None
 
 
 def _resolve_compression_profile(

@@ -11,6 +11,36 @@ from src.services.scan_index_store import InventoryItem, ScanIndexStore
 from src.services.scan_metrics import ExtensionMetrics, ScanRunMetrics
 
 
+def _save_context_run_for_test(
+    store: ScanIndexStore,
+    *,
+    scan_run_id: int | None,
+    report_mode: str = "weekly",
+    source_file_count: int = 2,
+    duration_ms: int = 33,
+) -> int:
+    return store.save_context_run(
+        report_mode=report_mode,
+        start_date=date(2026, 5, 10),
+        end_date=date(2026, 5, 24),
+        compression_profile=f"{report_mode}_balanced_v1",
+        context_profile_key='{"version":"context_scheduler_v1"}',
+        scan_run_id=scan_run_id,
+        source_file_count=source_file_count,
+        included_file_count=1,
+        omitted_file_count=max(source_file_count - 1, 0),
+        metadata_only_count=0,
+        compressed_file_count=1,
+        error_file_count=0,
+        truncated_file_count=1,
+        input_chars=1200,
+        output_chars=500,
+        duration_ms=duration_ms,
+        status="success",
+        error="",
+    )
+
+
 def test_index_store_creates_inventory_and_cache_tables(tmp_path: Path):
     """初始化索引库时应创建库存、解析缓存和扫描运行表。"""
     store = ScanIndexStore(db_path=tmp_path / "nested" / "scan_index.sqlite3")
@@ -156,6 +186,67 @@ def test_context_run_and_decisions_round_trip(tmp_path: Path):
             "error": "",
         },
     ]
+
+
+def test_get_context_and_scan_run_by_id_does_not_return_latest(
+    tmp_path: Path,
+) -> None:
+    """按 id 查询应绑定指定 run，即使之后又写入了更新的 run。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+    first_scan_run_id = store.save_scan_run_metrics(
+        run_metrics=ScanRunMetrics(
+            total_duration_ms=101,
+            discovered_count=1,
+            reused_count=0,
+            reparsed_count=1,
+        )
+    )
+    second_scan_run_id = store.save_scan_run_metrics(
+        run_metrics=ScanRunMetrics(
+            total_duration_ms=202,
+            discovered_count=9,
+            reused_count=8,
+            reparsed_count=1,
+        )
+    )
+    first_context_run_id = _save_context_run_for_test(
+        store,
+        scan_run_id=first_scan_run_id,
+        report_mode="weekly",
+        source_file_count=1,
+        duration_ms=11,
+    )
+    second_context_run_id = _save_context_run_for_test(
+        store,
+        scan_run_id=second_scan_run_id,
+        report_mode="monthly",
+        source_file_count=9,
+        duration_ms=22,
+    )
+
+    context_run = store.get_context_run(first_context_run_id)
+    scan_run = store.get_scan_run_detail(first_scan_run_id)
+
+    assert store.latest_context_run()["context_run_id"] == second_context_run_id
+    assert store.latest_scan_run_detail()["run_id"] == second_scan_run_id
+    assert context_run is not None
+    assert context_run["context_run_id"] == first_context_run_id
+    assert context_run["scan_run_id"] == first_scan_run_id
+    assert context_run["report_mode"] == "weekly"
+    assert scan_run is not None
+    assert scan_run["run_id"] == first_scan_run_id
+    assert scan_run["discovered_count"] == 1
+    assert scan_run["total_duration_ms"] == 101
+
+
+def test_get_context_and_scan_run_by_id_returns_none_when_missing(
+    tmp_path: Path,
+) -> None:
+    """指定 id 不存在时返回 None，不把缺失行伪装成 latest。"""
+    store = ScanIndexStore(db_path=tmp_path / "scan_index.sqlite3")
+
+    assert store.get_context_run(999) is None
+    assert store.get_scan_run_detail(999) is None
 
 
 def test_save_context_run_with_decisions_rolls_back_run_when_decision_fails(
