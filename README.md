@@ -102,7 +102,7 @@ llm:
 
 ### Rust Discovery Backend
 
-默认优先使用 Rust discovery；如果二进制未构建、路径配置错误或 stdout 合约失败，会记录 warning 并回退到 Python discovery：
+默认优先使用 Rust discovery；如果 Rust CLI 缺失、启动失败、超时、非零退出，或 stdout JSON / 字段契约校验失败，会记录 warning 并回退到 Python discovery：
 
 ```yaml
 scanner:
@@ -111,6 +111,8 @@ scanner:
 ```
 
 本机要测试 Rust discovery 时，先构建 CLI：
+
+需本机已安装 Rust toolchain，并确保 cargo 可用。
 
 ```bash
 cd rust/discovery
