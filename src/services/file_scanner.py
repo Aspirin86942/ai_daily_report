@@ -32,6 +32,8 @@ from .office_parser import (
     OFFICE_RUST_FILE_TYPES,
     OfficeParseAudit,
     OfficeParseOutcome,
+    PYTHON_OFFICE_BACKEND,
+    PYTHON_SHAREPOINT_TEXT_BACKEND,
     parse_office_with_fallback,
     parse_with_sharepoint_text,
 )
@@ -44,6 +46,12 @@ logger = setup_logger()
 TEXT_FILE_TYPES = {".txt", ".md", ".csv", ".json", ".log"}
 DOCUMENT_FILE_TYPES = {".docx", ".xlsx", ".pptx", ".pdf"}
 NOT_PARSED_PARSER_BACKEND = "not_parsed"
+MODERN_OFFICE_FILE_TYPES = {".docx", ".xlsx", ".pptx"}
+LEGACY_SHAREPOINT_FILE_TYPES = {".doc", ".ppt"}
+DEFAULT_OFFICE_FALLBACK_ORDER = (
+    PYTHON_OFFICE_BACKEND,
+    PYTHON_SHAREPOINT_TEXT_BACKEND,
+)
 
 
 def _extract_content_worker(
@@ -79,6 +87,207 @@ def _extract_document_content_worker(
         ),
     )
     result_queue.put(context.model_dump())
+
+
+def _extract_python_office_fallback_worker(
+    file_path_str: str,
+    file_type: str,
+    limits: dict,
+    scanner_cfg: dict,
+    result_queue: mp.Queue,
+) -> None:
+    """子进程运行 Office Python fallback，避免坏文件卡住扫描线程。"""
+    file_path = Path(file_path_str)
+    normalized_type = file_type.lower()
+    try:
+        context = _run_python_office_fallback_backend(
+            file_path=file_path,
+            file_type=normalized_type,
+            limits=limits,
+            scanner_cfg=scanner_cfg,
+        )
+    except Exception as exc:
+        context = FileContext(
+            file_path=str(file_path),
+            file_type=normalized_type,
+            content="",
+            error=f"PYTHON_OFFICE_FALLBACK_FAILED: {exc}",
+            parser_backend=NOT_PARSED_PARSER_BACKEND,
+            truncated=False,
+        )
+    result_queue.put(context.model_dump())
+
+
+def _run_python_office_fallback_backend(
+    file_path: Path,
+    file_type: str,
+    limits: Mapping[str, object],
+    scanner_cfg: Mapping[str, object],
+) -> FileContext:
+    """按 scanner fallback_order 在子进程里选择 Python Office fallback。"""
+    normalized_type = file_type.lower()
+    last_context: FileContext | None = None
+
+    for backend in _resolve_office_fallback_order(scanner_cfg):
+        context: FileContext | None = None
+        if backend == PYTHON_OFFICE_BACKEND:
+            context = _run_python_office_backend(
+                file_path=file_path,
+                file_type=normalized_type,
+                limits=limits,
+                scanner_cfg=scanner_cfg,
+            )
+        elif (
+            backend == PYTHON_SHAREPOINT_TEXT_BACKEND
+            and (
+                normalized_type in LEGACY_SHAREPOINT_FILE_TYPES
+                or (
+                    normalized_type == ".xls"
+                    and last_context is not None
+                    and last_context.parser_backend == PYTHON_OFFICE_BACKEND
+                )
+            )
+        ):
+            context = parse_with_sharepoint_text(
+                file_path,
+                normalized_type,
+                limits,
+            )
+
+        if context is None:
+            continue
+        if context.error is None:
+            return context
+        last_context = context
+
+    if last_context is not None:
+        return last_context
+
+    return FileContext(
+        file_path=str(file_path),
+        file_type=normalized_type,
+        content="",
+        error=f"PYTHON_FALLBACK_UNAVAILABLE: {normalized_type}",
+        parser_backend=NOT_PARSED_PARSER_BACKEND,
+        truncated=False,
+    )
+
+
+def _run_python_office_backend(
+    file_path: Path,
+    file_type: str,
+    limits: Mapping[str, object],
+    scanner_cfg: Mapping[str, object],
+) -> FileContext | None:
+    """执行 python_office_v1 fallback；.xls 保留旧 Excel 表格抽取。"""
+    if file_type in MODERN_OFFICE_FILE_TYPES:
+        return parse_document_file(
+            file_path=file_path,
+            file_type=file_type,
+            limits=dict(limits),
+            options=_build_python_office_fallback_options(scanner_cfg),
+        )
+    if file_type == ".xls":
+        return _parse_legacy_excel_fallback(
+            file_path=file_path,
+            file_type=file_type,
+            limits=limits,
+            scanner_cfg=scanner_cfg,
+        )
+    return None
+
+
+def _parse_legacy_excel_fallback(
+    file_path: Path,
+    file_type: str,
+    limits: Mapping[str, object],
+    scanner_cfg: Mapping[str, object],
+) -> FileContext:
+    """旧 .xls fallback 继续输出表格 Markdown，保持历史 scanner 行为。"""
+    max_rows = _positive_int(
+        limits.get("excel_max_rows"),
+        _positive_int(scanner_cfg.get("excel_max_rows"), 50),
+    )
+    text_max_chars = _positive_int(
+        limits.get("text_max_chars"),
+        _positive_int(scanner_cfg.get("text_max_chars"), 6000),
+    )
+    try:
+        raw_content = _parse_excel_table_content(file_path, max_rows)
+        truncated = len(raw_content) > text_max_chars
+        content = truncate_text(raw_content, text_max_chars)
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content=content,
+            error=None,
+            parser_backend=PYTHON_OFFICE_BACKEND,
+            truncated=truncated,
+        )
+    except Exception as exc:
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="",
+            error=f"PYTHON_OFFICE_XLS_FAILED: {exc}",
+            parser_backend=PYTHON_OFFICE_BACKEND,
+            truncated=False,
+        )
+
+
+def _parse_excel_table_content(file_path: Path, max_rows: int) -> str:
+    """解析 Excel 文件为 Markdown 表格文本，供旧 scanner 和 .xls fallback 共用。"""
+    content_parts = []
+    excel_file = pd.ExcelFile(file_path)
+
+    for sheet_name in excel_file.sheet_names:
+        df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=max_rows)
+        df = df.dropna(how="all")
+
+        if len(df) > max_rows:
+            df = df.head(max_rows)
+            content_parts.append(f"## {sheet_name} (仅显示前 {max_rows} 行)")
+        else:
+            content_parts.append(f"## {sheet_name}")
+
+        if not df.empty:
+            content_parts.append(df.to_markdown(index=False))
+
+    return "\n\n".join(content_parts)
+
+
+def _build_python_office_fallback_options(
+    scanner_cfg: Mapping[str, object],
+) -> DocumentParserOptions:
+    """Python fallback 固定标记独立 backend，避免和旧 office_v1 混淆。"""
+    return DocumentParserOptions(
+        office_parser_backend=PYTHON_OFFICE_BACKEND,
+        pdf_parser_backend=scanner_cfg.get(
+            "pdf_parser_backend",
+            "pdf_text_v1",
+        ),
+        include_pptx_notes=bool(scanner_cfg.get("pptx_include_notes", True)),
+    )
+
+
+def _resolve_office_fallback_order(
+    scanner_cfg: Mapping[str, object],
+) -> tuple[str, ...]:
+    order = scanner_cfg.get("office_parser_fallback_order", DEFAULT_OFFICE_FALLBACK_ORDER)
+    if isinstance(order, str):
+        return (order,)
+    try:
+        return tuple(str(item) for item in order)
+    except TypeError:
+        return DEFAULT_OFFICE_FALLBACK_ORDER
+
+
+def _positive_int(value: object, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
 
 
 class FileScanner:
@@ -663,14 +872,7 @@ class FileScanner:
 
     def _build_python_office_fallback_options(self) -> DocumentParserOptions:
         """Python fallback 固定标记独立 backend，避免和旧 office_v1 混淆。"""
-        return DocumentParserOptions(
-            office_parser_backend="python_office_v1",
-            pdf_parser_backend=self.scanner_cfg.get(
-                "pdf_parser_backend",
-                "pdf_text_v1",
-            ),
-            include_pptx_notes=bool(self.scanner_cfg.get("pptx_include_notes", True)),
-        )
+        return _build_python_office_fallback_options(self.scanner_cfg)
 
     def _warn_invalid_light_text_budget(
         self,
@@ -809,20 +1011,76 @@ class FileScanner:
         file_type: str,
         limits: Mapping[str, object],
     ) -> FileContext:
-        """Rust Office 失败后的 Python fallback，现代格式和 legacy 格式分流。"""
+        """Rust Office 失败后的 Python fallback，放入子进程保留 hard timeout。"""
         normalized_type = file_type.lower()
-        if normalized_type in {".docx", ".xlsx", ".pptx"}:
-            return parse_document_file(
-                file_path=file_path,
-                file_type=normalized_type,
-                limits=dict(limits),
-                options=self._build_python_office_fallback_options(),
-            )
-        return parse_with_sharepoint_text(
+        timeout_seconds = self.parser_supervisor.resolve_timeout(normalized_type)
+        context, timed_out = self._run_python_office_fallback_subprocess(
             file_path,
             normalized_type,
-            limits,
+            dict(limits),
+            timeout_seconds,
         )
+        if timed_out:
+            logger.warning(
+                "Office Python fallback 超时: %s (%ss)",
+                file_path,
+                f"{timeout_seconds:g}",
+            )
+            return self.parser_supervisor.handle_worker_timeout(
+                file_path,
+                normalized_type,
+            )
+        if context is None:
+            return self.parser_supervisor.handle_missing_result(
+                file_path,
+                normalized_type,
+            )
+        return context
+
+    def _run_python_office_fallback_subprocess(
+        self,
+        file_path: Path,
+        file_type: str,
+        limits: dict,
+        timeout_seconds: float,
+    ) -> tuple[Optional[FileContext], bool]:
+        """在独立子进程中运行 Python Office fallback。"""
+        ctx = mp.get_context("spawn")
+        result_queue: mp.Queue = ctx.Queue(maxsize=1)
+        process = ctx.Process(
+            target=_extract_python_office_fallback_worker,
+            args=(
+                str(file_path),
+                file_type,
+                limits,
+                dict(self.scanner_cfg),
+                result_queue,
+            ),
+        )
+        process.start()
+        process.join(timeout_seconds)
+
+        if process.is_alive():
+            process.terminate()
+            process.join()
+            return None, True
+
+        try:
+            payload = result_queue.get_nowait()
+        except Exception:
+            return None, False
+
+        try:
+            return FileContext(**payload), False
+        except Exception as exc:
+            logger.warning("Office Python fallback 返回无效结果 %s: %s", file_path, exc)
+            return (
+                self.parser_supervisor.handle_invalid_payload(
+                    file_path,
+                    file_type,
+                ),
+                False,
+            )
 
     def _run_extract_document_subprocess(
         self,
@@ -971,29 +1229,7 @@ class FileScanner:
         if max_rows is None:
             max_rows = self.scanner_cfg["excel_max_rows"]
 
-        content_parts = []
-
-        # 读取所有 Sheet
-        excel_file = pd.ExcelFile(file_path)
-
-        for sheet_name in excel_file.sheet_names:
-            df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=max_rows)
-
-            # 矢量化过滤空行
-            df = df.dropna(how="all")
-
-            # 限制行数
-            if len(df) > max_rows:
-                df = df.head(max_rows)
-                content_parts.append(f"## {sheet_name} (仅显示前 {max_rows} 行)")
-            else:
-                content_parts.append(f"## {sheet_name}")
-
-            # 转换为 Markdown 表格
-            if not df.empty:
-                content_parts.append(df.to_markdown(index=False))
-
-        return "\n\n".join(content_parts)
+        return _parse_excel_table_content(file_path, max_rows)
 
     def _parse_pdf(self, file_path: Path, max_pages: Optional[int] = None) -> str:
         """解析 PDF 文件

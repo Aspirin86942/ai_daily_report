@@ -3,6 +3,7 @@
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Mapping
 
 import pytest
 
@@ -1368,6 +1369,183 @@ def test_scan_files_records_python_fallback_audit_for_office_file(
     assert detail.fallback_reason == "RUST_OFFICE_PARSE_FAILED: bad zip"
     assert detail.rust_duration_ms == 11
     assert detail.fallback_duration_ms == 19
+
+
+def test_scan_files_times_out_python_office_fallback_in_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Rust 启动失败后，modern Office 的 Python fallback 仍应有父进程硬超时。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".docx"],
+            "worker_lane_mode": "direct",
+            "rust_office_parser_bin": str(tmp_path / "missing-rust-parser"),
+            "office_parser_fallback_order": ["python_office_v1"],
+            "file_timeout_seconds": 0.01,
+        },
+    )
+    sample = scanner.work_dir / "timeout.docx"
+    sample.write_bytes(b"not a real docx")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=15")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    class TimeoutQueue:
+        def get_nowait(self):
+            raise RuntimeError("no payload")
+
+    class TimeoutProcess:
+        def __init__(self, *args, **kwargs):
+            self.terminated = False
+
+        def start(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            self.terminated = True
+
+    class TimeoutContext:
+        def Queue(self, maxsize=1):
+            return TimeoutQueue()
+
+        def Process(self, *args, **kwargs):
+            return TimeoutProcess()
+
+    monkeypatch.setattr(
+        file_scanner_module.mp,
+        "get_context",
+        lambda name: TimeoutContext(),
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.error_count == 1
+    error = result.contexts[0].error or ""
+    assert "OFFICE_PARSE_FAILED" in error
+    assert "timeout: file parse exceeded 0.01s" in error
+
+
+def test_scan_files_prefers_legacy_excel_fallback_for_xls_after_rust_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """XLS Rust 失败后应优先保留旧 Excel 表格抽取，不直接落到 sharepoint。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".xls"],
+            "worker_lane_mode": "direct",
+            "rust_office_parser_bin": str(tmp_path / "missing-rust-parser"),
+            "office_parser_fallback_order": [
+                "python_office_v1",
+                "python_sharepoint_text_v1",
+            ],
+        },
+    )
+    sample = scanner.work_dir / "legacy.xls"
+    sample.write_bytes(b"legacy xls bytes are not parsed by this routing test")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=50")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    excel_calls: list[tuple[Path, int]] = []
+    sharepoint_calls: list[Path] = []
+
+    def fake_excel_table_content(file_path: Path, max_rows: int) -> str:
+        excel_calls.append((file_path, max_rows))
+        return "## LegacySheet\n\n| item | qty |\n|---|---:|\n| A | 2 |"
+
+    def fake_sharepoint_text(
+        file_path: Path,
+        file_type: str,
+        limits: Mapping[str, object],
+    ) -> file_scanner_module.FileContext:
+        sharepoint_calls.append(file_path)
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="sharepoint fallback should not be preferred",
+            error=None,
+            parser_backend="python_sharepoint_text_v1",
+        )
+
+    class InlineQueue:
+        def __init__(self):
+            self.payload = None
+
+        def put(self, payload):
+            self.payload = payload
+
+        def get_nowait(self):
+            if self.payload is None:
+                raise RuntimeError("no payload")
+            return self.payload
+
+    class InlineProcess:
+        def __init__(self, target, args):
+            self.target = target
+            self.args = args
+
+        def start(self):
+            self.target(*self.args)
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return False
+
+        def terminate(self):
+            raise AssertionError("inline fallback should not time out")
+
+    class InlineContext:
+        def Queue(self, maxsize=1):
+            return InlineQueue()
+
+        def Process(self, target, args):
+            return InlineProcess(target, args)
+
+    monkeypatch.setattr(
+        file_scanner_module,
+        "_parse_excel_table_content",
+        fake_excel_table_content,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        file_scanner_module,
+        "parse_with_sharepoint_text",
+        fake_sharepoint_text,
+    )
+    monkeypatch.setattr(
+        file_scanner_module.mp,
+        "get_context",
+        lambda name: InlineContext(),
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.success_count == 1
+    assert result.contexts[0].parser_backend == "python_office_v1"
+    assert "LegacySheet" in result.contexts[0].content
+    assert excel_calls == [(sample, 50)]
+    assert sharepoint_calls == []
+    detail = scanner.last_reparse_details[0]
+    assert detail.fallback_backend == "python_office_v1"
 
 
 def test_pdf_stays_on_existing_document_backend(
