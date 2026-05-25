@@ -210,6 +210,23 @@ class Config:
             "direct_text_read_bytes",
             "log_tail_read_bytes",
             "text_excerpt_max_chars",
+            "excel_max_sheets",
+            "excel_max_columns",
+            "docx_max_paragraphs",
+            "docx_max_tables",
+            "docx_table_max_rows",
+            "docx_table_max_cols",
+            "pptx_max_slides",
+            "pptx_include_notes",
+            "document_excerpt_max_chars",
+            "summary_excel_max_sheets",
+            "summary_excel_max_columns",
+            "summary_docx_max_paragraphs",
+            "summary_docx_max_tables",
+            "summary_docx_table_max_rows",
+            "summary_docx_table_max_cols",
+            "summary_pptx_max_slides",
+            "summary_document_excerpt_max_chars",
         ):
             if hasattr(scanner, key):
                 cfg[key] = self._to_builtin_value(getattr(scanner, key))

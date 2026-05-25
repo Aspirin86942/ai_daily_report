@@ -17,8 +17,14 @@ STAGE_TO_FIELD = {
 
 
 def is_timeout_error(error: str | None) -> bool:
-    """只按稳定 timeout 前缀识别超时，避免普通异常误入 timeout 统计。"""
-    return bool(error and error.startswith("timeout:"))
+    """识别 scanner worker、Rust Office 与组合 fallback timeout。"""
+    if not error:
+        return False
+    return (
+        error.startswith("timeout:")
+        or error.startswith("RUST_OFFICE_TIMEOUT:")
+        or "timeout: file parse exceeded" in error
+    )
 
 
 @dataclass(slots=True)

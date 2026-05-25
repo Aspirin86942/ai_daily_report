@@ -1437,6 +1437,71 @@ def test_scan_files_times_out_python_office_fallback_in_subprocess(
     assert "timeout: file parse exceeded 0.01s" in error
 
 
+def test_scan_files_times_out_configured_python_office_backend_in_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """显式切到 python_office_v1 时，scanner 仍应保留父进程 hard timeout。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".docx"],
+            "worker_lane_mode": "direct",
+            "office_parser_backend": "python_office_v1",
+            "file_timeout_seconds": 0.01,
+        },
+    )
+    sample = scanner.work_dir / "configured-timeout.docx"
+    sample.write_bytes(b"not a real docx")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=15")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    class TimeoutQueue:
+        def get_nowait(self):
+            raise RuntimeError("no payload")
+
+    class TimeoutProcess:
+        def start(self):
+            pass
+
+        def join(self, timeout=None):
+            pass
+
+        def is_alive(self):
+            return True
+
+        def terminate(self):
+            pass
+
+    class TimeoutContext:
+        def Queue(self, maxsize=1):
+            return TimeoutQueue()
+
+        def Process(self, *args, **kwargs):
+            return TimeoutProcess()
+
+    monkeypatch.setattr(
+        file_scanner_module.mp,
+        "get_context",
+        lambda name: TimeoutContext(),
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.error_count == 1
+    assert result.contexts[0].error == "timeout: file parse exceeded 0.01s"
+    detail = scanner.last_reparse_details[0]
+    assert detail.attempted_backend == "python_office_v1"
+    assert detail.worker_lane == "subprocess"
+    run_detail = scanner.scan_index_store.latest_scan_run_detail()
+    assert run_detail["timeout_count"] == 1
+
+
 def test_scan_files_prefers_legacy_excel_fallback_for_xls_after_rust_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

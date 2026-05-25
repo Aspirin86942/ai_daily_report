@@ -124,12 +124,47 @@ def test_metrics_collector_aggregates_extension_results():
     assert metrics.timeout_count == 1
 
 
-def test_is_timeout_error_requires_timeout_prefix():
-    """只有稳定 timeout 前缀进入 timeout 统计，普通异常不能混入。"""
+def test_is_timeout_error_recognizes_worker_and_office_timeout_models():
+    """worker、Rust Office 和组合 fallback timeout 都应进入 timeout 统计。"""
     assert is_timeout_error("timeout: file parse exceeded 30s") is True
+    assert is_timeout_error("RUST_OFFICE_TIMEOUT: file parse exceeded 30s") is True
+    assert (
+        is_timeout_error(
+            "OFFICE_PARSE_FAILED: rust=RUST_OFFICE_PARSE_FAILED: bad; "
+            "python=timeout: file parse exceeded 30s"
+        )
+        is True
+    )
     assert is_timeout_error("TimeoutError from parser") is False
     assert is_timeout_error("bad workbook") is False
     assert is_timeout_error(None) is False
+
+
+def test_metrics_collector_counts_office_timeout_models():
+    """Rust Office timeout 和 fallback 组合 timeout 都应进入汇总计数。"""
+    collector = ScanMetricsCollector()
+
+    collector.record_extension_result(
+        ".docx",
+        duration_ms=30,
+        error="RUST_OFFICE_TIMEOUT: file parse exceeded 30s",
+    )
+    collector.record_extension_result(
+        ".xlsx",
+        duration_ms=30,
+        error=(
+            "OFFICE_PARSE_FAILED: rust=RUST_OFFICE_PARSE_FAILED: bad; "
+            "python=timeout: file parse exceeded 30s"
+        ),
+    )
+
+    metrics = collector.finish(total_duration_ms=60)
+
+    assert metrics.timeout_count == 2
+    assert {item.extension: item.timeout_count for item in metrics.extension_metrics} == {
+        ".docx": 1,
+        ".xlsx": 1,
+    }
 
 
 def test_scan_run_metrics_summary_line_is_stable():

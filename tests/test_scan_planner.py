@@ -4,6 +4,7 @@ from datetime import date
 from pathlib import Path
 from types import SimpleNamespace
 
+from src.core.config import Config
 from src.services.scan_planner import ScanPlanner
 
 
@@ -202,6 +203,75 @@ def test_build_parser_profile_uses_summary_document_limits():
     assert profile["docx_table_max_cols"] == 6
     assert profile["pptx_max_slides"] == 12
     assert profile["document_excerpt_max_chars"] == 2000
+
+
+def test_config_document_budget_keys_feed_parser_profile(tmp_path: Path):
+    """真实 Config 链路必须把 Office 预算透传给 planner/cache key。"""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.linux.yaml").write_text(
+        "\n".join(
+            [
+                "scanner:",
+                "  allowed_extensions:",
+                "    - .docx",
+                "  ignored_patterns: []",
+                "  max_workers: 1",
+                "  excel_max_rows: 50",
+                "  pdf_max_pages: 5",
+                "  text_max_chars: 6000",
+                "  excel_max_sheets: 9",
+                "  excel_max_columns: 31",
+                "  docx_max_paragraphs: 211",
+                "  docx_max_tables: 22",
+                "  docx_table_max_rows: 61",
+                "  docx_table_max_cols: 13",
+                "  pptx_max_slides: 51",
+                "  pptx_include_notes: false",
+                "  document_excerpt_max_chars: 7000",
+                "  summary_excel_max_rows: 11",
+                "  summary_pdf_max_pages: 3",
+                "  summary_text_max_chars: 2100",
+                "  summary_excel_max_sheets: 4",
+                "  summary_excel_max_columns: 14",
+                "  summary_docx_max_paragraphs: 81",
+                "  summary_docx_max_tables: 6",
+                "  summary_docx_table_max_rows: 21",
+                "  summary_docx_table_max_cols: 9",
+                "  summary_pptx_max_slides: 16",
+                "  summary_document_excerpt_max_chars: 2300",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = object.__new__(Config)
+    cfg._settings = Config._build_settings(config_dir, system_name="Linux")
+
+    scanner_config = cfg.scanner_config
+    regular_profile = ScanPlanner(scanner_config).build_parser_profile(
+        summary_mode=False
+    )
+    summary_profile = ScanPlanner(scanner_config).build_parser_profile(
+        summary_mode=True
+    )
+
+    assert regular_profile["excel_max_sheets"] == 9
+    assert regular_profile["excel_max_columns"] == 31
+    assert regular_profile["docx_max_paragraphs"] == 211
+    assert regular_profile["docx_max_tables"] == 22
+    assert regular_profile["docx_table_max_rows"] == 61
+    assert regular_profile["docx_table_max_cols"] == 13
+    assert regular_profile["pptx_max_slides"] == 51
+    assert regular_profile["pptx_include_notes"] is False
+    assert regular_profile["document_excerpt_max_chars"] == 7000
+    assert summary_profile["excel_max_sheets"] == 4
+    assert summary_profile["excel_max_columns"] == 14
+    assert summary_profile["docx_max_paragraphs"] == 81
+    assert summary_profile["docx_max_tables"] == 6
+    assert summary_profile["docx_table_max_rows"] == 21
+    assert summary_profile["docx_table_max_cols"] == 9
+    assert summary_profile["pptx_max_slides"] == 16
+    assert summary_profile["document_excerpt_max_chars"] == 2300
 
 
 def test_build_parser_profile_uses_legacy_direct_text_max_bytes_as_read_budget():

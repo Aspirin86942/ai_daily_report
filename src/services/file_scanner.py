@@ -34,6 +34,7 @@ from .office_parser import (
     OfficeParseOutcome,
     PYTHON_OFFICE_BACKEND,
     PYTHON_SHAREPOINT_TEXT_BACKEND,
+    RUST_OFFICE_BACKEND,
     parse_office_with_fallback,
     parse_with_sharepoint_text,
 )
@@ -118,6 +119,37 @@ def _extract_python_office_fallback_worker(
     result_queue.put(context.model_dump())
 
 
+def _extract_configured_python_office_backend_worker(
+    file_path_str: str,
+    file_type: str,
+    limits: dict,
+    scanner_cfg: dict,
+    backend: str,
+    result_queue: mp.Queue,
+) -> None:
+    """子进程运行显式配置的 Python Office backend。"""
+    file_path = Path(file_path_str)
+    normalized_type = file_type.lower()
+    try:
+        context = _run_configured_python_office_backend(
+            file_path=file_path,
+            file_type=normalized_type,
+            limits=limits,
+            scanner_cfg=scanner_cfg,
+            backend=backend,
+        )
+    except Exception as exc:
+        context = FileContext(
+            file_path=str(file_path),
+            file_type=normalized_type,
+            content="",
+            error=f"PYTHON_OFFICE_BACKEND_FAILED: {exc}",
+            parser_backend=NOT_PARSED_PARSER_BACKEND,
+            truncated=False,
+        )
+    result_queue.put(context.model_dump())
+
+
 def _run_python_office_fallback_backend(
     file_path: Path,
     file_type: str,
@@ -168,6 +200,44 @@ def _run_python_office_fallback_backend(
         file_type=normalized_type,
         content="",
         error=f"PYTHON_FALLBACK_UNAVAILABLE: {normalized_type}",
+        parser_backend=NOT_PARSED_PARSER_BACKEND,
+        truncated=False,
+    )
+
+
+def _run_configured_python_office_backend(
+    file_path: Path,
+    file_type: str,
+    limits: Mapping[str, object],
+    scanner_cfg: Mapping[str, object],
+    backend: str,
+) -> FileContext:
+    """按 office_parser_backend 精确执行 Python backend。"""
+    normalized_type = file_type.lower()
+    if backend == PYTHON_OFFICE_BACKEND:
+        context = _run_python_office_backend(
+            file_path=file_path,
+            file_type=normalized_type,
+            limits=limits,
+            scanner_cfg=scanner_cfg,
+        )
+        if context is not None:
+            return context
+        return FileContext(
+            file_path=str(file_path),
+            file_type=normalized_type,
+            content="",
+            error=f"PYTHON_OFFICE_UNSUPPORTED_EXTENSION: {normalized_type}",
+            parser_backend=NOT_PARSED_PARSER_BACKEND,
+            truncated=False,
+        )
+    if backend == PYTHON_SHAREPOINT_TEXT_BACKEND:
+        return parse_with_sharepoint_text(file_path, normalized_type, limits)
+    return FileContext(
+        file_path=str(file_path),
+        file_type=normalized_type,
+        content="",
+        error=f"OFFICE_UNKNOWN_BACKEND: {backend}",
         parser_backend=NOT_PARSED_PARSER_BACKEND,
         truncated=False,
     )
@@ -994,6 +1064,21 @@ class FileScanner:
         """运行 Rust Office parser，并记录 Rust/Python fallback 审计信息。"""
         normalized_type = file_type.lower()
         timeout_seconds = self.parser_supervisor.resolve_timeout(normalized_type)
+        configured_backend = str(
+            self.scanner_cfg.get("office_parser_backend", RUST_OFFICE_BACKEND)
+        )
+        if configured_backend != RUST_OFFICE_BACKEND:
+            context = self._parse_configured_python_office_backend(
+                file_path,
+                normalized_type,
+                limits,
+                configured_backend,
+            )
+            self._office_parse_audits[str(file_path)] = OfficeParseAudit(
+                attempted_backend=configured_backend,
+            )
+            return context
+
         outcome: OfficeParseOutcome = parse_office_with_fallback(
             file_path=file_path,
             file_type=normalized_type,
@@ -1004,6 +1089,33 @@ class FileScanner:
         )
         self._office_parse_audits[str(file_path)] = outcome.audit
         return outcome.context
+
+    def _parse_configured_python_office_backend(
+        self,
+        file_path: Path,
+        file_type: str,
+        limits: Mapping[str, object],
+        backend: str,
+    ) -> FileContext:
+        """显式 Python backend 也必须通过子进程保留 hard timeout。"""
+        timeout_seconds = self.parser_supervisor.resolve_timeout(file_type)
+        context, timed_out = self._run_configured_python_office_backend_subprocess(
+            file_path,
+            file_type,
+            dict(limits),
+            backend,
+            timeout_seconds,
+        )
+        if timed_out:
+            logger.warning(
+                "Office Python backend 超时: %s (%ss)",
+                file_path,
+                f"{timeout_seconds:g}",
+            )
+            return self.parser_supervisor.handle_worker_timeout(file_path, file_type)
+        if context is None:
+            return self.parser_supervisor.handle_missing_result(file_path, file_type)
+        return context
 
     def _parse_python_office_fallback(
         self,
@@ -1074,6 +1186,53 @@ class FileScanner:
             return FileContext(**payload), False
         except Exception as exc:
             logger.warning("Office Python fallback 返回无效结果 %s: %s", file_path, exc)
+            return (
+                self.parser_supervisor.handle_invalid_payload(
+                    file_path,
+                    file_type,
+                ),
+                False,
+            )
+
+    def _run_configured_python_office_backend_subprocess(
+        self,
+        file_path: Path,
+        file_type: str,
+        limits: dict,
+        backend: str,
+        timeout_seconds: float,
+    ) -> tuple[Optional[FileContext], bool]:
+        """在独立子进程中运行显式 Python Office backend。"""
+        ctx = mp.get_context("spawn")
+        result_queue: mp.Queue = ctx.Queue(maxsize=1)
+        process = ctx.Process(
+            target=_extract_configured_python_office_backend_worker,
+            args=(
+                str(file_path),
+                file_type,
+                limits,
+                dict(self.scanner_cfg),
+                backend,
+                result_queue,
+            ),
+        )
+        process.start()
+        process.join(timeout_seconds)
+
+        if process.is_alive():
+            process.terminate()
+            process.join()
+            return None, True
+
+        try:
+            payload = result_queue.get_nowait()
+        except Exception:
+            return None, False
+
+        try:
+            return FileContext(**payload), False
+        except Exception as exc:
+            logger.warning("Office Python backend 返回无效结果 %s: %s", file_path, exc)
             return (
                 self.parser_supervisor.handle_invalid_payload(
                     file_path,
