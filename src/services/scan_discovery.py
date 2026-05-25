@@ -163,16 +163,23 @@ class RustDiscoveryRunner:
             separator,
             1,
         )
-        if not mtime_ns_text.isdigit() or not version_size_text.isdigit():
+        if not self._is_ascii_digits(mtime_ns_text) or not self._is_ascii_digits(
+            version_size_text
+        ):
             raise RustDiscoveryError(
                 "source_version mtime_ns and size must be non-negative integers"
             )
 
+        int(mtime_ns_text)
         version_size = int(version_size_text)
         if version_size != size_bytes:
             raise RustDiscoveryError("source_version size must match size_bytes")
 
         return source_version
+
+    @staticmethod
+    def _is_ascii_digits(value: str) -> bool:
+        return bool(value) and all("0" <= character <= "9" for character in value)
 
 
 class FileDiscoveryService:

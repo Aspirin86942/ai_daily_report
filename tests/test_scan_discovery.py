@@ -409,6 +409,30 @@ def test_bootstrap_full_scan_rejects_unnormalized_discovery_backend(
             "size_bytes": 999,
             "source_version": "mtime_ns=1:size=998",
         },
+        {
+            "file_identity": "__IDENTITY__",
+            "path": "__PATH__",
+            "extension": ".md",
+            "modified_at": "__MODIFIED_AT__",
+            "size_bytes": 1,
+            "source_version": "mtime_ns=²:size=1",
+        },
+        {
+            "file_identity": "__IDENTITY__",
+            "path": "__PATH__",
+            "extension": ".md",
+            "modified_at": "__MODIFIED_AT__",
+            "size_bytes": 1,
+            "source_version": "mtime_ns=١:size=1",
+        },
+        {
+            "file_identity": "__IDENTITY__",
+            "path": "__PATH__",
+            "extension": ".md",
+            "modified_at": "__MODIFIED_AT__",
+            "size_bytes": 4,
+            "source_version": "mtime_ns=4:size=４",
+        },
     ],
 )
 def test_bootstrap_full_scan_falls_back_when_rust_item_contract_is_invalid(
