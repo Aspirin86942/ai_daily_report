@@ -135,6 +135,35 @@ scanner:
 
 benchmark 报告中的 `discovery_backend` 字段用于确认本轮配置；如果看到 Rust fallback warning，说明配置是 Rust，但实际 discovery 已降级到 Python。
 
+### Rust Office Parser Backend
+
+Office 文件默认优先使用 Rust `office_oxide` parser backend；如果 Rust CLI 缺失、执行失败、超时或输出契约校验失败，会按配置回退到 Python backend：
+
+```yaml
+scanner:
+  office_parser_backend: "rust_office_oxide_v1"
+  rust_office_parser_bin: "rust/office_parser/target/release/ai-daily-office-parser"
+  office_parser_fallback_enabled: true
+  office_parser_fallback_order:
+    - "python_office_v1"
+    - "python_sharepoint_text_v1"
+  office_fallback_after_timeout: false
+  office_external_fallback: "disabled"
+  office_legacy_extensions_enabled: false
+```
+
+本机要测试 Rust Office parser 时，先构建 CLI：
+
+```bash
+cd rust/office_parser
+cargo test
+cargo build --release
+```
+
+默认扫描范围不会自动加入 `.doc` / `.ppt`。如需处理 legacy Office 文件，应先确认真实样本和 fallback 行为，再显式加入 `scanner.allowed_extensions`，避免把未验证的旧格式文件带入常规扫描。
+
+benchmark 报告中的 `parser_backend`、`attempted_backend`、`fallback_backend`、`fallback_reason` 字段用于确认 Rust 是否成功解析，或是否已回退到 Python backend。
+
 ### `config/.secrets.yaml`
 
 ```yaml
