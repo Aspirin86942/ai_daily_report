@@ -270,18 +270,34 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
             "",
             "## Reparse Details",
             "",
-            "| extension | cache_miss_reason | parse_duration_ms | parse_status | path |",
-            "|---|---|---:|---|---|",
+            "| extension | cache_miss_reason | parse_duration_ms | parse_status | "
+            "attempted_backend | fallback_backend | fallback_reason | "
+            "rust_duration_ms | fallback_duration_ms | path |",
+            "|---|---|---:|---|---|---|---|---:|---:|---|",
         ]
     )
     if reparse_details:
         for item in reparse_details:
+            fallback_reason = str(item.get("fallback_reason", "")).replace("|", "/")
             lines.append(
                 "| {extension} | {cache_miss_reason} | {parse_duration_ms} | "
-                "{parse_status} | {path} |".format(**item)
+                "{parse_status} | {attempted_backend} | {fallback_backend} | "
+                "{fallback_reason} | {rust_duration_ms} | "
+                "{fallback_duration_ms} | {path} |".format(
+                    extension=item.get("extension", ""),
+                    cache_miss_reason=item.get("cache_miss_reason", ""),
+                    parse_duration_ms=item.get("parse_duration_ms", 0),
+                    parse_status=item.get("parse_status", ""),
+                    attempted_backend=item.get("attempted_backend", ""),
+                    fallback_backend=item.get("fallback_backend", ""),
+                    fallback_reason=fallback_reason,
+                    rust_duration_ms=item.get("rust_duration_ms", 0),
+                    fallback_duration_ms=item.get("fallback_duration_ms", 0),
+                    path=item.get("path", ""),
+                )
             )
     else:
-        lines.append("| (none) |  | 0 |  |  |")
+        lines.append("| (none) |  | 0 |  |  |  |  | 0 | 0 |  |")
 
     return "\n".join(lines) + "\n"
 

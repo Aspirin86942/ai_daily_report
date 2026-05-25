@@ -3,7 +3,7 @@
 import multiprocessing as mp
 from pathlib import Path
 from datetime import date, datetime, timedelta
-from typing import List, Optional
+from typing import List, Mapping, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import perf_counter
 import pandas as pd
@@ -27,6 +27,13 @@ from .light_text_parser import (
 from .document_parser import (
     DocumentParserOptions,
     parse_document_file,
+)
+from .office_parser import (
+    OFFICE_RUST_FILE_TYPES,
+    OfficeParseAudit,
+    OfficeParseOutcome,
+    parse_office_with_fallback,
+    parse_with_sharepoint_text,
 )
 from .scan_metrics import ReparseDetail, ScanMetricsCollector
 from .scan_planner import ScanPlanner
@@ -93,6 +100,7 @@ class FileScanner:
             ),
         )
         self.last_reparse_details: list[ReparseDetail] = []
+        self._office_parse_audits: dict[str, OfficeParseAudit] = {}
 
     @staticmethod
     def _resolve_project_path(path_value: str | Path) -> Path:
@@ -140,6 +148,7 @@ class FileScanner:
 
         metrics = ScanMetricsCollector.start()
         self.last_reparse_details = []
+        self._office_parse_audits = {}
 
         # 发现边界只负责找候选文件，不承担解析与汇总逻辑。
         with metrics.measure_stage("discovery"):
@@ -457,6 +466,7 @@ class FileScanner:
         context: FileContext,
     ) -> None:
         """记录单个重解析文件的 cache miss 原因和解析结果。"""
+        office_audit = self._office_parse_audits.get(str(self._item_path(item)))
         self.last_reparse_details.append(
             ReparseDetail(
                 path=str(self._item_path(item)),
@@ -475,6 +485,21 @@ class FileScanner:
                     context,
                 ),
                 truncated=context.truncated,
+                attempted_backend=office_audit.attempted_backend
+                if office_audit is not None
+                else "",
+                fallback_backend=office_audit.fallback_backend
+                if office_audit is not None
+                else "",
+                fallback_reason=office_audit.fallback_reason
+                if office_audit is not None
+                else "",
+                rust_duration_ms=office_audit.rust_duration_ms
+                if office_audit is not None
+                else 0,
+                fallback_duration_ms=office_audit.fallback_duration_ms
+                if office_audit is not None
+                else 0,
             )
         )
 
@@ -573,6 +598,12 @@ class FileScanner:
                 limits=effective_limits,
                 options=self._build_light_text_options(effective_limits),
             )
+        if self._should_parse_office_rust(file_type):
+            return self._extract_office_content_with_timeout(
+                file_path,
+                file_type,
+                effective_limits,
+            )
         if self._should_parse_document_direct(file_type):
             return self._extract_document_content_with_timeout(
                 file_path,
@@ -585,6 +616,12 @@ class FileScanner:
         if str(self.scanner_cfg.get("worker_lane_mode", "direct")).lower() != "direct":
             return False
         return file_type.lower() in TEXT_FILE_TYPES
+
+    def _should_parse_office_rust(self, file_type: str) -> bool:
+        """direct lane 下 Office 文件交给 Rust Office parser orchestration。"""
+        if str(self.scanner_cfg.get("worker_lane_mode", "direct")).lower() != "direct":
+            return False
+        return file_type.lower() in OFFICE_RUST_FILE_TYPES
 
     def _should_parse_document_direct(self, file_type: str) -> bool:
         """Office/PDF 使用正式 backend，但仍通过子进程保留 hard timeout。"""
@@ -617,6 +654,17 @@ class FileScanner:
                 "office_parser_backend",
                 "office_v1",
             ),
+            pdf_parser_backend=self.scanner_cfg.get(
+                "pdf_parser_backend",
+                "pdf_text_v1",
+            ),
+            include_pptx_notes=bool(self.scanner_cfg.get("pptx_include_notes", True)),
+        )
+
+    def _build_python_office_fallback_options(self) -> DocumentParserOptions:
+        """Python fallback 固定标记独立 backend，避免和旧 office_v1 混淆。"""
+        return DocumentParserOptions(
+            office_parser_backend="python_office_v1",
             pdf_parser_backend=self.scanner_cfg.get(
                 "pdf_parser_backend",
                 "pdf_text_v1",
@@ -734,6 +782,47 @@ class FileScanner:
         if context is None:
             return self.parser_supervisor.handle_missing_result(file_path, file_type)
         return context
+
+    def _extract_office_content_with_timeout(
+        self,
+        file_path: Path,
+        file_type: str,
+        limits: Mapping[str, object],
+    ) -> FileContext:
+        """运行 Rust Office parser，并记录 Rust/Python fallback 审计信息。"""
+        normalized_type = file_type.lower()
+        timeout_seconds = self.parser_supervisor.resolve_timeout(normalized_type)
+        outcome: OfficeParseOutcome = parse_office_with_fallback(
+            file_path=file_path,
+            file_type=normalized_type,
+            limits=limits,
+            scanner_cfg=self.scanner_cfg,
+            timeout_seconds=timeout_seconds,
+            python_fallback=self._parse_python_office_fallback,
+        )
+        self._office_parse_audits[str(file_path)] = outcome.audit
+        return outcome.context
+
+    def _parse_python_office_fallback(
+        self,
+        file_path: Path,
+        file_type: str,
+        limits: Mapping[str, object],
+    ) -> FileContext:
+        """Rust Office 失败后的 Python fallback，现代格式和 legacy 格式分流。"""
+        normalized_type = file_type.lower()
+        if normalized_type in {".docx", ".xlsx", ".pptx"}:
+            return parse_document_file(
+                file_path=file_path,
+                file_type=normalized_type,
+                limits=dict(limits),
+                options=self._build_python_office_fallback_options(),
+            )
+        return parse_with_sharepoint_text(
+            file_path,
+            normalized_type,
+            limits,
+        )
 
     def _run_extract_document_subprocess(
         self,
@@ -862,6 +951,8 @@ class FileScanner:
             return "subprocess"
         if file_type.lower() in TEXT_FILE_TYPES:
             return "direct"
+        if file_type.lower() in OFFICE_RUST_FILE_TYPES:
+            return "subprocess"
         if file_type.lower() in DOCUMENT_FILE_TYPES:
             # Office/PDF 虽然是正式 backend，但仍由子进程提供 hard timeout 隔离。
             return "subprocess"

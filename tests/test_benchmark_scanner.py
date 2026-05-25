@@ -21,6 +21,11 @@ def _make_reparse_detail(
     truncated: bool,
     path: str = "D:\\work\\report.md",
     worker_lane: str = "",
+    attempted_backend: str = "",
+    fallback_backend: str = "",
+    fallback_reason: str = "",
+    rust_duration_ms: int = 0,
+    fallback_duration_ms: int = 0,
 ) -> ReparseDetail:
     return ReparseDetail(
         path=path,
@@ -36,6 +41,11 @@ def _make_reparse_detail(
         parser_backend=parser_backend,
         worker_lane=worker_lane,
         truncated=truncated,
+        attempted_backend=attempted_backend,
+        fallback_backend=fallback_backend,
+        fallback_reason=fallback_reason,
+        rust_duration_ms=rust_duration_ms,
+        fallback_duration_ms=fallback_duration_ms,
     )
 
 
@@ -246,6 +256,11 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             "parser_backend": LIGHT_TEXT_PARSER_BACKEND,
             "worker_lane": "direct",
             "truncated": True,
+            "attempted_backend": "",
+            "fallback_backend": "",
+            "fallback_reason": "",
+            "rust_duration_ms": 0,
+            "fallback_duration_ms": 0,
         }
     ]
     assert payload["parser_backend_summary"] == {
@@ -262,6 +277,65 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             }
         },
     }
+
+
+def test_build_benchmark_payload_preserves_office_fallback_audit_fields():
+    """benchmark JSON 应保留 Office Rust 尝试和 Python fallback 审计字段。"""
+    scan_result = ScanResult(
+        total_files=1,
+        success_count=1,
+        error_count=0,
+        contexts=[],
+    )
+    run_detail = {
+        "run_id": 8,
+        "discovered_count": 1,
+        "reused_count": 0,
+        "reparsed_count": 1,
+        "total_duration_ms": 70,
+        "discovery_duration_ms": 5,
+        "inventory_cache_duration_ms": 6,
+        "parse_duration_ms": 50,
+        "aggregation_duration_ms": 2,
+        "success_count": 1,
+        "error_count": 0,
+        "timeout_count": 0,
+    }
+    reparse_details = [
+        _make_reparse_detail(
+            extension=".xlsx",
+            parser_backend="python_office_v1",
+            worker_lane="subprocess",
+            truncated=False,
+            path="D:\\work\\bad.xlsx",
+            attempted_backend="rust_office_oxide_v1",
+            fallback_backend="python_office_v1",
+            fallback_reason="RUST_OFFICE_PARSE_FAILED: bad zip",
+            rust_duration_ms=13,
+            fallback_duration_ms=21,
+        )
+    ]
+
+    payload = build_benchmark_payload(
+        scan_result=scan_result,
+        run_detail=run_detail,
+        extension_metrics=[],
+        reparse_details=reparse_details,
+        start_date=date(2026, 5, 23),
+        end_date=date(2026, 5, 24),
+        summary_mode=False,
+        discovery_backend="rust",
+    )
+
+    assert payload["reparse_details"][0]["attempted_backend"] == (
+        "rust_office_oxide_v1"
+    )
+    assert payload["reparse_details"][0]["fallback_backend"] == "python_office_v1"
+    assert payload["reparse_details"][0]["fallback_reason"] == (
+        "RUST_OFFICE_PARSE_FAILED: bad zip"
+    )
+    assert payload["reparse_details"][0]["rust_duration_ms"] == 13
+    assert payload["reparse_details"][0]["fallback_duration_ms"] == 21
 
 
 def test_render_markdown_report_contains_stage_and_extension_metrics():
@@ -316,6 +390,11 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
                 "parse_error": "",
                 "parser_backend": LIGHT_TEXT_PARSER_BACKEND,
                 "truncated": True,
+                "attempted_backend": "rust_office_oxide_v1",
+                "fallback_backend": "python_office_v1",
+                "fallback_reason": "RUST_OFFICE_PARSE_FAILED: bad zip",
+                "rust_duration_ms": 13,
+                "fallback_duration_ms": 21,
             }
         ],
         "parser_backend_summary": {
@@ -346,7 +425,14 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
     assert "- truncated_count: `1`" in markdown
     assert "| .md | light_text_v1 | 1 | 0 | 1 |" in markdown
     assert "## Reparse Details" in markdown
-    assert "| .md | source_version_changed | 12 | success | D:\\work\\report.md |" in markdown
+    assert (
+        "| .md | source_version_changed | 12 | success | rust_office_oxide_v1 | "
+        "python_office_v1 | RUST_OFFICE_PARSE_FAILED: bad zip | 13 | 21 | "
+        "D:\\work\\report.md |"
+    ) in markdown
+    assert "rust_office_oxide_v1" in markdown
+    assert "python_office_v1" in markdown
+    assert "RUST_OFFICE_PARSE_FAILED: bad zip" in markdown
 
 
 def test_render_markdown_report_orders_backend_summary_rows_stably():

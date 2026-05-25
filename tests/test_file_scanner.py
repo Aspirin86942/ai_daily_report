@@ -8,6 +8,7 @@ import pytest
 
 import src.services.file_scanner as file_scanner_module
 from src.services.file_scanner import FileScanner
+from src.services.office_parser import OfficeParseAudit, OfficeParseOutcome
 from src.services.scan_discovery import DiscoveredFile, FileDiscoveryService
 
 
@@ -1238,11 +1239,197 @@ def test_scan_files_uses_document_backend_for_pdf_in_direct_mode(
     assert result.contexts[0].parser_backend == "pdf_text_v1"
 
 
-def test_scan_files_uses_document_backend_for_docx_in_direct_mode(
+def test_scan_files_uses_rust_office_backend_for_xlsx_in_direct_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """direct 模式下 DOCX 应走 document backend，而不是旧 subprocess 入口。"""
+    """direct 模式下 XLSX 应走 Rust Office orchestration，不再走旧 document lane。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".xlsx"], "worker_lane_mode": "direct"},
+    )
+    sample = scanner.work_dir / "report.xlsx"
+    sample.write_bytes(b"xlsx bytes are not parsed by this routing test")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=42")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    office_calls: list[tuple[Path, str, int]] = []
+
+    def fake_office_backend(**kwargs) -> OfficeParseOutcome:
+        office_calls.append(
+            (
+                kwargs["file_path"],
+                kwargs["file_type"],
+                int(kwargs["timeout_seconds"]),
+            )
+        )
+        return OfficeParseOutcome(
+            context=file_scanner_module.FileContext(
+                file_path=str(kwargs["file_path"]),
+                file_type=".xlsx",
+                content="xlsx parsed through rust office backend",
+                error=None,
+                parser_backend="rust_office_oxide_v1",
+                truncated=True,
+            ),
+            audit=OfficeParseAudit(
+                attempted_backend="rust_office_oxide_v1",
+                rust_duration_ms=7,
+            ),
+        )
+
+    def fail_document_backend(
+        file_path: Path,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
+        raise AssertionError("Office files should not use old document lane")
+
+    monkeypatch.setattr(
+        file_scanner_module,
+        "parse_office_with_fallback",
+        fake_office_backend,
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_extract_document_content_with_timeout",
+        fail_document_backend,
+        raising=False,
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert office_calls == [(sample, ".xlsx", 30)]
+    assert result.success_count == 1
+    assert result.contexts[0].content == "xlsx parsed through rust office backend"
+    assert result.contexts[0].parser_backend == "rust_office_oxide_v1"
+    detail = scanner.last_reparse_details[0]
+    assert detail.parser_backend == "rust_office_oxide_v1"
+    assert detail.worker_lane == "subprocess"
+    assert detail.attempted_backend == "rust_office_oxide_v1"
+    assert detail.rust_duration_ms == 7
+
+
+def test_scan_files_records_python_fallback_audit_for_office_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Office Rust 失败后 Python fallback 的审计字段应进入 reparse detail。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".xlsx"], "worker_lane_mode": "direct"},
+    )
+    sample = scanner.work_dir / "fallback.xlsx"
+    sample.write_bytes(b"xlsx bytes are not parsed by this audit test")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=43")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    def fake_office_backend(**kwargs) -> OfficeParseOutcome:
+        return OfficeParseOutcome(
+            context=file_scanner_module.FileContext(
+                file_path=str(kwargs["file_path"]),
+                file_type=".xlsx",
+                content="xlsx parsed through python fallback",
+                error=None,
+                parser_backend="python_office_v1",
+                truncated=False,
+            ),
+            audit=OfficeParseAudit(
+                attempted_backend="rust_office_oxide_v1",
+                fallback_backend="python_office_v1",
+                fallback_reason="RUST_OFFICE_PARSE_FAILED: bad zip",
+                rust_duration_ms=11,
+                fallback_duration_ms=19,
+            ),
+        )
+
+    monkeypatch.setattr(
+        file_scanner_module,
+        "parse_office_with_fallback",
+        fake_office_backend,
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.success_count == 1
+    detail = scanner.last_reparse_details[0]
+    assert detail.parser_backend == "python_office_v1"
+    assert detail.worker_lane == "subprocess"
+    assert detail.attempted_backend == "rust_office_oxide_v1"
+    assert detail.fallback_backend == "python_office_v1"
+    assert detail.fallback_reason == "RUST_OFFICE_PARSE_FAILED: bad zip"
+    assert detail.rust_duration_ms == 11
+    assert detail.fallback_duration_ms == 19
+
+
+def test_pdf_stays_on_existing_document_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """PDF 不属于 Office Rust 范围，仍应走现有 document/PDF backend。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"allowed_extensions": [".pdf"], "worker_lane_mode": "direct"},
+    )
+    sample = scanner.work_dir / "report.pdf"
+    sample.write_text("not a real pdf", encoding="utf-8")
+    discovered = [_build_discovered_file(sample, "mtime_ns=1:size=14")]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+    document_calls: list[Path] = []
+
+    def fail_office_backend(**kwargs) -> OfficeParseOutcome:
+        raise AssertionError("PDF should not call Rust Office parser")
+
+    def fake_document_backend(
+        file_path: Path,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
+        document_calls.append(file_path)
+        return file_scanner_module.FileContext(
+            file_path=str(file_path),
+            file_type=".pdf",
+            content="pdf parsed through document backend",
+            error=None,
+            parser_backend="pdf_text_v1",
+        )
+
+    monkeypatch.setattr(
+        file_scanner_module,
+        "parse_office_with_fallback",
+        fail_office_backend,
+    )
+    monkeypatch.setattr(
+        scanner,
+        "_extract_document_content_with_timeout",
+        fake_document_backend,
+        raising=False,
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert document_calls == [sample]
+    assert result.success_count == 1
+    assert result.contexts[0].parser_backend == "pdf_text_v1"
+
+
+def test_scan_files_uses_rust_office_backend_for_docx_in_direct_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """direct 模式下 DOCX 应走 Rust Office orchestration，而不是旧 document lane。"""
     scanner = _make_scanner(
         tmp_path,
         monkeypatch,
@@ -1256,43 +1443,50 @@ def test_scan_files_uses_document_backend_for_docx_in_direct_mode(
         "bootstrap_full_scan",
         lambda start_date, end_date: discovered,
     )
-    document_calls: list[Path] = []
+    office_calls: list[Path] = []
 
-    def fake_document_backend(
-        file_path: Path,
-        limits: dict,
-    ) -> file_scanner_module.FileContext:
-        document_calls.append(file_path)
-        return file_scanner_module.FileContext(
-            file_path=str(file_path),
-            file_type=".docx",
-            content="docx parsed through document backend",
-            error=None,
-            parser_backend="office_v1",
-            truncated=True,
+    def fake_office_backend(**kwargs) -> OfficeParseOutcome:
+        office_calls.append(kwargs["file_path"])
+        return OfficeParseOutcome(
+            context=file_scanner_module.FileContext(
+                file_path=str(kwargs["file_path"]),
+                file_type=".docx",
+                content="docx parsed through rust office backend",
+                error=None,
+                parser_backend="rust_office_oxide_v1",
+                truncated=True,
+            ),
+            audit=OfficeParseAudit(
+                attempted_backend="rust_office_oxide_v1",
+                rust_duration_ms=8,
+            ),
         )
 
-    def fail_legacy_subprocess(
+    def fail_document_backend(
         file_path: Path,
         limits: dict,
     ) -> file_scanner_module.FileContext:
-        raise AssertionError("direct document backend should bypass legacy subprocess")
+        raise AssertionError("Office files should not use old document lane")
 
+    monkeypatch.setattr(
+        file_scanner_module,
+        "parse_office_with_fallback",
+        fake_office_backend,
+    )
     monkeypatch.setattr(
         scanner,
         "_extract_document_content_with_timeout",
-        fake_document_backend,
+        fail_document_backend,
         raising=False,
     )
-    monkeypatch.setattr(scanner, "_extract_content_with_timeout", fail_legacy_subprocess)
 
     result = scanner.scan_files(date.today(), date.today())
 
-    assert document_calls == [sample]
+    assert office_calls == [sample]
     assert result.success_count == 1
-    assert result.contexts[0].parser_backend == "office_v1"
+    assert result.contexts[0].parser_backend == "rust_office_oxide_v1"
     assert result.contexts[0].truncated is True
-    assert scanner.last_reparse_details[0].parser_backend == "office_v1"
+    assert scanner.last_reparse_details[0].parser_backend == "rust_office_oxide_v1"
     assert scanner.last_reparse_details[0].worker_lane == "subprocess"
 
 
@@ -1363,13 +1557,13 @@ def test_scan_files_preserves_document_parser_metadata_from_cache(
 
     monkeypatch.setattr(
         scanner,
-        "_extract_document_content_with_timeout",
-        lambda file_path, limits: file_scanner_module.FileContext(
+        "_extract_office_content_with_timeout",
+        lambda file_path, file_type, limits: file_scanner_module.FileContext(
             file_path=str(file_path),
             file_type=".docx",
             content="cached document content",
             error=None,
-            parser_backend="office_v1",
+            parser_backend="rust_office_oxide_v1",
             truncated=True,
         ),
         raising=False,
@@ -1378,15 +1572,19 @@ def test_scan_files_preserves_document_parser_metadata_from_cache(
     first_result = scanner.scan_files(date.today(), date.today())
 
     assert first_result.success_count == 1
-    assert first_result.contexts[0].parser_backend == "office_v1"
+    assert first_result.contexts[0].parser_backend == "rust_office_oxide_v1"
     assert first_result.contexts[0].truncated is True
 
-    def fail_reparse(file_path: Path, limits: dict) -> file_scanner_module.FileContext:
+    def fail_reparse(
+        file_path: Path,
+        file_type: str,
+        limits: dict,
+    ) -> file_scanner_module.FileContext:
         raise AssertionError("fresh document parse cache should avoid reparsing")
 
     monkeypatch.setattr(
         scanner,
-        "_extract_document_content_with_timeout",
+        "_extract_office_content_with_timeout",
         fail_reparse,
         raising=False,
     )
@@ -1394,7 +1592,7 @@ def test_scan_files_preserves_document_parser_metadata_from_cache(
     second_result = scanner.scan_files(date.today(), date.today())
 
     assert second_result.success_count == 1
-    assert second_result.contexts[0].parser_backend == "office_v1"
+    assert second_result.contexts[0].parser_backend == "rust_office_oxide_v1"
     assert second_result.contexts[0].truncated is True
 
 
@@ -1478,8 +1676,9 @@ def test_parser_profile_change_reparses_document_file(
     )
     parse_calls: list[str] = []
 
-    def fake_document_backend(
+    def fake_office_backend(
         file_path: Path,
+        file_type: str,
         limits: dict,
     ) -> file_scanner_module.FileContext:
         parse_calls.append(scanner.scanner_cfg["parser_profile_version"])
@@ -1488,14 +1687,14 @@ def test_parser_profile_change_reparses_document_file(
             file_type=".docx",
             content=f"content {parse_calls[-1]}",
             error=None,
-            parser_backend="office_v1",
+            parser_backend="rust_office_oxide_v1",
             truncated=False,
         )
 
     monkeypatch.setattr(
         scanner,
-        "_extract_document_content_with_timeout",
-        fake_document_backend,
+        "_extract_office_content_with_timeout",
+        fake_office_backend,
         raising=False,
     )
 

@@ -72,6 +72,11 @@ class ReparseDetail:
     parser_backend: str = ""
     worker_lane: str = ""
     truncated: bool = False
+    attempted_backend: str = ""
+    fallback_backend: str = ""
+    fallback_reason: str = ""
+    rust_duration_ms: int = 0
+    fallback_duration_ms: int = 0
 
     def to_dict(self) -> dict[str, int | str | bool | None]:
         """转成 benchmark JSON / Markdown 共用的稳定结构。"""
@@ -89,6 +94,11 @@ class ReparseDetail:
             "parser_backend": self.parser_backend,
             "worker_lane": self.worker_lane,
             "truncated": bool(self.truncated),
+            "attempted_backend": self.attempted_backend,
+            "fallback_backend": self.fallback_backend,
+            "fallback_reason": self.fallback_reason,
+            "rust_duration_ms": max(0, int(self.rust_duration_ms)),
+            "fallback_duration_ms": max(0, int(self.fallback_duration_ms)),
         }
 
 
