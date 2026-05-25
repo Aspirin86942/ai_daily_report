@@ -123,33 +123,42 @@ def test_build_parser_profile_includes_rust_office_backend_and_fallback_keys():
             "excel_max_rows": 50,
             "pdf_max_pages": 5,
             "text_max_chars": 6000,
-            "office_parser_backend": "rust_office_oxide_v1",
-            "rust_office_parser_bin": "rust/office_parser/target/release/ai-daily-office-parser",
-            "office_parser_fallback_enabled": True,
-            "office_parser_fallback_order": [
-                "python_office_v1",
-                "python_sharepoint_text_v1",
-            ],
-            "office_fallback_after_timeout": False,
-            "office_external_fallback": "disabled",
-            "office_legacy_extensions_enabled": False,
+            "office_parser_backend": "custom_office_backend_v2",
+            "rust_office_parser_bin": "custom/bin/office-parser",
+            "office_parser_fallback_enabled": False,
+            "office_parser_fallback_order": ["python_sharepoint_text_v1"],
+            "office_fallback_after_timeout": True,
+            "office_external_fallback": "tika",
+            "office_legacy_extensions_enabled": True,
         }
     )
 
     profile = planner.build_parser_profile(summary_mode=False)
 
-    assert profile["office_parser_backend"] == "rust_office_oxide_v1"
-    assert profile["rust_office_parser_bin"] == (
-        "rust/office_parser/target/release/ai-daily-office-parser"
-    )
-    assert profile["office_parser_fallback_enabled"] is True
-    assert profile["office_parser_fallback_order"] == [
-        "python_office_v1",
-        "python_sharepoint_text_v1",
-    ]
-    assert profile["office_fallback_after_timeout"] is False
-    assert profile["office_external_fallback"] == "disabled"
-    assert profile["office_legacy_extensions_enabled"] is False
+    assert profile["office_parser_backend"] == "custom_office_backend_v2"
+    assert profile["rust_office_parser_bin"] == "custom/bin/office-parser"
+    assert profile["office_parser_fallback_enabled"] is False
+    assert profile["office_parser_fallback_order"] == ["python_sharepoint_text_v1"]
+    assert profile["office_fallback_after_timeout"] is True
+    assert profile["office_external_fallback"] == "tika"
+    assert profile["office_legacy_extensions_enabled"] is True
+
+    serialized = planner.serialize_parser_profile(profile)
+    default_profile = ScanPlanner(
+        scanner_cfg={
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+        }
+    ).build_parser_profile(summary_mode=False)
+    assert serialized != planner.serialize_parser_profile(default_profile)
+    assert '"office_parser_backend":"custom_office_backend_v2"' in serialized
+    assert '"rust_office_parser_bin":"custom/bin/office-parser"' in serialized
+    assert '"office_parser_fallback_enabled":false' in serialized
+    assert '"office_parser_fallback_order":["python_sharepoint_text_v1"]' in serialized
+    assert '"office_fallback_after_timeout":true' in serialized
+    assert '"office_external_fallback":"tika"' in serialized
+    assert '"office_legacy_extensions_enabled":true' in serialized
 
 
 def test_build_parser_profile_uses_summary_document_limits():

@@ -39,7 +39,7 @@ scanner:
   discovery_backend: "rust"
   rust_discovery_bin: "rust/discovery/target/release/ai-daily-discovery"
   discovery_timeout_seconds: 30
-  # Office parser defaults: Rust primary, Python fallback.
+  # Office parser profile defaults; runtime fallback is wired by the scanner implementation.
   office_parser_backend: "rust_office_oxide_v1"
   rust_office_parser_bin: "rust/office_parser/target/release/ai-daily-office-parser"
   office_parser_fallback_enabled: true
