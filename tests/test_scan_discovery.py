@@ -304,6 +304,43 @@ def test_bootstrap_full_scan_rejects_unsupported_discovery_backend(
     assert calls == []
 
 
+def test_bootstrap_full_scan_rejects_unnormalized_discovery_backend(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """service 边界只接受归一化后的 backend 字面量。"""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "fallback.md").write_text("fallback", encoding="utf-8")
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([]),
+            stderr="",
+        )
+
+    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+
+    discovery = FileDiscoveryService(
+        work_dir=work_dir,
+        scanner_cfg={
+            "allowed_extensions": [".md"],
+            "ignored_patterns": [],
+            "excluded_dirs": [],
+            "discovery_backend": "Rust",
+            "rust_discovery_bin": "target/release/ai-daily-discovery",
+        },
+    )
+
+    with pytest.raises(ValueError, match="Unsupported discovery_backend: Rust"):
+        discovery.bootstrap_full_scan(date.today(), date.today())
+
+    assert calls == []
+
+
 @pytest.mark.parametrize(
     "bad_item",
     [

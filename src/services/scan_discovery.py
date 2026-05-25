@@ -163,7 +163,7 @@ class FileDiscoveryService:
         end_date: date,
     ) -> List[DiscoveredFile]:
         """执行一次完整文件发现，并返回可落库存的文件元数据。"""
-        backend = str(self.scanner_cfg.get("discovery_backend", "rust")).lower()
+        backend = self.scanner_cfg.get("discovery_backend", "rust")
         if backend == "rust":
             try:
                 return RustDiscoveryRunner(self.scanner_cfg).discover(
