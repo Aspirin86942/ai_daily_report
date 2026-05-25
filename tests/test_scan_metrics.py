@@ -39,6 +39,11 @@ def test_reparse_detail_serializes_stable_payload():
         "parser_backend": "light_text_v1",
         "worker_lane": "direct",
         "truncated": True,
+        "attempted_backend": "",
+        "fallback_backend": "",
+        "fallback_reason": "",
+        "rust_duration_ms": 0,
+        "fallback_duration_ms": 0,
     }
 
 
@@ -62,6 +67,11 @@ def test_reparse_detail_normalizes_duration_and_none_version():
     assert payload["parser_backend"] == ""
     assert payload["worker_lane"] == ""
     assert payload["truncated"] is False
+    assert payload["attempted_backend"] == ""
+    assert payload["fallback_backend"] == ""
+    assert payload["fallback_reason"] == ""
+    assert payload["rust_duration_ms"] == 0
+    assert payload["fallback_duration_ms"] == 0
 
 
 def test_metrics_collector_builds_scan_run_detail():
