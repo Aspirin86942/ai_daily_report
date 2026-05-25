@@ -142,6 +142,19 @@ class Config:
                 "worker_lane_mode",
                 "direct",
             ),
+            "discovery_backend": str(
+                getattr(self._settings.scanner, "discovery_backend", "rust")
+            ).strip().lower(),
+            "rust_discovery_bin": getattr(
+                self._settings.scanner,
+                "rust_discovery_bin",
+                "rust/discovery/target/release/ai-daily-discovery",
+            ),
+            "discovery_timeout_seconds": getattr(
+                self._settings.scanner,
+                "discovery_timeout_seconds",
+                30,
+            ),
         }
         # 可选的 summary 模式配置
         scanner = self._settings.scanner

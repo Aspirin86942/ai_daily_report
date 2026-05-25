@@ -140,6 +140,7 @@ def build_benchmark_payload(
     start_date: date,
     end_date: date,
     summary_mode: bool,
+    discovery_backend: str,
 ) -> dict[str, Any]:
     """组合 benchmark 输出结构，避免 CLI 和测试各自拼字段。"""
     return {
@@ -147,6 +148,7 @@ def build_benchmark_payload(
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "summary_mode": summary_mode,
+            "discovery_backend": discovery_backend,
         },
         "scan_result": {
             "total_files": scan_result.total_files,
@@ -186,6 +188,7 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
         f"- start_date: `{parameters['start_date']}`",
         f"- end_date: `{parameters['end_date']}`",
         f"- summary_mode: `{parameters['summary_mode']}`",
+        f"- discovery_backend: `{parameters.get('discovery_backend', 'rust')}`",
         "",
         "## Scan Result",
         "",
@@ -355,6 +358,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         start_date=args.start_date,
         end_date=args.end_date,
         summary_mode=args.summary_mode,
+        discovery_backend=str(scanner.scanner_cfg.get("discovery_backend", "rust")),
     )
 
 

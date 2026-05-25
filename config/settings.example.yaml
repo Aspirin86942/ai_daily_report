@@ -35,6 +35,10 @@ scanner:
     - "~$*"
     - "*.tmp"
   excluded_dirs: []
+  # 默认优先 Rust；二进制缺失或失败时会回退 Python。
+  discovery_backend: "rust"
+  rust_discovery_bin: "rust/discovery/target/release/ai-daily-discovery"
+  discovery_timeout_seconds: 30
   max_workers: 4
   excel_max_rows: 50
   pdf_max_pages: 5

@@ -206,12 +206,14 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
         start_date=date(2026, 5, 23),
         end_date=date(2026, 5, 24),
         summary_mode=True,
+        discovery_backend="rust",
     )
 
     assert payload["parameters"] == {
         "start_date": "2026-05-23",
         "end_date": "2026-05-24",
         "summary_mode": True,
+        "discovery_backend": "rust",
     }
     assert payload["scan_result"] == {
         "total_files": 2,
@@ -269,6 +271,7 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
             "start_date": "2026-05-23",
             "end_date": "2026-05-24",
             "summary_mode": False,
+            "discovery_backend": "rust",
         },
         "scan_result": {
             "total_files": 2,
@@ -334,6 +337,7 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
     assert "# Scanner Benchmark Report" in markdown
     assert "| total | 120 |" in markdown
     assert "| discovery | 10 |" in markdown
+    assert "- discovery_backend: `rust`" in markdown
     assert "| .txt | 2 | 80 | 1 | 1 | 1 |" in markdown
     assert "## Parser Backend Summary" in markdown
     assert "- direct_count: `1`" in markdown
