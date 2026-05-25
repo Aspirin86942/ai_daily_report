@@ -109,13 +109,24 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
                 continue;
             }
         };
+        let discovered_path = match absolute_discovered_path(entry.path()) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!(
+                    "warning: cannot build absolute discovered path {}: {}",
+                    entry.path().display(),
+                    error
+                );
+                continue;
+            }
+        };
         files.push(DiscoveredFileOut {
             file_identity: format!(
                 "bootstrap:{}",
                 resolved_path.to_string_lossy().to_lowercase()
             ),
-            path: resolved_path.to_string_lossy().to_string(),
-            extension: lower_extension(entry.path()),
+            path: discovered_path.to_string_lossy().to_string(),
+            extension: lower_extension(&discovered_path),
             modified_at: modified_naive.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
             size_bytes,
             source_version: build_source_version(mtime_ns, size_bytes),
@@ -149,6 +160,13 @@ fn is_within_date_range(
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid end date boundary"))?;
 
     Ok(modified_at >= start_dt && modified_at < next_day_start)
+}
+
+fn absolute_discovered_path(path: &Path) -> io::Result<PathBuf> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()?.join(path))
 }
 
 fn has_allowed_extension(file_name_lower: &str, allowed_extensions: &[String]) -> bool {
@@ -339,13 +357,18 @@ mod tests {
         let mut sorted_paths = paths.clone();
         sorted_paths.sort();
         let target_path = target.canonicalize().unwrap().to_string_lossy().to_string();
+        let link_path = link.to_string_lossy().to_string();
 
         assert_eq!(paths, sorted_paths);
         let linked_item = files
             .iter()
-            .find(|item| item.path == target_path)
+            .find(|item| item.path == link_path)
             .expect("file symlink should be discovered through target metadata");
         assert_eq!(linked_item.extension, ".md");
+        assert_eq!(
+            linked_item.file_identity,
+            format!("bootstrap:{}", target_path.to_lowercase())
+        );
         assert!(linked_item.source_version.starts_with("mtime_ns="));
         assert!(linked_item.source_version.contains(":size="));
         assert!(chrono::NaiveDateTime::parse_from_str(
@@ -353,5 +376,49 @@ mod tests {
             "%Y-%m-%dT%H:%M:%S%.f"
         )
         .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_files_keeps_symlink_path_when_target_suffix_differs() {
+        let fixture = TempFixture::new("symlink_suffix_mismatch");
+        let work_dir = fixture.path().join("work");
+        let target_dir = fixture.path().join("targets");
+        std::fs::create_dir(&work_dir).unwrap();
+        std::fs::create_dir(&target_dir).unwrap();
+
+        let target = target_dir.join("target.txt");
+        let link = work_dir.join("report.MD");
+        std::fs::write(&target, "linked text").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let today = Local::now().date_naive();
+        let request = DiscoveryRequest {
+            work_dir,
+            start_date: today,
+            end_date: today,
+            allowed_extensions: vec![".md".to_string()],
+            ignored_patterns: vec![],
+            excluded_dirs: vec![],
+        };
+
+        let files = discover_files(&request).unwrap();
+        let target_metadata = std::fs::metadata(&target).unwrap();
+        let target_path = target.canonicalize().unwrap().to_string_lossy().to_string();
+        let expected_identity = format!("bootstrap:{}", target_path.to_lowercase());
+
+        assert_eq!(files.len(), 1);
+        let item = &files[0];
+        assert_eq!(item.path, link.to_string_lossy());
+        assert_eq!(item.extension, ".md");
+        assert_eq!(item.file_identity, expected_identity);
+        assert_eq!(item.size_bytes, target_metadata.len());
+        assert_eq!(
+            item.source_version,
+            build_source_version(
+                metadata_mtime_ns(&target_metadata).unwrap(),
+                target_metadata.len()
+            )
+        );
     }
 }
