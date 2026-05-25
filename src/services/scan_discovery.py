@@ -130,12 +130,7 @@ class RustDiscoveryRunner:
         if size_bytes < 0:
             raise RustDiscoveryError("size_bytes must be non-negative")
 
-        if not isinstance(source_version, str) or not source_version:
-            raise RustDiscoveryError("source_version must be a non-empty string")
-        if not source_version.startswith("mtime_ns=") or ":size=" not in source_version:
-            raise RustDiscoveryError(
-                "source_version must include mtime_ns= prefix and :size= segment"
-            )
+        source_version = self._validate_source_version(source_version, size_bytes)
 
         try:
             return DiscoveredFile(
@@ -148,6 +143,36 @@ class RustDiscoveryRunner:
             )
         except TypeError as exc:
             raise RustDiscoveryError(f"invalid discovered file item: {item}") from exc
+
+    def _validate_source_version(
+        self,
+        source_version: object,
+        size_bytes: int,
+    ) -> str:
+        if not isinstance(source_version, str) or not source_version:
+            raise RustDiscoveryError("source_version must be a non-empty string")
+
+        prefix = "mtime_ns="
+        separator = ":size="
+        if not source_version.startswith(prefix) or separator not in source_version:
+            raise RustDiscoveryError(
+                "source_version must use mtime_ns=<n>:size=<n> format"
+            )
+
+        mtime_ns_text, version_size_text = source_version[len(prefix) :].split(
+            separator,
+            1,
+        )
+        if not mtime_ns_text.isdigit() or not version_size_text.isdigit():
+            raise RustDiscoveryError(
+                "source_version mtime_ns and size must be non-negative integers"
+            )
+
+        version_size = int(version_size_text)
+        if version_size != size_bytes:
+            raise RustDiscoveryError("source_version size must match size_bytes")
+
+        return source_version
 
 
 class FileDiscoveryService:
