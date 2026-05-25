@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from datetime import date, datetime
 from pathlib import Path
@@ -27,7 +28,10 @@ def _touch_scan_date(path: Path) -> None:
     not RUST_DISCOVERY_BIN.exists(),
     reason="Rust discovery release binary has not been built",
 )
-def test_rust_discovery_matches_python_backend_for_fixture(tmp_path: Path) -> None:
+def test_rust_discovery_matches_python_backend_for_fixture(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """同一组 fixture 下 Rust 和 Python 应发现同一批文件并保持版本指纹一致。"""
     work_dir = tmp_path / "work"
     work_dir.mkdir()
@@ -80,7 +84,10 @@ def test_rust_discovery_matches_python_backend_for_fixture(tmp_path: Path) -> No
     )
 
     python_items = python_discovery.bootstrap_full_scan(SCAN_DATE, SCAN_DATE)
-    rust_items = rust_discovery.bootstrap_full_scan(SCAN_DATE, SCAN_DATE)
+    with caplog.at_level(logging.WARNING, logger="ai_daily_report"):
+        rust_items = rust_discovery.bootstrap_full_scan(SCAN_DATE, SCAN_DATE)
+
+    assert "Rust discovery 失败，回退 Python discovery" not in caplog.text
 
     def comparable(items):
         return sorted(
