@@ -48,7 +48,12 @@ def _run_rust_office_parser(sample: Path, file_type: str) -> dict:
 
 
 def _rewrite_xlsx_inline_strings_as_shared_strings(path: Path) -> None:
-    """让 openpyxl fixture 使用 sharedStrings，覆盖 Rust 后端真实兼容路径。"""
+    """把 openpyxl 默认 inlineStr fixture 改写成 sharedStrings。
+
+    当前 office_oxide 对 openpyxl 默认 inlineStr 中文提取不完整：未改写时
+    Rust CLI 可能返回 error=None，但中文单元格内容丢失。这里改成
+    sharedStrings，是为了锁住 Rust CLI 已知可提取的 OOXML 路径。
+    """
     ElementTree.register_namespace("", OOXML_MAIN_NS)
     ElementTree.register_namespace("", OOXML_CONTENT_TYPES_NS)
     ElementTree.register_namespace("", OOXML_REL_NS)
@@ -294,7 +299,9 @@ def test_parse_pptx_extracts_slide_text(tmp_path: Path):
     not RUST_OFFICE_PARSER_BIN.exists(),
     reason="Rust Office parser release binary has not been built",
 )
-def test_rust_office_parser_extracts_generated_docx_xlsx_and_pptx(tmp_path: Path):
+def test_rust_office_parser_extracts_docx_shared_strings_xlsx_and_pptx(
+    tmp_path: Path,
+):
     docx_sample = tmp_path / "report.docx"
     doc = Document()
     doc.add_paragraph("Rust DOCX 中文")
@@ -306,6 +313,8 @@ def test_rust_office_parser_extracts_generated_docx_xlsx_and_pptx(tmp_path: Path
     sheet.append(["项目", "状态"])
     sheet.append(["Rust XLSX 中文", "完成"])
     workbook.save(xlsx_sample)
+    # TODO: 当前 office_oxide 会静默丢失 openpyxl 默认 inlineStr 中文，
+    # 且 error 仍为 None；Rust 侧修复后再增加默认 inlineStr contract。
     _rewrite_xlsx_inline_strings_as_shared_strings(xlsx_sample)
 
     pptx_sample = tmp_path / "deck.pptx"
