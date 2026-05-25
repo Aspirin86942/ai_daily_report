@@ -127,7 +127,13 @@ class RustOfficeParserRunner:
             )
 
         try:
-            return FileContext(**payload), _elapsed_ms(started_at)
+            context = FileContext(**payload)
+            _validate_rust_payload_context(
+                context,
+                expected_file_path=str(file_path),
+                expected_file_type=normalized_type,
+            )
+            return context, _elapsed_ms(started_at)
         except Exception as exc:
             return (
                 _error_context(
@@ -157,12 +163,11 @@ def parse_office_with_fallback(
     fallback_order = _fallback_order(scanner_cfg)
 
     if backend != RUST_OFFICE_BACKEND:
-        context = _run_python_fallback(
+        context = _run_configured_python_backend(
             file_path,
             normalized_type,
             limits,
-            python_fallback=python_fallback,
-            fallback_order=fallback_order,
+            backend,
         )
         return OfficeParseOutcome(
             context=context,
@@ -304,14 +309,7 @@ def _run_python_fallback(
     last_context: FileContext | None = None
     for backend in fallback_order:
         if backend == PYTHON_OFFICE_BACKEND and file_type in _MODERN_OFFICE_FILE_TYPES:
-            from .document_parser import DocumentParserOptions, parse_document_file
-
-            context = parse_document_file(
-                file_path,
-                file_type,
-                limits,
-                DocumentParserOptions(office_parser_backend=PYTHON_OFFICE_BACKEND),
-            )
+            context = _run_python_office(file_path, file_type, limits)
             if context.error is None:
                 return context
             last_context = context
@@ -337,6 +335,64 @@ def _run_python_fallback(
         parser_backend=NOT_PARSED_BACKEND,
         truncated=False,
     )
+
+
+def _run_configured_python_backend(
+    file_path: Path,
+    file_type: str,
+    limits: Mapping[str, Any],
+    backend: str,
+) -> FileContext:
+    if backend == PYTHON_OFFICE_BACKEND:
+        return _run_python_office(file_path, file_type, limits)
+    if backend == PYTHON_SHAREPOINT_TEXT_BACKEND:
+        return parse_with_sharepoint_text(file_path, file_type, limits)
+    return FileContext(
+        file_path=str(file_path),
+        file_type=file_type,
+        content="",
+        error=f"OFFICE_UNKNOWN_BACKEND: {backend}",
+        parser_backend=NOT_PARSED_BACKEND,
+        truncated=False,
+    )
+
+
+def _run_python_office(
+    file_path: Path,
+    file_type: str,
+    limits: Mapping[str, Any],
+) -> FileContext:
+    from .document_parser import DocumentParserOptions, parse_document_file
+
+    return parse_document_file(
+        file_path,
+        file_type,
+        limits,
+        DocumentParserOptions(office_parser_backend=PYTHON_OFFICE_BACKEND),
+    )
+
+
+def _validate_rust_payload_context(
+    context: FileContext,
+    *,
+    expected_file_path: str,
+    expected_file_type: str,
+) -> None:
+    if context.file_path != expected_file_path:
+        raise ValueError(
+            f"file_path mismatch: expected {expected_file_path!r}, "
+            f"got {context.file_path!r}"
+        )
+    if context.file_type != expected_file_type:
+        raise ValueError(
+            f"file_type mismatch: expected {expected_file_type!r}, "
+            f"got {context.file_type!r}"
+        )
+    if context.parser_backend != RUST_OFFICE_BACKEND:
+        raise ValueError(
+            f"parser_backend mismatch: expected {RUST_OFFICE_BACKEND!r}, "
+            f"got {context.parser_backend!r}"
+        )
 
 
 def _error_context(file_path: Path, file_type: str, error: str) -> FileContext:

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,6 +7,8 @@ import pytest
 from src.models.schemas import FileContext
 from src.services.office_parser import (
     OFFICE_RUST_FILE_TYPES,
+    PYTHON_OFFICE_BACKEND,
+    PYTHON_SHAREPOINT_TEXT_BACKEND,
     RUST_OFFICE_BACKEND,
     OfficeParseAudit,
     RustOfficeParserRunner,
@@ -83,6 +86,55 @@ def test_rust_runner_returns_error_context_for_invalid_json(tmp_path, monkeypatc
     assert context.content == ""
     assert context.error is not None
     assert context.error.startswith("RUST_OFFICE_INVALID_JSON:")
+    assert context.parser_backend == RUST_OFFICE_BACKEND
+
+
+@pytest.mark.parametrize(
+    ("payload_override", "expected_detail"),
+    [
+        ({"file_path": "/tmp/other.xlsx"}, "file_path mismatch"),
+        ({"file_type": ".docx"}, "file_type mismatch"),
+        ({"parser_backend": PYTHON_OFFICE_BACKEND}, "parser_backend mismatch"),
+    ],
+)
+def test_rust_runner_returns_error_context_for_semantic_payload_mismatch(
+    tmp_path,
+    monkeypatch,
+    payload_override,
+    expected_detail,
+):
+    sample = tmp_path / "report.xlsx"
+    sample.write_bytes(b"fake")
+    payload = {
+        "file_path": str(sample),
+        "file_type": ".xlsx",
+        "content": "ok",
+        "error": None,
+        "parser_backend": RUST_OFFICE_BACKEND,
+        "truncated": False,
+    }
+    payload.update(payload_override)
+    completed = SimpleNamespace(
+        returncode=0,
+        stdout=json.dumps(payload),
+        stderr="",
+    )
+    monkeypatch.setattr(
+        "src.services.office_parser.subprocess.run",
+        lambda *args, **kwargs: completed,
+    )
+
+    context, _ = RustOfficeParserRunner("parser").parse(
+        sample,
+        ".xlsx",
+        {"document_excerpt_max_chars": 6000},
+        12,
+    )
+
+    assert context.content == ""
+    assert context.error is not None
+    assert context.error.startswith("RUST_OFFICE_INVALID_PAYLOAD:")
+    assert expected_detail in context.error
     assert context.parser_backend == RUST_OFFICE_BACKEND
 
 
@@ -192,6 +244,47 @@ def test_parse_office_with_fallback_does_not_fallback_after_timeout_by_default(t
 
     assert outcome.context.error == "RUST_OFFICE_TIMEOUT: file parse exceeded 3s"
     assert outcome.audit.fallback_backend == ""
+
+
+def test_parse_office_with_sharepoint_backend_uses_sharepoint_for_docx(
+    tmp_path,
+    monkeypatch,
+):
+    sample = tmp_path / "report.docx"
+    sample.write_bytes(b"fake")
+    calls = []
+
+    def fake_sharepoint(file_path, file_type, limits):
+        calls.append((file_path, file_type, limits))
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="sharepoint text",
+            error=None,
+            parser_backend=PYTHON_SHAREPOINT_TEXT_BACKEND,
+            truncated=False,
+        )
+
+    monkeypatch.setattr(
+        "src.services.office_parser.parse_with_sharepoint_text",
+        fake_sharepoint,
+    )
+
+    outcome = parse_office_with_fallback(
+        file_path=sample,
+        file_type=".docx",
+        limits={"document_excerpt_max_chars": 6000},
+        scanner_cfg={
+            "office_parser_backend": PYTHON_SHAREPOINT_TEXT_BACKEND,
+            "office_parser_fallback_order": [PYTHON_OFFICE_BACKEND],
+        },
+        timeout_seconds=12,
+    )
+
+    assert outcome.context.content == "sharepoint text"
+    assert outcome.context.parser_backend == PYTHON_SHAREPOINT_TEXT_BACKEND
+    assert outcome.audit.attempted_backend == PYTHON_SHAREPOINT_TEXT_BACKEND
+    assert calls == [(sample, ".docx", {"document_excerpt_max_chars": 6000})]
 
 
 def test_parse_with_sharepoint_text_reports_missing_dependency(tmp_path):
