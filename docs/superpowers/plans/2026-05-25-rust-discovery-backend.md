@@ -349,6 +349,48 @@ def test_bootstrap_full_scan_uses_rust_backend_when_configured(
 Append this test:
 
 ```python
+def test_bootstrap_full_scan_defaults_to_rust_backend(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """未显式配置 backend 时，discovery 服务也应优先尝试 Rust。"""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    payload = []
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+
+    discovery = FileDiscoveryService(
+        work_dir=work_dir,
+        scanner_cfg={
+            "allowed_extensions": [".md"],
+            "ignored_patterns": [],
+            "excluded_dirs": [],
+            "rust_discovery_bin": "target/release/ai-daily-discovery",
+            "discovery_timeout_seconds": 5,
+        },
+    )
+
+    files = discovery.bootstrap_full_scan(date.today(), date.today())
+
+    assert files == []
+    assert calls
+```
+
+- [ ] **Step 3: Write failing fallback test**
+
+Append this test:
+
+```python
 def test_bootstrap_full_scan_falls_back_to_python_when_rust_fails(
     tmp_path: Path,
     monkeypatch,
@@ -386,7 +428,7 @@ def test_bootstrap_full_scan_falls_back_to_python_when_rust_fails(
     assert item.file_identity == f"bootstrap:{str(sample.resolve()).lower()}"
 ```
 
-- [ ] **Step 3: Write failing invalid-contract fallback test**
+- [ ] **Step 4: Write failing invalid-contract fallback test**
 
 Append this test:
 
@@ -427,7 +469,7 @@ def test_bootstrap_full_scan_falls_back_when_rust_json_contract_is_invalid(
     assert item.path == sample
 ```
 
-- [ ] **Step 4: Run discovery tests and verify they fail**
+- [ ] **Step 5: Run discovery tests and verify they fail**
 
 Run:
 
@@ -437,7 +479,7 @@ Run:
 
 Expected: FAIL because `src.services.scan_discovery.subprocess` and Rust runner do not exist yet.
 
-- [ ] **Step 5: Implement Python runner and backend selection**
+- [ ] **Step 6: Implement Python runner and backend selection**
 
 In `src/services/scan_discovery.py`, add imports:
 
@@ -603,7 +645,7 @@ Move the existing body of `bootstrap_full_scan()` into a new private method:
         return files
 ```
 
-- [ ] **Step 6: Run discovery tests and verify they pass**
+- [ ] **Step 7: Run discovery tests and verify they pass**
 
 Run:
 
@@ -613,7 +655,7 @@ Run:
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit Python runner**
+- [ ] **Step 8: Commit Python runner**
 
 Run:
 
