@@ -304,3 +304,30 @@ def test_parse_with_sharepoint_text_reports_missing_dependency(tmp_path):
     assert context.content == ""
     assert context.error == "PYTHON_SHAREPOINT_TEXT_UNAVAILABLE: sharepoint2text"
     assert context.parser_backend == "python_sharepoint_text_v1"
+
+
+def test_parse_with_sharepoint_text_extracts_and_truncates_content(tmp_path):
+    sample = tmp_path / "legacy.ppt"
+    sample.write_bytes(b"fake")
+
+    class FakeExtraction:
+        def get_full_text(self):
+            return "甲乙丙丁"
+
+    class FakeSharePoint2Text:
+        @staticmethod
+        def read_file(path):
+            assert path == str(sample)
+            yield FakeExtraction()
+
+    context = parse_with_sharepoint_text(
+        sample,
+        ".ppt",
+        {"document_excerpt_max_chars": 3},
+        import_module=lambda name: FakeSharePoint2Text,
+    )
+
+    assert context.content == "甲乙丙"
+    assert context.error is None
+    assert context.parser_backend == "python_sharepoint_text_v1"
+    assert context.truncated is True
