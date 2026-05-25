@@ -100,6 +100,39 @@ llm:
 - 默认使用 `deepseek`，因此只配置 `OPENAI_API_KEY` 但不切换 `llm.provider` 时，`python main.py doctor` 仍会按 DeepSeek 路径校验并报缺少 `DEEPSEEK_API_KEY`。
 - OpenAI 用户请先把 `llm.provider` 改成 `openai`，再配置 `OPENAI_API_KEY`。
 
+### Rust Discovery Backend
+
+默认优先使用 Rust discovery；如果二进制未构建、路径配置错误或 stdout 合约失败，会记录 warning 并回退到 Python discovery：
+
+```yaml
+scanner:
+  discovery_backend: "rust"
+  rust_discovery_bin: "rust/discovery/target/release/ai-daily-discovery"
+```
+
+本机要测试 Rust discovery 时，先构建 CLI：
+
+```bash
+cd rust/discovery
+cargo build --release
+```
+
+然后只修改本机配置 `config/settings.linux.yaml`：
+
+```yaml
+scanner:
+  discovery_backend: "rust"
+```
+
+需要跑 Python baseline benchmark 时，把本机 `config/settings.linux.yaml` 临时改成：
+
+```yaml
+scanner:
+  discovery_backend: "python"
+```
+
+benchmark 报告中的 `discovery_backend` 字段用于确认本轮配置；如果看到 Rust fallback warning，说明配置是 Rust，但实际 discovery 已降级到 Python。
+
 ### `config/.secrets.yaml`
 
 ```yaml
