@@ -35,3 +35,6 @@ venv/
 # 临时文件
 ~$*
 *.tmp
+
+# Rust
+target/
