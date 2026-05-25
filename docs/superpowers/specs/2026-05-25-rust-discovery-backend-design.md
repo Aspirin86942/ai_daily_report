@@ -87,9 +87,9 @@ rust/discovery/
 
 Python `FileDiscoveryService` 增加 backend 选择：
 
-- `scanner.discovery_backend = "python"`：使用现有 `os.walk()`。
-- `scanner.discovery_backend = "rust"`：优先调用 Rust CLI，失败则 fallback 到 Python。
-- 默认第一阶段可以先保持 `python`，也可以在本机 YAML 中切到 `rust` 做 benchmark。
+- `scanner.discovery_backend = "rust"`：默认优先调用 Rust CLI，失败则 fallback 到 Python。
+- `scanner.discovery_backend = "python"`：显式强制使用现有 `os.walk()`，用于对照 benchmark 或临时排障。
+- 缺省值也按 `rust` 处理，让真实扫描优先验证 Rust discovery；fresh clone 未构建二进制时仍通过 fallback 保持可用。
 
 推荐原因：
 
@@ -162,16 +162,15 @@ Rust 输出的每个文件必须满足：
 
 ```yaml
 scanner:
-  discovery_backend: "python"  # python | rust
-  rust_discovery_bin: "target/release/ai-daily-discovery"
+  discovery_backend: "rust"  # rust | python
+  rust_discovery_bin: "rust/discovery/target/release/ai-daily-discovery"
 ```
 
 建议第一阶段默认值：
 
-- `discovery_backend = "python"`，避免 fresh clone 在未构建 Rust CLI 时直接失败。
-- 用户本机要测试 Rust 时，在 `config/settings.linux.yaml` 改成 `rust`。
-
-后续如果 Rust discovery 经验证稳定，再考虑把默认值切到 `rust`。
+- `discovery_backend = "rust"`，优先验证 Rust discovery 的真实收益。
+- 未构建 Rust CLI 或路径配置错误时自动 fallback 到 Python，避免 fresh clone 直接不可用。
+- 需要做 Python baseline benchmark 或临时排障时，在 `config/settings.linux.yaml` 显式改成 `python`。
 
 ## 数据流
 
@@ -215,11 +214,11 @@ Rust CLI 进程级错误：
 
 Python 单元测试：
 
-- `FileDiscoveryService` 默认仍使用 Python backend。
+- `FileDiscoveryService` 默认优先使用 Rust backend。
 - `discovery_backend = "rust"` 时会调用 Rust runner。
 - Rust runner 成功时转换为 `DiscoveredFile`。
 - Rust runner 失败时 fallback 到 Python discovery。
-- 配置项缺失时默认使用 Python backend。
+- 配置项缺失时默认使用 Rust backend，并保留失败 fallback。
 
 契约测试：
 
@@ -245,7 +244,7 @@ Rust 单元测试：
 
 - Rust 和 Python 时间精度可能不同。必须确认 Linux 下能拿到 nanosecond mtime，并生成与 Python `st_mtime_ns` 一致的 `mtime_ns`。
 - 路径大小写规则在 Linux 和 Windows 不同。第一阶段在 Linux 验证，仍保留 `lower()` 的 `file_identity` 契约。
-- Rust CLI 路径配置错误会触发 fallback。benchmark 需要明确输出当前 discovery backend，避免误以为 Rust 生效。
+- Rust CLI 路径配置错误会触发 fallback。benchmark 需要明确输出当前 discovery backend 和 fallback warning，避免误以为 Rust 二进制真实生效。
 - 如果扫描根目录过大，stdout JSON 数组会占用内存。第一阶段 Python 仍需要完整列表，因此 JSON 数组可接受；后续如要极大规模扫描，再改 JSON Lines 流式处理。
 - `ignored_patterns` 的 glob 实现要和 Python `fnmatch` 足够接近。第一阶段只承诺覆盖项目已有模式，先不扩展复杂 glob 语义。
 
@@ -279,7 +278,7 @@ Rust 单元测试：
 
 class FileDiscoveryService:
     def bootstrap_full_scan(self, start_date: date, end_date: date) -> list[DiscoveredFile]:
-        backend = self.scanner_cfg.get("discovery_backend", "python")
+        backend = self.scanner_cfg.get("discovery_backend", "rust")
 
         if backend == "rust":
             try:
