@@ -1048,6 +1048,12 @@ def test_rust_discovery_matches_python_backend_for_fixture(tmp_path: Path):
     (included_dir / "~$draft.md").write_text("ignore", encoding="utf-8")
     (included_dir / "scratch.tmp").write_text("ignore", encoding="utf-8")
     (excluded_dir / "blocked.md").write_text("blocked", encoding="utf-8")
+    target_dir = tmp_path / "targets"
+    target_dir.mkdir()
+    symlink_target = target_dir / "target.txt"
+    symlink_target.write_text("target", encoding="utf-8")
+    symlink_path = included_dir / "linked.MD"
+    symlink_path.symlink_to(symlink_target)
 
     base_cfg = {
         "allowed_extensions": [".md", ".txt", ".tmp"],
@@ -1084,6 +1090,18 @@ def test_rust_discovery_matches_python_backend_for_fixture(tmp_path: Path):
         )
 
     assert comparable(rust_items) == comparable(python_items)
+
+    rust_by_path = {item.path: item for item in rust_items}
+    symlink_item = rust_by_path[symlink_path]
+    target_stat = symlink_target.stat()
+    assert symlink_item.extension == ".md"
+    assert symlink_item.path == symlink_path
+    assert symlink_item.file_identity == (
+        f"bootstrap:{str(symlink_target.resolve()).lower()}"
+    )
+    assert symlink_item.source_version == (
+        f"mtime_ns={target_stat.st_mtime_ns}:size={target_stat.st_size}"
+    )
 ```
 
 - [ ] **Step 2: Run contract test after Rust build**
