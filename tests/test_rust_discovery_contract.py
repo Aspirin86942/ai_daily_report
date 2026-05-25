@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import date
+import os
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,12 @@ RUST_DISCOVERY_BIN = (
     Path(__file__).resolve().parents[1]
     / "rust/discovery/target/release/ai-daily-discovery"
 )
+SCAN_DATE = date(2026, 5, 25)
+SCAN_TIMESTAMP = datetime(2026, 5, 25, 12, 0, 0).timestamp()
+
+
+def _touch_scan_date(path: Path) -> None:
+    os.utime(path, (SCAN_TIMESTAMP, SCAN_TIMESTAMP))
 
 
 @pytest.mark.skipif(
@@ -32,15 +39,24 @@ def test_rust_discovery_matches_python_backend_for_fixture(tmp_path: Path) -> No
     keep_md = included_dir / "keep.MD"
     keep_txt = included_dir / "note.txt"
     keep_md.write_text("keep", encoding="utf-8")
+    _touch_scan_date(keep_md)
     keep_txt.write_text("note", encoding="utf-8")
-    (included_dir / "~$draft.md").write_text("ignore", encoding="utf-8")
-    (included_dir / "scratch.tmp").write_text("ignore", encoding="utf-8")
-    (excluded_dir / "blocked.md").write_text("blocked", encoding="utf-8")
+    _touch_scan_date(keep_txt)
+    ignored_draft = included_dir / "~$draft.md"
+    ignored_tmp = included_dir / "scratch.tmp"
+    excluded_file = excluded_dir / "blocked.md"
+    ignored_draft.write_text("ignore", encoding="utf-8")
+    _touch_scan_date(ignored_draft)
+    ignored_tmp.write_text("ignore", encoding="utf-8")
+    _touch_scan_date(ignored_tmp)
+    excluded_file.write_text("blocked", encoding="utf-8")
+    _touch_scan_date(excluded_file)
 
     target_dir = tmp_path / "targets"
     target_dir.mkdir()
     symlink_target = target_dir / "target.txt"
     symlink_target.write_text("target", encoding="utf-8")
+    _touch_scan_date(symlink_target)
     symlink_path = included_dir / "linked.MD"
     symlink_path.symlink_to(symlink_target)
 
@@ -63,9 +79,8 @@ def test_rust_discovery_matches_python_backend_for_fixture(tmp_path: Path) -> No
         },
     )
 
-    scan_date = date.today()
-    python_items = python_discovery.bootstrap_full_scan(scan_date, scan_date)
-    rust_items = rust_discovery.bootstrap_full_scan(scan_date, scan_date)
+    python_items = python_discovery.bootstrap_full_scan(SCAN_DATE, SCAN_DATE)
+    rust_items = rust_discovery.bootstrap_full_scan(SCAN_DATE, SCAN_DATE)
 
     def comparable(items):
         return sorted(
@@ -81,14 +96,20 @@ def test_rust_discovery_matches_python_backend_for_fixture(tmp_path: Path) -> No
 
     assert comparable(rust_items) == comparable(python_items)
 
+    python_by_path = {item.path: item for item in python_items}
     rust_by_path = {item.path: item for item in rust_items}
-    symlink_item = rust_by_path[symlink_path]
+    assert symlink_path in python_by_path
+    assert symlink_path in rust_by_path
+
+    python_symlink_item = python_by_path[symlink_path]
+    rust_symlink_item = rust_by_path[symlink_path]
     target_stat = symlink_target.stat()
-    assert symlink_item.extension == ".md"
-    assert symlink_item.path == symlink_path
-    assert symlink_item.file_identity == (
-        f"bootstrap:{str(symlink_target.resolve()).lower()}"
-    )
-    assert symlink_item.source_version == (
+    expected_file_identity = f"bootstrap:{str(symlink_target.resolve()).lower()}"
+    expected_source_version = (
         f"mtime_ns={target_stat.st_mtime_ns}:size={target_stat.st_size}"
     )
+    for symlink_item in (python_symlink_item, rust_symlink_item):
+        assert symlink_item.path == symlink_path
+        assert symlink_item.extension == ".md"
+        assert symlink_item.file_identity == expected_file_identity
+        assert symlink_item.source_version == expected_source_version
