@@ -137,7 +137,7 @@ benchmark 报告中的 `discovery_backend` 字段用于确认本轮配置；如�
 
 ### Rust Office Parser Backend
 
-Office 文件默认优先使用 Rust `office_oxide` parser backend；如果 Rust CLI 缺失、执行失败、超时或输出契约校验失败，会按配置回退到 Python backend：
+Office 文件默认优先使用 Rust `office_oxide` parser backend；如果 Rust CLI 缺失、执行失败或输出契约校验失败，会按配置回退到 Python backend。超时默认直接作为解析失败返回；只有显式启用 `office_fallback_after_timeout: true` 时，才会在 Rust 超时后继续尝试 Python fallback。
 
 ```yaml
 scanner:
