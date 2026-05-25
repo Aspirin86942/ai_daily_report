@@ -1,6 +1,7 @@
 """配置管理模块"""
 
 import os
+import platform
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Dict
@@ -25,13 +26,41 @@ class Config:
         root_dir = Path(__file__).parent.parent.parent
         config_dir = root_dir / "config"
 
-        # 加载配置
-        self._settings = Dynaconf(
+        self._settings = self._build_settings(config_dir)
+
+    @staticmethod
+    def _settings_file_name(system_name: str | None = None) -> str:
+        """按运行系统选择本机配置文件名。"""
+        normalized = (system_name or platform.system()).strip().lower()
+        if normalized.startswith("win"):
+            return "settings.windows.yaml"
+        return "settings.linux.yaml"
+
+    @classmethod
+    def _settings_files(
+        cls,
+        config_dir: Path,
+        system_name: str | None = None,
+    ) -> list[str]:
+        """返回 Dynaconf 的配置文件读取顺序。"""
+        return [
+            str(config_dir / cls._settings_file_name(system_name)),
+            str(config_dir / ".secrets.yaml"),
+        ]
+
+    @classmethod
+    def _build_settings(
+        cls,
+        config_dir: Path,
+        system_name: str | None = None,
+    ) -> Dynaconf:
+        """构建配置对象。
+
+        非敏感配置按系统拆分，敏感配置最后加载，确保本机密钥不会写进示例文件。
+        """
+        return Dynaconf(
             envvar_prefix="DAILY_REPORT",
-            settings_files=[
-                str(config_dir / "settings.toml"),
-                str(config_dir / ".secrets.toml"),
-            ],
+            settings_files=cls._settings_files(config_dir, system_name),
             environments=False,
             load_dotenv=True,
         )

@@ -11,12 +11,13 @@ pip install -r requirements.txt
 # 2) 选择 LLM provider 并配置对应密钥
 #
 # 默认 provider 是 DeepSeek：
-# - 保持 config/settings.toml 中 llm.provider = "deepseek"
-# - 配置 DEEPSEEK_API_KEY（或写入 config/.secrets.toml）
+# - Linux 保持 config/settings.linux.yaml 中 llm.provider = "deepseek"
+# - Windows 保持 config/settings.windows.yaml 中 llm.provider = "deepseek"
+# - 配置 DEEPSEEK_API_KEY（或写入 config/.secrets.yaml）
 #
 # 如果使用 OpenAI：
-# - 先把 config/settings.toml 中 llm.provider 改为 "openai"
-# - 再配置 OPENAI_API_KEY（或写入 config/.secrets.toml）
+# - 先把本机 settings.*.yaml 中 llm.provider 改为 "openai"
+# - 再配置 OPENAI_API_KEY（或写入 config/.secrets.yaml）
 
 # 3) 检查环境与配置
 python main.py doctor
@@ -65,36 +66,50 @@ python -m pytest tests/ -v
 
 ## 配置说明
 
-### `config/settings.toml`
+### 本机配置文件
 
-```toml
-[paths]
-work_dir = "D:\\01- 工作"
-data_dir = "data"
-reports_dir = "data/reports"
-db_dir = "data/db"
+运行时按系统自动读取本机配置：
 
-[llm]
-provider = "deepseek"            # deepseek | openai
-model_id = "deepseek-chat"       # OpenAI 示例: gpt-4o-mini
-temperature = 0.2
-max_tokens = 8192
-max_retries = 3
+- Linux: `config/settings.linux.yaml`
+- Windows: `config/settings.windows.yaml`
+
+这两个文件是本机配置，已加入 `.gitignore`，不会提交到 GitHub。仓库只提交 `config/settings.example.yaml` 作为示例。首次配置可复制示例文件：
+
+```bash
+# Linux
+cp config/settings.example.yaml config/settings.linux.yaml
+
+# Windows 用户可复制成 config/settings.windows.yaml 后修改路径
+```
+
+```yaml
+paths:
+  work_dir: "/home/george/bochu_work"
+  data_dir: "data"
+  reports_dir: "data/reports"
+  db_dir: "data/db"
+
+llm:
+  provider: "deepseek"            # deepseek | openai
+  model_id: "deepseek-chat"       # OpenAI 示例: gpt-4o-mini
+  temperature: 0.2
+  max_tokens: 8192
+  max_retries: 3
 ```
 
 - 默认使用 `deepseek`，因此只配置 `OPENAI_API_KEY` 但不切换 `llm.provider` 时，`python main.py doctor` 仍会按 DeepSeek 路径校验并报缺少 `DEEPSEEK_API_KEY`。
 - OpenAI 用户请先把 `llm.provider` 改成 `openai`，再配置 `OPENAI_API_KEY`。
 
-### `config/.secrets.toml`
+### `config/.secrets.yaml`
 
-```toml
-[api]
-deepseek_api_key = "your-deepseek-key"
-openai_api_key = "your-openai-key"
+```yaml
+api:
+  deepseek_api_key: "your-deepseek-key"
+  openai_api_key: "your-openai-key"
 
-[proxy]
-http_proxy = "http://127.0.0.1:10808"
-https_proxy = "http://127.0.0.1:10808"
+proxy:
+  http_proxy: "http://127.0.0.1:10808"
+  https_proxy: "http://127.0.0.1:10808"
 ```
 
 ## 存储说明
@@ -106,8 +121,10 @@ https_proxy = "http://127.0.0.1:10808"
 
 ```text
 config/                # 配置文件
-  settings.toml
-  .secrets.toml
+  settings.example.yaml     # GitHub 示例配置
+  settings.linux.yaml       # Linux 本机配置（不提交）
+  settings.windows.yaml     # Windows 本机配置（不提交）
+  .secrets.yaml             # 本机敏感配置（不提交）
 
 data/
   db/                  # SQLite 数据库目录（reports.sqlite3）

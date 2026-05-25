@@ -564,7 +564,7 @@ def test_run_doctor_cmd_uses_healthcheck(monkeypatch):
                 "SQLite DB": "data/db/reports.sqlite3",
                 "API Key": "sk-test-12...",
             },
-            warnings=["缺少敏感配置文件: config/.secrets.toml"],
+            warnings=["缺少敏感配置文件: config/.secrets.yaml"],
             errors=[],
         ),
     )

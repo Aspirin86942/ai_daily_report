@@ -4,7 +4,7 @@
 - `main.py` is the CLI entry point.
 - `src/` holds core logic: `core/` (config, health checks, logging, LLM client), `models/` (Pydantic schemas), `services/` (file scanning, SQLite storage, report generation), and `utils/` (text helpers).
 - `templates/` contains LLM prompts and Jinja2 report templates.
-- `config/` stores settings (`settings.toml`) and secrets (`.secrets.toml`, not committed).
+- `config/` stores YAML settings. Track only `settings.example.yaml`; keep `settings.linux.yaml`, `settings.windows.yaml`, and `.secrets.yaml` local.
 - `data/` stores the SQLite database and generated Markdown reports; `logs/` holds runtime logs.
 - `tests/` contains pytest test modules.
 
@@ -43,6 +43,6 @@
 - PRs should include a clear summary, linked issues (if any), and notes on config changes or template updates.
 
 ## Configuration & Security
-- Do not commit API keys. Use `config/.secrets.toml`, `DEEPSEEK_API_KEY`, or `OPENAI_API_KEY`.
-- Update `config/settings.toml` for path, model, and scanner limits changes.
- - LLM backend is selectable via `llm.provider` (`deepseek` or `openai`). For DeepSeek, set `DEEPSEEK_API_KEY` (or `api.deepseek_api_key` in `config/.secrets.toml`). For OpenAI, set `OPENAI_API_KEY` (or `api.openai_api_key` in `config/.secrets.toml`) and use a model that supports JSON schema output (e.g., `gpt-4o-mini`).
+- Do not commit API keys. Use `config/.secrets.yaml`, `DEEPSEEK_API_KEY`, or `OPENAI_API_KEY`.
+- Update the current OS local settings file (`config/settings.linux.yaml` on Linux, `config/settings.windows.yaml` on Windows) for path, model, and scanner limits changes.
+ - LLM backend is selectable via `llm.provider` (`deepseek` or `openai`). For DeepSeek, set `DEEPSEEK_API_KEY` (or `api.deepseek_api_key` in `config/.secrets.yaml`). For OpenAI, set `OPENAI_API_KEY` (or `api.openai_api_key` in `config/.secrets.yaml`) and use a model that supports JSON schema output (e.g., `gpt-4o-mini`).

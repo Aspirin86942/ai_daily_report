@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import config
+from .config import Config, config
 
 TEMPLATE_FILES: tuple[str, ...] = (
     "system_prompt.md",
@@ -22,6 +22,7 @@ REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
     ("openai", "openai"),
     ("pydantic", "pydantic"),
     ("dynaconf", "dynaconf"),
+    ("PyYAML", "yaml"),
     ("rich", "rich"),
     ("pandas", "pandas"),
     ("openpyxl", "openpyxl"),
@@ -54,8 +55,8 @@ def _append_project_file_checks(result: HealthCheckResult, project_root: Path) -
     """
 
     config_dir = project_root / "config"
-    settings_file = config_dir / "settings.toml"
-    secrets_file = config_dir / ".secrets.toml"
+    settings_file = config_dir / Config._settings_file_name()
+    secrets_file = config_dir / ".secrets.yaml"
 
     if not settings_file.exists():
         result.errors.append(f"缺少配置文件: {settings_file.relative_to(project_root)}")

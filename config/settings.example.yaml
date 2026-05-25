@@ -1,0 +1,54 @@
+app:
+  name: "审计日报生成器"
+  version: "5.0.0"
+
+paths:
+  # 复制成本机配置后，按运行系统改成真实工作目录。
+  # Linux 示例: /home/george/bochu_work
+  # Windows 示例: D:\bochu_work
+  work_dir: "/path/to/work"
+  data_dir: "data"
+  reports_dir: "data/reports"
+  db_dir: "data/db"
+
+llm:
+  provider: "deepseek"
+  model_id: "deepseek-chat"
+  temperature: 0.2
+  # 保留足够 token 预算，避免日报生成被截断。
+  max_tokens: 8192
+  max_retries: 3
+
+scanner:
+  allowed_extensions:
+    - ".xlsx"
+    - ".xls"
+    - ".pptx"
+    - ".pdf"
+    - ".txt"
+    - ".md"
+    - ".docx"
+    - ".csv"
+    - ".json"
+    - ".log"
+  ignored_patterns:
+    - "~$*"
+    - "*.tmp"
+  excluded_dirs: []
+  max_workers: 4
+  excel_max_rows: 50
+  pdf_max_pages: 5
+  text_max_chars: 6000
+  summary_excel_max_rows: 10
+  summary_pdf_max_pages: 2
+  summary_text_max_chars: 2000
+  total_max_chars: 50000
+  max_file_size_mb: 50
+  file_timeout_seconds: 30
+  file_timeout_by_extension:
+    ".pdf": 45
+    ".xlsx": 60
+    ".xls": 60
+  index_db_path: "data/db/scan_index.sqlite3"
+  parser_profile_version: "v1"
+  worker_lane_mode: "direct"

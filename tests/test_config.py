@@ -3,7 +3,56 @@
 import pickle
 from types import SimpleNamespace
 
-from src.core.config import Config, config
+from src.core.config import Config
+
+
+def test_build_settings_reads_platform_yaml_and_yaml_secrets(tmp_path):
+    """配置加载应按平台读取 YAML，并继续让敏感配置覆盖非敏感配置。"""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.linux.yaml").write_text(
+        "\n".join(
+            [
+                "paths:",
+                "  work_dir: /home/george/work",
+                "llm:",
+                "  provider: deepseek",
+                "api:",
+                "  deepseek_api_key: from-settings",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (config_dir / ".secrets.yaml").write_text(
+        "\n".join(
+            [
+                "api:",
+                "  deepseek_api_key: from-secrets",
+                "proxy:",
+                "  http_proxy: http://127.0.0.1:10808",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = Config._build_settings(config_dir, system_name="Linux")
+
+    assert settings.paths.work_dir == "/home/george/work"
+    assert settings.llm.provider == "deepseek"
+    assert settings.api.deepseek_api_key == "from-secrets"
+    assert settings.proxy.http_proxy == "http://127.0.0.1:10808"
+
+
+def test_config_selects_windows_yaml_on_windows(tmp_path):
+    """Windows 运行时必须读取 Windows 专用配置，避免误用 Linux 路径。"""
+    config_dir = tmp_path / "config"
+
+    settings_files = Config._settings_files(config_dir, system_name="Windows")
+
+    assert settings_files == [
+        str(config_dir / "settings.windows.yaml"),
+        str(config_dir / ".secrets.yaml"),
+    ]
 
 
 def test_scanner_config_exposes_scan_index_defaults_when_keys_absent():
@@ -69,9 +118,34 @@ def test_scanner_config_passes_direct_text_max_bytes_when_present():
     assert scanner_config["direct_text_max_bytes"] == 8192
 
 
-def test_scanner_config_uses_builtin_containers_and_is_picklable():
+def test_scanner_config_uses_builtin_containers_and_is_picklable(tmp_path):
     """扫描配置必须可 pickle，确保 Windows spawn 能把参数安全传给子进程。"""
-    scanner_config = config.scanner_config
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.linux.yaml").write_text(
+        "\n".join(
+            [
+                "scanner:",
+                "  allowed_extensions:",
+                "    - .txt",
+                "  ignored_patterns:",
+                "    - '~$*'",
+                "  excluded_dirs:",
+                "    - /tmp/skip",
+                "  max_workers: 1",
+                "  excel_max_rows: 50",
+                "  pdf_max_pages: 5",
+                "  text_max_chars: 6000",
+                "  file_timeout_by_extension:",
+                "    .pdf: 45",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = object.__new__(Config)
+    cfg._settings = Config._build_settings(config_dir, system_name="Linux")
+
+    scanner_config = cfg.scanner_config
 
     assert isinstance(scanner_config["allowed_extensions"], list)
     assert isinstance(scanner_config["ignored_patterns"], list)

@@ -35,7 +35,10 @@ def _make_config(provider: str, api_key: str, root: Path) -> SimpleNamespace:
 def test_collect_healthcheck_accepts_env_only_provider_key(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    (config_dir / "settings.toml").write_text("[llm]\nprovider='deepseek'\n", encoding="utf-8")
+    (config_dir / healthcheck.Config._settings_file_name()).write_text(
+        "llm:\n  provider: deepseek\n",
+        encoding="utf-8",
+    )
     _write_templates(tmp_path)
     (tmp_path / "data").mkdir()
 
@@ -53,6 +56,7 @@ def test_collect_healthcheck_accepts_env_only_provider_key(tmp_path, monkeypatch
 
     assert result.errors == []
     assert any("缺少敏感配置文件" in message for message in result.warnings)
+    assert any("config/.secrets.yaml" in message for message in result.warnings)
     assert result.info["LLM Provider"] == "deepseek"
     assert result.info["API Key"] == "sk-test-12..."
 
@@ -60,7 +64,10 @@ def test_collect_healthcheck_accepts_env_only_provider_key(tmp_path, monkeypatch
 def test_collect_healthcheck_reports_missing_provider_api_key(tmp_path, monkeypatch):
     config_dir = tmp_path / "config"
     config_dir.mkdir()
-    (config_dir / "settings.toml").write_text("[llm]\nprovider='openai'\n", encoding="utf-8")
+    (config_dir / healthcheck.Config._settings_file_name()).write_text(
+        "llm:\n  provider: openai\n",
+        encoding="utf-8",
+    )
     _write_templates(tmp_path)
     (tmp_path / "data").mkdir()
 
