@@ -28,13 +28,6 @@ pub struct DiscoveredFileOut {
 }
 
 pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFileOut>> {
-    let start_dt = request.start_date.and_hms_opt(0, 0, 0).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "invalid start date boundary")
-    })?;
-    let end_dt = request
-        .end_date
-        .and_hms_micro_opt(23, 59, 59, 999_999)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid end date boundary"))?;
     let ignored_patterns = compile_patterns(&request.ignored_patterns)?;
     let excluded_dirs = resolve_excluded_dirs(&request.excluded_dirs);
     let mut files = Vec::new();
@@ -58,10 +51,6 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
                 continue;
             }
         };
-        if !entry.file_type().is_file() {
-            continue;
-        }
-
         let file_name = entry.file_name().to_string_lossy().to_string();
         let file_name_lower = file_name.to_lowercase();
         if !has_allowed_extension(&file_name_lower, &request.allowed_extensions) {
@@ -78,9 +67,22 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
                 continue;
             }
         };
-        let modified_local = metadata_modified_local(&metadata)?;
+        if !metadata.is_file() {
+            continue;
+        }
+        let modified_local = match metadata_modified_local(&metadata) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!(
+                    "warning: cannot read modified time {}: {}",
+                    entry.path().display(),
+                    error
+                );
+                continue;
+            }
+        };
         let modified_naive = modified_local.naive_local();
-        if modified_naive < start_dt || modified_naive > end_dt {
+        if !is_within_date_range(modified_naive, request.start_date, request.end_date)? {
             continue;
         }
 
@@ -96,7 +98,17 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
             }
         };
         let size_bytes = metadata.len();
-        let mtime_ns = metadata_mtime_ns(&metadata)?;
+        let mtime_ns = match metadata_mtime_ns(&metadata) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!(
+                    "warning: cannot read modified nanoseconds {}: {}",
+                    entry.path().display(),
+                    error
+                );
+                continue;
+            }
+        };
         files.push(DiscoveredFileOut {
             file_identity: format!(
                 "bootstrap:{}",
@@ -119,6 +131,24 @@ fn resolve_excluded_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
         .iter()
         .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
         .collect()
+}
+
+fn is_within_date_range(
+    modified_at: chrono::NaiveDateTime,
+    start_date: NaiveDate,
+    end_date: NaiveDate,
+) -> io::Result<bool> {
+    let start_dt = start_date.and_hms_opt(0, 0, 0).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "invalid start date boundary")
+    })?;
+    let next_day = end_date
+        .succ_opt()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid end date boundary"))?;
+    let next_day_start = next_day
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid end date boundary"))?;
+
+    Ok(modified_at >= start_dt && modified_at < next_day_start)
 }
 
 fn has_allowed_extension(file_name_lower: &str, allowed_extensions: &[String]) -> bool {
@@ -202,6 +232,36 @@ fn build_source_version(mtime_ns: u128, size_bytes: u64) -> String {
 mod tests {
     use super::*;
 
+    struct TempFixture {
+        root: PathBuf,
+    }
+
+    impl TempFixture {
+        fn new(name: &str) -> Self {
+            let unique = format!(
+                "ai_daily_discovery_{name}_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            );
+            let root = std::env::temp_dir().join(unique);
+            std::fs::create_dir(&root).unwrap();
+            Self { root }
+        }
+
+        fn path(&self) -> &Path {
+            &self.root
+        }
+    }
+
+    impl Drop for TempFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
     #[test]
     fn allowed_extension_is_case_insensitive() {
         assert!(has_allowed_extension("REPORT.MD", &[".md".to_string()]));
@@ -232,5 +292,66 @@ mod tests {
     #[test]
     fn source_version_uses_mtime_ns_and_size() {
         assert_eq!(build_source_version(123, 456), "mtime_ns=123:size=456");
+    }
+
+    #[test]
+    fn date_range_includes_final_day_nanoseconds_and_excludes_next_day() {
+        let start_date = NaiveDate::from_ymd_opt(2026, 5, 24).unwrap();
+        let end_date = NaiveDate::from_ymd_opt(2026, 5, 25).unwrap();
+        let final_day_last_ns = end_date.and_hms_nano_opt(23, 59, 59, 999_999_999).unwrap();
+        let next_day_start = NaiveDate::from_ymd_opt(2026, 5, 26)
+            .unwrap()
+            .and_hms_opt(0, 0, 0)
+            .unwrap();
+
+        assert!(is_within_date_range(final_day_last_ns, start_date, end_date).unwrap());
+        assert!(!is_within_date_range(next_day_start, start_date, end_date).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_files_includes_file_symlink_and_emits_stable_contract() {
+        let fixture = TempFixture::new("symlink_contract");
+        let work_dir = fixture.path().join("work");
+        let target_dir = fixture.path().join("targets");
+        std::fs::create_dir(&work_dir).unwrap();
+        std::fs::create_dir(&target_dir).unwrap();
+
+        let target = target_dir.join("target.md");
+        let regular = work_dir.join("regular.TXT");
+        let link = work_dir.join("LINK.MD");
+        std::fs::write(&target, "linked").unwrap();
+        std::fs::write(&regular, "regular").unwrap();
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let today = Local::now().date_naive();
+        let request = DiscoveryRequest {
+            work_dir: work_dir.clone(),
+            start_date: today,
+            end_date: today,
+            allowed_extensions: vec![".md".to_string(), ".txt".to_string()],
+            ignored_patterns: vec![],
+            excluded_dirs: vec![],
+        };
+
+        let files = discover_files(&request).unwrap();
+        let paths: Vec<&str> = files.iter().map(|item| item.path.as_str()).collect();
+        let mut sorted_paths = paths.clone();
+        sorted_paths.sort();
+        let target_path = target.canonicalize().unwrap().to_string_lossy().to_string();
+
+        assert_eq!(paths, sorted_paths);
+        let linked_item = files
+            .iter()
+            .find(|item| item.path == target_path)
+            .expect("file symlink should be discovered through target metadata");
+        assert_eq!(linked_item.extension, ".md");
+        assert!(linked_item.source_version.starts_with("mtime_ns="));
+        assert!(linked_item.source_version.contains(":size="));
+        assert!(chrono::NaiveDateTime::parse_from_str(
+            &linked_item.modified_at,
+            "%Y-%m-%dT%H:%M:%S%.f"
+        )
+        .is_ok());
     }
 }
