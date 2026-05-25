@@ -219,6 +219,7 @@ def test_config_document_budget_keys_feed_parser_profile(tmp_path: Path):
                 "  max_workers: 1",
                 "  excel_max_rows: 50",
                 "  pdf_max_pages: 5",
+                "  pdf_parser_backend: custom_pdf_v2",
                 "  text_max_chars: 6000",
                 "  excel_max_sheets: 9",
                 "  excel_max_columns: 31",
@@ -256,6 +257,7 @@ def test_config_document_budget_keys_feed_parser_profile(tmp_path: Path):
     )
 
     assert regular_profile["excel_max_sheets"] == 9
+    assert regular_profile["pdf_parser_backend"] == "custom_pdf_v2"
     assert regular_profile["excel_max_columns"] == 31
     assert regular_profile["docx_max_paragraphs"] == 211
     assert regular_profile["docx_max_tables"] == 22

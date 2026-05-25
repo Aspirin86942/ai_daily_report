@@ -166,6 +166,9 @@ class Config:
                     DEFAULT_OFFICE_PARSER_BACKEND,
                 )
             ).strip(),
+            "pdf_parser_backend": str(
+                getattr(self._settings.scanner, "pdf_parser_backend", "pdf_text_v1")
+            ).strip(),
             "rust_office_parser_bin": getattr(
                 self._settings.scanner,
                 "rust_office_parser_bin",
