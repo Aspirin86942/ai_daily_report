@@ -23,10 +23,17 @@ from .document_parser import (
     DEFAULT_EXCEL_MAX_ROWS,
     DEFAULT_EXCEL_MAX_SHEETS,
     DEFAULT_PPTX_MAX_SLIDES,
-    OFFICE_PARSER_BACKEND,
     PDF_TEXT_PARSER_BACKEND,
 )
 
+DEFAULT_OFFICE_PARSER_BACKEND = "rust_office_oxide_v1"
+DEFAULT_RUST_OFFICE_PARSER_BIN = (
+    "rust/office_parser/target/release/ai-daily-office-parser"
+)
+DEFAULT_OFFICE_FALLBACK_ORDER = [
+    "python_office_v1",
+    "python_sharepoint_text_v1",
+]
 DEFAULT_SUMMARY_EXCEL_MAX_SHEETS = 2
 DEFAULT_SUMMARY_EXCEL_MAX_COLUMNS = 12
 DEFAULT_SUMMARY_DOCX_MAX_PARAGRAPHS = 80
@@ -116,11 +123,33 @@ class ScanPlanner:
         """补齐 Office/PDF 解析预算，确保 cache key 能反映 parser profile 变化。"""
         profile["office_parser_backend"] = self.scanner_cfg.get(
             "office_parser_backend",
-            OFFICE_PARSER_BACKEND,
+            DEFAULT_OFFICE_PARSER_BACKEND,
         )
         profile["pdf_parser_backend"] = self.scanner_cfg.get(
             "pdf_parser_backend",
             PDF_TEXT_PARSER_BACKEND,
+        )
+        profile["rust_office_parser_bin"] = self.scanner_cfg.get(
+            "rust_office_parser_bin",
+            DEFAULT_RUST_OFFICE_PARSER_BIN,
+        )
+        profile["office_parser_fallback_enabled"] = bool(
+            self.scanner_cfg.get("office_parser_fallback_enabled", True)
+        )
+        profile["office_parser_fallback_order"] = list(
+            self.scanner_cfg.get(
+                "office_parser_fallback_order",
+                DEFAULT_OFFICE_FALLBACK_ORDER,
+            )
+        )
+        profile["office_fallback_after_timeout"] = bool(
+            self.scanner_cfg.get("office_fallback_after_timeout", False)
+        )
+        profile["office_external_fallback"] = str(
+            self.scanner_cfg.get("office_external_fallback", "disabled")
+        ).strip().lower()
+        profile["office_legacy_extensions_enabled"] = bool(
+            self.scanner_cfg.get("office_legacy_extensions_enabled", False)
         )
         if summary_mode:
             profile["excel_max_sheets"] = self._positive_profile_value(

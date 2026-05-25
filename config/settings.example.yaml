@@ -39,6 +39,17 @@ scanner:
   discovery_backend: "rust"
   rust_discovery_bin: "rust/discovery/target/release/ai-daily-discovery"
   discovery_timeout_seconds: 30
+  # Office parser defaults: Rust primary, Python fallback.
+  office_parser_backend: "rust_office_oxide_v1"
+  rust_office_parser_bin: "rust/office_parser/target/release/ai-daily-office-parser"
+  office_parser_fallback_enabled: true
+  office_parser_fallback_order:
+    - "python_office_v1"
+    - "python_sharepoint_text_v1"
+  office_fallback_after_timeout: false
+  office_external_fallback: "disabled"
+  # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.
+  office_legacy_extensions_enabled: false
   max_workers: 4
   excel_max_rows: 50
   pdf_max_pages: 5

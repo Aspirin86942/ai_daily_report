@@ -28,8 +28,17 @@ def test_build_parser_profile_uses_summary_limits_when_requested():
         "excel_max_rows": 10,
         "pdf_max_pages": 2,
         "text_max_chars": 2000,
-        "office_parser_backend": "office_v1",
+        "office_parser_backend": "rust_office_oxide_v1",
         "pdf_parser_backend": "pdf_text_v1",
+        "rust_office_parser_bin": "rust/office_parser/target/release/ai-daily-office-parser",
+        "office_parser_fallback_enabled": True,
+        "office_parser_fallback_order": [
+            "python_office_v1",
+            "python_sharepoint_text_v1",
+        ],
+        "office_fallback_after_timeout": False,
+        "office_external_fallback": "disabled",
+        "office_legacy_extensions_enabled": False,
         "excel_max_sheets": 2,
         "excel_max_columns": 12,
         "docx_max_paragraphs": 80,
@@ -83,8 +92,19 @@ def test_build_parser_profile_includes_document_parser_defaults():
 
     profile = planner.build_parser_profile(summary_mode=False)
 
-    assert profile["office_parser_backend"] == "office_v1"
+    assert profile["office_parser_backend"] == "rust_office_oxide_v1"
     assert profile["pdf_parser_backend"] == "pdf_text_v1"
+    assert profile["rust_office_parser_bin"] == (
+        "rust/office_parser/target/release/ai-daily-office-parser"
+    )
+    assert profile["office_parser_fallback_enabled"] is True
+    assert profile["office_parser_fallback_order"] == [
+        "python_office_v1",
+        "python_sharepoint_text_v1",
+    ]
+    assert profile["office_fallback_after_timeout"] is False
+    assert profile["office_external_fallback"] == "disabled"
+    assert profile["office_legacy_extensions_enabled"] is False
     assert profile["excel_max_sheets"] == 5
     assert profile["excel_max_columns"] == 20
     assert profile["docx_max_paragraphs"] == 200
@@ -94,6 +114,42 @@ def test_build_parser_profile_includes_document_parser_defaults():
     assert profile["pptx_max_slides"] == 50
     assert profile["pptx_include_notes"] is True
     assert profile["document_excerpt_max_chars"] == 6000
+
+
+def test_build_parser_profile_includes_rust_office_backend_and_fallback_keys():
+    """Office backend/fallback 配置必须进入 cache key，避免跨 backend 复用旧内容。"""
+    planner = ScanPlanner(
+        scanner_cfg={
+            "excel_max_rows": 50,
+            "pdf_max_pages": 5,
+            "text_max_chars": 6000,
+            "office_parser_backend": "rust_office_oxide_v1",
+            "rust_office_parser_bin": "rust/office_parser/target/release/ai-daily-office-parser",
+            "office_parser_fallback_enabled": True,
+            "office_parser_fallback_order": [
+                "python_office_v1",
+                "python_sharepoint_text_v1",
+            ],
+            "office_fallback_after_timeout": False,
+            "office_external_fallback": "disabled",
+            "office_legacy_extensions_enabled": False,
+        }
+    )
+
+    profile = planner.build_parser_profile(summary_mode=False)
+
+    assert profile["office_parser_backend"] == "rust_office_oxide_v1"
+    assert profile["rust_office_parser_bin"] == (
+        "rust/office_parser/target/release/ai-daily-office-parser"
+    )
+    assert profile["office_parser_fallback_enabled"] is True
+    assert profile["office_parser_fallback_order"] == [
+        "python_office_v1",
+        "python_sharepoint_text_v1",
+    ]
+    assert profile["office_fallback_after_timeout"] is False
+    assert profile["office_external_fallback"] == "disabled"
+    assert profile["office_legacy_extensions_enabled"] is False
 
 
 def test_build_parser_profile_uses_summary_document_limits():

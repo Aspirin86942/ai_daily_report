@@ -100,6 +100,36 @@ def test_scanner_config_exposes_discovery_backend_defaults_when_keys_absent():
     assert scanner_config["discovery_timeout_seconds"] == 30
 
 
+def test_scanner_config_exposes_office_parser_defaults_when_keys_absent():
+    """Office parser 缺省时应优先 Rust，并保留 Python fallback。"""
+    cfg = object.__new__(Config)
+    cfg._settings = SimpleNamespace(
+        scanner=SimpleNamespace(
+            allowed_extensions=[".docx"],
+            ignored_patterns=[],
+            max_workers=1,
+            excel_max_rows=50,
+            pdf_max_pages=5,
+            text_max_chars=6000,
+        )
+    )
+
+    scanner_config = cfg.scanner_config
+
+    assert scanner_config["office_parser_backend"] == "rust_office_oxide_v1"
+    assert scanner_config["rust_office_parser_bin"] == (
+        "rust/office_parser/target/release/ai-daily-office-parser"
+    )
+    assert scanner_config["office_parser_fallback_enabled"] is True
+    assert scanner_config["office_parser_fallback_order"] == [
+        "python_office_v1",
+        "python_sharepoint_text_v1",
+    ]
+    assert scanner_config["office_fallback_after_timeout"] is False
+    assert scanner_config["office_external_fallback"] == "disabled"
+    assert scanner_config["office_legacy_extensions_enabled"] is False
+
+
 def test_scanner_config_passes_excluded_dirs_as_builtin_list():
     """excluded_dirs 必须从 settings 透传到 scanner，并转成普通 list。"""
     cfg = object.__new__(Config)
@@ -162,6 +192,15 @@ def test_scanner_config_uses_builtin_containers_and_is_picklable(tmp_path):
                 "  discovery_backend: rust",
                 "  rust_discovery_bin: rust/discovery/target/release/ai-daily-discovery",
                 "  discovery_timeout_seconds: 12",
+                "  office_parser_backend: rust_office_oxide_v1",
+                "  rust_office_parser_bin: rust/office_parser/target/release/ai-daily-office-parser",
+                "  office_parser_fallback_enabled: true",
+                "  office_parser_fallback_order:",
+                "    - python_office_v1",
+                "    - python_sharepoint_text_v1",
+                "  office_fallback_after_timeout: false",
+                "  office_external_fallback: disabled",
+                "  office_legacy_extensions_enabled: false",
                 "  file_timeout_by_extension:",
                 "    .pdf: 45",
             ]
@@ -182,6 +221,10 @@ def test_scanner_config_uses_builtin_containers_and_is_picklable(tmp_path):
         "rust/discovery/target/release/ai-daily-discovery"
     )
     assert scanner_config["discovery_timeout_seconds"] == 12
+    assert scanner_config["office_parser_backend"] == "rust_office_oxide_v1"
+    assert isinstance(scanner_config["office_parser_fallback_order"], list)
+    assert scanner_config["office_parser_fallback_enabled"] is True
+    assert scanner_config["office_fallback_after_timeout"] is False
 
     pickle.dumps(scanner_config)
 

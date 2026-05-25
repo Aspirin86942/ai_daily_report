@@ -7,6 +7,15 @@ from pathlib import Path
 from typing import Any, Dict
 from dynaconf import Dynaconf
 
+DEFAULT_OFFICE_PARSER_BACKEND = "rust_office_oxide_v1"
+DEFAULT_RUST_OFFICE_PARSER_BIN = (
+    "rust/office_parser/target/release/ai-daily-office-parser"
+)
+DEFAULT_OFFICE_FALLBACK_ORDER = [
+    "python_office_v1",
+    "python_sharepoint_text_v1",
+]
+
 
 class Config:
     """全局配置管理器 (单例模式)"""
@@ -149,6 +158,37 @@ class Config:
                 self._settings.scanner,
                 "rust_discovery_bin",
                 "rust/discovery/target/release/ai-daily-discovery",
+            ),
+            "office_parser_backend": str(
+                getattr(
+                    self._settings.scanner,
+                    "office_parser_backend",
+                    DEFAULT_OFFICE_PARSER_BACKEND,
+                )
+            ).strip(),
+            "rust_office_parser_bin": getattr(
+                self._settings.scanner,
+                "rust_office_parser_bin",
+                DEFAULT_RUST_OFFICE_PARSER_BIN,
+            ),
+            "office_parser_fallback_enabled": bool(
+                getattr(self._settings.scanner, "office_parser_fallback_enabled", True)
+            ),
+            "office_parser_fallback_order": self._to_builtin_value(
+                getattr(
+                    self._settings.scanner,
+                    "office_parser_fallback_order",
+                    DEFAULT_OFFICE_FALLBACK_ORDER,
+                )
+            ),
+            "office_fallback_after_timeout": bool(
+                getattr(self._settings.scanner, "office_fallback_after_timeout", False)
+            ),
+            "office_external_fallback": str(
+                getattr(self._settings.scanner, "office_external_fallback", "disabled")
+            ).strip().lower(),
+            "office_legacy_extensions_enabled": bool(
+                getattr(self._settings.scanner, "office_legacy_extensions_enabled", False)
             ),
             "discovery_timeout_seconds": getattr(
                 self._settings.scanner,
