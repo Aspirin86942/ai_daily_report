@@ -5,6 +5,8 @@ from datetime import date, datetime
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from src.services.scan_discovery import DiscoveredFile, FileDiscoveryService
 
 
@@ -263,3 +265,140 @@ def test_bootstrap_full_scan_falls_back_when_rust_json_contract_is_invalid(
     [item] = discovery.bootstrap_full_scan(date.today(), date.today())
 
     assert item.path == sample
+
+
+def test_bootstrap_full_scan_rejects_unsupported_discovery_backend(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """backend 拼写错误必须显式失败，不能静默退回 Python discovery。"""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    (work_dir / "fallback.md").write_text("fallback", encoding="utf-8")
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([]),
+            stderr="",
+        )
+
+    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+
+    discovery = FileDiscoveryService(
+        work_dir=work_dir,
+        scanner_cfg={
+            "allowed_extensions": [".md"],
+            "ignored_patterns": [],
+            "excluded_dirs": [],
+            "discovery_backend": "rsut",
+            "rust_discovery_bin": "target/release/ai-daily-discovery",
+        },
+    )
+
+    with pytest.raises(ValueError, match="Unsupported discovery_backend: rsut"):
+        discovery.bootstrap_full_scan(date.today(), date.today())
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "bad_item",
+    [
+        None,
+        {
+            "file_identity": None,
+            "path": "__PATH__",
+            "extension": ".md",
+            "modified_at": "__MODIFIED_AT__",
+            "size_bytes": 999,
+            "source_version": "mtime_ns=1:size=999",
+        },
+        {
+            "file_identity": "__IDENTITY__",
+            "path": "",
+            "extension": ".md",
+            "modified_at": "__MODIFIED_AT__",
+            "size_bytes": 999,
+            "source_version": "mtime_ns=1:size=999",
+        },
+        {
+            "file_identity": "__IDENTITY__",
+            "path": "__PATH__",
+            "extension": "md",
+            "modified_at": "__MODIFIED_AT__",
+            "size_bytes": 999,
+            "source_version": "mtime_ns=1:size=999",
+        },
+        {
+            "file_identity": "__IDENTITY__",
+            "path": "__PATH__",
+            "extension": ".md",
+            "modified_at": "__MODIFIED_AT__",
+            "size_bytes": True,
+            "source_version": "mtime_ns=1:size=True",
+        },
+    ],
+)
+def test_bootstrap_full_scan_falls_back_when_rust_item_contract_is_invalid(
+    tmp_path: Path,
+    monkeypatch,
+    bad_item,
+):
+    """Rust 输出不能靠 str/int 宽松转换修正，坏合约必须触发 Python fallback。"""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    sample = work_dir / "fallback.md"
+    sample.write_text("fallback", encoding="utf-8")
+    stat_result = sample.stat()
+
+    if isinstance(bad_item, dict):
+        bad_item = {
+            key: str(sample.resolve()) if value == "__PATH__" else value
+            for key, value in bad_item.items()
+        }
+        bad_item = {
+            key: f"bootstrap:{str(sample.resolve()).lower()}"
+            if value == "__IDENTITY__"
+            else value
+            for key, value in bad_item.items()
+        }
+        bad_item = {
+            key: datetime.fromtimestamp(stat_result.st_mtime).isoformat()
+            if value == "__MODIFIED_AT__"
+            else value
+            for key, value in bad_item.items()
+        }
+
+    def fake_run(*args, **kwargs):
+        return SimpleNamespace(
+            returncode=0,
+            stdout=json.dumps([bad_item]),
+            stderr="",
+        )
+
+    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+
+    discovery = FileDiscoveryService(
+        work_dir=work_dir,
+        scanner_cfg={
+            "allowed_extensions": [".md"],
+            "ignored_patterns": [],
+            "excluded_dirs": [],
+            "discovery_backend": "rust",
+            "rust_discovery_bin": "target/release/ai-daily-discovery",
+            "discovery_timeout_seconds": 5,
+        },
+    )
+
+    [item] = discovery.bootstrap_full_scan(date.today(), date.today())
+
+    assert item.path == sample
+    assert item.file_identity == f"bootstrap:{str(sample.resolve()).lower()}"
+    assert item.extension == ".md"
+    assert item.size_bytes == stat_result.st_size
+    assert item.source_version == (
+        f"mtime_ns={stat_result.st_mtime_ns}:size={stat_result.st_size}"
+    )

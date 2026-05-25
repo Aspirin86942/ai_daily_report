@@ -89,15 +89,64 @@ class RustDiscoveryRunner:
         if not isinstance(item, dict):
             raise RustDiscoveryError("discovered file item must be an object")
         try:
-            return DiscoveredFile(
-                file_identity=str(item["file_identity"]),
-                path=Path(str(item["path"])),
-                extension=str(item["extension"]).lower(),
-                modified_at=datetime.fromisoformat(str(item["modified_at"])),
-                size_bytes=int(item["size_bytes"]),
-                source_version=str(item["source_version"]),
+            file_identity = item["file_identity"]
+            path_value = item["path"]
+            extension = item["extension"]
+            modified_at = item["modified_at"]
+            size_bytes = item["size_bytes"]
+            source_version = item["source_version"]
+        except KeyError as exc:
+            raise RustDiscoveryError(f"missing discovered file field: {exc}") from exc
+
+        if not isinstance(file_identity, str) or not file_identity:
+            raise RustDiscoveryError("file_identity must be a non-empty string")
+        if not file_identity.startswith("bootstrap:"):
+            raise RustDiscoveryError("file_identity must start with bootstrap:")
+
+        if not isinstance(path_value, str) or not path_value:
+            raise RustDiscoveryError("path must be a non-empty string")
+        path = Path(path_value)
+        if not path.is_absolute():
+            raise RustDiscoveryError("path must be absolute")
+
+        if not isinstance(extension, str) or not extension:
+            raise RustDiscoveryError("extension must be a non-empty string")
+        if extension != extension.lower() or not extension.startswith("."):
+            raise RustDiscoveryError(
+                "extension must be lowercase and start with a dot"
             )
-        except (KeyError, TypeError, ValueError) as exc:
+
+        if not isinstance(modified_at, str):
+            raise RustDiscoveryError("modified_at must be an ISO datetime string")
+        try:
+            parsed_modified_at = datetime.fromisoformat(modified_at)
+        except ValueError as exc:
+            raise RustDiscoveryError(
+                f"modified_at must be parseable by datetime.fromisoformat: {modified_at}"
+            ) from exc
+
+        if not isinstance(size_bytes, int) or isinstance(size_bytes, bool):
+            raise RustDiscoveryError("size_bytes must be an integer")
+        if size_bytes < 0:
+            raise RustDiscoveryError("size_bytes must be non-negative")
+
+        if not isinstance(source_version, str) or not source_version:
+            raise RustDiscoveryError("source_version must be a non-empty string")
+        if not source_version.startswith("mtime_ns=") or ":size=" not in source_version:
+            raise RustDiscoveryError(
+                "source_version must include mtime_ns= prefix and :size= segment"
+            )
+
+        try:
+            return DiscoveredFile(
+                file_identity=file_identity,
+                path=path,
+                extension=extension,
+                modified_at=parsed_modified_at,
+                size_bytes=size_bytes,
+                source_version=source_version,
+            )
+        except TypeError as exc:
             raise RustDiscoveryError(f"invalid discovered file item: {item}") from exc
 
 
@@ -123,8 +172,22 @@ class FileDiscoveryService:
                     end_date=end_date,
                 )
             except (OSError, subprocess.SubprocessError, RustDiscoveryError) as exc:
-                logger.warning("Rust discovery 失败，回退 Python discovery: %s", exc)
-        return self._bootstrap_full_scan_python(start_date, end_date)
+                logger.warning(
+                    (
+                        "Rust discovery 失败，回退 Python discovery: %s "
+                        "(rust_discovery_bin=%s, work_dir=%s, start_date=%s, "
+                        "end_date=%s)"
+                    ),
+                    exc,
+                    self.scanner_cfg.get("rust_discovery_bin"),
+                    self.work_dir,
+                    start_date,
+                    end_date,
+                )
+                return self._bootstrap_full_scan_python(start_date, end_date)
+        if backend == "python":
+            return self._bootstrap_full_scan_python(start_date, end_date)
+        raise ValueError(f"Unsupported discovery_backend: {backend}")
 
     def _bootstrap_full_scan_python(
         self,
