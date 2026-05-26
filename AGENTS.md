@@ -6,6 +6,8 @@
 - `templates/` contains LLM prompts and Jinja2 report templates.
 - `config/` stores YAML settings. Track only `settings.example.yaml`; keep `settings.linux.yaml`, `settings.windows.yaml`, and `.secrets.yaml` local.
 - `data/` stores the SQLite database and generated Markdown reports; `logs/` holds runtime logs.
+- `rust/` contains Rust CLI helpers: `discovery/` for file discovery and `office_parser/` for Office parsing.
+- `scripts/benchmark_scanner.py` runs the real scanner path and writes parser/discovery benchmark evidence.
 - `tests/` contains pytest test modules.
 
 ## Build, Test, and Development Commands
@@ -15,6 +17,9 @@
 - `python main.py weekly --source db` aggregates weekly reports; `--source scan` scans files instead.
 - `python main.py monthly --source db` aggregates monthly reports.
 - `python -m pytest tests/ -v` runs the test suite.
+- `cd rust/discovery && cargo test && cargo build --release` verifies the Rust discovery CLI.
+- `cd rust/office_parser && cargo test && cargo build --release` verifies the Rust Office parser CLI.
+- `python scripts/benchmark_scanner.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --json-out /tmp/scanner.json --markdown-out /tmp/scanner.md` captures scanner performance and backend evidence.
 
 ## Coding Style & Naming Conventions
 - Python style: follow PEP 8 with 4-space indentation.
@@ -32,6 +37,9 @@
 - `Run`: 表示一次 CLI 命令执行、一次 scanner run 或一次 context 构建。
 - `Decision`: 表示单个文件在一次 context run 中的策略选择和审计原因。
 - 产品讨论中可以把 scanner、parser、compressor 理解成“能力代理”，但代码命名优先使用 `Scheduler`、`Planner`、`Parser`、`Compressor`、`Store` 等确定性术语，避免把职责边界写虚。
+- Scanner backend changes must keep `parser_backend` separate from `worker_lane`; benchmark summaries should prove both the parser that produced content and the lane where it executed.
+- Office parsing defaults to `rust_office_oxide_v1` with Python fallback. Keep `office_fallback_after_timeout` false unless the user explicitly chooses slower timeout fallback.
+- Backend, fallback, timeout, and parser budget changes must be included in `ScanPlanner` parser profile keys to avoid stale parse cache reuse.
 
 ## Testing Guidelines
 - Framework: pytest.

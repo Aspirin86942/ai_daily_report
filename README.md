@@ -52,6 +52,13 @@ python main.py doctor
 
 # 测试
 python -m pytest tests/ -v
+
+# scanner benchmark（真实扫描链路）
+python scripts/benchmark_scanner.py \
+  --start-date 2026-05-24 \
+  --end-date 2026-05-25 \
+  --json-out /tmp/scanner.json \
+  --markdown-out /tmp/scanner.md
 ```
 
 ## 数据来源（`--source`）
@@ -135,6 +142,8 @@ scanner:
 
 benchmark 报告中的 `discovery_backend` 字段用于确认本轮配置；如果看到 Rust fallback warning，说明配置是 Rust，但实际 discovery 已降级到 Python。
 
+更完整的 scanner backend 架构、fallback 行为、cache profile 和 benchmark 读法见 `docs/scanner-backends.md`。
+
 ### Rust Office Parser Backend
 
 Office 文件默认优先使用 Rust `office_oxide` parser backend；如果 Rust CLI 缺失、执行失败或输出契约校验失败，会按配置回退到 Python backend。超时默认直接作为解析失败返回；只有显式启用 `office_fallback_after_timeout: true` 时，才会在 Rust 超时后继续尝试 Python fallback。
@@ -197,8 +206,15 @@ data/
 src/
   core/                # 配置、环境检查、日志、LLM 客户端
   models/              # Pydantic 数据模型
-  services/            # 文件扫描、SQLite 存储、报告生成
+  services/            # 文件扫描、parser backend、SQLite 存储、报告生成
   utils/               # 工具函数
+
+rust/
+  discovery/           # Rust 文件发现 CLI
+  office_parser/       # Rust Office parser CLI
+
+scripts/
+  benchmark_scanner.py # 真实 scanner 性能与 backend 证据
 
 templates/             # Prompt + Jinja2 模板
 tests/                 # pytest 测试
@@ -207,4 +223,4 @@ main.py                # CLI 入口
 
 ## 技术栈
 
-Python 3.10+ | DeepSeek/OpenAI | SQLite | Pydantic | Dynaconf | Jinja2 | Pandas
+Python 3.10+ | Rust | DeepSeek/OpenAI | SQLite | Pydantic | Dynaconf | Jinja2 | Pandas
