@@ -279,11 +279,13 @@ mod tests {
     use super::*;
 
     #[cfg(unix)]
+    #[allow(dead_code)]
     struct TempFixture {
         root: PathBuf,
     }
 
     #[cfg(unix)]
+    #[allow(dead_code)]
     impl TempFixture {
         fn new(name: &str) -> Self {
             let unique = format!(
