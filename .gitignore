@@ -32,6 +32,9 @@ venv/
 # workbuddy
 .workbuddy/
 
+# CodeGraph 本地索引
+.codegraph/
+
 # 临时文件
 ~$*
 *.tmp

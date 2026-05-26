@@ -1,6 +1,6 @@
 use chrono::{Local, NaiveDate, TimeZone};
 use glob::Pattern;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,6 +14,7 @@ pub struct DiscoveryRequest {
     pub end_date: NaiveDate,
     pub allowed_extensions: Vec<String>,
     pub ignored_patterns: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_path_list")]
     pub excluded_dirs: Vec<PathBuf>,
 }
 
@@ -120,12 +121,11 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
                 continue;
             }
         };
+        let resolved_path_text = contract_path_string(&resolved_path);
+        let discovered_path_text = contract_path_string(&discovered_path);
         files.push(DiscoveredFileOut {
-            file_identity: format!(
-                "bootstrap:{}",
-                resolved_path.to_string_lossy().to_lowercase()
-            ),
-            path: discovered_path.to_string_lossy().to_string(),
+            file_identity: format!("bootstrap:{}", resolved_path_text.to_lowercase()),
+            path: discovered_path_text,
             extension: lower_extension(&discovered_path),
             modified_at: modified_naive.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
             size_bytes,
@@ -140,8 +140,16 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
 fn resolve_excluded_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
     paths
         .iter()
+        .filter(|path| !path.as_os_str().is_empty())
         .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
         .collect()
+}
+
+fn deserialize_optional_path_list<'de, D>(deserializer: D) -> Result<Vec<PathBuf>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Option::<Vec<PathBuf>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 fn is_within_date_range(
@@ -167,6 +175,26 @@ fn absolute_discovered_path(path: &Path) -> io::Result<PathBuf> {
         return Ok(path.to_path_buf());
     }
     Ok(std::env::current_dir()?.join(path))
+}
+
+fn contract_path_string(path: &Path) -> String {
+    normalize_windows_verbatim_prefix(path.to_string_lossy().as_ref())
+}
+
+#[cfg(windows)]
+fn normalize_windows_verbatim_prefix(value: &str) -> String {
+    if let Some(stripped) = value.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{stripped}");
+    }
+    if let Some(stripped) = value.strip_prefix(r"\\?\") {
+        return stripped.to_string();
+    }
+    value.to_string()
+}
+
+#[cfg(not(windows))]
+fn normalize_windows_verbatim_prefix(value: &str) -> String {
+    value.to_string()
 }
 
 fn has_allowed_extension(file_name_lower: &str, allowed_extensions: &[String]) -> bool {
@@ -250,10 +278,12 @@ fn build_source_version(mtime_ns: u128, size_bytes: u64) -> String {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     struct TempFixture {
         root: PathBuf,
     }
 
+    #[cfg(unix)]
     impl TempFixture {
         fn new(name: &str) -> Self {
             let unique = format!(
@@ -274,6 +304,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for TempFixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
@@ -305,6 +336,25 @@ mod tests {
             Path::new("/work/keep"),
             &[PathBuf::from("/work/skip")]
         ));
+    }
+
+    #[test]
+    fn discovery_request_defaults_missing_or_null_excluded_dirs() {
+        let base = serde_json::json!({
+            "work_dir": "/work",
+            "start_date": "2026-05-25",
+            "end_date": "2026-05-25",
+            "allowed_extensions": [".md"],
+            "ignored_patterns": []
+        });
+
+        let missing: DiscoveryRequest = serde_json::from_value(base.clone()).unwrap();
+        let mut with_null = base;
+        with_null["excluded_dirs"] = serde_json::Value::Null;
+        let null_value: DiscoveryRequest = serde_json::from_value(with_null).unwrap();
+
+        assert!(missing.excluded_dirs.is_empty());
+        assert!(null_value.excluded_dirs.is_empty());
     }
 
     #[test]

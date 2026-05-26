@@ -64,6 +64,32 @@ def test_bootstrap_full_scan_skips_files_outside_date_range(tmp_path: Path):
     assert files == []
 
 
+@pytest.mark.parametrize("excluded_dirs", [None, ""])
+def test_bootstrap_full_scan_treats_empty_excluded_dirs_as_empty_list(
+    tmp_path: Path,
+    excluded_dirs,
+):
+    """discovery 边界应容忍空排除目录，不能把 None 或空字符串传成有效路径。"""
+    work_dir = tmp_path / "work"
+    work_dir.mkdir()
+    sample = work_dir / "report.md"
+    sample.write_text("hello", encoding="utf-8")
+
+    discovery = FileDiscoveryService(
+        work_dir=work_dir,
+        scanner_cfg={
+            "allowed_extensions": [".md"],
+            "ignored_patterns": [],
+            "excluded_dirs": excluded_dirs,
+            "discovery_backend": "python",
+        },
+    )
+
+    [item] = discovery.bootstrap_full_scan(date.today(), date.today())
+
+    assert item.path == sample
+
+
 def test_bootstrap_full_scan_returns_discovered_file_metadata(tmp_path: Path):
     """启动发现应返回可写入库存表的文件元数据。"""
     work_dir = tmp_path / "work"
@@ -120,6 +146,8 @@ def test_bootstrap_full_scan_uses_rust_backend_when_configured(
 
     def fake_run(*args, **kwargs):
         calls.append((args, kwargs))
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "strict"
         return SimpleNamespace(
             returncode=0,
             stdout=json.dumps(payload),

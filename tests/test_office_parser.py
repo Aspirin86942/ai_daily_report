@@ -34,11 +34,15 @@ def test_rust_runner_returns_file_context_from_valid_payload(tmp_path, monkeypat
 
     completed = SimpleNamespace(
         returncode=0,
-        stdout=(
-            '{"file_path":"'
-            + str(sample)
-            + '","file_type":".xlsx","content":"ok","error":null,'
-            '"parser_backend":"rust_office_oxide_v1","truncated":false}'
+        stdout=json.dumps(
+            {
+                "file_path": str(sample),
+                "file_type": ".xlsx",
+                "content": "ok",
+                "error": None,
+                "parser_backend": "rust_office_oxide_v1",
+                "truncated": False,
+            }
         ),
         stderr="",
     )
@@ -46,6 +50,8 @@ def test_rust_runner_returns_file_context_from_valid_payload(tmp_path, monkeypat
     def fake_run(*args, **kwargs):
         assert str(args[0][0]).endswith("ai-daily-office-parser")
         assert kwargs["timeout"] == 12.0
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "strict"
         assert '"path": "' in kwargs["input"]
         assert '"file_type": ".xlsx"' in kwargs["input"]
         return completed

@@ -47,6 +47,11 @@ def _mask_api_key(api_key: str) -> str:
     return f"{api_key[:10]}..."
 
 
+def _relative_display_path(path: Path, root: Path) -> str:
+    """诊断输出统一使用 /，避免 Windows 反斜杠影响测试和复制排查。"""
+    return path.relative_to(root).as_posix()
+
+
 def _append_project_file_checks(result: HealthCheckResult, project_root: Path) -> None:
     """检查项目基础文件。
 
@@ -59,11 +64,13 @@ def _append_project_file_checks(result: HealthCheckResult, project_root: Path) -
     secrets_file = config_dir / ".secrets.yaml"
 
     if not settings_file.exists():
-        result.errors.append(f"缺少配置文件: {settings_file.relative_to(project_root)}")
+        result.errors.append(
+            f"缺少配置文件: {_relative_display_path(settings_file, project_root)}"
+        )
 
     if not secrets_file.exists():
         result.warnings.append(
-            f"缺少敏感配置文件: {secrets_file.relative_to(project_root)} "
+            f"缺少敏感配置文件: {_relative_display_path(secrets_file, project_root)} "
             "(如已通过环境变量配置 API Key，可忽略)"
         )
 
@@ -72,12 +79,14 @@ def _append_project_file_checks(result: HealthCheckResult, project_root: Path) -
         template_path = templates_dir / template_name
         if not template_path.exists():
             result.errors.append(
-                f"缺少模板文件: {template_path.relative_to(project_root)}"
+                f"缺少模板文件: {_relative_display_path(template_path, project_root)}"
             )
 
     data_dir = project_root / "data"
     if not data_dir.exists():
-        result.warnings.append(f"数据目录不存在: {data_dir.relative_to(project_root)} (将自动创建)")
+        result.warnings.append(
+            f"数据目录不存在: {_relative_display_path(data_dir, project_root)} (将自动创建)"
+        )
 
 
 def _resolve_provider_key(cfg: Any, provider: str) -> tuple[str, str]:

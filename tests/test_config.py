@@ -152,6 +152,35 @@ def test_scanner_config_passes_excluded_dirs_as_builtin_list():
     assert isinstance(scanner_config["excluded_dirs"], list)
 
 
+def test_scanner_config_normalizes_empty_excluded_dirs_to_list(tmp_path):
+    """YAML 空 excluded_dirs 应按空列表处理，避免 Rust discovery 收到 null。"""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.linux.yaml").write_text(
+        "\n".join(
+            [
+                "scanner:",
+                "  allowed_extensions:",
+                "    - .md",
+                "  ignored_patterns: []",
+                "  excluded_dirs:",
+                "  max_workers: 1",
+                "  excel_max_rows: 50",
+                "  pdf_max_pages: 5",
+                "  text_max_chars: 6000",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = object.__new__(Config)
+    cfg._settings = Config._build_settings(config_dir, system_name="Linux")
+
+    scanner_config = cfg.scanner_config
+
+    assert scanner_config["excluded_dirs"] == []
+    assert isinstance(scanner_config["excluded_dirs"], list)
+
+
 def test_scanner_config_passes_direct_text_max_bytes_when_present():
     """direct_text_max_bytes 是扫描 lane 安全阈值，应从 settings 透传给 scanner。"""
     cfg = object.__new__(Config)

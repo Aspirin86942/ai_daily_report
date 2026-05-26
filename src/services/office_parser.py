@@ -80,6 +80,8 @@ class RustOfficeParserRunner:
                 [str(self._resolve_binary_path())],
                 input=json.dumps(request, ensure_ascii=False, indent=2),
                 text=True,
+                encoding="utf-8",
+                errors="strict",
                 capture_output=True,
                 timeout=float(timeout_seconds),
                 check=False,

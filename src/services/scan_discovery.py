@@ -50,12 +50,16 @@ class RustDiscoveryRunner:
             "end_date": end_date.isoformat(),
             "allowed_extensions": self.scanner_cfg["allowed_extensions"],
             "ignored_patterns": self.scanner_cfg["ignored_patterns"],
-            "excluded_dirs": self.scanner_cfg.get("excluded_dirs", []),
+            "excluded_dirs": _normalize_excluded_dirs(
+                self.scanner_cfg.get("excluded_dirs", [])
+            ),
         }
         completed = subprocess.run(
             [str(self._resolve_binary_path())],
             input=json.dumps(request, ensure_ascii=False),
             text=True,
+            encoding="utf-8",
+            errors="strict",
             capture_output=True,
             timeout=float(self.scanner_cfg.get("discovery_timeout_seconds", 30)),
             check=False,
@@ -231,7 +235,9 @@ class FileDiscoveryService:
         end_dt = datetime.combine(end_date, datetime.max.time())
 
         files: list[DiscoveredFile] = []
-        excluded_dirs = self.scanner_cfg.get("excluded_dirs", [])
+        excluded_dirs = _normalize_excluded_dirs(
+            self.scanner_cfg.get("excluded_dirs", [])
+        )
         excluded_paths = [Path(directory).resolve() for directory in excluded_dirs]
 
         for root, _, filenames in os.walk(self.work_dir):
@@ -296,3 +302,25 @@ class FileDiscoveryService:
             fnmatch.fnmatch(filename_lower, str(pattern).lower())
             for pattern in self.scanner_cfg["ignored_patterns"]
         )
+
+
+def _normalize_excluded_dirs(value: object) -> list[str]:
+    """在 discovery 边界兜底清洗空排除目录，避免空值被当成路径。"""
+    if value is None:
+        return []
+    if isinstance(value, (str, os.PathLike)):
+        item = str(value).strip()
+        return [item] if item else []
+
+    result: list[str] = []
+    try:
+        iterator = iter(value)  # type: ignore[arg-type]
+    except TypeError:
+        item = str(value).strip()
+        return [item] if item else []
+
+    for item in iterator:
+        item_text = str(item).strip()
+        if item_text:
+            result.append(item_text)
+    return result

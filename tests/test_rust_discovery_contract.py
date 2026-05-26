@@ -12,10 +12,17 @@ import pytest
 from src.services.scan_discovery import FileDiscoveryService
 
 
-RUST_DISCOVERY_BIN = (
-    Path(__file__).resolve().parents[1]
-    / "rust/discovery/target/release/ai-daily-discovery"
-)
+def _rust_discovery_bin() -> Path:
+    binary = (
+        Path(__file__).resolve().parents[1]
+        / "rust/discovery/target/release/ai-daily-discovery"
+    )
+    if os.name == "nt":
+        return binary.with_suffix(".exe")
+    return binary
+
+
+RUST_DISCOVERY_BIN = _rust_discovery_bin()
 SCAN_DATE = date(2026, 5, 25)
 SCAN_TIMESTAMP = datetime(2026, 5, 25, 12, 0, 0).timestamp()
 
@@ -42,10 +49,13 @@ def test_rust_discovery_matches_python_backend_for_fixture(
 
     keep_md = included_dir / "keep.MD"
     keep_txt = included_dir / "note.txt"
+    keep_unicode = included_dir / "中文报告.MD"
     keep_md.write_text("keep", encoding="utf-8")
     _touch_scan_date(keep_md)
     keep_txt.write_text("note", encoding="utf-8")
     _touch_scan_date(keep_txt)
+    keep_unicode.write_text("unicode", encoding="utf-8")
+    _touch_scan_date(keep_unicode)
     ignored_draft = included_dir / "~$draft.md"
     ignored_tmp = included_dir / "scratch.tmp"
     excluded_file = excluded_dir / "blocked.md"

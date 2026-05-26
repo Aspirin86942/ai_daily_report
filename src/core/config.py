@@ -86,6 +86,25 @@ class Config:
             return [Config._to_builtin_value(item) for item in value]
         return value
 
+    @staticmethod
+    def _to_string_list(value: Any) -> list[str]:
+        """把可选路径列表归一化，避免 YAML 空值把 null 传到下游 Rust。"""
+        value = Config._to_builtin_value(value)
+        if value is None:
+            return []
+        if isinstance(value, str):
+            item = value.strip()
+            return [item] if item else []
+        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
+            # 空字符串路径会被解析成当前目录，必须在配置边界过滤掉。
+            return [
+                item_text
+                for item in value
+                if (item_text := str(item).strip())
+            ]
+        item = str(value).strip()
+        return [item] if item else []
+
     @property
     def work_dir(self) -> Path:
         """工作目录"""
@@ -129,7 +148,7 @@ class Config:
             "ignored_patterns": self._to_builtin_value(
                 self._settings.scanner.ignored_patterns
             ),
-            "excluded_dirs": self._to_builtin_value(
+            "excluded_dirs": self._to_string_list(
                 getattr(self._settings.scanner, "excluded_dirs", [])
             ),
             "max_workers": self._settings.scanner.max_workers,
