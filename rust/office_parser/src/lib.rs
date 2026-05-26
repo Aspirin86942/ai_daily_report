@@ -1,4 +1,4 @@
-use quick_xml::events::{BytesStart, BytesText, Event};
+use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
@@ -287,6 +287,50 @@ mod tests {
         assert!(!context.content.contains("row-over-budget"));
         assert!(!context.content.contains("second-sheet-over-budget"));
         assert!(context.truncated);
+    }
+
+    #[test]
+    fn xlsx_decodes_inline_string_numeric_character_references() {
+        let mut parts = minimal_xlsx_parts();
+        parts[3] = (
+            "xl/worksheets/sheet1.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>&#39033;&#30446;</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>&#29366;&#24577;</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"><is><t>Rust XLSX &#20013;&#25991;</t></is></c>
+      <c r="B2" t="inlineStr"><is><t>&#23436;&#25104;</t></is></c>
+    </row>
+  </sheetData>
+</worksheet>"#,
+        );
+        let path = write_test_xlsx(&parts);
+        let mut limits = BTreeMap::new();
+        limits.insert("excel_max_sheets".to_string(), serde_json::json!(1));
+        limits.insert("excel_max_rows".to_string(), serde_json::json!(2));
+        limits.insert("excel_max_columns".to_string(), serde_json::json!(2));
+        limits.insert(
+            "document_excerpt_max_chars".to_string(),
+            serde_json::json!(2000),
+        );
+        let request = OfficeParseRequest {
+            file_path: path.clone(),
+            file_type: ".xlsx".to_string(),
+            limits,
+            parser_backend: RUST_OFFICE_BACKEND.to_string(),
+        };
+
+        let context = parse_office_file(&request);
+
+        std::fs::remove_file(path).ok();
+        assert_eq!(context.error, None);
+        assert_eq!(context.parser_backend, RUST_XLSX_BOUNDED_BACKEND);
+        assert!(context.content.contains("| 项目 | 状态 |"));
+        assert!(context.content.contains("| Rust XLSX 中文 | 完成 |"));
     }
 
     #[test]
@@ -612,6 +656,13 @@ fn parse_sheet_bounded<R: Read + Seek>(
                     }
                 }
             }
+            Event::GeneralRef(e) => {
+                if let Some(cell) = current_cell.as_mut() {
+                    if cell.capture && (cell.in_value || cell.in_text) {
+                        cell.text.push_str(&unescape_general_ref(&e)?);
+                    }
+                }
+            }
             Event::Eof => break,
             _ => {}
         }
@@ -711,6 +762,11 @@ fn parse_needed_shared_strings<R: Read + Seek>(
             Event::Text(e) => {
                 if in_si && in_text {
                     current_text.push_str(&unescape_text(&e)?);
+                }
+            }
+            Event::GeneralRef(e) => {
+                if in_si && in_text {
+                    current_text.push_str(&unescape_general_ref(&e)?);
                 }
             }
             Event::Eof => break,
@@ -891,4 +947,14 @@ fn unescape_text(e: &BytesText<'_>) -> Result<String, String> {
     quick_xml::escape::unescape(&decoded)
         .map(|value| value.into_owned())
         .map_err(|error| format!("XML text unescape error: {error}"))
+}
+
+fn unescape_general_ref(e: &BytesRef<'_>) -> Result<String, String> {
+    let decoded = e
+        .decode()
+        .map_err(|error| format!("XML reference decode error: {error}"))?;
+    let wrapped = format!("&{decoded};");
+    quick_xml::escape::unescape(&wrapped)
+        .map(|value| value.into_owned())
+        .map_err(|error| format!("XML reference unescape error: {error}"))
 }

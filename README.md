@@ -146,7 +146,7 @@ benchmark 报告中的 `discovery_backend` 字段用于确认本轮配置；如�
 
 ### Rust Office Parser Backend
 
-Office 文件默认优先使用 Rust `office_oxide` parser backend；如果 Rust CLI 缺失、执行失败或输出契约校验失败，会按配置回退到 Python backend。超时默认直接作为解析失败返回；只有显式启用 `office_fallback_after_timeout: true` 时，才会在 Rust 超时后继续尝试 Python fallback。
+Office 文件默认优先使用 Rust parser CLI；如果 Rust CLI 缺失、执行失败或输出契约校验失败，会按配置回退到 Python backend。超时默认直接作为解析失败返回；只有显式启用 `office_fallback_after_timeout: true` 时，才会在 Rust 超时后继续尝试 Python fallback。
 
 ```yaml
 scanner:
@@ -169,9 +169,9 @@ cargo test
 cargo build --release
 ```
 
-默认扫描范围不会自动加入 `.doc` / `.ppt`。如需处理 legacy Office 文件，应先确认真实样本和 fallback 行为，再显式加入 `scanner.allowed_extensions`，避免把未验证的旧格式文件带入常规扫描。
+`.xlsx` 在 Rust CLI 内走专用 `rust_xlsx_bounded_v1` 有界预览路径，只读取配置预算内的 sheet、行、列和字符数；`.docx` / `.pptx` 继续走 `rust_office_oxide_v1`。默认扫描范围不会自动加入 `.doc` / `.ppt`。如需处理 legacy Office 文件，应先确认真实样本和 fallback 行为，再显式加入 `scanner.allowed_extensions`，避免把未验证的旧格式文件带入常规扫描。
 
-benchmark 报告中的 `parser_backend`、`attempted_backend`、`fallback_backend`、`fallback_reason` 字段用于确认 Rust 是否成功解析，或是否已回退到 Python backend。
+benchmark 报告中的 `parser_backend`、`attempted_backend`、`fallback_backend`、`fallback_reason` 字段用于确认 Rust 是否成功解析，或是否已回退到 Python backend。看到 `.xlsx` 的 `parser_backend` 为 `rust_xlsx_bounded_v1` 是当前预期行为，不表示脱离 Rust Office parser CLI。
 
 ### `config/.secrets.yaml`
 

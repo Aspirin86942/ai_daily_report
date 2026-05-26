@@ -12,13 +12,14 @@ FileScanner
        -> stable parser profile for cache keys
   -> parser lanes
        -> light_text_v1 for text-like files
-       -> rust_office_oxide_v1 for Office files, with Python fallback
+       -> rust_xlsx_bounded_v1 for .xlsx previews
+       -> rust_office_oxide_v1 for other Office files, with Python fallback
        -> pdf_text_v1 for PDF files
   -> ScanIndexStore
        -> inventory, parse cache, metrics, reparse details
 ```
 
-The scanner separates parser backend from execution lane. `parser_backend` describes who produced the content; `worker_lane` describes where it ran. Office parsing can be counted as subprocess work while still reporting `rust_office_oxide_v1` as the parser backend.
+The scanner separates parser backend from execution lane. `parser_backend` describes who produced the content; `worker_lane` describes where it ran. Office parsing can be counted as subprocess work while still reporting `rust_xlsx_bounded_v1` or `rust_office_oxide_v1` as the parser backend.
 
 ## Discovery Backend
 
@@ -68,13 +69,13 @@ cargo build --release
 
 Behavior:
 
-- `.docx`, `.xlsx`, and `.pptx` default to the Rust `office_oxide` CLI.
+- `.xlsx` uses the Rust `rust_xlsx_bounded_v1` fast path inside the Office parser CLI. It reads only the configured sheet, row, column, and character budgets instead of converting the whole workbook before truncation, and handles inline/shared strings used by common `openpyxl` files.
+- `.docx` and `.pptx` default to the Rust `office_oxide` path and report `rust_office_oxide_v1`.
 - Rust start failures, non-zero exits, invalid JSON, and invalid `FileContext` payloads can fall back to Python.
 - Rust timeout is treated as a parse failure by default. Enable `office_fallback_after_timeout: true` only if getting slower fallback content is more important than keeping a strict per-file budget.
+- Deterministic bad `.xlsx` ZIP errors from `rust_xlsx_bounded_v1` skip Python fallback so warm scans do not repeatedly pay for a slow failure path.
 - `.doc` and `.ppt` are not in the default extension set. Enable legacy extensions only after testing real samples.
 - `.xls` keeps the Python Office fallback path available because old binary Excel behavior is less predictable through the Rust path.
-
-Known limitation: current `office_oxide` can silently miss Chinese text from some `openpyxl` inline-string `.xlsx` files. The contract test documents this with a sharedStrings fixture rewrite; do not remove that note without verifying the upstream behavior.
 
 ## Cache Profile
 
@@ -114,6 +115,8 @@ Read these fields in the output:
 - `reparse_details[].attempted_backend` shows the first Office backend attempted.
 - `reparse_details[].fallback_backend` and `fallback_reason` show whether Python fallback was used.
 - `rust_duration_ms` and `fallback_duration_ms` split Rust and fallback parser cost.
+
+For `.xlsx`, `parser_backend_summary.by_extension[".xlsx"]` should normally show `rust_xlsx_bounded_v1` when the Rust Office parser CLI is available.
 
 ## Verification
 

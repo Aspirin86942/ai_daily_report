@@ -9,7 +9,7 @@
 - 报告结构化输出：JSON + Pydantic 校验
 - 历史数据默认存储：SQLite（`data/db/reports.sqlite3`）
 - 支持 `db`（历史聚合）与 `scan`（文件扫描）两种数据来源
-- scan 路径默认使用 Rust discovery，并对 Office 文件优先使用 Rust `office_oxide` parser；Python fallback 保留用于正确性和可审计性
+- scan 路径默认使用 Rust discovery，并对 Office 文件优先使用 Rust parser CLI；其中 `.xlsx` 走 `rust_xlsx_bounded_v1` 有界预览，`.docx` / `.pptx` 走 `rust_office_oxide_v1`，Python fallback 保留用于正确性和可审计性
 
 ## Commands
 
@@ -103,7 +103,7 @@ rust/
 - LLM 输出：使用 JSON 模式 + Pydantic 严格校验
 - 扫描策略：`summary_mode` + `total_max_chars` 控制上下文长度
 - Scanner backend：`parser_backend` 表示内容由谁解析，`worker_lane` 表示执行通道，不能混用
-- Office parser：默认 `rust_office_oxide_v1`；Rust 超时默认不 fallback，除非显式开启 `office_fallback_after_timeout`
+- Office parser：配置默认 `rust_office_oxide_v1`；`.xlsx` 在 Rust CLI 内报告 `rust_xlsx_bounded_v1` 有界预览；Rust 超时默认不 fallback，除非显式开启 `office_fallback_after_timeout`
 - Cache profile：backend、fallback、timeout、预算字段变化必须进入 `ScanPlanner` profile，避免复用旧解析缓存
 - 存储策略：SQLite 作为程序事实源，Markdown 作为阅读输出
 - 周边界：ISO 周（Monday-Sunday）

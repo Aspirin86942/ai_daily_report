@@ -38,7 +38,7 @@
 - `Decision`: 表示单个文件在一次 context run 中的策略选择和审计原因。
 - 产品讨论中可以把 scanner、parser、compressor 理解成“能力代理”，但代码命名优先使用 `Scheduler`、`Planner`、`Parser`、`Compressor`、`Store` 等确定性术语，避免把职责边界写虚。
 - Scanner backend changes must keep `parser_backend` separate from `worker_lane`; benchmark summaries should prove both the parser that produced content and the lane where it executed.
-- Office parsing defaults to `rust_office_oxide_v1` with Python fallback. Keep `office_fallback_after_timeout` false unless the user explicitly chooses slower timeout fallback.
+- Office parser config defaults to `rust_office_oxide_v1` with Python fallback. Inside the Rust CLI, `.xlsx` reports the dedicated bounded preview backend `rust_xlsx_bounded_v1`; `.docx` / `.pptx` continue to report `rust_office_oxide_v1`. Keep `office_fallback_after_timeout` false unless the user explicitly chooses slower timeout fallback.
 - Backend, fallback, timeout, and parser budget changes must be included in `ScanPlanner` parser profile keys to avoid stale parse cache reuse.
 
 ## Testing Guidelines
