@@ -14,6 +14,7 @@ from typing import Any
 from ..models.schemas import FileContext
 
 RUST_OFFICE_BACKEND = "rust_office_oxide_v1"
+RUST_XLSX_BOUNDED_BACKEND = "rust_xlsx_bounded_v1"
 PYTHON_OFFICE_BACKEND = "python_office_v1"
 PYTHON_SHAREPOINT_TEXT_BACKEND = "python_sharepoint_text_v1"
 NOT_PARSED_BACKEND = "not_parsed"
@@ -186,10 +187,11 @@ def parse_office_with_fallback(
         timeout_seconds,
     )
     if rust_context.error is None:
+        attempted_backend = rust_context.parser_backend or RUST_OFFICE_BACKEND
         return OfficeParseOutcome(
             context=rust_context,
             audit=OfficeParseAudit(
-                attempted_backend=RUST_OFFICE_BACKEND,
+                attempted_backend=attempted_backend,
                 rust_duration_ms=rust_duration_ms,
             ),
         )
@@ -198,12 +200,17 @@ def parse_office_with_fallback(
     fallback_after_timeout = bool(scanner_cfg.get("office_fallback_after_timeout", False))
     fallback_reason = rust_context.error or ""
     is_timeout = fallback_reason.startswith("RUST_OFFICE_TIMEOUT:")
+    attempted_backend = rust_context.parser_backend or RUST_OFFICE_BACKEND
 
-    if not fallback_enabled or (is_timeout and not fallback_after_timeout):
+    if (
+        not fallback_enabled
+        or (is_timeout and not fallback_after_timeout)
+        or _should_skip_python_fallback(normalized_type, rust_context)
+    ):
         return OfficeParseOutcome(
             context=rust_context,
             audit=OfficeParseAudit(
-                attempted_backend=RUST_OFFICE_BACKEND,
+                attempted_backend=attempted_backend,
                 fallback_reason=fallback_reason,
                 rust_duration_ms=rust_duration_ms,
             ),
@@ -390,9 +397,12 @@ def _validate_rust_payload_context(
             f"file_type mismatch: expected {expected_file_type!r}, "
             f"got {context.file_type!r}"
         )
-    if context.parser_backend != RUST_OFFICE_BACKEND:
+    allowed_backends = {RUST_OFFICE_BACKEND}
+    if expected_file_type == ".xlsx":
+        allowed_backends.add(RUST_XLSX_BOUNDED_BACKEND)
+    if context.parser_backend not in allowed_backends:
         raise ValueError(
-            f"parser_backend mismatch: expected {RUST_OFFICE_BACKEND!r}, "
+            f"parser_backend mismatch: expected one of {sorted(allowed_backends)!r}, "
             f"got {context.parser_backend!r}"
         )
 
@@ -410,6 +420,19 @@ def _error_context(file_path: Path, file_type: str, error: str) -> FileContext:
 
 def _elapsed_ms(started_at: float) -> int:
     return max(0, int((perf_counter() - started_at) * 1000))
+
+
+def _should_skip_python_fallback(
+    normalized_type: str,
+    rust_context: FileContext,
+) -> bool:
+    """确定性坏 xlsx 不再进入 Python fallback，避免 warm scan 反复慢失败。"""
+    if normalized_type != ".xlsx":
+        return False
+    if rust_context.parser_backend != RUST_XLSX_BOUNDED_BACKEND:
+        return False
+    error = rust_context.error or ""
+    return error.startswith("RUST_XLSX_BOUNDED_PARSE_FAILED: ZIP error:")
 
 
 def _positive_limit(limits: Mapping[str, Any], key: str, default: int) -> int:

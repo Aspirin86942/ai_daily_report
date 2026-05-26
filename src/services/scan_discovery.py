@@ -199,6 +199,8 @@ class FileDiscoveryService:
         end_date: date,
     ) -> List[DiscoveredFile]:
         """执行一次完整文件发现，并返回可落库存的文件元数据。"""
+        self._validate_work_dir()
+
         backend = self.scanner_cfg.get("discovery_backend", "rust")
         if backend == "rust":
             try:
@@ -224,6 +226,18 @@ class FileDiscoveryService:
         if backend == "python":
             return self._bootstrap_full_scan_python(start_date, end_date)
         raise ValueError(f"Unsupported discovery_backend: {backend}")
+
+    def _validate_work_dir(self) -> None:
+        """扫描根目录不可达时直接失败，避免把配置/挂载问题伪装成空扫描。"""
+        try:
+            if not self.work_dir.exists():
+                raise FileNotFoundError(f"work_dir does not exist: {self.work_dir}")
+            if not self.work_dir.is_dir():
+                raise NotADirectoryError(f"work_dir is not a directory: {self.work_dir}")
+        except OSError as exc:
+            if isinstance(exc, (FileNotFoundError, NotADirectoryError)):
+                raise
+            raise OSError(f"work_dir is not accessible: {self.work_dir}: {exc}") from exc
 
     def _bootstrap_full_scan_python(
         self,

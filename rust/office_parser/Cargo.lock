@@ -13,8 +13,10 @@ name = "ai-daily-office-parser"
 version = "0.1.0"
 dependencies = [
  "office_oxide",
+ "quick-xml",
  "serde",
  "serde_json",
+ "zip",
 ]
 
 [[package]]

@@ -107,11 +107,14 @@ def _append_runtime_config_checks(result: HealthCheckResult, cfg: Any) -> None:
     """
 
     provider = str(getattr(cfg, "llm_provider", "")).strip().lower()
+    work_dir = Path(getattr(cfg, "work_dir"))
     result.info["LLM Provider"] = provider
-    result.info["工作目录"] = str(getattr(cfg, "work_dir"))
+    result.info["工作目录"] = str(work_dir)
     result.info["LLM 模型"] = str(getattr(cfg, "llm_config")["model_id"])
     result.info["最大并发"] = str(getattr(cfg, "scanner_config")["max_workers"])
     result.info["SQLite DB"] = str(Path(getattr(cfg, "db_dir")) / "reports.sqlite3")
+
+    _append_work_dir_check(result, work_dir)
 
     if provider not in {"deepseek", "openai"}:
         result.errors.append(
@@ -125,6 +128,19 @@ def _append_runtime_config_checks(result: HealthCheckResult, cfg: Any) -> None:
         return
 
     result.info["API Key"] = _mask_api_key(api_key)
+
+
+def _append_work_dir_check(result: HealthCheckResult, work_dir: Path) -> None:
+    """校验扫描根目录，避免路径不可达被后续扫描误判为空结果。"""
+
+    try:
+        if not work_dir.exists():
+            result.errors.append(f"工作目录不存在: {work_dir}")
+            return
+        if not work_dir.is_dir():
+            result.errors.append(f"工作目录不是目录: {work_dir}")
+    except OSError as exc:
+        result.errors.append(f"工作目录不可访问: {work_dir} ({exc})")
 
 
 def _append_dependency_checks(result: HealthCheckResult) -> None:

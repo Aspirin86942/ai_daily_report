@@ -29,6 +29,8 @@ pub struct DiscoveredFileOut {
 }
 
 pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFileOut>> {
+    validate_work_dir(&request.work_dir)?;
+
     let ignored_patterns = compile_patterns(&request.ignored_patterns)?;
     let excluded_dirs = resolve_excluded_dirs(&request.excluded_dirs);
     let mut files = Vec::new();
@@ -135,6 +137,26 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
 
     files.sort_by(|left, right| left.path.cmp(&right.path));
     Ok(files)
+}
+
+fn validate_work_dir(work_dir: &Path) -> io::Result<()> {
+    let metadata = fs::metadata(work_dir).map_err(|error| {
+        let message = if error.kind() == io::ErrorKind::NotFound {
+            format!("work_dir does not exist: {}", work_dir.display())
+        } else {
+            format!("work_dir is not accessible: {}: {error}", work_dir.display())
+        };
+        io::Error::new(error.kind(), message)
+    })?;
+
+    if !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("work_dir is not a directory: {}", work_dir.display()),
+        ));
+    }
+
+    Ok(())
 }
 
 fn resolve_excluded_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
@@ -357,6 +379,41 @@ mod tests {
 
         assert!(missing.excluded_dirs.is_empty());
         assert!(null_value.excluded_dirs.is_empty());
+    }
+
+    #[test]
+    fn discover_files_rejects_missing_work_dir() {
+        let today = Local::now().date_naive();
+        let missing = std::env::temp_dir().join(format!(
+            "ai_daily_discovery_missing_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        if missing.exists() {
+            std::fs::remove_dir_all(&missing).unwrap();
+        }
+        let request = DiscoveryRequest {
+            work_dir: missing.clone(),
+            start_date: today,
+            end_date: today,
+            allowed_extensions: vec![".md".to_string()],
+            ignored_patterns: vec![],
+            excluded_dirs: vec![],
+        };
+
+        let error = match discover_files(&request) {
+            Ok(_) => panic!("missing work_dir must not be treated as an empty scan"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            error.to_string().contains("work_dir does not exist"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

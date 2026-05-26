@@ -10,6 +10,7 @@ from src.services.office_parser import (
     PYTHON_OFFICE_BACKEND,
     PYTHON_SHAREPOINT_TEXT_BACKEND,
     RUST_OFFICE_BACKEND,
+    RUST_XLSX_BOUNDED_BACKEND,
     OfficeParseAudit,
     RustOfficeParserRunner,
     parse_office_with_fallback,
@@ -71,6 +72,39 @@ def test_rust_runner_returns_file_context_from_valid_payload(tmp_path, monkeypat
         truncated=False,
     )
     assert duration_ms >= 0
+
+
+def test_rust_runner_accepts_bounded_xlsx_backend_payload(tmp_path, monkeypatch):
+    sample = tmp_path / "report.xlsx"
+    sample.write_bytes(b"fake")
+    completed = SimpleNamespace(
+        returncode=0,
+        stdout=json.dumps(
+            {
+                "file_path": str(sample),
+                "file_type": ".xlsx",
+                "content": "# XLSX preview",
+                "error": None,
+                "parser_backend": RUST_XLSX_BOUNDED_BACKEND,
+                "truncated": True,
+            }
+        ),
+        stderr="",
+    )
+    monkeypatch.setattr(
+        "src.services.office_parser.subprocess.run",
+        lambda *args, **kwargs: completed,
+    )
+
+    context, _ = RustOfficeParserRunner("parser").parse(
+        sample,
+        ".xlsx",
+        {"document_excerpt_max_chars": 2000},
+        12,
+    )
+
+    assert context.parser_backend == RUST_XLSX_BOUNDED_BACKEND
+    assert context.truncated is True
 
 
 def test_rust_runner_returns_error_context_for_invalid_json(tmp_path, monkeypatch):
@@ -250,6 +284,56 @@ def test_parse_office_with_fallback_does_not_fallback_after_timeout_by_default(t
 
     assert outcome.context.error == "RUST_OFFICE_TIMEOUT: file parse exceeded 3s"
     assert outcome.audit.fallback_backend == ""
+
+
+def test_parse_office_with_fallback_skips_python_for_deterministic_bad_xlsx_zip(
+    tmp_path,
+):
+    sample = tmp_path / "bad.xlsx"
+    sample.write_bytes(b"not-a-zip")
+    rust_error = (
+        "RUST_XLSX_BOUNDED_PARSE_FAILED: "
+        "ZIP error: invalid Zip archive: Could not find EOCD"
+    )
+    rust_context = FileContext(
+        file_path=str(sample),
+        file_type=".xlsx",
+        content="",
+        error=rust_error,
+        parser_backend=RUST_XLSX_BOUNDED_BACKEND,
+        truncated=False,
+    )
+
+    class FakeRunner:
+        def parse(self, file_path, file_type, limits, timeout_seconds):
+            return rust_context, 6
+
+    def fail_python_fallback(file_path, file_type, limits):
+        pytest.fail("deterministic bad xlsx zip should not run Python fallback")
+
+    outcome = parse_office_with_fallback(
+        file_path=sample,
+        file_type=".xlsx",
+        limits={"document_excerpt_max_chars": 2000},
+        scanner_cfg={
+            "office_parser_backend": RUST_OFFICE_BACKEND,
+            "office_parser_fallback_enabled": True,
+            "office_parser_fallback_order": ["python_office_v1"],
+            "office_fallback_after_timeout": False,
+        },
+        timeout_seconds=12,
+        rust_runner=FakeRunner(),
+        python_fallback=fail_python_fallback,
+    )
+
+    assert outcome.context is rust_context
+    assert outcome.audit == OfficeParseAudit(
+        attempted_backend=RUST_XLSX_BOUNDED_BACKEND,
+        fallback_backend="",
+        fallback_reason=rust_error,
+        rust_duration_ms=6,
+        fallback_duration_ms=0,
+    )
 
 
 def test_parse_office_with_sharepoint_backend_uses_sharepoint_for_docx(

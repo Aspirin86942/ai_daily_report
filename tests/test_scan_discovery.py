@@ -64,6 +64,37 @@ def test_bootstrap_full_scan_skips_files_outside_date_range(tmp_path: Path):
     assert files == []
 
 
+def test_bootstrap_full_scan_rejects_missing_work_dir_before_backend(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """工作目录不可达时必须显式失败，不能伪装成空扫描。"""
+    missing_work_dir = tmp_path / "missing"
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append((args, kwargs))
+        return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+
+    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+
+    discovery = FileDiscoveryService(
+        work_dir=missing_work_dir,
+        scanner_cfg={
+            "allowed_extensions": [".md"],
+            "ignored_patterns": [],
+            "excluded_dirs": [],
+            "discovery_backend": "rust",
+            "rust_discovery_bin": "target/release/ai-daily-discovery",
+        },
+    )
+
+    with pytest.raises(FileNotFoundError, match="work_dir does not exist"):
+        discovery.bootstrap_full_scan(date.today(), date.today())
+
+    assert calls == []
+
+
 @pytest.mark.parametrize("excluded_dirs", [None, ""])
 def test_bootstrap_full_scan_treats_empty_excluded_dirs_as_empty_list(
     tmp_path: Path,

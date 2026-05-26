@@ -41,6 +41,7 @@ def test_collect_healthcheck_accepts_env_only_provider_key(tmp_path, monkeypatch
     )
     _write_templates(tmp_path)
     (tmp_path / "data").mkdir()
+    (tmp_path / "workspace").mkdir()
 
     monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [("rich", "rich")])
     monkeypatch.setattr(
@@ -59,6 +60,31 @@ def test_collect_healthcheck_accepts_env_only_provider_key(tmp_path, monkeypatch
     assert any("config/.secrets.yaml" in message for message in result.warnings)
     assert result.info["LLM Provider"] == "deepseek"
     assert result.info["API Key"] == "sk-test-12..."
+
+
+def test_collect_healthcheck_reports_missing_work_dir(tmp_path, monkeypatch):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / healthcheck.Config._settings_file_name()).write_text(
+        "llm:\n  provider: deepseek\n",
+        encoding="utf-8",
+    )
+    _write_templates(tmp_path)
+    (tmp_path / "data").mkdir()
+
+    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [("rich", "rich")])
+    monkeypatch.setattr(
+        healthcheck.importlib,
+        "import_module",
+        lambda module_name: object(),
+    )
+
+    result = healthcheck.collect_healthcheck(
+        project_root=tmp_path,
+        config_obj=_make_config("deepseek", "sk-test-123456", tmp_path),
+    )
+
+    assert f"工作目录不存在: {tmp_path / 'workspace'}" in result.errors
 
 
 def test_collect_healthcheck_reports_missing_provider_api_key(tmp_path, monkeypatch):
