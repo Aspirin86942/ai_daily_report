@@ -1,7 +1,9 @@
 # Python Wheel With Bundled Rust Binaries Design
 
-Status: APPROVED DESIGN, AWAITING SPEC REVIEW
+Status: ARCHIVED - NOT PLANNED FOR EXECUTION
 Date: 2026-05-26
+Archived Date: 2026-05-27
+Archive Note: User decided not to execute the Python wheel / bundled Rust binary release path now. Keep this design as reference material only.
 
 ## 目标
 

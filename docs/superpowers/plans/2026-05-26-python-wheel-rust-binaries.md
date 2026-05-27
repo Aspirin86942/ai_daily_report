@@ -1,5 +1,9 @@
 # Python Wheel With Bundled Rust Binaries Implementation Plan
 
+Status: ARCHIVED - DO NOT EXECUTE
+Archived Date: 2026-05-27
+Archive Note: User decided not to execute this packaging plan. Keep it as historical design context only; do not treat the checklist below as active implementation work unless the user explicitly reopens it.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Package the full `ai_daily_report` CLI as Linux and Windows wheels that include prebuilt Rust CLI binaries, so users can install from GitHub Release without Rust.
