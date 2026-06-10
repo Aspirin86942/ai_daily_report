@@ -6,6 +6,10 @@ import pytest
 
 from src.models.schemas import FileContext
 from src.services.office_parser import (
+    OFFICE_FAILURE_CONTRACT,
+    OFFICE_FAILURE_DETERMINISTIC,
+    OFFICE_FAILURE_ENVIRONMENT_UNAVAILABLE,
+    OFFICE_FAILURE_RECOVERABLE,
     OFFICE_RUST_FILE_TYPES,
     PYTHON_OFFICE_BACKEND,
     PYTHON_SHAREPOINT_TEXT_BACKEND,
@@ -220,7 +224,7 @@ def test_parse_office_with_fallback_uses_python_when_rust_fails(tmp_path):
             file_type=file_type,
             content="python fallback",
             error=None,
-            parser_backend="python_office_v1",
+            parser_backend=PYTHON_OFFICE_BACKEND,
             truncated=False,
         )
 
@@ -231,7 +235,7 @@ def test_parse_office_with_fallback_uses_python_when_rust_fails(tmp_path):
         scanner_cfg={
             "office_parser_backend": RUST_OFFICE_BACKEND,
             "office_parser_fallback_enabled": True,
-            "office_parser_fallback_order": ["python_office_v1"],
+            "office_parser_fallback_order": [PYTHON_OFFICE_BACKEND],
             "office_fallback_after_timeout": False,
         },
         timeout_seconds=12,
@@ -240,13 +244,12 @@ def test_parse_office_with_fallback_uses_python_when_rust_fails(tmp_path):
     )
 
     assert outcome.context.content == "python fallback"
-    assert outcome.audit == OfficeParseAudit(
-        attempted_backend=RUST_OFFICE_BACKEND,
-        fallback_backend="python_office_v1",
-        fallback_reason="RUST_OFFICE_PARSE_FAILED: bad zip",
-        rust_duration_ms=5,
-        fallback_duration_ms=0,
-    )
+    assert outcome.audit.attempted_backend == RUST_OFFICE_BACKEND
+    assert outcome.audit.fallback_backend == PYTHON_OFFICE_BACKEND
+    assert outcome.audit.fallback_reason == "RUST_OFFICE_PARSE_FAILED: bad zip"
+    assert outcome.audit.rust_duration_ms == 5
+    assert outcome.audit.fallback_duration_ms >= 0
+    assert outcome.audit.failure_class == OFFICE_FAILURE_RECOVERABLE
 
 
 def test_parse_office_with_fallback_does_not_fallback_after_timeout_by_default(tmp_path):
@@ -272,7 +275,7 @@ def test_parse_office_with_fallback_does_not_fallback_after_timeout_by_default(t
         scanner_cfg={
             "office_parser_backend": RUST_OFFICE_BACKEND,
             "office_parser_fallback_enabled": True,
-            "office_parser_fallback_order": ["python_office_v1"],
+            "office_parser_fallback_order": [PYTHON_OFFICE_BACKEND],
             "office_fallback_after_timeout": False,
         },
         timeout_seconds=3,
@@ -284,6 +287,7 @@ def test_parse_office_with_fallback_does_not_fallback_after_timeout_by_default(t
 
     assert outcome.context.error == "RUST_OFFICE_TIMEOUT: file parse exceeded 3s"
     assert outcome.audit.fallback_backend == ""
+    assert outcome.audit.failure_class == OFFICE_FAILURE_DETERMINISTIC
 
 
 def test_parse_office_with_fallback_skips_python_for_deterministic_bad_xlsx_zip(
@@ -318,7 +322,7 @@ def test_parse_office_with_fallback_skips_python_for_deterministic_bad_xlsx_zip(
         scanner_cfg={
             "office_parser_backend": RUST_OFFICE_BACKEND,
             "office_parser_fallback_enabled": True,
-            "office_parser_fallback_order": ["python_office_v1"],
+            "office_parser_fallback_order": [PYTHON_OFFICE_BACKEND],
             "office_fallback_after_timeout": False,
         },
         timeout_seconds=12,
@@ -333,7 +337,236 @@ def test_parse_office_with_fallback_skips_python_for_deterministic_bad_xlsx_zip(
         fallback_reason=rust_error,
         rust_duration_ms=6,
         fallback_duration_ms=0,
+        failure_class=OFFICE_FAILURE_DETERMINISTIC,
     )
+    assert outcome.audit.failure_class == OFFICE_FAILURE_DETERMINISTIC
+
+
+def test_parse_office_with_fallback_allows_timeout_fallback_when_enabled(tmp_path):
+    sample = tmp_path / "slow.xlsx"
+    sample.write_bytes(b"fake")
+    rust_context = FileContext(
+        file_path=str(sample),
+        file_type=".xlsx",
+        content="",
+        error="RUST_OFFICE_TIMEOUT: file parse exceeded 3s",
+        parser_backend=RUST_OFFICE_BACKEND,
+        truncated=False,
+    )
+
+    class FakeRunner:
+        def parse(self, file_path, file_type, limits, timeout_seconds):
+            return rust_context, 3
+
+    def fake_python_fallback(file_path, file_type, limits):
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="timeout fallback content",
+            error=None,
+            parser_backend=PYTHON_OFFICE_BACKEND,
+            truncated=False,
+        )
+
+    outcome = parse_office_with_fallback(
+        file_path=sample,
+        file_type=".xlsx",
+        limits={},
+        scanner_cfg={
+            "office_parser_backend": RUST_OFFICE_BACKEND,
+            "office_parser_fallback_enabled": True,
+            "office_parser_fallback_order": [PYTHON_OFFICE_BACKEND],
+            "office_fallback_after_timeout": True,
+        },
+        timeout_seconds=3,
+        rust_runner=FakeRunner(),
+        python_fallback=fake_python_fallback,
+    )
+
+    assert outcome.context.content == "timeout fallback content"
+    assert outcome.audit.failure_class == OFFICE_FAILURE_DETERMINISTIC
+    assert outcome.audit.fallback_reason == "RUST_OFFICE_TIMEOUT: file parse exceeded 3s"
+
+
+def test_parse_office_with_fallback_marks_start_failure_as_environment_unavailable(
+    tmp_path,
+):
+    sample = tmp_path / "report.docx"
+    sample.write_bytes(b"fake")
+    rust_context = FileContext(
+        file_path=str(sample),
+        file_type=".docx",
+        content="",
+        error="RUST_OFFICE_START_FAILED: no such file or directory",
+        parser_backend=RUST_OFFICE_BACKEND,
+        truncated=False,
+    )
+
+    class FakeRunner:
+        def parse(self, file_path, file_type, limits, timeout_seconds):
+            return rust_context, 4
+
+    def fake_python_fallback(file_path, file_type, limits):
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="python fallback",
+            error=None,
+            parser_backend=PYTHON_OFFICE_BACKEND,
+            truncated=False,
+        )
+
+    outcome = parse_office_with_fallback(
+        file_path=sample,
+        file_type=".docx",
+        limits={},
+        scanner_cfg={
+            "office_parser_backend": RUST_OFFICE_BACKEND,
+            "office_parser_fallback_enabled": True,
+            "office_parser_fallback_order": [PYTHON_OFFICE_BACKEND],
+            "office_fallback_after_timeout": False,
+        },
+        timeout_seconds=12,
+        rust_runner=FakeRunner(),
+        python_fallback=fake_python_fallback,
+    )
+
+    assert outcome.context.content == "python fallback"
+    assert outcome.audit.failure_class == OFFICE_FAILURE_ENVIRONMENT_UNAVAILABLE
+    assert outcome.audit.fallback_backend == PYTHON_OFFICE_BACKEND
+
+
+def test_parse_office_with_fallback_marks_invalid_payload_as_contract_failure(
+    tmp_path,
+):
+    sample = tmp_path / "report.pptx"
+    sample.write_bytes(b"fake")
+    rust_context = FileContext(
+        file_path=str(sample),
+        file_type=".pptx",
+        content="",
+        error="RUST_OFFICE_INVALID_PAYLOAD: parser_backend mismatch",
+        parser_backend=RUST_OFFICE_BACKEND,
+        truncated=False,
+    )
+
+    class FakeRunner:
+        def parse(self, file_path, file_type, limits, timeout_seconds):
+            return rust_context, 8
+
+    def fake_python_fallback(file_path, file_type, limits):
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="fallback content",
+            error=None,
+            parser_backend=PYTHON_OFFICE_BACKEND,
+            truncated=False,
+        )
+
+    outcome = parse_office_with_fallback(
+        file_path=sample,
+        file_type=".pptx",
+        limits={},
+        scanner_cfg={
+            "office_parser_backend": RUST_OFFICE_BACKEND,
+            "office_parser_fallback_enabled": True,
+            "office_parser_fallback_order": [PYTHON_OFFICE_BACKEND],
+            "office_fallback_after_timeout": False,
+        },
+        timeout_seconds=12,
+        rust_runner=FakeRunner(),
+        python_fallback=fake_python_fallback,
+    )
+
+    assert outcome.context.content == "fallback content"
+    assert outcome.audit.failure_class == OFFICE_FAILURE_CONTRACT
+
+
+def test_parse_office_with_fallback_marks_invalid_json_as_contract_failure(
+    tmp_path,
+):
+    sample = tmp_path / "report.docx"
+    sample.write_bytes(b"fake")
+    rust_context = FileContext(
+        file_path=str(sample),
+        file_type=".docx",
+        content="",
+        error="RUST_OFFICE_INVALID_JSON: line 1 column 1",
+        parser_backend=RUST_OFFICE_BACKEND,
+        truncated=False,
+    )
+
+    class FakeRunner:
+        def parse(self, file_path, file_type, limits, timeout_seconds):
+            return rust_context, 7
+
+    def fake_python_fallback(file_path, file_type, limits):
+        return FileContext(
+            file_path=str(file_path),
+            file_type=file_type,
+            content="fallback content",
+            error=None,
+            parser_backend=PYTHON_OFFICE_BACKEND,
+            truncated=False,
+        )
+
+    outcome = parse_office_with_fallback(
+        file_path=sample,
+        file_type=".docx",
+        limits={},
+        scanner_cfg={
+            "office_parser_backend": RUST_OFFICE_BACKEND,
+            "office_parser_fallback_enabled": True,
+            "office_parser_fallback_order": [PYTHON_OFFICE_BACKEND],
+            "office_fallback_after_timeout": False,
+        },
+        timeout_seconds=12,
+        rust_runner=FakeRunner(),
+        python_fallback=fake_python_fallback,
+    )
+
+    assert outcome.context.content == "fallback content"
+    assert outcome.audit.fallback_backend == PYTHON_OFFICE_BACKEND
+    assert outcome.audit.failure_class == OFFICE_FAILURE_CONTRACT
+
+
+def test_parse_office_with_fallback_marks_recoverable_parser_failure(tmp_path):
+    sample = tmp_path / "report.docx"
+    sample.write_bytes(b"fake")
+    rust_context = FileContext(
+        file_path=str(sample),
+        file_type=".docx",
+        content="",
+        error="RUST_OFFICE_PARSE_FAILED: unexpected parser error",
+        parser_backend=RUST_OFFICE_BACKEND,
+        truncated=False,
+    )
+
+    class FakeRunner:
+        def parse(self, file_path, file_type, limits, timeout_seconds):
+            return rust_context, 5
+
+    outcome = parse_office_with_fallback(
+        file_path=sample,
+        file_type=".docx",
+        limits={},
+        scanner_cfg={
+            "office_parser_backend": RUST_OFFICE_BACKEND,
+            "office_parser_fallback_enabled": False,
+            "office_parser_fallback_order": [PYTHON_OFFICE_BACKEND],
+            "office_fallback_after_timeout": False,
+        },
+        timeout_seconds=12,
+        rust_runner=FakeRunner(),
+        python_fallback=lambda file_path, file_type, limits: pytest.fail(
+            "fallback is disabled"
+        ),
+    )
+
+    assert outcome.context is rust_context
+    assert outcome.audit.failure_class == OFFICE_FAILURE_RECOVERABLE
+    assert outcome.audit.fallback_backend == ""
 
 
 def test_parse_office_with_sharepoint_backend_uses_sharepoint_for_docx(

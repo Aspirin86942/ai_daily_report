@@ -18,6 +18,11 @@ RUST_XLSX_BOUNDED_BACKEND = "rust_xlsx_bounded_v1"
 PYTHON_OFFICE_BACKEND = "python_office_v1"
 PYTHON_SHAREPOINT_TEXT_BACKEND = "python_sharepoint_text_v1"
 NOT_PARSED_BACKEND = "not_parsed"
+OFFICE_FAILURE_DETERMINISTIC = "deterministic"
+OFFICE_FAILURE_ENVIRONMENT_UNAVAILABLE = "environment_unavailable"
+OFFICE_FAILURE_CONTRACT = "contract_failure"
+OFFICE_FAILURE_RECOVERABLE = "recoverable_parser_failure"
+OFFICE_FALLBACK_POLICY_VERSION = "hybrid_v1"
 OFFICE_RUST_FILE_TYPES = {".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"}
 DEFAULT_RUST_OFFICE_PARSER_BIN = (
     "rust/office_parser/target/release/ai-daily-office-parser"
@@ -38,6 +43,7 @@ class OfficeParseAudit:
     fallback_reason: str = ""
     rust_duration_ms: int = 0
     fallback_duration_ms: int = 0
+    failure_class: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +157,66 @@ class RustOfficeParserRunner:
 PythonFallback = Callable[[Path, str, Mapping[str, Any]], FileContext]
 
 
+@dataclass(frozen=True, slots=True)
+class OfficeFallbackDecision:
+    failure_class: str
+    allow_fallback: bool
+    reason: str
+
+
+def classify_office_failure(
+    *,
+    file_type: str,
+    rust_backend: str,
+    rust_error: str,
+    scanner_cfg: Mapping[str, Any],
+) -> OfficeFallbackDecision:
+    fallback_enabled = bool(scanner_cfg.get("office_parser_fallback_enabled", True))
+    fallback_after_timeout = bool(scanner_cfg.get("office_fallback_after_timeout", False))
+    normalized_type = file_type.lower()
+
+    # 分类优先看 Rust error contract，避免 scanner benchmark 继续从文本原因里猜策略。
+    if rust_error.startswith("RUST_OFFICE_TIMEOUT:"):
+        return OfficeFallbackDecision(
+            failure_class=OFFICE_FAILURE_DETERMINISTIC,
+            allow_fallback=fallback_enabled and fallback_after_timeout,
+            reason="timeout",
+        )
+
+    if (
+        normalized_type == ".xlsx"
+        and rust_backend == RUST_XLSX_BOUNDED_BACKEND
+        and rust_error.startswith("RUST_XLSX_BOUNDED_PARSE_FAILED: ZIP error:")
+    ):
+        return OfficeFallbackDecision(
+            failure_class=OFFICE_FAILURE_DETERMINISTIC,
+            allow_fallback=False,
+            reason="deterministic_xlsx_zip_error",
+        )
+
+    if rust_error.startswith("RUST_OFFICE_START_FAILED:"):
+        return OfficeFallbackDecision(
+            failure_class=OFFICE_FAILURE_ENVIRONMENT_UNAVAILABLE,
+            allow_fallback=fallback_enabled,
+            reason="rust_binary_unavailable",
+        )
+
+    if rust_error.startswith("RUST_OFFICE_INVALID_JSON:") or rust_error.startswith(
+        "RUST_OFFICE_INVALID_PAYLOAD:"
+    ):
+        return OfficeFallbackDecision(
+            failure_class=OFFICE_FAILURE_CONTRACT,
+            allow_fallback=fallback_enabled,
+            reason="rust_python_contract_failed",
+        )
+
+    return OfficeFallbackDecision(
+        failure_class=OFFICE_FAILURE_RECOVERABLE,
+        allow_fallback=fallback_enabled,
+        reason="rust_parse_failed",
+    )
+
+
 def parse_office_with_fallback(
     *,
     file_path: Path,
@@ -196,23 +262,23 @@ def parse_office_with_fallback(
             ),
         )
 
-    fallback_enabled = bool(scanner_cfg.get("office_parser_fallback_enabled", True))
-    fallback_after_timeout = bool(scanner_cfg.get("office_fallback_after_timeout", False))
     fallback_reason = rust_context.error or ""
-    is_timeout = fallback_reason.startswith("RUST_OFFICE_TIMEOUT:")
     attempted_backend = rust_context.parser_backend or RUST_OFFICE_BACKEND
+    decision = classify_office_failure(
+        file_type=normalized_type,
+        rust_backend=attempted_backend,
+        rust_error=fallback_reason,
+        scanner_cfg=scanner_cfg,
+    )
 
-    if (
-        not fallback_enabled
-        or (is_timeout and not fallback_after_timeout)
-        or _should_skip_python_fallback(normalized_type, rust_context)
-    ):
+    if not decision.allow_fallback:
         return OfficeParseOutcome(
             context=rust_context,
             audit=OfficeParseAudit(
                 attempted_backend=attempted_backend,
                 fallback_reason=fallback_reason,
                 rust_duration_ms=rust_duration_ms,
+                failure_class=decision.failure_class,
             ),
         )
 
@@ -235,6 +301,7 @@ def parse_office_with_fallback(
                 fallback_reason=fallback_reason,
                 rust_duration_ms=rust_duration_ms,
                 fallback_duration_ms=fallback_duration_ms,
+                failure_class=decision.failure_class,
             ),
         )
 
@@ -256,6 +323,7 @@ def parse_office_with_fallback(
             fallback_reason=fallback_reason,
             rust_duration_ms=rust_duration_ms,
             fallback_duration_ms=fallback_duration_ms,
+            failure_class=decision.failure_class,
         ),
     )
 
@@ -420,19 +488,6 @@ def _error_context(file_path: Path, file_type: str, error: str) -> FileContext:
 
 def _elapsed_ms(started_at: float) -> int:
     return max(0, int((perf_counter() - started_at) * 1000))
-
-
-def _should_skip_python_fallback(
-    normalized_type: str,
-    rust_context: FileContext,
-) -> bool:
-    """确定性坏 xlsx 不再进入 Python fallback，避免 warm scan 反复慢失败。"""
-    if normalized_type != ".xlsx":
-        return False
-    if rust_context.parser_backend != RUST_XLSX_BOUNDED_BACKEND:
-        return False
-    error = rust_context.error or ""
-    return error.startswith("RUST_XLSX_BOUNDED_PARSE_FAILED: ZIP error:")
 
 
 def _positive_limit(limits: Mapping[str, Any], key: str, default: int) -> int:
