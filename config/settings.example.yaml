@@ -47,6 +47,7 @@ scanner:
     - "python_office_v1"
     - "python_sharepoint_text_v1"
   office_fallback_after_timeout: false
+  office_fallback_policy_version: "hybrid_v1"
   office_external_fallback: "disabled"
   # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.
   office_legacy_extensions_enabled: false

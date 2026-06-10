@@ -15,6 +15,7 @@ DEFAULT_OFFICE_FALLBACK_ORDER = [
     "python_office_v1",
     "python_sharepoint_text_v1",
 ]
+DEFAULT_OFFICE_FALLBACK_POLICY_VERSION = "hybrid_v1"
 
 
 class Config:
@@ -104,6 +105,14 @@ class Config:
             ]
         item = str(value).strip()
         return [item] if item else []
+
+    @staticmethod
+    def _non_blank_string(value: Any, default: str) -> str:
+        """把 YAML null/空白值收敛到默认值，避免下游 cache key 漂移。"""
+        if value is None:
+            return default
+        text = str(value).strip()
+        return text or default
 
     @property
     def work_dir(self) -> Path:
@@ -211,6 +220,14 @@ class Config:
             ).strip().lower(),
             "office_legacy_extensions_enabled": bool(
                 getattr(self._settings.scanner, "office_legacy_extensions_enabled", False)
+            ),
+            "office_fallback_policy_version": self._non_blank_string(
+                getattr(
+                    self._settings.scanner,
+                    "office_fallback_policy_version",
+                    DEFAULT_OFFICE_FALLBACK_POLICY_VERSION,
+                ),
+                DEFAULT_OFFICE_FALLBACK_POLICY_VERSION,
             ),
             "discovery_timeout_seconds": getattr(
                 self._settings.scanner,

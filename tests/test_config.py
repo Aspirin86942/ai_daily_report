@@ -1,6 +1,7 @@
 """测试配置对象的兼容默认值。"""
 
 import pickle
+from pathlib import Path
 from types import SimpleNamespace
 
 from src.core.config import Config
@@ -283,3 +284,74 @@ def test_scanner_config_passes_light_text_parser_options_when_present():
     assert scanner_config["direct_text_read_bytes"] == 131072
     assert scanner_config["log_tail_read_bytes"] == 65536
     assert scanner_config["text_excerpt_max_chars"] == 3000
+
+
+def test_scanner_config_exposes_office_fallback_policy_version(tmp_path: Path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.linux.yaml").write_text(
+        "\n".join(
+            [
+                "scanner:",
+                "  allowed_extensions:",
+                "    - .docx",
+                "  ignored_patterns: []",
+                "  max_workers: 1",
+                "  excel_max_rows: 50",
+                "  pdf_max_pages: 5",
+                "  text_max_chars: 6000",
+                "  office_fallback_policy_version: hybrid_v2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = object.__new__(Config)
+    cfg._settings = Config._build_settings(config_dir, system_name="Linux")
+
+    assert cfg.scanner_config["office_fallback_policy_version"] == "hybrid_v2"
+
+
+def test_scanner_config_defaults_empty_office_fallback_policy_version(
+    tmp_path: Path,
+):
+    """YAML 空值不能进入 parser profile，否则 cache key 会意外分裂。"""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.linux.yaml").write_text(
+        "\n".join(
+            [
+                "scanner:",
+                "  allowed_extensions:",
+                "    - .docx",
+                "  ignored_patterns: []",
+                "  max_workers: 1",
+                "  excel_max_rows: 50",
+                "  pdf_max_pages: 5",
+                "  text_max_chars: 6000",
+                "  office_fallback_policy_version:",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    cfg = object.__new__(Config)
+    cfg._settings = Config._build_settings(config_dir, system_name="Linux")
+
+    assert cfg.scanner_config["office_fallback_policy_version"] == "hybrid_v1"
+
+
+def test_scanner_config_defaults_blank_office_fallback_policy_version():
+    """只含空白的显式配置也应等价于未配置。"""
+    cfg = object.__new__(Config)
+    cfg._settings = SimpleNamespace(
+        scanner=SimpleNamespace(
+            allowed_extensions=[".docx"],
+            ignored_patterns=[],
+            max_workers=1,
+            excel_max_rows=50,
+            pdf_max_pages=5,
+            text_max_chars=6000,
+            office_fallback_policy_version="   ",
+        )
+    )
+
+    assert cfg.scanner_config["office_fallback_policy_version"] == "hybrid_v1"

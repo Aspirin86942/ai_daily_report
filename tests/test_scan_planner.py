@@ -40,6 +40,7 @@ def test_build_parser_profile_uses_summary_limits_when_requested():
         "office_fallback_after_timeout": False,
         "office_external_fallback": "disabled",
         "office_legacy_extensions_enabled": False,
+        "office_fallback_policy_version": "hybrid_v1",
         "excel_max_sheets": 2,
         "excel_max_columns": 12,
         "docx_max_paragraphs": 80,
@@ -106,6 +107,7 @@ def test_build_parser_profile_includes_document_parser_defaults():
     assert profile["office_fallback_after_timeout"] is False
     assert profile["office_external_fallback"] == "disabled"
     assert profile["office_legacy_extensions_enabled"] is False
+    assert profile["office_fallback_policy_version"] == "hybrid_v1"
     assert profile["excel_max_sheets"] == 5
     assert profile["excel_max_columns"] == 20
     assert profile["docx_max_paragraphs"] == 200
@@ -131,6 +133,7 @@ def test_build_parser_profile_includes_rust_office_backend_and_fallback_keys():
             "office_fallback_after_timeout": True,
             "office_external_fallback": "tika",
             "office_legacy_extensions_enabled": True,
+            "office_fallback_policy_version": "hybrid_v2",
         }
     )
 
@@ -143,6 +146,7 @@ def test_build_parser_profile_includes_rust_office_backend_and_fallback_keys():
     assert profile["office_fallback_after_timeout"] is True
     assert profile["office_external_fallback"] == "tika"
     assert profile["office_legacy_extensions_enabled"] is True
+    assert profile["office_fallback_policy_version"] == "hybrid_v2"
 
     serialized = planner.serialize_parser_profile(profile)
     default_profile = ScanPlanner(
@@ -160,6 +164,28 @@ def test_build_parser_profile_includes_rust_office_backend_and_fallback_keys():
     assert '"office_fallback_after_timeout":true' in serialized
     assert '"office_external_fallback":"tika"' in serialized
     assert '"office_legacy_extensions_enabled":true' in serialized
+    assert '"office_fallback_policy_version":"hybrid_v2"' in serialized
+
+
+def test_build_parser_profile_defaults_empty_office_fallback_policy_version():
+    """空 policy version 必须回到默认契约，避免生成 None/空串 cache key。"""
+    for configured_value in (None, "", "   "):
+        planner = ScanPlanner(
+            scanner_cfg={
+                "excel_max_rows": 50,
+                "pdf_max_pages": 5,
+                "text_max_chars": 6000,
+                "office_fallback_policy_version": configured_value,
+            }
+        )
+
+        profile = planner.build_parser_profile(summary_mode=False)
+        serialized = planner.serialize_parser_profile(profile)
+
+        assert profile["office_fallback_policy_version"] == "hybrid_v1"
+        assert '"office_fallback_policy_version":"hybrid_v1"' in serialized
+        assert '"office_fallback_policy_version":"None"' not in serialized
+        assert '"office_fallback_policy_version":""' not in serialized
 
 
 def test_build_parser_profile_uses_summary_document_limits():

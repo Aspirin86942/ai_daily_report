@@ -34,6 +34,7 @@ DEFAULT_OFFICE_FALLBACK_ORDER = [
     "python_office_v1",
     "python_sharepoint_text_v1",
 ]
+DEFAULT_OFFICE_FALLBACK_POLICY_VERSION = "hybrid_v1"
 DEFAULT_SUMMARY_EXCEL_MAX_SHEETS = 2
 DEFAULT_SUMMARY_EXCEL_MAX_COLUMNS = 12
 DEFAULT_SUMMARY_DOCX_MAX_PARAGRAPHS = 80
@@ -151,6 +152,10 @@ class ScanPlanner:
         profile["office_legacy_extensions_enabled"] = bool(
             self.scanner_cfg.get("office_legacy_extensions_enabled", False)
         )
+        profile["office_fallback_policy_version"] = self._string_profile_value(
+            "office_fallback_policy_version",
+            DEFAULT_OFFICE_FALLBACK_POLICY_VERSION,
+        )
         if summary_mode:
             profile["excel_max_sheets"] = self._positive_profile_value(
                 "summary_excel_max_sheets",
@@ -225,6 +230,14 @@ class ScanPlanner:
     def _positive_profile_value(self, key: str, default: int) -> int:
         """profile 使用归一化正整数，避免运行时预算与 cache key 漂移。"""
         return normalize_positive_int(self.scanner_cfg.get(key, default), default)
+
+    def _string_profile_value(self, key: str, default: str) -> str:
+        """profile 字符串值不允许为空，避免 cache key 出现非契约版本。"""
+        value = self.scanner_cfg.get(key, default)
+        if value is None:
+            return default
+        text = str(value).strip()
+        return text or default
 
     def serialize_parser_profile(self, profile: dict) -> str:
         """稳定序列化 parser profile，避免 cache key 因键顺序漂移。"""
