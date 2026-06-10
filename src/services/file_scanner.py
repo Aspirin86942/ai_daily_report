@@ -4,7 +4,6 @@ import multiprocessing as mp
 from pathlib import Path
 from datetime import date, datetime, timedelta
 from typing import List, Mapping, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import perf_counter
 import pandas as pd
 import pdfplumber
@@ -14,7 +13,6 @@ from ..models.schemas import FileContext, ScanResult
 from ..core.config import config
 from ..core.logger import setup_logger
 from ..utils.text_tools import truncate_text
-from .scan_aggregator import ScanAggregator
 from .scan_discovery import DiscoveredFile, FileDiscoveryService
 from .scan_index_store import InventoryItem, ScanIndexStore
 from .light_text_parser import (
@@ -38,9 +36,10 @@ from .office_parser import (
     parse_office_with_fallback,
     parse_with_sharepoint_text,
 )
-from .scan_metrics import ReparseDetail, ScanMetricsCollector
+from .scan_metrics import ReparseDetail
 from .scan_planner import ScanPlanner
 from .scan_worker_pool import ParserSupervisor
+from .cold_scanner_run import ColdScannerRun
 
 logger = setup_logger()
 
@@ -416,215 +415,11 @@ class FileScanner:
         Returns:
             扫描汇总结果
         """
-        if start_date is None:
-            start_date = date.today() - timedelta(days=1)
-        if end_date is None:
-            end_date = date.today()
-
-        logger.info(
-            f"开始扫描工作目录: {self.work_dir} ({start_date} ~ {end_date}, summary={summary_mode})"
+        return ColdScannerRun(self).scan_files(
+            start_date=start_date,
+            end_date=end_date,
+            summary_mode=summary_mode,
         )
-
-        metrics = ScanMetricsCollector.start()
-        self.last_reparse_details = []
-        self._office_parse_audits = {}
-
-        # 发现边界只负责找候选文件，不承担解析与汇总逻辑。
-        with metrics.measure_stage("discovery"):
-            discovered_files = self._normalize_discovered_files(
-                self.discovery_service.bootstrap_full_scan(start_date, end_date)
-            )
-        logger.info(f"发现 {len(discovered_files)} 个文件")
-        metrics.set_discovered_count(len(discovered_files))
-
-        if not discovered_files:
-            with metrics.measure_stage("inventory_cache"):
-                # 空扫描同样要覆盖 inventory 快照，避免后续规划继续读取旧发现结果。
-                self.scan_index_store.replace_inventory([])
-                metrics.set_plan_counts(reused_count=0, reparsed_count=0)
-            result = ScanResult(
-                total_files=0, success_count=0, error_count=0, contexts=[]
-            )
-            metrics.set_result_counts(
-                success_count=result.success_count,
-                error_count=result.error_count,
-            )
-            with metrics.measure_stage("aggregation"):
-                pass
-            run_metrics = metrics.finish()
-            run_id = self.scan_index_store.save_scan_run_metrics(
-                run_metrics=run_metrics
-            )
-            # 后续 context run 必须绑定本次扫描，而不能再从 SQLite 读取 latest。
-            result = result.model_copy(update={"scan_run_id": run_id})
-            logger.info(run_metrics.to_summary_line())
-            return result
-
-        with metrics.measure_stage("inventory_cache"):
-            parser_profile = self.scan_planner.build_parser_profile(
-                summary_mode=summary_mode
-            )
-            parser_profile_key = self.scan_planner.serialize_parser_profile(
-                parser_profile
-            )
-            # 先写入 bootstrap inventory，后续计划才能稳定基于统一快照做 freshness 判断。
-            self.scan_index_store.replace_inventory(
-                [
-                    {
-                        "file_identity": item.file_identity,
-                        "path": str(item.path),
-                        "extension": item.extension,
-                        "modified_date": item.modified_at.date().isoformat(),
-                        "size_bytes": item.size_bytes,
-                        "source_version": item.source_version,
-                    }
-                    for item in discovered_files
-                ]
-            )
-            inventory_items = self.scan_index_store.query_inventory(start_date, end_date)
-            cache_probes = {
-                item.file_identity: self.scan_index_store.probe_parse_cache(
-                    item.file_identity,
-                    parser_profile_key,
-                    source_version=item.source_version,
-                )
-                for item in inventory_items
-            }
-            cache_lookup = {
-                file_identity: probe.cache_status == "fresh"
-                for file_identity, probe in cache_probes.items()
-            }
-            planned_candidates = self.scan_planner.plan_candidates(
-                candidates=inventory_items,
-                start_date=start_date,
-                end_date=end_date,
-                cache_lookup=cache_lookup,
-            )
-            metrics.set_plan_counts(
-                reused_count=len(planned_candidates["cached"]),
-                reparsed_count=len(planned_candidates["uncached"]),
-            )
-            limits = {
-                key: value
-                for key, value in parser_profile.items()
-                if key not in {"total_max_chars", "summary_mode"}
-            }
-            cached_contexts = self._get_cached_contexts(
-                planned_candidates["cached"],
-                parser_profile_key,
-            )
-            cached_contexts_by_path = {
-                Path(context.file_path): context for context in cached_contexts
-            }
-
-        aggregator = ScanAggregator(parser_profile["total_max_chars"])
-
-        for cached_file in planned_candidates["cached"]:
-            cached_path = self._item_path(cached_file)
-            cached_context = cached_contexts_by_path.get(cached_path)
-            if cached_context is None:
-                aggregator.add_context(
-                    FileContext(
-                        file_path=str(cached_path),
-                        file_type=self._item_extension(cached_file),
-                        content="",
-                        error="cache hit missing context",
-                    )
-                )
-                continue
-            aggregator.add_cached_context(cached_context)
-
-        with metrics.measure_stage("parse"):
-            # 并行处理文件
-            with ThreadPoolExecutor(
-                max_workers=self.scanner_cfg["max_workers"]
-            ) as executor:
-                future_to_file = {
-                    executor.submit(
-                        self._extract_uncached_content_with_duration,
-                        item,
-                        limits,
-                    ): item
-                    for item in planned_candidates["uncached"]
-                }
-
-                for future in as_completed(future_to_file):
-                    inventory_item = future_to_file[future]
-                    file_path = self._item_path(inventory_item)
-                    try:
-                        context, duration_ms = future.result()
-                        metrics.record_extension_result(
-                            self._item_extension(inventory_item),
-                            duration_ms,
-                            context.error,
-                        )
-                        self._record_reparse_detail(
-                            inventory_item,
-                            cache_probes[self._item_identity(inventory_item)],
-                            duration_ms,
-                            context,
-                        )
-                        self._write_parse_cache(
-                            inventory_item,
-                            parser_profile_key,
-                            context,
-                        )
-                        previous_truncated = aggregator.truncated_by_global_limit
-                        aggregator.add_context(context)
-                        if (
-                            aggregator.truncated_by_global_limit
-                            and not previous_truncated
-                        ):
-                            logger.warning(
-                                "已达全局字符上限 %s，后续文件内容将被省略",
-                                aggregator.total_max_chars,
-                            )
-                    except Exception as e:
-                        logger.error(f"处理文件失败 {file_path}: {e}")
-                        metrics.record_extension_result(
-                            self._item_extension(inventory_item),
-                            0,
-                            str(e),
-                        )
-                        self.scan_index_store.upsert_parse_cache(
-                            file_identity=self._item_identity(inventory_item),
-                            parser_profile=parser_profile_key,
-                            content_excerpt="",
-                            parse_status="error",
-                            parse_error=str(e),
-                            source_version=self._item_source_version(inventory_item),
-                        )
-                        self._record_reparse_exception(
-                            inventory_item,
-                            cache_probes[self._item_identity(inventory_item)],
-                            str(e),
-                        )
-                        aggregator.add_exception(file_path, e)
-
-        with metrics.measure_stage("aggregation"):
-            # 数据完整性校验
-            assert (
-                aggregator.success_count + aggregator.error_count
-                == planned_candidates["total_candidates"]
-            ), "文件处理数量不匹配"
-            result = aggregator.build_result(planned_candidates["total_candidates"])
-
-        logger.info(
-            "扫描完成: 成功 %s, 失败 %s",
-            aggregator.success_count,
-            aggregator.error_count,
-        )
-        metrics.set_result_counts(
-            success_count=result.success_count,
-            error_count=result.error_count,
-        )
-        run_metrics = metrics.finish()
-        run_id = self.scan_index_store.save_scan_run_metrics(run_metrics=run_metrics)
-        # 显式随结果返回 run_id，避免多个 CLI run 共享 SQLite 时审计串号。
-        result = result.model_copy(update={"scan_run_id": run_id})
-        logger.info(run_metrics.to_summary_line())
-
-        return result
 
     def _normalize_discovered_files(
         self,

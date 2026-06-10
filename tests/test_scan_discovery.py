@@ -76,7 +76,7 @@ def test_bootstrap_full_scan_rejects_missing_work_dir_before_backend(
         calls.append((args, kwargs))
         return SimpleNamespace(returncode=0, stdout="[]", stderr="")
 
-    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     discovery = FileDiscoveryService(
         work_dir=missing_work_dir,
@@ -185,7 +185,7 @@ def test_bootstrap_full_scan_uses_rust_backend_when_configured(
             stderr="",
         )
 
-    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     discovery = FileDiscoveryService(
         work_dir=work_dir,
@@ -234,7 +234,7 @@ def test_bootstrap_full_scan_defaults_to_rust_backend(
             stderr="",
         )
 
-    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     discovery = FileDiscoveryService(
         work_dir=work_dir,
@@ -270,7 +270,7 @@ def test_bootstrap_full_scan_falls_back_to_python_when_rust_fails(
             stderr="boom",
         )
 
-    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     discovery = FileDiscoveryService(
         work_dir=work_dir,
@@ -307,7 +307,7 @@ def test_bootstrap_full_scan_falls_back_when_rust_json_contract_is_invalid(
             stderr="",
         )
 
-    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     discovery = FileDiscoveryService(
         work_dir=work_dir,
@@ -344,7 +344,7 @@ def test_bootstrap_full_scan_rejects_unsupported_discovery_backend(
             stderr="",
         )
 
-    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     discovery = FileDiscoveryService(
         work_dir=work_dir,
@@ -381,7 +381,7 @@ def test_bootstrap_full_scan_rejects_unnormalized_discovery_backend(
             stderr="",
         )
 
-    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     discovery = FileDiscoveryService(
         work_dir=work_dir,
@@ -531,7 +531,7 @@ def test_bootstrap_full_scan_falls_back_when_rust_item_contract_is_invalid(
             stderr="",
         )
 
-    monkeypatch.setattr("src.services.scan_discovery.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     discovery = FileDiscoveryService(
         work_dir=work_dir,

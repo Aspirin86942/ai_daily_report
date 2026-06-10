@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import importlib
-import json
-import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,6 +10,7 @@ from time import perf_counter
 from typing import Any
 
 from ..models.schemas import FileContext
+from .rust_cli_contract import RustCliContractError, run_rust_json_cli
 
 RUST_OFFICE_BACKEND = "rust_office_oxide_v1"
 RUST_XLSX_BOUNDED_BACKEND = "rust_xlsx_bounded_v1"
@@ -58,13 +57,6 @@ class RustOfficeParserRunner:
     def __init__(self, binary_path: str | Path):
         self.binary_path = Path(binary_path)
 
-    def _resolve_binary_path(self) -> Path:
-        """Resolve relative Rust binary paths from the project root."""
-        if self.binary_path.is_absolute():
-            return self.binary_path
-        project_root = Path(__file__).resolve().parents[2]
-        return project_root / self.binary_path
-
     def parse(
         self,
         file_path: Path,
@@ -72,7 +64,6 @@ class RustOfficeParserRunner:
         limits: Mapping[str, Any],
         timeout_seconds: float,
     ) -> tuple[FileContext, int]:
-        started_at = perf_counter()
         normalized_type = file_type.lower()
         request = {
             "path": str(file_path),
@@ -82,76 +73,67 @@ class RustOfficeParserRunner:
             "parser_backend": RUST_OFFICE_BACKEND,
         }
 
-        try:
-            completed = subprocess.run(
-                [str(self._resolve_binary_path())],
-                input=json.dumps(request, ensure_ascii=False, indent=2),
-                text=True,
-                encoding="utf-8",
-                errors="strict",
-                capture_output=True,
-                timeout=float(timeout_seconds),
-                check=False,
-            )
-        except (subprocess.TimeoutExpired, TimeoutError):
-            return (
-                _error_context(
-                    file_path,
-                    normalized_type,
-                    f"RUST_OFFICE_TIMEOUT: file parse exceeded {timeout_seconds:g}s",
-                ),
-                _elapsed_ms(started_at),
-            )
-        except OSError as exc:
-            return (
-                _error_context(
-                    file_path,
-                    normalized_type,
-                    f"RUST_OFFICE_START_FAILED: {exc}",
-                ),
-                _elapsed_ms(started_at),
-            )
-
-        if completed.returncode != 0:
-            message = completed.stderr.strip() or f"exit code {completed.returncode}"
-            return (
-                _error_context(
-                    file_path,
-                    normalized_type,
-                    f"RUST_OFFICE_PARSE_FAILED: {message}",
-                ),
-                _elapsed_ms(started_at),
-            )
-
-        try:
-            payload = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            return (
-                _error_context(
-                    file_path,
-                    normalized_type,
-                    f"RUST_OFFICE_INVALID_JSON: {exc}",
-                ),
-                _elapsed_ms(started_at),
-            )
-
-        try:
-            context = FileContext(**payload)
-            _validate_rust_payload_context(
-                context,
+        result = run_rust_json_cli(
+            binary_path=self.binary_path,
+            request_payload=request,
+            timeout_seconds=timeout_seconds,
+            validator=lambda payload: _validate_rust_payload_context_from_json(
+                payload,
                 expected_file_path=str(file_path),
                 expected_file_type=normalized_type,
-            )
-            return context, _elapsed_ms(started_at)
-        except Exception as exc:
-            return (
-                _error_context(
-                    file_path,
-                    normalized_type,
-                    f"RUST_OFFICE_INVALID_PAYLOAD: {exc}",
-                ),
-                _elapsed_ms(started_at),
-            )
+            ),
+            contract_name="rust_office_parser",
+            json_indent=2,
+        )
+
+        if result.error is None and result.payload is not None:
+            return result.payload, result.duration_ms
+
+        error = result.error or RustCliContractError(
+            kind="invalid_payload",
+            message="Rust Office parser returned no payload",
+        )
+        public_error = _rust_office_error_from_contract(
+            error,
+            timeout_seconds=timeout_seconds,
+        )
+        return (
+            _error_context(file_path, normalized_type, public_error),
+            result.duration_ms,
+        )
+
+
+def _rust_office_error_from_contract(
+    error: RustCliContractError,
+    *,
+    timeout_seconds: float,
+) -> str:
+    if error.kind == "timeout":
+        return f"RUST_OFFICE_TIMEOUT: file parse exceeded {timeout_seconds:g}s"
+    if error.kind == "start_failed":
+        return f"RUST_OFFICE_START_FAILED: {error.message}"
+    if error.kind == "nonzero_exit":
+        return f"RUST_OFFICE_PARSE_FAILED: {error.message}"
+    if error.kind in {"invalid_stdout_encoding", "invalid_json"}:
+        return f"RUST_OFFICE_INVALID_JSON: {error.message}"
+    return f"RUST_OFFICE_INVALID_PAYLOAD: {error.message}"
+
+
+def _validate_rust_payload_context_from_json(
+    payload: object,
+    *,
+    expected_file_path: str,
+    expected_file_type: str,
+) -> FileContext:
+    if not isinstance(payload, Mapping):
+        raise ValueError("stdout JSON must be an object")
+    context = FileContext(**payload)
+    _validate_rust_payload_context(
+        context,
+        expected_file_path=expected_file_path,
+        expected_file_type=expected_file_type,
+    )
+    return context
 
 
 PythonFallback = Callable[[Path, str, Mapping[str, Any]], FileContext]

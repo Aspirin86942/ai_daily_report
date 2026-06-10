@@ -61,7 +61,7 @@ def test_rust_runner_returns_file_context_from_valid_payload(tmp_path, monkeypat
         assert '"file_type": ".xlsx"' in kwargs["input"]
         return completed
 
-    monkeypatch.setattr("src.services.office_parser.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     context, duration_ms = RustOfficeParserRunner(
         "rust/office_parser/target/release/ai-daily-office-parser"
@@ -96,7 +96,7 @@ def test_rust_runner_accepts_bounded_xlsx_backend_payload(tmp_path, monkeypatch)
         stderr="",
     )
     monkeypatch.setattr(
-        "src.services.office_parser.subprocess.run",
+        "src.services.rust_cli_contract.subprocess.run",
         lambda *args, **kwargs: completed,
     )
 
@@ -116,7 +116,7 @@ def test_rust_runner_returns_error_context_for_invalid_json(tmp_path, monkeypatc
     sample.write_bytes(b"fake")
     completed = SimpleNamespace(returncode=0, stdout="not-json", stderr="")
     monkeypatch.setattr(
-        "src.services.office_parser.subprocess.run",
+        "src.services.rust_cli_contract.subprocess.run",
         lambda *args, **kwargs: completed,
     )
 
@@ -164,7 +164,7 @@ def test_rust_runner_returns_error_context_for_semantic_payload_mismatch(
         stderr="",
     )
     monkeypatch.setattr(
-        "src.services.office_parser.subprocess.run",
+        "src.services.rust_cli_contract.subprocess.run",
         lambda *args, **kwargs: completed,
     )
 
@@ -189,7 +189,7 @@ def test_rust_runner_returns_timeout_context(tmp_path, monkeypatch):
     def fake_run(*args, **kwargs):
         raise TimeoutError("expired")
 
-    monkeypatch.setattr("src.services.office_parser.subprocess.run", fake_run)
+    monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
     context, _ = RustOfficeParserRunner("parser").parse(
         sample,

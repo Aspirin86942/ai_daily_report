@@ -23,3 +23,7 @@ _Avoid_: Rust parser slow case, file parse failure
 **Office parser contract failure**:
 A Rust Office parser failure where the CLI completed but its stdout or `FileContext` payload does not satisfy the Python scanner contract. It may fall back to Python for report usefulness, but it should be treated as a Rust-Python boundary defect rather than an Office file content problem.
 _Avoid_: File content failure, environment-unavailable failure
+
+**Rust CLI JSON contract**:
+The stdin/stdout JSON contract shared by Rust helper CLIs and Python adapters, including binary path resolution, request payload shape, timeout handling, stdout JSON decoding, stderr/error mapping, and response payload validation. It is the seam where Rust helper execution becomes trusted Python scanner data.
+_Avoid_: Raw subprocess call, Rust helper wrapper, CLI glue

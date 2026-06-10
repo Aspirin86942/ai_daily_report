@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import fnmatch
-import json
 import os
-import subprocess
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import List
 
 from ..core.logger import setup_logger
+from .rust_cli_contract import RustCliContractError, run_rust_json_cli
 
 logger = setup_logger()
 
@@ -54,40 +53,35 @@ class RustDiscoveryRunner:
                 self.scanner_cfg.get("excluded_dirs", [])
             ),
         }
-        completed = subprocess.run(
-            [str(self._resolve_binary_path())],
-            input=json.dumps(request, ensure_ascii=False),
-            text=True,
-            encoding="utf-8",
-            errors="strict",
-            capture_output=True,
-            timeout=float(self.scanner_cfg.get("discovery_timeout_seconds", 30)),
-            check=False,
+        result = run_rust_json_cli(
+            binary_path=self.scanner_cfg.get(
+                "rust_discovery_bin",
+                "rust/discovery/target/release/ai-daily-discovery",
+            ),
+            request_payload=request,
+            timeout_seconds=float(self.scanner_cfg.get("discovery_timeout_seconds", 30)),
+            validator=self._validate_discovery_payload,
+            contract_name="rust_discovery",
         )
-        if completed.returncode != 0:
-            message = completed.stderr.strip() or f"exit code {completed.returncode}"
-            raise RustDiscoveryError(message)
-        try:
-            raw_items = json.loads(completed.stdout)
-        except json.JSONDecodeError as exc:
-            raise RustDiscoveryError(f"invalid JSON stdout: {exc}") from exc
+        if result.error is not None:
+            raise RustDiscoveryError(self._format_contract_error(result.error))
+        if result.payload is None:
+            raise RustDiscoveryError("Rust discovery returned no payload")
+        return result.payload
+
+    def _validate_discovery_payload(self, raw_items: object) -> list[DiscoveredFile]:
         if not isinstance(raw_items, list):
             raise RustDiscoveryError("stdout JSON must be a list")
         return [self._to_discovered_file(item) for item in raw_items]
 
-    def _resolve_binary_path(self) -> Path:
-        configured = Path(
-            str(
-                self.scanner_cfg.get(
-                    "rust_discovery_bin",
-                    "rust/discovery/target/release/ai-daily-discovery",
-                )
-            )
-        )
-        if configured.is_absolute():
-            return configured
-        project_root = Path(__file__).resolve().parent.parent.parent
-        return project_root / configured
+    def _format_contract_error(self, error: RustCliContractError) -> str:
+        if error.kind == "invalid_json":
+            return f"invalid JSON stdout: {error.message}"
+        if error.kind == "invalid_stdout_encoding":
+            return f"invalid stdout encoding: {error.message}"
+        if error.kind == "request_serialization_failed":
+            return f"request JSON serialization failed: {error.message}"
+        return error.message
 
     def _to_discovered_file(self, item: object) -> DiscoveredFile:
         if not isinstance(item, dict):
@@ -209,7 +203,7 @@ class FileDiscoveryService:
                     start_date=start_date,
                     end_date=end_date,
                 )
-            except (OSError, subprocess.SubprocessError, RustDiscoveryError) as exc:
+            except RustDiscoveryError as exc:
                 logger.warning(
                     (
                         "Rust discovery 失败，回退 Python discovery: %s "
