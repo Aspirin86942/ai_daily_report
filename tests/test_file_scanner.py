@@ -1280,6 +1280,7 @@ def test_scan_files_uses_rust_office_backend_for_xlsx_in_direct_mode(
             audit=OfficeParseAudit(
                 attempted_backend="rust_office_oxide_v1",
                 rust_duration_ms=7,
+                failure_class="",
             ),
         )
 
@@ -1312,6 +1313,7 @@ def test_scan_files_uses_rust_office_backend_for_xlsx_in_direct_mode(
     assert detail.worker_lane == "subprocess"
     assert detail.attempted_backend == "rust_office_oxide_v1"
     assert detail.rust_duration_ms == 7
+    assert detail.failure_class == ""
 
 
 def test_scan_files_records_python_fallback_audit_for_office_file(
@@ -1349,6 +1351,7 @@ def test_scan_files_records_python_fallback_audit_for_office_file(
                 fallback_reason="RUST_OFFICE_PARSE_FAILED: bad zip",
                 rust_duration_ms=11,
                 fallback_duration_ms=19,
+                failure_class="recoverable_parser_failure",
             ),
         )
 
@@ -1369,6 +1372,7 @@ def test_scan_files_records_python_fallback_audit_for_office_file(
     assert detail.fallback_reason == "RUST_OFFICE_PARSE_FAILED: bad zip"
     assert detail.rust_duration_ms == 11
     assert detail.fallback_duration_ms == 19
+    assert detail.failure_class == "recoverable_parser_failure"
 
 
 def test_scan_files_times_out_python_office_fallback_in_subprocess(

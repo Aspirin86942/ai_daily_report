@@ -779,6 +779,9 @@ class FileScanner:
                 fallback_duration_ms=office_audit.fallback_duration_ms
                 if office_audit is not None
                 else 0,
+                failure_class=office_audit.failure_class
+                if office_audit is not None
+                else "",
             )
         )
 

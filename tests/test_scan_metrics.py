@@ -44,6 +44,7 @@ def test_reparse_detail_serializes_stable_payload():
         "fallback_reason": "",
         "rust_duration_ms": 0,
         "fallback_duration_ms": 0,
+        "failure_class": "",
     }
 
 

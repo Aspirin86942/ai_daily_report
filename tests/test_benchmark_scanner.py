@@ -261,6 +261,7 @@ def test_build_benchmark_payload_uses_scan_result_and_metrics():
             "fallback_reason": "",
             "rust_duration_ms": 0,
             "fallback_duration_ms": 0,
+            "failure_class": "",
         }
     ]
     assert payload["parser_backend_summary"] == {

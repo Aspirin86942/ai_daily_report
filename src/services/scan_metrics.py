@@ -83,6 +83,7 @@ class ReparseDetail:
     fallback_reason: str = ""
     rust_duration_ms: int = 0
     fallback_duration_ms: int = 0
+    failure_class: str = ""
 
     def to_dict(self) -> dict[str, int | str | bool | None]:
         """转成 benchmark JSON / Markdown 共用的稳定结构。"""
@@ -105,6 +106,7 @@ class ReparseDetail:
             "fallback_reason": self.fallback_reason,
             "rust_duration_ms": max(0, int(self.rust_duration_ms)),
             "fallback_duration_ms": max(0, int(self.fallback_duration_ms)),
+            "failure_class": self.failure_class,
         }
 
 
