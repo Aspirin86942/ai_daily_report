@@ -272,17 +272,18 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
             "",
             "| extension | cache_miss_reason | parse_duration_ms | parse_status | "
             "attempted_backend | fallback_backend | fallback_reason | "
-            "rust_duration_ms | fallback_duration_ms | path |",
-            "|---|---|---:|---|---|---|---|---:|---:|---|",
+            "failure_class | rust_duration_ms | fallback_duration_ms | path |",
+            "|---|---|---:|---|---|---|---|---|---:|---:|---|",
         ]
     )
     if reparse_details:
         for item in reparse_details:
             fallback_reason = str(item.get("fallback_reason", "")).replace("|", "/")
+            failure_class = str(item.get("failure_class", "")).replace("|", "/")
             lines.append(
                 "| {extension} | {cache_miss_reason} | {parse_duration_ms} | "
                 "{parse_status} | {attempted_backend} | {fallback_backend} | "
-                "{fallback_reason} | {rust_duration_ms} | "
+                "{fallback_reason} | {failure_class} | {rust_duration_ms} | "
                 "{fallback_duration_ms} | {path} |".format(
                     extension=item.get("extension", ""),
                     cache_miss_reason=item.get("cache_miss_reason", ""),
@@ -291,13 +292,30 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
                     attempted_backend=item.get("attempted_backend", ""),
                     fallback_backend=item.get("fallback_backend", ""),
                     fallback_reason=fallback_reason,
+                    failure_class=failure_class,
                     rust_duration_ms=item.get("rust_duration_ms", 0),
                     fallback_duration_ms=item.get("fallback_duration_ms", 0),
                     path=item.get("path", ""),
                 )
             )
     else:
-        lines.append("| (none) |  | 0 |  |  |  |  | 0 | 0 |  |")
+        lines.append("| (none) |  | 0 |  |  |  |  |  | 0 | 0 |  |")
+
+    failure_classes = {
+        str(item.get("failure_class", ""))
+        for item in reparse_details
+        if item.get("failure_class")
+    }
+    if "environment_unavailable" in failure_classes:
+        lines.extend(
+            [
+                "",
+                "## Office Failure Class Notes",
+                "",
+                "- `environment_unavailable`: Rust Office parser did not start, "
+                "so this run cannot evaluate Rust parser performance for those files.",
+            ]
+        )
 
     return "\n".join(lines) + "\n"
 

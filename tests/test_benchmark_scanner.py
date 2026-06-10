@@ -26,6 +26,7 @@ def _make_reparse_detail(
     fallback_reason: str = "",
     rust_duration_ms: int = 0,
     fallback_duration_ms: int = 0,
+    failure_class: str = "",
 ) -> ReparseDetail:
     return ReparseDetail(
         path=path,
@@ -46,6 +47,7 @@ def _make_reparse_detail(
         fallback_reason=fallback_reason,
         rust_duration_ms=rust_duration_ms,
         fallback_duration_ms=fallback_duration_ms,
+        failure_class=failure_class,
     )
 
 
@@ -314,6 +316,7 @@ def test_build_benchmark_payload_preserves_office_fallback_audit_fields():
             fallback_reason="RUST_OFFICE_PARSE_FAILED: bad zip",
             rust_duration_ms=13,
             fallback_duration_ms=21,
+            failure_class="recoverable_parser_failure",
         )
     ]
 
@@ -337,6 +340,9 @@ def test_build_benchmark_payload_preserves_office_fallback_audit_fields():
     )
     assert payload["reparse_details"][0]["rust_duration_ms"] == 13
     assert payload["reparse_details"][0]["fallback_duration_ms"] == 21
+    assert payload["reparse_details"][0]["failure_class"] == (
+        "recoverable_parser_failure"
+    )
 
 
 def test_render_markdown_report_contains_stage_and_extension_metrics():
@@ -394,6 +400,7 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
                 "attempted_backend": "rust_office_oxide_v1",
                 "fallback_backend": "python_office_v1",
                 "fallback_reason": "RUST_OFFICE_PARSE_FAILED: bad zip",
+                "failure_class": "environment_unavailable",
                 "rust_duration_ms": 13,
                 "fallback_duration_ms": 21,
             }
@@ -428,12 +435,16 @@ def test_render_markdown_report_contains_stage_and_extension_metrics():
     assert "## Reparse Details" in markdown
     assert (
         "| .md | source_version_changed | 12 | success | rust_office_oxide_v1 | "
-        "python_office_v1 | RUST_OFFICE_PARSE_FAILED: bad zip | 13 | 21 | "
+        "python_office_v1 | RUST_OFFICE_PARSE_FAILED: bad zip | "
+        "environment_unavailable | 13 | 21 | "
         "D:\\work\\report.md |"
     ) in markdown
     assert "rust_office_oxide_v1" in markdown
     assert "python_office_v1" in markdown
     assert "RUST_OFFICE_PARSE_FAILED: bad zip" in markdown
+    assert "failure_class" in markdown
+    assert "environment_unavailable" in markdown
+    assert "cannot evaluate Rust parser performance" in markdown
 
 
 def test_render_markdown_report_orders_backend_summary_rows_stably():
