@@ -114,6 +114,7 @@ Read these fields in the output:
 - `parser_backend_summary.by_extension` shows which parser backend handled each extension.
 - `reparse_details[].attempted_backend` shows the first Office backend attempted.
 - `reparse_details[].fallback_backend` and `fallback_reason` show whether Python fallback was used.
+- `failure_class` classifies Rust Office parser failures as `deterministic`, `environment_unavailable`, `contract_failure`, or `recoverable_parser_failure`; `environment_unavailable` rows mean the Rust parser did not start and should not be used as Rust parser performance evidence.
 - `rust_duration_ms` and `fallback_duration_ms` split Rust and fallback parser cost.
 
 For `.xlsx`, `parser_backend_summary.by_extension[".xlsx"]` should normally show `rust_xlsx_bounded_v1` when the Rust Office parser CLI is available.
