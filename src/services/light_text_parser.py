@@ -342,7 +342,7 @@ def _build_json_content(
             keys = ", ".join(sorted(str(key) for key in payload.keys()))
             lines.append(f"top_level_keys: {keys}")
         elif isinstance(payload, list):
-            lines.append(f"top_level_type: list")
+            lines.append("top_level_type: list")
             lines.append(f"top_level_items: {len(payload)}")
         else:
             lines.append(f"top_level_type: {type(payload).__name__}")

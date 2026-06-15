@@ -218,8 +218,12 @@ def test_real_weekly_prompt_template_locks_seven_section_contract():
     ):
         assert field_name in prompt_text
 
-    assert "都必须使用自然段" in prompt_text
-    assert "不要使用项目符号、编号列表或表格" in prompt_text
+    assert "保持原有 7 段式周报结构不变" in prompt_text
+    assert "不新增、不删除、不合并任何字段或章节" in prompt_text
+    assert "字段内部拆成 `1、`、`2、`、`3、`" in prompt_text
+    assert "只学习其“段内编号拆分”的格式" in prompt_text
+    assert "存货报废流程优化" not in prompt_text
+    assert "访谈：XXX" not in prompt_text
     assert "不要臆造量化结论" in prompt_text
     assert "缺失信息不要编造" in prompt_text
     assert "overview" not in prompt_text

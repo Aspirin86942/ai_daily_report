@@ -3,11 +3,9 @@ import pytest
 from pydantic import ValidationError
 
 from src.models.schemas import (
-    DataSource,
     DailyReportData,
     FileContext,
     MonthlyReportData,
-    ReportMode,
     ScanResult,
     WeeklyReportData,
 )

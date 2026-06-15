@@ -751,23 +751,17 @@ fn parse_needed_shared_strings<R: Read + Seek>(
                 in_si = false;
                 current_text.clear();
             }
-            Event::Start(e) if is_local_name(e.name().as_ref(), b"t") => {
-                if in_si {
-                    in_text = true;
-                }
+            Event::Start(e) if is_local_name(e.name().as_ref(), b"t") && in_si => {
+                in_text = true;
             }
             Event::End(e) if is_local_name(e.name().as_ref(), b"t") => {
                 in_text = false;
             }
-            Event::Text(e) => {
-                if in_si && in_text {
-                    current_text.push_str(&unescape_text(&e)?);
-                }
+            Event::Text(e) if in_si && in_text => {
+                current_text.push_str(&unescape_text(&e)?);
             }
-            Event::GeneralRef(e) => {
-                if in_si && in_text {
-                    current_text.push_str(&unescape_general_ref(&e)?);
-                }
+            Event::GeneralRef(e) if in_si && in_text => {
+                current_text.push_str(&unescape_general_ref(&e)?);
             }
             Event::Eof => break,
             _ => {}
@@ -856,8 +850,7 @@ fn cell_to_text(cell: &PreviewCell, shared_strings: &HashMap<usize, String>) -> 
 
 fn escape_markdown_cell(value: &str) -> String {
     value
-        .replace('\r', " ")
-        .replace('\n', " ")
+        .replace(['\r', '\n'], " ")
         .replace('|', "\\|")
         .trim()
         .to_string()

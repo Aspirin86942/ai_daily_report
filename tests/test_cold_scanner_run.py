@@ -1,6 +1,8 @@
 from datetime import date, datetime
 from pathlib import Path
 
+import pytest
+
 from src.models.schemas import FileContext
 from src.services.cold_scanner_run import ColdScannerRun
 from src.services.scan_discovery import DiscoveredFile
@@ -292,3 +294,34 @@ def test_cold_scanner_run_orchestrates_inventory_cache_parse_and_aggregation():
     assert metrics.success_count == 2
     assert metrics.error_count == 0
 
+
+def test_cold_scanner_run_raises_runtime_error_when_processed_count_mismatches_plan():
+    uncached_path = Path("uncached.md")
+    discovered = [_discovered_file(uncached_path, "mtime_ns=2:size=10")]
+    uncached_item = _inventory_item(uncached_path, "mtime_ns=2:size=10")
+    parsed_context = FileContext(
+        file_path=str(uncached_path),
+        file_type=".md",
+        content="parsed",
+        error=None,
+    )
+    cache_probes = {
+        uncached_item.file_identity: _cache_probe(uncached_item, "miss", "new_file")
+    }
+    scanner = FakeScannerAdapter(
+        discovered_files=discovered,
+        inventory_items=[uncached_item],
+        cache_probes=cache_probes,
+        planned_candidates={
+            "cached": [],
+            "uncached": [uncached_item],
+            "total_candidates": 2,
+        },
+        uncached_context=(parsed_context, 17),
+    )
+
+    with pytest.raises(RuntimeError, match="文件处理数量不匹配"):
+        ColdScannerRun(scanner).scan_files(
+            start_date=date(2026, 6, 10),
+            end_date=date(2026, 6, 11),
+        )

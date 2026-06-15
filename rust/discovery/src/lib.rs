@@ -144,7 +144,10 @@ fn validate_work_dir(work_dir: &Path) -> io::Result<()> {
         let message = if error.kind() == io::ErrorKind::NotFound {
             format!("work_dir does not exist: {}", work_dir.display())
         } else {
-            format!("work_dir is not accessible: {}: {error}", work_dir.display())
+            format!(
+                "work_dir is not accessible: {}: {error}",
+                work_dir.display()
+            )
         };
         io::Error::new(error.kind(), message)
     })?;
@@ -354,7 +357,10 @@ mod tests {
     fn excluded_dir_matches_directory_and_children() {
         let root = PathBuf::from("/work/skip");
 
-        assert!(is_excluded_dir(Path::new("/work/skip"), &[root.clone()]));
+        assert!(is_excluded_dir(
+            Path::new("/work/skip"),
+            std::slice::from_ref(&root)
+        ));
         assert!(is_excluded_dir(Path::new("/work/skip/nested"), &[root]));
         assert!(!is_excluded_dir(
             Path::new("/work/keep"),

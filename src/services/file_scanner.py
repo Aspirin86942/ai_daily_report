@@ -2,7 +2,7 @@
 
 import multiprocessing as mp
 from pathlib import Path
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import List, Mapping, Optional
 from time import perf_counter
 import pandas as pd
@@ -40,6 +40,19 @@ from .scan_metrics import ReparseDetail
 from .scan_planner import ScanPlanner
 from .scan_worker_pool import ParserSupervisor
 from .cold_scanner_run import ColdScannerRun
+from .scanner_items import (
+    item_extension,
+    item_identity,
+    item_path,
+    item_source_version,
+    normalize_discovered_files,
+)
+from .scanner_parse_cache import (
+    build_reparse_detail,
+    build_reparse_exception_detail,
+    get_cached_contexts,
+    write_parse_cache,
+)
 
 logger = setup_logger()
 
@@ -426,28 +439,7 @@ class FileScanner:
         discovered_files: list[Path | DiscoveredFile],
     ) -> list[DiscoveredFile]:
         """兼容旧 Path monkeypatch，同时统一生成 inventory 所需元数据。"""
-        normalized: list[DiscoveredFile] = []
-        for item in discovered_files:
-            if isinstance(item, DiscoveredFile):
-                normalized.append(item)
-                continue
-
-            file_path = Path(item)
-            stat_result = file_path.stat()
-            resolved_path = file_path.resolve()
-            normalized.append(
-                DiscoveredFile(
-                    file_identity=f"bootstrap:{str(resolved_path).lower()}",
-                    path=file_path,
-                    extension=file_path.suffix.lower(),
-                    modified_at=datetime.fromtimestamp(stat_result.st_mtime),
-                    size_bytes=stat_result.st_size,
-                    source_version=(
-                        f"mtime_ns={stat_result.st_mtime_ns}:size={stat_result.st_size}"
-                    ),
-                )
-            )
-        return normalized
+        return normalize_discovered_files(discovered_files)
 
     def _get_cached_contexts(
         self,
@@ -455,26 +447,11 @@ class FileScanner:
         parser_profile: str,
     ) -> list[FileContext]:
         """从 parse_cache 恢复 fresh cache 命中的上下文。"""
-        contexts: list[FileContext] = []
-        for item in cached_files:
-            cached = self.scan_index_store.load_parse_cache(
-                self._item_identity(item),
-                parser_profile,
-                source_version=self._item_source_version(item),
-            )
-            parse_status = cached["parse_status"]
-            parse_error = cached["parse_error"] or None
-            contexts.append(
-                FileContext(
-                    file_path=str(self._item_path(item)),
-                    file_type=self._item_extension(item),
-                    content=cached["content_excerpt"],
-                    error=parse_error if parse_status != "success" else None,
-                    parser_backend=cached["parser_backend"] or None,
-                    truncated=bool(cached["truncated"]),
-                )
-            )
-        return contexts
+        return get_cached_contexts(
+            self.scan_index_store,
+            cached_files,
+            parser_profile,
+        )
 
     def _get_files_in_range(self, start_date: date, end_date: date) -> List[Path]:
         """获取日期范围内修改的文件列表
@@ -494,24 +471,19 @@ class FileScanner:
 
     def _item_path(self, item: Path | InventoryItem) -> Path:
         """统一读取候选路径。"""
-        return item if isinstance(item, Path) else Path(item.path)
+        return item_path(item)
 
     def _item_identity(self, item: Path | InventoryItem) -> str:
         """统一读取缓存身份。"""
-        if isinstance(item, Path):
-            return f"bootstrap:{str(item.resolve()).lower()}"
-        return item.file_identity
+        return item_identity(item)
 
     def _item_extension(self, item: Path | InventoryItem) -> str:
         """统一读取扩展名。"""
-        return item.suffix.lower() if isinstance(item, Path) else item.extension
+        return item_extension(item)
 
     def _item_source_version(self, item: Path | InventoryItem) -> str:
         """统一读取 discovery 版本指纹。"""
-        if isinstance(item, Path):
-            stat_result = item.stat()
-            return f"mtime_ns={stat_result.st_mtime_ns}:size={stat_result.st_size}"
-        return item.source_version
+        return item_source_version(item)
 
     def _write_parse_cache(
         self,
@@ -520,17 +492,7 @@ class FileScanner:
         context: FileContext,
     ) -> None:
         """把本轮解析结果写回 parse_cache。"""
-        is_success = context.error is None
-        self.scan_index_store.upsert_parse_cache(
-            file_identity=self._item_identity(item),
-            parser_profile=parser_profile,
-            content_excerpt=context.content if is_success else "",
-            parse_status="success" if is_success else "error",
-            parse_error=context.error or "",
-            source_version=self._item_source_version(item),
-            parser_backend=context.parser_backend or "",
-            truncated=context.truncated,
-        )
+        write_parse_cache(self.scan_index_store, item, parser_profile, context)
 
     def _record_reparse_detail(
         self,
@@ -540,43 +502,14 @@ class FileScanner:
         context: FileContext,
     ) -> None:
         """记录单个重解析文件的 cache miss 原因和解析结果。"""
-        office_audit = self._office_parse_audits.get(str(self._item_path(item)))
         self.last_reparse_details.append(
-            ReparseDetail(
-                path=str(self._item_path(item)),
-                extension=self._item_extension(item),
-                file_identity=self._item_identity(item),
-                source_version=self._item_source_version(item),
-                cache_status=cache_probe.cache_status,
-                cache_miss_reason=cache_probe.cache_miss_reason,
-                previous_source_version=cache_probe.previous_source_version,
-                parse_duration_ms=duration_ms,
-                parse_status="error" if context.error else "success",
-                parse_error=context.error or "",
-                parser_backend=context.parser_backend or "subprocess",
-                worker_lane=self._infer_worker_lane(
-                    self._item_extension(item),
-                    context,
-                ),
-                truncated=context.truncated,
-                attempted_backend=office_audit.attempted_backend
-                if office_audit is not None
-                else "",
-                fallback_backend=office_audit.fallback_backend
-                if office_audit is not None
-                else "",
-                fallback_reason=office_audit.fallback_reason
-                if office_audit is not None
-                else "",
-                rust_duration_ms=office_audit.rust_duration_ms
-                if office_audit is not None
-                else 0,
-                fallback_duration_ms=office_audit.fallback_duration_ms
-                if office_audit is not None
-                else 0,
-                failure_class=office_audit.failure_class
-                if office_audit is not None
-                else "",
+            build_reparse_detail(
+                item=item,
+                cache_probe=cache_probe,
+                duration_ms=duration_ms,
+                context=context,
+                office_parse_audits=self._office_parse_audits,
+                infer_worker_lane=self._infer_worker_lane,
             )
         )
 
@@ -588,20 +521,11 @@ class FileScanner:
     ) -> None:
         """解析入口抛异常时，也要留下 benchmark 可见的重解析明细。"""
         self.last_reparse_details.append(
-            ReparseDetail(
-                path=str(self._item_path(item)),
-                extension=self._item_extension(item),
-                file_identity=self._item_identity(item),
-                source_version=self._item_source_version(item),
-                cache_status=cache_probe.cache_status,
-                cache_miss_reason=cache_probe.cache_miss_reason,
-                previous_source_version=cache_probe.previous_source_version,
-                parse_duration_ms=0,
-                parse_status="error",
+            build_reparse_exception_detail(
+                item=item,
+                cache_probe=cache_probe,
                 parse_error=parse_error,
-                parser_backend=NOT_PARSED_PARSER_BACKEND,
-                worker_lane="not_parsed",
-                truncated=False,
+                not_parsed_backend=NOT_PARSED_PARSER_BACKEND,
             )
         )
 

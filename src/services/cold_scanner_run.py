@@ -135,10 +135,13 @@ class ColdScannerRun:
             )
 
         with metrics.measure_stage("aggregation"):
-            assert (
-                aggregator.success_count + aggregator.error_count
-                == planned_candidates["total_candidates"]
-            ), "文件处理数量不匹配"
+            processed_count = aggregator.success_count + aggregator.error_count
+            expected_count = planned_candidates["total_candidates"]
+            if processed_count != expected_count:
+                raise RuntimeError(
+                    "文件处理数量不匹配: "
+                    f"processed={processed_count}, expected={expected_count}"
+                )
             result = aggregator.build_result(planned_candidates["total_candidates"])
 
         logger.info(
@@ -290,4 +293,3 @@ class ColdScannerRun:
         result = result.model_copy(update={"scan_run_id": run_id})
         logger.info(run_metrics.to_summary_line())
         return result
-

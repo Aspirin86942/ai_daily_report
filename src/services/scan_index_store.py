@@ -3,38 +3,19 @@
 from __future__ import annotations
 
 import sqlite3
-from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
 from .context_compressor import ContextDecision
 from .scan_metrics import ExtensionMetrics, ScanRunMetrics
+from .scan_index_schema import init_scan_index_schema, list_table_names
+from .scan_index_inventory import (
+    query_inventory as query_file_inventory,
+    replace_inventory as replace_file_inventory,
+)
 
 
-@dataclass(slots=True)
-class InventoryItem:
-    """库存查询返回的 typed 文件元数据。"""
-
-    file_identity: str
-    path: Path
-    extension: str
-    modified_date: date
-    size_bytes: int
-    source_version: str
-
-
-@dataclass(frozen=True, slots=True)
-class CacheProbe:
-    """解释一次 parse cache freshness 判断结果。"""
-
-    file_identity: str
-    parser_profile: str
-    source_version: str
-    cache_status: str
-    cache_miss_reason: str
-    previous_source_version: str | None = None
-
-
+from .scan_index_models import CacheProbe, InventoryItem
 class ScanIndexStore:
     """保存扫描库存、解析缓存和扫描运行记录的最小存储层。"""
 
@@ -55,288 +36,7 @@ class ScanIndexStore:
     def _init_schema(self) -> None:
         """初始化扫描索引、缓存和 checkpoint 占位表。"""
         with self._connect() as conn:
-            self._migrate_existing_schema(conn)
-            self._migrate_parse_cache_schema(conn)
-            conn.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS file_inventory (
-                    file_identity TEXT PRIMARY KEY,
-                    path TEXT NOT NULL,
-                    extension TEXT NOT NULL,
-                    modified_date TEXT NOT NULL,
-                    size_bytes INTEGER NOT NULL,
-                    source_version TEXT NOT NULL DEFAULT ''
-                );
-
-                CREATE TABLE IF NOT EXISTS parse_cache (
-                    file_identity TEXT NOT NULL,
-                    parser_profile TEXT NOT NULL,
-                    source_version TEXT NOT NULL DEFAULT '',
-                    content_excerpt TEXT NOT NULL,
-                    parse_status TEXT NOT NULL,
-                    parse_error TEXT NOT NULL,
-                    parser_backend TEXT NOT NULL DEFAULT '',
-                    truncated INTEGER NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (file_identity, parser_profile, source_version)
-                );
-
-                CREATE TABLE IF NOT EXISTS scan_runs (
-                    run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    discovered_count INTEGER NOT NULL DEFAULT 0,
-                    reused_count INTEGER NOT NULL DEFAULT 0,
-                    reparsed_count INTEGER NOT NULL DEFAULT 0,
-                    total_duration_ms INTEGER NOT NULL DEFAULT 0,
-                    discovery_duration_ms INTEGER NOT NULL DEFAULT 0,
-                    inventory_cache_duration_ms INTEGER NOT NULL DEFAULT 0,
-                    parse_duration_ms INTEGER NOT NULL DEFAULT 0,
-                    aggregation_duration_ms INTEGER NOT NULL DEFAULT 0,
-                    success_count INTEGER NOT NULL DEFAULT 0,
-                    error_count INTEGER NOT NULL DEFAULT 0,
-                    timeout_count INTEGER NOT NULL DEFAULT 0
-                );
-
-                CREATE TABLE IF NOT EXISTS scan_extension_metrics (
-                    run_id INTEGER NOT NULL,
-                    extension TEXT NOT NULL,
-                    file_count INTEGER NOT NULL DEFAULT 0,
-                    parse_duration_ms INTEGER NOT NULL DEFAULT 0,
-                    success_count INTEGER NOT NULL DEFAULT 0,
-                    error_count INTEGER NOT NULL DEFAULT 0,
-                    timeout_count INTEGER NOT NULL DEFAULT 0,
-                    PRIMARY KEY (run_id, extension),
-                    FOREIGN KEY (run_id) REFERENCES scan_runs(run_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS discovery_checkpoints (
-                    discovery_key TEXT PRIMARY KEY,
-                    checkpoint_value TEXT NOT NULL
-                );
-
-                CREATE TABLE IF NOT EXISTS context_runs (
-                    context_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    report_mode TEXT NOT NULL,
-                    start_date TEXT NOT NULL,
-                    end_date TEXT NOT NULL,
-                    compression_profile TEXT NOT NULL,
-                    context_profile_key TEXT NOT NULL,
-                    scan_run_id INTEGER,
-                    source_file_count INTEGER NOT NULL DEFAULT 0,
-                    included_file_count INTEGER NOT NULL DEFAULT 0,
-                    omitted_file_count INTEGER NOT NULL DEFAULT 0,
-                    metadata_only_count INTEGER NOT NULL DEFAULT 0,
-                    compressed_file_count INTEGER NOT NULL DEFAULT 0,
-                    error_file_count INTEGER NOT NULL DEFAULT 0,
-                    truncated_file_count INTEGER NOT NULL DEFAULT 0,
-                    input_chars INTEGER NOT NULL DEFAULT 0,
-                    output_chars INTEGER NOT NULL DEFAULT 0,
-                    duration_ms INTEGER NOT NULL DEFAULT 0,
-                    status TEXT NOT NULL DEFAULT 'success',
-                    error TEXT NOT NULL DEFAULT '',
-                    FOREIGN KEY (scan_run_id) REFERENCES scan_runs(run_id)
-                );
-
-                CREATE TABLE IF NOT EXISTS context_decisions (
-                    context_decision_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    context_run_id INTEGER NOT NULL,
-                    file_identity TEXT NOT NULL DEFAULT '',
-                    path TEXT NOT NULL,
-                    extension TEXT NOT NULL,
-                    size_bytes INTEGER,
-                    parser_backend TEXT NOT NULL DEFAULT '',
-                    worker_lane TEXT NOT NULL DEFAULT '',
-                    cache_status TEXT NOT NULL DEFAULT '',
-                    action TEXT NOT NULL,
-                    reason TEXT NOT NULL,
-                    priority INTEGER NOT NULL DEFAULT 0,
-                    input_chars INTEGER NOT NULL DEFAULT 0,
-                    output_chars INTEGER NOT NULL DEFAULT 0,
-                    truncated INTEGER NOT NULL DEFAULT 0,
-                    error TEXT NOT NULL DEFAULT '',
-                    FOREIGN KEY (context_run_id)
-                        REFERENCES context_runs(context_run_id)
-                );
-                """
-            )
-            self._migrate_scan_metrics_schema(conn)
-
-    def _migrate_existing_schema(self, conn: sqlite3.Connection) -> None:
-        """迁移早期 Task 2 索引库，避免列名和缓存版本契约漂移。"""
-        table_names = self._list_table_names(conn)
-        if "file_inventory" in table_names:
-            inventory_columns = self._list_column_names(conn, "file_inventory")
-            if (
-                "modified_at" in inventory_columns
-                or "modified_date" not in inventory_columns
-                or "source_version" not in inventory_columns
-            ):
-                modified_date_expr = (
-                    "modified_date"
-                    if "modified_date" in inventory_columns
-                    else "modified_at"
-                )
-                source_version_expr = (
-                    "source_version" if "source_version" in inventory_columns else "''"
-                )
-                conn.executescript(
-                    f"""
-                    ALTER TABLE file_inventory RENAME TO file_inventory_legacy;
-
-                    CREATE TABLE file_inventory (
-                        file_identity TEXT PRIMARY KEY,
-                        path TEXT NOT NULL,
-                        extension TEXT NOT NULL,
-                        modified_date TEXT NOT NULL,
-                        size_bytes INTEGER NOT NULL,
-                        source_version TEXT NOT NULL DEFAULT ''
-                    );
-
-                    INSERT INTO file_inventory (
-                        file_identity,
-                        path,
-                        extension,
-                        modified_date,
-                        size_bytes,
-                        source_version
-                    )
-                    SELECT
-                        file_identity,
-                        path,
-                        extension,
-                        {modified_date_expr},
-                        size_bytes,
-                        {source_version_expr}
-                    FROM file_inventory_legacy;
-
-                    DROP TABLE file_inventory_legacy;
-                    """
-                )
-
-    def _migrate_parse_cache_schema(self, conn: sqlite3.Connection) -> None:
-        """迁移 parse_cache，补齐 source_version 主键和 parser metadata 字段。"""
-        table_names = self._list_table_names(conn)
-        if "parse_cache" not in table_names:
-            return
-
-        cache_columns = self._list_column_names(conn, "parse_cache")
-        cache_primary_key = self._list_primary_key_columns(conn, "parse_cache")
-        expected_primary_key = [
-            "file_identity",
-            "parser_profile",
-            "source_version",
-        ]
-        if "source_version" not in cache_columns or cache_primary_key != expected_primary_key:
-            source_version_expr = (
-                "source_version" if "source_version" in cache_columns else "''"
-            )
-            parser_backend_expr = (
-                "parser_backend" if "parser_backend" in cache_columns else "''"
-            )
-            truncated_expr = "truncated" if "truncated" in cache_columns else "0"
-            updated_at_expr = (
-                "updated_at" if "updated_at" in cache_columns else "CURRENT_TIMESTAMP"
-            )
-            conn.executescript(
-                f"""
-                ALTER TABLE parse_cache RENAME TO parse_cache_legacy;
-
-                CREATE TABLE parse_cache (
-                    file_identity TEXT NOT NULL,
-                    parser_profile TEXT NOT NULL,
-                    source_version TEXT NOT NULL DEFAULT '',
-                    content_excerpt TEXT NOT NULL,
-                    parse_status TEXT NOT NULL,
-                    parse_error TEXT NOT NULL,
-                    parser_backend TEXT NOT NULL DEFAULT '',
-                    truncated INTEGER NOT NULL DEFAULT 0,
-                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (file_identity, parser_profile, source_version)
-                );
-
-                INSERT INTO parse_cache (
-                    file_identity,
-                    parser_profile,
-                    source_version,
-                    content_excerpt,
-                    parse_status,
-                    parse_error,
-                    parser_backend,
-                    truncated,
-                    updated_at
-                )
-                SELECT
-                    file_identity,
-                    parser_profile,
-                    {source_version_expr},
-                    content_excerpt,
-                    parse_status,
-                    parse_error,
-                    {parser_backend_expr},
-                    {truncated_expr},
-                    {updated_at_expr}
-                FROM parse_cache_legacy;
-
-                DROP TABLE parse_cache_legacy;
-                """
-            )
-            return
-
-        if "parser_backend" not in cache_columns:
-            conn.execute(
-                "ALTER TABLE parse_cache ADD COLUMN parser_backend TEXT NOT NULL DEFAULT ''"
-            )
-        if "truncated" not in cache_columns:
-            conn.execute(
-                "ALTER TABLE parse_cache ADD COLUMN truncated INTEGER NOT NULL DEFAULT 0"
-            )
-
-    def _migrate_scan_metrics_schema(self, conn: sqlite3.Connection) -> None:
-        """为旧 scan_runs 表补齐性能指标列。"""
-        table_names = self._list_table_names(conn)
-        if "scan_runs" not in table_names:
-            return
-
-        existing_columns = self._list_column_names(conn, "scan_runs")
-        required_columns = {
-            "total_duration_ms": "INTEGER NOT NULL DEFAULT 0",
-            "discovery_duration_ms": "INTEGER NOT NULL DEFAULT 0",
-            "inventory_cache_duration_ms": "INTEGER NOT NULL DEFAULT 0",
-            "parse_duration_ms": "INTEGER NOT NULL DEFAULT 0",
-            "aggregation_duration_ms": "INTEGER NOT NULL DEFAULT 0",
-            "success_count": "INTEGER NOT NULL DEFAULT 0",
-            "error_count": "INTEGER NOT NULL DEFAULT 0",
-            "timeout_count": "INTEGER NOT NULL DEFAULT 0",
-        }
-        for column_name, column_def in required_columns.items():
-            if column_name not in existing_columns:
-                conn.execute(
-                    f"ALTER TABLE scan_runs ADD COLUMN {column_name} {column_def}"
-                )
-
-    def _list_table_names(self, conn: sqlite3.Connection) -> set[str]:
-        """列出现有表名。"""
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
-        return {str(row["name"]) for row in rows}
-
-    def _list_column_names(self, conn: sqlite3.Connection, table_name: str) -> set[str]:
-        """列出指定表字段名。"""
-        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        return {str(row["name"]) for row in rows}
-
-    def _list_primary_key_columns(
-        self,
-        conn: sqlite3.Connection,
-        table_name: str,
-    ) -> list[str]:
-        """按主键顺序列出字段名。"""
-        rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
-        primary_key_rows = [row for row in rows if int(row["pk"]) > 0]
-        primary_key_rows.sort(key=lambda row: int(row["pk"]))
-        return [str(row["name"]) for row in primary_key_rows]
+            init_scan_index_schema(conn)
 
     def _non_negative_int(self, value: int) -> int:
         """把审计计数归一为非负整数，避免异常路径污染后续统计。"""
@@ -345,10 +45,7 @@ class ScanIndexStore:
     def list_tables(self) -> set[str]:
         """返回当前 SQLite 文件内的表名集合。"""
         with self._connect() as conn:
-            rows = conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        return {str(row["name"]) for row in rows}
+            return list_table_names(conn)
 
     def save_checkpoint(self, discovery_key: str, checkpoint_value: str) -> None:
         """保存 discovery checkpoint 占位值，后续任务可在此接入增量扫描。"""
@@ -1173,31 +870,7 @@ class ScanIndexStore:
     def replace_inventory(self, items: list[dict[str, object]]) -> None:
         """用一次 bootstrap 快照整体替换当前库存。"""
         with self._connect() as conn:
-            conn.execute("DELETE FROM file_inventory")
-            conn.executemany(
-                """
-                INSERT INTO file_inventory (
-                    file_identity,
-                    path,
-                    extension,
-                    modified_date,
-                    size_bytes,
-                    source_version
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        str(item["file_identity"]),
-                        str(item["path"]),
-                        str(item["extension"]),
-                        str(item["modified_date"]),
-                        int(item["size_bytes"]),
-                        str(item.get("source_version", "")),
-                    )
-                    for item in items
-                ],
-            )
+            replace_file_inventory(conn, items)
 
     def query_inventory(
         self,
@@ -1206,30 +879,4 @@ class ScanIndexStore:
     ) -> list[InventoryItem]:
         """按修改日期闭区间读取库存快照。"""
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT
-                    file_identity,
-                    path,
-                    extension,
-                    modified_date,
-                    size_bytes,
-                    source_version
-                FROM file_inventory
-                WHERE modified_date >= ? AND modified_date <= ?
-                ORDER BY path, file_identity
-                """,
-                (start_date.isoformat(), end_date.isoformat()),
-            ).fetchall()
-
-        return [
-            InventoryItem(
-                file_identity=str(row["file_identity"]),
-                path=Path(str(row["path"])),
-                extension=str(row["extension"]),
-                modified_date=date.fromisoformat(str(row["modified_date"])),
-                size_bytes=int(row["size_bytes"]),
-                source_version=str(row["source_version"]),
-            )
-            for row in rows
-        ]
+            return query_file_inventory(conn, start_date, end_date)
