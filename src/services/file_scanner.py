@@ -37,8 +37,9 @@ from .office_parser import (
     parse_with_sharepoint_text,
 )
 from .scan_metrics import ReparseDetail
-from .scan_planner import ScanPlanner
+from .scan_planner import DEFAULT_RUST_OFFICE_PARSER_BIN, ScanPlanner
 from .scan_worker_pool import ParserSupervisor
+from .rust_cli_contract import resolve_binary_path
 from .cold_scanner_run import ColdScannerRun
 from .scanner_items import (
     item_extension,
@@ -380,7 +381,15 @@ class FileScanner:
         self.scanner_cfg = config.scanner_config
         self.work_dir = config.work_dir
         self.discovery_service = FileDiscoveryService(self.work_dir, self.scanner_cfg)
-        self.scan_planner = ScanPlanner(self.scanner_cfg)
+        (
+            rust_office_binary_size_bytes,
+            rust_office_binary_mtime_ns,
+        ) = self._rust_office_binary_metadata(self.scanner_cfg)
+        self.scan_planner = ScanPlanner(
+            self.scanner_cfg,
+            rust_office_parser_bin_size_bytes=rust_office_binary_size_bytes,
+            rust_office_parser_bin_mtime_ns=rust_office_binary_mtime_ns,
+        )
         self.scan_index_store = ScanIndexStore(
             self._resolve_project_path(self.scanner_cfg["index_db_path"])
         )
@@ -401,6 +410,23 @@ class FileScanner:
             return path
         project_root = Path(__file__).resolve().parent.parent.parent
         return project_root / path
+
+    @staticmethod
+    def _rust_office_binary_metadata(
+        scanner_cfg: dict,
+    ) -> tuple[int | None, int | None]:
+        """在 runtime adapter 解析 helper 指纹，planner 保持无文件系统 I/O。"""
+        binary_path = resolve_binary_path(
+            scanner_cfg.get(
+                "rust_office_parser_bin",
+                DEFAULT_RUST_OFFICE_PARSER_BIN,
+            )
+        )
+        try:
+            binary_stat = binary_path.stat()
+        except OSError:
+            return None, None
+        return binary_stat.st_size, binary_stat.st_mtime_ns
 
     def scan_today_files(self) -> ScanResult:
         """扫描今日修改的文件（默认日期范围封装）
@@ -1053,11 +1079,16 @@ class FileScanner:
                 return too_large_context
 
             if file_type in DOCUMENT_FILE_TYPES:
+                parser_options = (
+                    self._build_python_office_fallback_options()
+                    if file_type in MODERN_OFFICE_FILE_TYPES
+                    else self._build_document_parser_options()
+                )
                 return parse_document_file(
                     file_path=file_path,
                     file_type=file_type,
                     limits=limits,
-                    options=self._build_document_parser_options(),
+                    options=parser_options,
                 )
             if file_type in [".xls"]:
                 content = self._parse_excel(file_path, limits["excel_max_rows"])

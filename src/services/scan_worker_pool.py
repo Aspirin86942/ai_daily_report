@@ -8,8 +8,11 @@ from typing import Any
 
 from ..core.logger import setup_logger
 from ..models.schemas import FileContext
+from .scan_timeouts import (
+    DEFAULT_FILE_TIMEOUT_SECONDS,
+    normalize_file_timeout,
+)
 
-DEFAULT_FILE_TIMEOUT_SECONDS = 30.0
 logger = setup_logger()
 
 
@@ -31,25 +34,14 @@ class ParserSupervisor:
             normalized_type,
             self.file_timeout_seconds,
         )
-        try:
-            timeout = float(timeout_value)
-        except (TypeError, ValueError):
+        timeout, is_valid = normalize_file_timeout(timeout_value)
+        if not is_valid:
             logger.warning(
                 "非法单文件超时配置 %r for %s，回退默认值 %ss",
                 timeout_value,
                 normalized_type,
                 f"{DEFAULT_FILE_TIMEOUT_SECONDS:g}",
             )
-            return DEFAULT_FILE_TIMEOUT_SECONDS
-
-        if timeout <= 0:
-            logger.warning(
-                "非法单文件超时配置 %r for %s，回退默认值 %ss",
-                timeout_value,
-                normalized_type,
-                f"{DEFAULT_FILE_TIMEOUT_SECONDS:g}",
-            )
-            return DEFAULT_FILE_TIMEOUT_SECONDS
         return timeout
 
     def parse_file(

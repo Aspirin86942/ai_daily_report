@@ -1,6 +1,7 @@
 """测试 Office/PDF bounded document parser。"""
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -15,11 +16,24 @@ from src.services.document_parser import (
     DocumentParserOptions,
     parse_document_file,
 )
+from src.services.rust_cli_contract import resolve_binary_path
 
-RUST_OFFICE_PARSER_BIN = (
-    Path(__file__).resolve().parents[1]
-    / "rust/office_parser/target/release/ai-daily-office-parser"
+RUST_OFFICE_PARSER_BIN = resolve_binary_path(
+    "rust/office_parser/target/release/ai-daily-office-parser",
+    project_root=Path(__file__).resolve().parents[1],
 )
+
+
+def _require_rust_office_parser_binary() -> None:
+    if RUST_OFFICE_PARSER_BIN.is_file():
+        return
+    if os.name == "nt":
+        pytest.fail(
+            "Windows integration requires the built Rust Office parser .exe; "
+            "run cargo build --release --locked --manifest-path "
+            "rust/office_parser/Cargo.toml"
+        )
+    pytest.skip("Rust Office parser release binary has not been built")
 
 
 def _run_rust_office_parser(sample: Path, file_type: str) -> dict:
@@ -166,13 +180,10 @@ def test_parse_pptx_extracts_slide_text(tmp_path: Path):
     assert "完成 scanner 优化" in context.content
 
 
-@pytest.mark.skipif(
-    not RUST_OFFICE_PARSER_BIN.exists(),
-    reason="Rust Office parser release binary has not been built",
-)
 def test_rust_office_parser_extracts_docx_bounded_xlsx_and_pptx(
     tmp_path: Path,
 ):
+    _require_rust_office_parser_binary()
     docx_sample = tmp_path / "report.docx"
     doc = Document()
     doc.add_paragraph("Rust DOCX 中文")

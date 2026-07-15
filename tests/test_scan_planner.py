@@ -32,6 +32,10 @@ def test_build_parser_profile_uses_summary_limits_when_requested():
         "office_parser_backend": "rust_office_oxide_v1",
         "pdf_parser_backend": "pdf_text_v1",
         "rust_office_parser_bin": "rust/office_parser/target/release/ai-daily-office-parser",
+        "rust_office_parser_bin_size_bytes": None,
+        "rust_office_parser_bin_mtime_ns": None,
+        "file_timeout_seconds": 30.0,
+        "file_timeout_by_extension": {},
         "office_parser_fallback_enabled": True,
         "office_parser_fallback_order": [
             "python_office_v1",
@@ -117,6 +121,40 @@ def test_build_parser_profile_includes_document_parser_defaults():
     assert profile["pptx_max_slides"] == 50
     assert profile["pptx_include_notes"] is True
     assert profile["document_excerpt_max_chars"] == 6000
+
+
+def test_build_parser_profile_includes_timeout_and_injected_binary_metadata():
+    """运行时 timeout 和 Rust 二进制指纹必须参与稳定 cache key。"""
+    scanner_cfg = {
+        "file_timeout_seconds": 12,
+        "file_timeout_by_extension": {".pdf": 45, ".docx": "60"},
+    }
+    planner = ScanPlanner(
+        scanner_cfg=scanner_cfg,
+        rust_office_parser_bin_size_bytes=4096,
+        rust_office_parser_bin_mtime_ns=123456789,
+    )
+
+    profile = planner.build_parser_profile(summary_mode=False)
+
+    assert profile["file_timeout_seconds"] == 12.0
+    assert profile["file_timeout_by_extension"] == {
+        ".pdf": 45.0,
+        ".docx": 60.0,
+    }
+    assert profile["rust_office_parser_bin_size_bytes"] == 4096
+    assert profile["rust_office_parser_bin_mtime_ns"] == 123456789
+
+    rebuilt_profile = ScanPlanner(
+        scanner_cfg=scanner_cfg,
+        rust_office_parser_bin_size_bytes=4096,
+        rust_office_parser_bin_mtime_ns=123456790,
+    ).build_parser_profile(summary_mode=False)
+    serialized_profile = planner.serialize_parser_profile(profile)
+    serialized_rebuilt_profile = planner.serialize_parser_profile(
+        rebuilt_profile
+    )
+    assert serialized_profile != serialized_rebuilt_profile
 
 
 def test_build_parser_profile_includes_rust_office_backend_and_fallback_keys():

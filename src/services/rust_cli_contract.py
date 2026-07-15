@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import platform
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -39,19 +40,34 @@ class RustCliJsonResult(Generic[T]):
     error: RustCliContractError | None
     duration_ms: int
     binary_path: Path
+    stderr: str = ""
 
 
 def resolve_binary_path(
     binary_path: str | Path,
     *,
     project_root: Path | None = None,
+    system_name: str | None = None,
 ) -> Path:
     """Resolve Rust helper binary paths relative to the repository root."""
     configured = Path(binary_path)
     if configured.is_absolute():
-        return configured
-    root = project_root if project_root is not None else Path(__file__).resolve().parents[2]
-    return root / configured
+        resolved = configured
+    else:
+        root = (
+            project_root
+            if project_root is not None
+            else Path(__file__).resolve().parents[2]
+        )
+        resolved = root / configured
+
+    normalized_system = (system_name or platform.system()).strip().lower()
+    if (
+        normalized_system.startswith("win")
+        and resolved.suffix.lower() != ".exe"
+    ):
+        resolved = Path(f"{resolved}.exe")
+    return resolved
 
 
 def run_rust_json_cli(
@@ -161,6 +177,7 @@ def run_rust_json_cli(
         error=None,
         duration_ms=_elapsed_ms(started_at),
         binary_path=resolved_binary,
+        stderr=stderr,
     )
 
 
@@ -185,6 +202,7 @@ def _error_result(
         ),
         duration_ms=_elapsed_ms(started_at),
         binary_path=binary_path,
+        stderr=stderr,
     )
 
 

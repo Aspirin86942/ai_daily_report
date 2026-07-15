@@ -67,6 +67,23 @@ class RustDiscoveryRunner:
             raise RustDiscoveryError(self._format_contract_error(result.error))
         if result.payload is None:
             raise RustDiscoveryError("Rust discovery returned no payload")
+        for warning in result.stderr.splitlines():
+            warning = warning.strip()
+            if not warning:
+                continue
+            logger.warning(
+                (
+                    "Rust discovery stderr warning: %s "
+                    "(backend=rust_discovery, binary_path=%s, work_dir=%s, "
+                    "start_date=%s, end_date=%s, duration_ms=%s)"
+                ),
+                warning,
+                result.binary_path,
+                work_dir,
+                start_date,
+                end_date,
+                result.duration_ms,
+            )
         return result.payload
 
     def _validate_discovery_payload(self, raw_items: object) -> list[DiscoveredFile]:

@@ -209,16 +209,6 @@ def _append_writable_directory_check(
         result.errors.append(f"{label}不可写: {directory} ({exc})")
 
 
-def _resolve_rust_binary_path(path_value: str | Path, project_root: Path) -> Path:
-    """按实际平台解析配置声明的 Rust CLI 路径。"""
-
-    path = resolve_binary_path(path_value, project_root=project_root)
-    is_windows = platform.system().strip().lower().startswith("win")
-    if is_windows and path.suffix.lower() != ".exe":
-        path = Path(f"{path}.exe")
-    return path
-
-
 def _probe_rust_cli(binary_path: Path) -> str | None:
     """用空 stdin 验证 Rust JSON CLI 可启动且仍遵循统一错误前缀。"""
 
@@ -252,12 +242,13 @@ def _append_rust_cli_checks(
     """展示当前实际会启动的 Rust helper 路径。"""
 
     if str(scanner_config.get("discovery_backend", "rust")).strip().lower() == "rust":
-        discovery_path = _resolve_rust_binary_path(
+        discovery_path = resolve_binary_path(
             scanner_config.get(
                 "rust_discovery_bin",
                 "rust/discovery/target/release/ai-daily-discovery",
             ),
-            project_root,
+            project_root=project_root,
+            system_name=platform.system(),
         )
         result.info["Rust Discovery CLI"] = str(discovery_path)
         if not discovery_path.is_file():
@@ -281,12 +272,13 @@ def _append_rust_cli_checks(
         scanner_config.get("office_parser_backend", "rust_office_oxide_v1")
     ).strip()
     if office_backend == "rust_office_oxide_v1":
-        office_path = _resolve_rust_binary_path(
+        office_path = resolve_binary_path(
             scanner_config.get(
                 "rust_office_parser_bin",
                 "rust/office_parser/target/release/ai-daily-office-parser",
             ),
-            project_root,
+            project_root=project_root,
+            system_name=platform.system(),
         )
         result.info["Rust Office Parser CLI"] = str(office_path)
         office_exists = office_path.is_file()

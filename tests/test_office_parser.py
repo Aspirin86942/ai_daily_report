@@ -19,6 +19,7 @@ from src.services.office_parser import (
     parse_office_with_fallback,
     parse_with_sharepoint_text,
 )
+from src.services.rust_cli_contract import resolve_binary_path
 
 
 def test_office_rust_file_types_include_legacy_office_extensions():
@@ -35,6 +36,9 @@ def test_office_rust_file_types_include_legacy_office_extensions():
 def test_rust_runner_returns_file_context_from_valid_payload(tmp_path, monkeypatch):
     sample = tmp_path / "report.xlsx"
     sample.write_bytes(b"fake")
+    configured_binary = (
+        "rust/office_parser/target/release/ai-daily-office-parser"
+    )
 
     completed = SimpleNamespace(
         returncode=0,
@@ -52,7 +56,7 @@ def test_rust_runner_returns_file_context_from_valid_payload(tmp_path, monkeypat
     )
 
     def fake_run(*args, **kwargs):
-        assert str(args[0][0]).endswith("ai-daily-office-parser")
+        assert args[0][0] == str(resolve_binary_path(configured_binary))
         assert kwargs["timeout"] == 12.0
         assert kwargs["encoding"] == "utf-8"
         assert kwargs["errors"] == "strict"
@@ -62,9 +66,12 @@ def test_rust_runner_returns_file_context_from_valid_payload(tmp_path, monkeypat
 
     monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
 
-    context, duration_ms = RustOfficeParserRunner(
-        "rust/office_parser/target/release/ai-daily-office-parser"
-    ).parse(sample, ".xlsx", {"document_excerpt_max_chars": 6000}, 12)
+    context, duration_ms = RustOfficeParserRunner(configured_binary).parse(
+        sample,
+        ".xlsx",
+        {"document_excerpt_max_chars": 6000},
+        12,
+    )
 
     assert context == FileContext(
         file_path=str(sample),

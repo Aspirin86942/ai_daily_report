@@ -3,7 +3,23 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-from src.services.rust_cli_contract import run_rust_json_cli
+from src.services.rust_cli_contract import (
+    resolve_binary_path,
+    run_rust_json_cli,
+)
+
+
+def test_resolve_binary_path_appends_windows_executable_suffix_once(tmp_path):
+    assert resolve_binary_path(
+        "bin/helper",
+        project_root=tmp_path,
+        system_name="Windows",
+    ) == tmp_path / "bin/helper.exe"
+    assert resolve_binary_path(
+        "bin/helper.EXE",
+        project_root=tmp_path,
+        system_name="Windows",
+    ) == tmp_path / "bin/helper.EXE"
 
 
 def test_run_rust_json_cli_resolves_relative_binary_and_returns_validated_payload(
@@ -24,7 +40,7 @@ def test_run_rust_json_cli_resolves_relative_binary_and_returns_validated_payloa
         return SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"value": 42}),
-            stderr="",
+            stderr="warning: helper recovered",
         )
 
     monkeypatch.setattr("src.services.rust_cli_contract.subprocess.run", fake_run)
@@ -37,12 +53,14 @@ def test_run_rust_json_cli_resolves_relative_binary_and_returns_validated_payloa
         contract_name="test_helper",
         project_root=tmp_path,
     )
+    expected_binary = resolve_binary_path("bin/helper", project_root=tmp_path)
 
     assert result.error is None
     assert result.payload == 42
-    assert result.binary_path == tmp_path / "bin/helper"
+    assert result.binary_path == expected_binary
+    assert result.stderr == "warning: helper recovered"
     assert result.duration_ms >= 0
-    assert calls[0][0][0] == [str(tmp_path / "bin/helper")]
+    assert calls[0][0][0] == [str(expected_binary)]
 
 
 def test_run_rust_json_cli_returns_serialization_error_without_starting_process(

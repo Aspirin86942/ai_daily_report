@@ -9,20 +9,69 @@ from pathlib import Path
 
 import pytest
 
-from src.services.scan_discovery import FileDiscoveryService
+from src.services.rust_cli_contract import (
+    RustCliJsonResult,
+    resolve_binary_path,
+)
+from src.services.scan_discovery import (
+    FileDiscoveryService,
+    RustDiscoveryRunner,
+)
 
 
-def _rust_discovery_bin() -> Path:
-    binary = (
-        Path(__file__).resolve().parents[1]
-        / "rust/discovery/target/release/ai-daily-discovery"
+def test_rust_discovery_logs_successful_stderr_as_structured_warning(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary_path = tmp_path / "discovery.exe"
+    monkeypatch.setattr(
+        "src.services.scan_discovery.run_rust_json_cli",
+        lambda **_kwargs: RustCliJsonResult(
+            payload=[],
+            error=None,
+            duration_ms=7,
+            binary_path=binary_path,
+            stderr="warning: cannot stat fixture\n",
+        ),
     )
+    runner = RustDiscoveryRunner(
+        {
+            "allowed_extensions": [".md"],
+            "ignored_patterns": [],
+            "excluded_dirs": [],
+            "rust_discovery_bin": str(binary_path),
+            "discovery_timeout_seconds": 10,
+        }
+    )
+
+    with caplog.at_level(logging.WARNING):
+        assert runner.discover(tmp_path, SCAN_DATE, SCAN_DATE) == []
+
+    assert "Rust discovery stderr warning" in caplog.text
+    assert "warning: cannot stat fixture" in caplog.text
+    assert "backend=rust_discovery" in caplog.text
+    assert f"binary_path={binary_path}" in caplog.text
+
+
+RUST_DISCOVERY_BIN = resolve_binary_path(
+    "rust/discovery/target/release/ai-daily-discovery",
+    project_root=Path(__file__).resolve().parents[1],
+)
+
+
+def _require_rust_discovery_binary() -> None:
+    if RUST_DISCOVERY_BIN.is_file():
+        return
     if os.name == "nt":
-        return binary.with_suffix(".exe")
-    return binary
+        pytest.fail(
+            "Windows integration requires the built Rust discovery .exe; "
+            "run cargo build --release --locked --manifest-path "
+            "rust/discovery/Cargo.toml"
+        )
+    pytest.skip("Rust discovery release binary has not been built")
 
 
-RUST_DISCOVERY_BIN = _rust_discovery_bin()
 SCAN_DATE = date(2026, 5, 25)
 SCAN_TIMESTAMP = datetime(2026, 5, 25, 12, 0, 0).timestamp()
 
@@ -31,15 +80,12 @@ def _touch_scan_date(path: Path) -> None:
     os.utime(path, (SCAN_TIMESTAMP, SCAN_TIMESTAMP))
 
 
-@pytest.mark.skipif(
-    not RUST_DISCOVERY_BIN.exists(),
-    reason="Rust discovery release binary has not been built",
-)
 def test_rust_discovery_matches_python_backend_for_fixture(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """同一组 fixture 下 Rust 和 Python 应发现同一批文件并保持版本指纹一致。"""
+    _require_rust_discovery_binary()
     work_dir = tmp_path / "work"
     work_dir.mkdir()
     included_dir = work_dir / "included"

@@ -6,10 +6,12 @@ from types import SimpleNamespace
 from typing import Mapping
 
 import pytest
+from docx import Document
 
 import src.services.file_scanner as file_scanner_module
 from src.services.file_scanner import FileScanner
 from src.services.office_parser import OfficeParseAudit, OfficeParseOutcome
+from src.services.rust_cli_contract import resolve_binary_path
 from src.services.scan_discovery import DiscoveredFile, FileDiscoveryService
 
 
@@ -86,6 +88,31 @@ def test_file_scanner_init(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     assert (
         scanner.scan_index_store.db_path
         == tmp_path / "data" / "db" / "scan_index.sqlite3"
+    )
+
+
+def test_file_scanner_injects_resolved_rust_binary_metadata_into_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """runtime adapter 应解析真实 Windows helper 并把指纹注入 planner。"""
+    configured_binary = tmp_path / "bin" / "office-parser"
+    resolved_binary = resolve_binary_path(configured_binary)
+    resolved_binary.parent.mkdir(parents=True)
+    resolved_binary.write_bytes(b"rust-helper")
+    binary_stat = resolved_binary.stat()
+
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {"rust_office_parser_bin": str(configured_binary)},
+    )
+    profile = scanner.scan_planner.build_parser_profile()
+
+    assert profile["rust_office_parser_bin_size_bytes"] == binary_stat.st_size
+    assert (
+        profile["rust_office_parser_bin_mtime_ns"]
+        == binary_stat.st_mtime_ns
     )
 
 
@@ -1896,6 +1923,45 @@ def test_scan_files_keeps_legacy_subprocess_when_worker_lane_mode_subprocess_for
     assert legacy_calls == [sample]
     assert result.success_count == 1
     assert result.contexts[0].content == "legacy subprocess content"
+    assert scanner.last_reparse_details[0].worker_lane == "subprocess"
+
+
+def test_legacy_subprocess_docx_reports_python_parser_backend(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """legacy subprocess 的 Python Office 解析不能冒充 Rust backend。"""
+    scanner = _make_scanner(
+        tmp_path,
+        monkeypatch,
+        {
+            "allowed_extensions": [".docx"],
+            "worker_lane_mode": "subprocess",
+            "office_parser_backend": "rust_office_oxide_v1",
+        },
+    )
+    sample = scanner.work_dir / "legacy-real.docx"
+    document = Document()
+    document.add_paragraph("legacy subprocess evidence")
+    document.save(sample)
+    sample_stat = sample.stat()
+    discovered = [
+        _build_discovered_file(
+            sample,
+            f"mtime_ns={sample_stat.st_mtime_ns}:size={sample_stat.st_size}",
+        )
+    ]
+    monkeypatch.setattr(
+        scanner.discovery_service,
+        "bootstrap_full_scan",
+        lambda start_date, end_date: discovered,
+    )
+
+    result = scanner.scan_files(date.today(), date.today())
+
+    assert result.success_count == 1
+    assert result.contexts[0].parser_backend == "python_office_v1"
+    assert scanner.last_reparse_details[0].parser_backend == "python_office_v1"
     assert scanner.last_reparse_details[0].worker_lane == "subprocess"
 
 

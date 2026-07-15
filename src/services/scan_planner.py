@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Iterable
 
@@ -23,6 +24,10 @@ from .document_parser import (
     DEFAULT_EXCEL_MAX_SHEETS,
     DEFAULT_PPTX_MAX_SLIDES,
     PDF_TEXT_PARSER_BACKEND,
+)
+from .scan_timeouts import (
+    DEFAULT_FILE_TIMEOUT_SECONDS,
+    normalize_file_timeout,
 )
 
 DEFAULT_OFFICE_PARSER_BACKEND = "rust_office_oxide_v1"
@@ -46,8 +51,18 @@ DEFAULT_SUMMARY_PPTX_MAX_SLIDES = 15
 class ScanPlanner:
     """负责解析预算和候选文件分流规划。"""
 
-    def __init__(self, scanner_cfg: dict):
+    def __init__(
+        self,
+        scanner_cfg: dict,
+        *,
+        rust_office_parser_bin_size_bytes: int | None = None,
+        rust_office_parser_bin_mtime_ns: int | None = None,
+    ):
         self.scanner_cfg = scanner_cfg
+        self.rust_office_parser_bin_size_bytes = (
+            rust_office_parser_bin_size_bytes
+        )
+        self.rust_office_parser_bin_mtime_ns = rust_office_parser_bin_mtime_ns
 
     def build_parser_profile(self, summary_mode: bool = False) -> dict:
         """根据扫描模式生成解析预算。"""
@@ -132,6 +147,29 @@ class ScanPlanner:
         profile["rust_office_parser_bin"] = self.scanner_cfg.get(
             "rust_office_parser_bin",
             DEFAULT_RUST_OFFICE_PARSER_BIN,
+        )
+        profile["rust_office_parser_bin_size_bytes"] = (
+            self.rust_office_parser_bin_size_bytes
+        )
+        profile["rust_office_parser_bin_mtime_ns"] = (
+            self.rust_office_parser_bin_mtime_ns
+        )
+        profile["file_timeout_seconds"] = self._positive_timeout_value(
+            self.scanner_cfg.get(
+                "file_timeout_seconds",
+                DEFAULT_FILE_TIMEOUT_SECONDS,
+            )
+        )
+        timeout_overrides = (
+            self.scanner_cfg.get("file_timeout_by_extension", {}) or {}
+        )
+        profile["file_timeout_by_extension"] = (
+            {
+                str(extension): self._positive_timeout_value(timeout)
+                for extension, timeout in timeout_overrides.items()
+            }
+            if isinstance(timeout_overrides, Mapping)
+            else {}
         )
         profile["office_parser_fallback_enabled"] = bool(
             self.scanner_cfg.get("office_parser_fallback_enabled", True)
@@ -237,6 +275,12 @@ class ScanPlanner:
             return default
         text = str(value).strip()
         return text or default
+
+    @staticmethod
+    def _positive_timeout_value(value: object) -> float:
+        """timeout cache 语义与运行时一致：无效值回到统一默认值。"""
+        timeout, _ = normalize_file_timeout(value)
+        return timeout
 
     def serialize_parser_profile(self, profile: dict) -> str:
         """稳定序列化 parser profile，避免 cache key 因键顺序漂移。"""
