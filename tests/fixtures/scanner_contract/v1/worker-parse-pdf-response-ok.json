@@ -1,0 +1,19 @@
+{
+  "contract": "ai_daily_worker",
+  "protocol_version": 1,
+  "request_id": "33333333-3333-4333-8333-333333333333",
+  "status": "ok",
+  "file_path": "C:\\scanner-fixtures\\工作 目录\\sample.pdf",
+  "file_type": ".pdf",
+  "content": "合成 PDF 解析结果",
+  "parser_backend": "pdf_text_v1",
+  "worker_lane": "python_document_process",
+  "truncated": false,
+  "warnings": [],
+  "error": null,
+  "duration_ms": 24,
+  "worker_contract_version": "ai_daily_worker_v1",
+  "worker_version": "0.1.0",
+  "worker_build": "fixture-python-worker-build-v1",
+  "observed_source_version": "mtime_ns=3000000000:size=12288"
+}

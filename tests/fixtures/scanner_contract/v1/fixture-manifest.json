@@ -1,0 +1,125 @@
+{
+  "schema_version": "scanner_fixture_manifest_v1",
+  "valid_fixtures": [
+    {
+      "file": "diagnostic.json",
+      "schema": "diagnostic-v1.schema.json"
+    },
+    {
+      "file": "doctor-request.json",
+      "schema": "doctor-request-v1.schema.json"
+    },
+    {
+      "file": "doctor-response-error.json",
+      "schema": "doctor-response-v1.schema.json"
+    },
+    {
+      "file": "doctor-response-ok.json",
+      "schema": "doctor-response-v1.schema.json"
+    },
+    {
+      "file": "doctor-response-partial.json",
+      "schema": "doctor-response-v1.schema.json"
+    },
+    {
+      "file": "inspect-run-request.json",
+      "schema": "inspect-run-request-v1.schema.json"
+    },
+    {
+      "file": "inspect-run-response-error.json",
+      "schema": "inspect-run-response-v1.schema.json"
+    },
+    {
+      "file": "inspect-run-response-ok.json",
+      "schema": "inspect-run-response-v1.schema.json"
+    },
+    {
+      "file": "office-worker-version-response.json",
+      "schema": "worker-version-response-v1.schema.json"
+    },
+    {
+      "file": "profile-daily.json",
+      "schema": "scanner-profile-normalized-v1.schema.json"
+    },
+    {
+      "file": "profile-monthly.json",
+      "schema": "scanner-profile-normalized-v1.schema.json"
+    },
+    {
+      "file": "profile-weekly.json",
+      "schema": "scanner-profile-normalized-v1.schema.json"
+    },
+    {
+      "file": "python-worker-version-response.json",
+      "schema": "worker-version-response-v1.schema.json"
+    },
+    {
+      "file": "request-windows-unc.json",
+      "schema": "build-context-request-v1.schema.json"
+    },
+    {
+      "file": "request.json",
+      "schema": "build-context-request-v1.schema.json"
+    },
+    {
+      "file": "response-error.json",
+      "schema": "context-envelope-v1.schema.json"
+    },
+    {
+      "file": "response-ok.json",
+      "schema": "context-envelope-v1.schema.json"
+    },
+    {
+      "file": "response-partial.json",
+      "schema": "context-envelope-v1.schema.json"
+    },
+    {
+      "file": "scanner-version-response.json",
+      "schema": "version-response-v1.schema.json"
+    },
+    {
+      "file": "transport-error.json",
+      "schema": "transport-error-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-long-path-request.json",
+      "schema": "worker-parse-request-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-long-path-response-ok.json",
+      "schema": "worker-parse-response-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-office-request.json",
+      "schema": "worker-parse-request-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-office-response-ok.json",
+      "schema": "worker-parse-response-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-pdf-request.json",
+      "schema": "worker-parse-request-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-pdf-response-ok.json",
+      "schema": "worker-parse-response-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-sharepoint-request.json",
+      "schema": "worker-parse-request-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-sharepoint-response-error.json",
+      "schema": "worker-parse-response-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-xlsx-request.json",
+      "schema": "worker-parse-request-v1.schema.json"
+    },
+    {
+      "file": "worker-parse-xlsx-response-ok.json",
+      "schema": "worker-parse-response-v1.schema.json"
+    }
+  ]
+}

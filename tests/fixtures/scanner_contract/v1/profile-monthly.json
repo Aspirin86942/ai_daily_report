@@ -1,0 +1,81 @@
+{
+  "schema_version": "normalized_scanner_profile_v1",
+  "parser_profile_version": "v1",
+  "report_mode": "monthly",
+  "discovery": {
+    "allowed_extensions": [
+      ".csv",
+      ".docx",
+      ".json",
+      ".log",
+      ".md",
+      ".pdf",
+      ".pptx",
+      ".txt",
+      ".xls",
+      ".xlsx"
+    ],
+    "ignored_patterns": [
+      "*.tmp",
+      "~$*"
+    ],
+    "excluded_dirs": []
+  },
+  "execution": {
+    "max_workers": 4,
+    "max_file_size_bytes": 52428800,
+    "discovery_timeout_ms": 30000,
+    "file_timeout_ms": 30000,
+    "file_timeout_by_extension_ms": {
+      ".pdf": 45000,
+      ".xls": 60000,
+      ".xlsx": 60000
+    }
+  },
+  "parse": {
+    "aggregate_max_chars": 50000,
+    "text": {
+      "backend": "light_text_v1",
+      "read_head_bytes": 262144,
+      "read_tail_bytes": 262144,
+      "max_chars": 2000,
+      "excerpt_max_chars": 2000
+    },
+    "office": {
+      "primary_backend": "rust_office_oxide_v1",
+      "fallback_enabled": true,
+      "fallback_order": [
+        "python_office_v1",
+        "python_sharepoint_text_v1"
+      ],
+      "fallback_after_timeout": false,
+      "fallback_policy_version": "hybrid_v1",
+      "legacy_extensions_enabled": false,
+      "excel_max_sheets": 2,
+      "excel_max_rows": 10,
+      "excel_max_columns": 12,
+      "docx_max_paragraphs": 80,
+      "docx_max_tables": 8,
+      "docx_table_max_rows": 20,
+      "docx_table_max_cols": 8,
+      "pptx_max_slides": 15,
+      "pptx_include_notes": true,
+      "document_excerpt_max_chars": 2000
+    },
+    "pdf": {
+      "backend": "pdf_text_v1",
+      "max_pages": 2,
+      "excerpt_max_chars": 2000
+    }
+  },
+  "context": {
+    "profile_name": "monthly_balanced_v1",
+    "global_max_chars": 60000,
+    "per_file_max_chars": 4000,
+    "small_file_max_bytes": 65536,
+    "medium_file_max_bytes": 1048576,
+    "large_file_max_bytes": 10485760,
+    "priority_policy_version": "default_v1",
+    "compression_policy_version": "markdown_context_v1"
+  }
+}

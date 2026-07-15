@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "doctor-request-v1.schema.json",
+  "title": "DoctorRequest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "protocol_version",
+    "request_id",
+    "scan_db_path",
+    "adapters"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ai_daily_context"
+    },
+    "protocol_version": {
+      "const": 1
+    },
+    "request_id": {
+      "$ref": "#/$defs/requestId"
+    },
+    "scan_db_path": {
+      "$ref": "#/$defs/absolutePath"
+    },
+    "adapters": {
+      "$ref": "build-context-request-v1.schema.json#/$defs/adapterPaths"
+    }
+  },
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32767,
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "error_code": "PARSER_TIMEOUT",
+  "message": "synthetic parser deadline exceeded",
+  "retryable": true,
+  "stage": "parse",
+  "file_path": "C:\\scanner-fixtures\\工作 目录\\slow.xlsx",
+  "backend": "rust_xlsx_bounded_v1"
+}

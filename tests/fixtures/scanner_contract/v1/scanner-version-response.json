@@ -1,0 +1,16 @@
+{
+  "contract": "ai_daily_context",
+  "protocol_version": 1,
+  "binary_name": "ai-daily-scanner",
+  "engine_version": "0.1.0",
+  "engine_build": "fixture-engine-build-v1",
+  "target_triple": "x86_64-pc-windows-msvc",
+  "supported_commands": [
+    "version",
+    "doctor",
+    "build-context",
+    "inspect-run"
+  ],
+  "office_worker_contract_version": "ai_daily_worker_v1",
+  "python_worker_contract_version": "ai_daily_worker_v1"
+}

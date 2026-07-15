@@ -1,0 +1,2545 @@
+{
+  "schema_version": "scanner_invalid_fixture_corpus_v1",
+  "cases": [
+    {
+      "name": "profile_null_optional_leaf",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "nullability"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "max_workers": null
+      }
+    },
+    {
+      "name": "profile_unknown_infrastructure_leaf",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "unknown_field"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "rust_discovery_bin": "C:\\scanner-fixtures\\bin\\discovery.exe"
+      }
+    },
+    {
+      "name": "profile_integer_boolean",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "type"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "max_workers": true
+      }
+    },
+    {
+      "name": "profile_max_workers_below_limit",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "max_workers": 0
+      }
+    },
+    {
+      "name": "profile_max_file_size_over_limit",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "max_file_size_mb": 4097
+      }
+    },
+    {
+      "name": "profile_timeout_over_limit",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "file_timeout_seconds": 3601
+      }
+    },
+    {
+      "name": "profile_read_budget_over_limit",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "direct_text_read_bytes": 67108865
+      }
+    },
+    {
+      "name": "profile_char_budget_over_limit",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "text_max_chars": 10000001
+      }
+    },
+    {
+      "name": "profile_pdf_pages_over_limit",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "pdf_max_pages": 10001
+      }
+    },
+    {
+      "name": "profile_rows_over_limit",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "excel_max_rows": 1048577
+      }
+    },
+    {
+      "name": "profile_array_over_limit",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "ignored_patterns": [
+          "pattern-0",
+          "pattern-1",
+          "pattern-2",
+          "pattern-3",
+          "pattern-4",
+          "pattern-5",
+          "pattern-6",
+          "pattern-7",
+          "pattern-8",
+          "pattern-9",
+          "pattern-10",
+          "pattern-11",
+          "pattern-12",
+          "pattern-13",
+          "pattern-14",
+          "pattern-15",
+          "pattern-16",
+          "pattern-17",
+          "pattern-18",
+          "pattern-19",
+          "pattern-20",
+          "pattern-21",
+          "pattern-22",
+          "pattern-23",
+          "pattern-24",
+          "pattern-25",
+          "pattern-26",
+          "pattern-27",
+          "pattern-28",
+          "pattern-29",
+          "pattern-30",
+          "pattern-31",
+          "pattern-32",
+          "pattern-33",
+          "pattern-34",
+          "pattern-35",
+          "pattern-36",
+          "pattern-37",
+          "pattern-38",
+          "pattern-39",
+          "pattern-40",
+          "pattern-41",
+          "pattern-42",
+          "pattern-43",
+          "pattern-44",
+          "pattern-45",
+          "pattern-46",
+          "pattern-47",
+          "pattern-48",
+          "pattern-49",
+          "pattern-50",
+          "pattern-51",
+          "pattern-52",
+          "pattern-53",
+          "pattern-54",
+          "pattern-55",
+          "pattern-56",
+          "pattern-57",
+          "pattern-58",
+          "pattern-59",
+          "pattern-60",
+          "pattern-61",
+          "pattern-62",
+          "pattern-63",
+          "pattern-64",
+          "pattern-65",
+          "pattern-66",
+          "pattern-67",
+          "pattern-68",
+          "pattern-69",
+          "pattern-70",
+          "pattern-71",
+          "pattern-72",
+          "pattern-73",
+          "pattern-74",
+          "pattern-75",
+          "pattern-76",
+          "pattern-77",
+          "pattern-78",
+          "pattern-79",
+          "pattern-80",
+          "pattern-81",
+          "pattern-82",
+          "pattern-83",
+          "pattern-84",
+          "pattern-85",
+          "pattern-86",
+          "pattern-87",
+          "pattern-88",
+          "pattern-89",
+          "pattern-90",
+          "pattern-91",
+          "pattern-92",
+          "pattern-93",
+          "pattern-94",
+          "pattern-95",
+          "pattern-96",
+          "pattern-97",
+          "pattern-98",
+          "pattern-99",
+          "pattern-100",
+          "pattern-101",
+          "pattern-102",
+          "pattern-103",
+          "pattern-104",
+          "pattern-105",
+          "pattern-106",
+          "pattern-107",
+          "pattern-108",
+          "pattern-109",
+          "pattern-110",
+          "pattern-111",
+          "pattern-112",
+          "pattern-113",
+          "pattern-114",
+          "pattern-115",
+          "pattern-116",
+          "pattern-117",
+          "pattern-118",
+          "pattern-119",
+          "pattern-120",
+          "pattern-121",
+          "pattern-122",
+          "pattern-123",
+          "pattern-124",
+          "pattern-125",
+          "pattern-126",
+          "pattern-127",
+          "pattern-128",
+          "pattern-129",
+          "pattern-130",
+          "pattern-131",
+          "pattern-132",
+          "pattern-133",
+          "pattern-134",
+          "pattern-135",
+          "pattern-136",
+          "pattern-137",
+          "pattern-138",
+          "pattern-139",
+          "pattern-140",
+          "pattern-141",
+          "pattern-142",
+          "pattern-143",
+          "pattern-144",
+          "pattern-145",
+          "pattern-146",
+          "pattern-147",
+          "pattern-148",
+          "pattern-149",
+          "pattern-150",
+          "pattern-151",
+          "pattern-152",
+          "pattern-153",
+          "pattern-154",
+          "pattern-155",
+          "pattern-156",
+          "pattern-157",
+          "pattern-158",
+          "pattern-159",
+          "pattern-160",
+          "pattern-161",
+          "pattern-162",
+          "pattern-163",
+          "pattern-164",
+          "pattern-165",
+          "pattern-166",
+          "pattern-167",
+          "pattern-168",
+          "pattern-169",
+          "pattern-170",
+          "pattern-171",
+          "pattern-172",
+          "pattern-173",
+          "pattern-174",
+          "pattern-175",
+          "pattern-176",
+          "pattern-177",
+          "pattern-178",
+          "pattern-179",
+          "pattern-180",
+          "pattern-181",
+          "pattern-182",
+          "pattern-183",
+          "pattern-184",
+          "pattern-185",
+          "pattern-186",
+          "pattern-187",
+          "pattern-188",
+          "pattern-189",
+          "pattern-190",
+          "pattern-191",
+          "pattern-192",
+          "pattern-193",
+          "pattern-194",
+          "pattern-195",
+          "pattern-196",
+          "pattern-197",
+          "pattern-198",
+          "pattern-199",
+          "pattern-200",
+          "pattern-201",
+          "pattern-202",
+          "pattern-203",
+          "pattern-204",
+          "pattern-205",
+          "pattern-206",
+          "pattern-207",
+          "pattern-208",
+          "pattern-209",
+          "pattern-210",
+          "pattern-211",
+          "pattern-212",
+          "pattern-213",
+          "pattern-214",
+          "pattern-215",
+          "pattern-216",
+          "pattern-217",
+          "pattern-218",
+          "pattern-219",
+          "pattern-220",
+          "pattern-221",
+          "pattern-222",
+          "pattern-223",
+          "pattern-224",
+          "pattern-225",
+          "pattern-226",
+          "pattern-227",
+          "pattern-228",
+          "pattern-229",
+          "pattern-230",
+          "pattern-231",
+          "pattern-232",
+          "pattern-233",
+          "pattern-234",
+          "pattern-235",
+          "pattern-236",
+          "pattern-237",
+          "pattern-238",
+          "pattern-239",
+          "pattern-240",
+          "pattern-241",
+          "pattern-242",
+          "pattern-243",
+          "pattern-244",
+          "pattern-245",
+          "pattern-246",
+          "pattern-247",
+          "pattern-248",
+          "pattern-249",
+          "pattern-250",
+          "pattern-251",
+          "pattern-252",
+          "pattern-253",
+          "pattern-254",
+          "pattern-255",
+          "pattern-256"
+        ]
+      }
+    },
+    {
+      "name": "profile_string_over_limit",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "parser_profile_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "name": "profile_extension_invalid",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "allowed_extensions": [
+          ".XLSX"
+        ]
+      }
+    },
+    {
+      "name": "profile_fallback_backend_invalid",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "office_parser_fallback_order": [
+          "unknown_backend_v1"
+        ]
+      }
+    },
+    {
+      "name": "build_request_relative_work_dir",
+      "schema": "build-context-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "path"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "work_dir": "relative\\work",
+        "start_date": "2026-07-14",
+        "end_date": "2026-07-15",
+        "report_mode": "daily",
+        "compression_profile": null,
+        "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
+        "scanner_profile": {
+          "schema_version": "scanner_profile_v1"
+        },
+        "adapters": {
+          "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+          "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+          "python_module_root": "C:\\scanner-fixtures\\repo",
+          "python_document_worker_module": "src.workers.document_parser_worker"
+        }
+      }
+    },
+    {
+      "name": "build_request_relative_adapter_path",
+      "schema": "build-context-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "path"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "work_dir": "C:\\scanner-fixtures\\work",
+        "start_date": "2026-07-14",
+        "end_date": "2026-07-15",
+        "report_mode": "daily",
+        "compression_profile": null,
+        "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
+        "scanner_profile": {
+          "schema_version": "scanner_profile_v1"
+        },
+        "adapters": {
+          "office_worker_path": "relative\\office.exe",
+          "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+          "python_module_root": "C:\\scanner-fixtures\\repo",
+          "python_document_worker_module": "src.workers.document_parser_worker"
+        }
+      }
+    },
+    {
+      "name": "build_request_reversed_date_range",
+      "schema": "build-context-request-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "bound"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "work_dir": "C:\\scanner-fixtures\\work",
+        "start_date": "2026-07-16",
+        "end_date": "2026-07-15",
+        "report_mode": "daily",
+        "compression_profile": null,
+        "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
+        "scanner_profile": {
+          "schema_version": "scanner_profile_v1"
+        },
+        "adapters": {
+          "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+          "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+          "python_module_root": "C:\\scanner-fixtures\\repo",
+          "python_document_worker_module": "src.workers.document_parser_worker"
+        }
+      }
+    },
+    {
+      "name": "build_request_compression_profile_mode_mismatch",
+      "schema": "build-context-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "work_dir": "C:\\scanner-fixtures\\work",
+        "start_date": "2026-07-14",
+        "end_date": "2026-07-15",
+        "report_mode": "weekly",
+        "compression_profile": "daily_balanced_v1",
+        "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
+        "scanner_profile": {
+          "schema_version": "scanner_profile_v1"
+        },
+        "adapters": {
+          "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+          "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+          "python_module_root": "C:\\scanner-fixtures\\repo",
+          "python_document_worker_module": "src.workers.document_parser_worker"
+        }
+      }
+    },
+    {
+      "name": "build_request_unknown_field",
+      "schema": "build-context-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "unknown_field"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "work_dir": "C:\\scanner-fixtures\\work",
+        "start_date": "2026-07-14",
+        "end_date": "2026-07-15",
+        "report_mode": "daily",
+        "compression_profile": null,
+        "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
+        "scanner_profile": {
+          "schema_version": "scanner_profile_v1"
+        },
+        "adapters": {
+          "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+          "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+          "python_module_root": "C:\\scanner-fixtures\\repo",
+          "python_document_worker_module": "src.workers.document_parser_worker"
+        },
+        "unexpected": true
+      }
+    },
+    {
+      "name": "build_request_bad_request_id",
+      "schema": "build-context-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "request_id"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "not-a-uuid",
+        "work_dir": "C:\\scanner-fixtures\\work",
+        "start_date": "2026-07-14",
+        "end_date": "2026-07-15",
+        "report_mode": "daily",
+        "compression_profile": null,
+        "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
+        "scanner_profile": {
+          "schema_version": "scanner_profile_v1"
+        },
+        "adapters": {
+          "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+          "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+          "python_module_root": "C:\\scanner-fixtures\\repo",
+          "python_document_worker_module": "src.workers.document_parser_worker"
+        }
+      }
+    },
+    {
+      "name": "build_request_missing_nullable_compression_profile",
+      "schema": "build-context-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "optionality",
+        "nullability"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "work_dir": "C:\\scanner-fixtures\\work",
+        "start_date": "2026-07-14",
+        "end_date": "2026-07-15",
+        "report_mode": "daily",
+        "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
+        "scanner_profile": {
+          "schema_version": "scanner_profile_v1"
+        },
+        "adapters": {
+          "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+          "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+          "python_module_root": "C:\\scanner-fixtures\\repo",
+          "python_document_worker_module": "src.workers.document_parser_worker"
+        }
+      }
+    },
+    {
+      "name": "context_ok_with_error",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "ok",
+        "file_context": "synthetic context",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "warnings": [],
+        "error": {
+          "error_code": "INTERNAL_ERROR",
+          "message": "synthetic contract rejection",
+          "retryable": false,
+          "stage": "internal",
+          "file_path": null,
+          "backend": null
+        }
+      }
+    },
+    {
+      "name": "context_partial_without_warning",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "partial",
+        "file_context": "synthetic context",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "context_error_nonempty_context",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "error",
+        "file_context": "synthetic context",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": null,
+        "context_run_id": null,
+        "warnings": [],
+        "error": {
+          "error_code": "INTERNAL_ERROR",
+          "message": "synthetic contract rejection",
+          "retryable": false,
+          "stage": "internal",
+          "file_path": null,
+          "backend": null
+        }
+      }
+    },
+    {
+      "name": "context_summary_count_invariant",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "ok",
+        "file_context": "synthetic context",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 2,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "context_missing_nullable_run_id",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "optionality",
+        "nullability"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "ok",
+        "file_context": "synthetic context",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": 1,
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "diagnostic_invalid_stage",
+      "schema": "diagnostic-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum"
+      ],
+      "payload": {
+        "error_code": "INTERNAL_ERROR",
+        "message": "synthetic contract rejection",
+        "retryable": false,
+        "stage": "worker",
+        "file_path": null,
+        "backend": null
+      }
+    },
+    {
+      "name": "diagnostic_missing_nullable_backend",
+      "schema": "diagnostic-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "optionality",
+        "nullability"
+      ],
+      "payload": {
+        "error_code": "INTERNAL_ERROR",
+        "message": "synthetic contract rejection",
+        "retryable": false,
+        "stage": "internal",
+        "file_path": null
+      }
+    },
+    {
+      "name": "transport_wrong_request_error",
+      "schema": "transport-error-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_transport",
+        "protocol_version": 1,
+        "status": "error",
+        "error": {
+          "error_code": "INTERNAL_ERROR",
+          "message": "synthetic contract rejection",
+          "retryable": false,
+          "stage": "internal",
+          "file_path": null,
+          "backend": null
+        }
+      }
+    },
+    {
+      "name": "doctor_invalid_check_status",
+      "schema": "doctor-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "checks": [
+          {
+            "name": "scan_db_parent",
+            "status": "warn",
+            "message": "synthetic check"
+          }
+        ],
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "inspect_relative_db_path",
+      "schema": "inspect-run-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "path"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "scan_db_path": "relative\\scan.sqlite3",
+        "scan_run_id": 1,
+        "include_content": false
+      }
+    },
+    {
+      "name": "inspect_invalid_decision_action",
+      "schema": "inspect-run-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "status": "ok",
+        "run_status": "success",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "stage_metrics": [],
+        "extension_metrics": [],
+        "files": [],
+        "decisions": [
+          {
+            "relative_path": "work\\sample.xlsx",
+            "action": "include",
+            "reason": "synthetic",
+            "priority": 1,
+            "input_chars": 12,
+            "output_chars": 12,
+            "truncated": false,
+            "error_code": ""
+          }
+        ],
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "normalized_context_threshold_order",
+      "schema": "scanner-profile-normalized-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound",
+        "status_invariant"
+      ],
+      "payload": {
+        "schema_version": "normalized_scanner_profile_v1",
+        "parser_profile_version": "v1",
+        "report_mode": "daily",
+        "discovery": {
+          "allowed_extensions": [
+            ".csv",
+            ".docx",
+            ".json",
+            ".log",
+            ".md",
+            ".pdf",
+            ".pptx",
+            ".txt",
+            ".xls",
+            ".xlsx"
+          ],
+          "ignored_patterns": [
+            "*.tmp",
+            "~$*"
+          ],
+          "excluded_dirs": []
+        },
+        "execution": {
+          "max_workers": 4,
+          "max_file_size_bytes": 52428800,
+          "discovery_timeout_ms": 30000,
+          "file_timeout_ms": 30000,
+          "file_timeout_by_extension_ms": {
+            ".pdf": 45000,
+            ".xls": 60000,
+            ".xlsx": 60000
+          }
+        },
+        "parse": {
+          "aggregate_max_chars": 50000,
+          "text": {
+            "backend": "light_text_v1",
+            "read_head_bytes": 262144,
+            "read_tail_bytes": 262144,
+            "max_chars": 6000,
+            "excerpt_max_chars": 6000
+          },
+          "office": {
+            "primary_backend": "rust_office_oxide_v1",
+            "fallback_enabled": true,
+            "fallback_order": [
+              "python_office_v1",
+              "python_sharepoint_text_v1"
+            ],
+            "fallback_after_timeout": false,
+            "fallback_policy_version": "hybrid_v1",
+            "legacy_extensions_enabled": false,
+            "excel_max_sheets": 5,
+            "excel_max_rows": 50,
+            "excel_max_columns": 20,
+            "docx_max_paragraphs": 200,
+            "docx_max_tables": 20,
+            "docx_table_max_rows": 50,
+            "docx_table_max_cols": 12,
+            "pptx_max_slides": 50,
+            "pptx_include_notes": true,
+            "document_excerpt_max_chars": 6000
+          },
+          "pdf": {
+            "backend": "pdf_text_v1",
+            "max_pages": 5,
+            "excerpt_max_chars": 6000
+          }
+        },
+        "context": {
+          "profile_name": "daily_balanced_v1",
+          "global_max_chars": 50000,
+          "per_file_max_chars": 8000,
+          "small_file_max_bytes": 1048576,
+          "medium_file_max_bytes": 1048576,
+          "large_file_max_bytes": 10485760,
+          "priority_policy_version": "default_v1",
+          "compression_policy_version": "markdown_context_v1"
+        }
+      }
+    },
+    {
+      "name": "normalized_context_global_less_than_file",
+      "schema": "scanner-profile-normalized-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "bound",
+        "status_invariant"
+      ],
+      "payload": {
+        "schema_version": "normalized_scanner_profile_v1",
+        "parser_profile_version": "v1",
+        "report_mode": "daily",
+        "discovery": {
+          "allowed_extensions": [
+            ".csv",
+            ".docx",
+            ".json",
+            ".log",
+            ".md",
+            ".pdf",
+            ".pptx",
+            ".txt",
+            ".xls",
+            ".xlsx"
+          ],
+          "ignored_patterns": [
+            "*.tmp",
+            "~$*"
+          ],
+          "excluded_dirs": []
+        },
+        "execution": {
+          "max_workers": 4,
+          "max_file_size_bytes": 52428800,
+          "discovery_timeout_ms": 30000,
+          "file_timeout_ms": 30000,
+          "file_timeout_by_extension_ms": {
+            ".pdf": 45000,
+            ".xls": 60000,
+            ".xlsx": 60000
+          }
+        },
+        "parse": {
+          "aggregate_max_chars": 50000,
+          "text": {
+            "backend": "light_text_v1",
+            "read_head_bytes": 262144,
+            "read_tail_bytes": 262144,
+            "max_chars": 6000,
+            "excerpt_max_chars": 6000
+          },
+          "office": {
+            "primary_backend": "rust_office_oxide_v1",
+            "fallback_enabled": true,
+            "fallback_order": [
+              "python_office_v1",
+              "python_sharepoint_text_v1"
+            ],
+            "fallback_after_timeout": false,
+            "fallback_policy_version": "hybrid_v1",
+            "legacy_extensions_enabled": false,
+            "excel_max_sheets": 5,
+            "excel_max_rows": 50,
+            "excel_max_columns": 20,
+            "docx_max_paragraphs": 200,
+            "docx_max_tables": 20,
+            "docx_table_max_rows": 50,
+            "docx_table_max_cols": 12,
+            "pptx_max_slides": 50,
+            "pptx_include_notes": true,
+            "document_excerpt_max_chars": 6000
+          },
+          "pdf": {
+            "backend": "pdf_text_v1",
+            "max_pages": 5,
+            "excerpt_max_chars": 6000
+          }
+        },
+        "context": {
+          "profile_name": "daily_balanced_v1",
+          "global_max_chars": 1000,
+          "per_file_max_chars": 2000,
+          "small_file_max_bytes": 65536,
+          "medium_file_max_bytes": 1048576,
+          "large_file_max_bytes": 10485760,
+          "priority_policy_version": "default_v1",
+          "compression_policy_version": "markdown_context_v1"
+        }
+      }
+    },
+    {
+      "name": "normalized_unknown_infrastructure_leaf",
+      "schema": "scanner-profile-normalized-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "unknown_field"
+      ],
+      "payload": {
+        "schema_version": "normalized_scanner_profile_v1",
+        "parser_profile_version": "v1",
+        "report_mode": "daily",
+        "discovery": {
+          "allowed_extensions": [
+            ".csv",
+            ".docx",
+            ".json",
+            ".log",
+            ".md",
+            ".pdf",
+            ".pptx",
+            ".txt",
+            ".xls",
+            ".xlsx"
+          ],
+          "ignored_patterns": [
+            "*.tmp",
+            "~$*"
+          ],
+          "excluded_dirs": []
+        },
+        "execution": {
+          "max_workers": 4,
+          "max_file_size_bytes": 52428800,
+          "discovery_timeout_ms": 30000,
+          "file_timeout_ms": 30000,
+          "file_timeout_by_extension_ms": {
+            ".pdf": 45000,
+            ".xls": 60000,
+            ".xlsx": 60000
+          },
+          "worker_lane_mode": "process"
+        },
+        "parse": {
+          "aggregate_max_chars": 50000,
+          "text": {
+            "backend": "light_text_v1",
+            "read_head_bytes": 262144,
+            "read_tail_bytes": 262144,
+            "max_chars": 6000,
+            "excerpt_max_chars": 6000
+          },
+          "office": {
+            "primary_backend": "rust_office_oxide_v1",
+            "fallback_enabled": true,
+            "fallback_order": [
+              "python_office_v1",
+              "python_sharepoint_text_v1"
+            ],
+            "fallback_after_timeout": false,
+            "fallback_policy_version": "hybrid_v1",
+            "legacy_extensions_enabled": false,
+            "excel_max_sheets": 5,
+            "excel_max_rows": 50,
+            "excel_max_columns": 20,
+            "docx_max_paragraphs": 200,
+            "docx_max_tables": 20,
+            "docx_table_max_rows": 50,
+            "docx_table_max_cols": 12,
+            "pptx_max_slides": 50,
+            "pptx_include_notes": true,
+            "document_excerpt_max_chars": 6000
+          },
+          "pdf": {
+            "backend": "pdf_text_v1",
+            "max_pages": 5,
+            "excerpt_max_chars": 6000
+          }
+        },
+        "context": {
+          "profile_name": "daily_balanced_v1",
+          "global_max_chars": 50000,
+          "per_file_max_chars": 8000,
+          "small_file_max_bytes": 65536,
+          "medium_file_max_bytes": 1048576,
+          "large_file_max_bytes": 10485760,
+          "priority_policy_version": "default_v1",
+          "compression_policy_version": "markdown_context_v1"
+        }
+      }
+    },
+    {
+      "name": "normalized_set_array_not_sorted",
+      "schema": "scanner-profile-normalized-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "canonicalization"
+      ],
+      "payload": {
+        "schema_version": "normalized_scanner_profile_v1",
+        "parser_profile_version": "v1",
+        "report_mode": "daily",
+        "discovery": {
+          "allowed_extensions": [
+            ".xlsx",
+            ".csv"
+          ],
+          "ignored_patterns": [
+            "*.tmp",
+            "~$*"
+          ],
+          "excluded_dirs": []
+        },
+        "execution": {
+          "max_workers": 4,
+          "max_file_size_bytes": 52428800,
+          "discovery_timeout_ms": 30000,
+          "file_timeout_ms": 30000,
+          "file_timeout_by_extension_ms": {
+            ".pdf": 45000,
+            ".xls": 60000,
+            ".xlsx": 60000
+          }
+        },
+        "parse": {
+          "aggregate_max_chars": 50000,
+          "text": {
+            "backend": "light_text_v1",
+            "read_head_bytes": 262144,
+            "read_tail_bytes": 262144,
+            "max_chars": 6000,
+            "excerpt_max_chars": 6000
+          },
+          "office": {
+            "primary_backend": "rust_office_oxide_v1",
+            "fallback_enabled": true,
+            "fallback_order": [
+              "python_office_v1",
+              "python_sharepoint_text_v1"
+            ],
+            "fallback_after_timeout": false,
+            "fallback_policy_version": "hybrid_v1",
+            "legacy_extensions_enabled": false,
+            "excel_max_sheets": 5,
+            "excel_max_rows": 50,
+            "excel_max_columns": 20,
+            "docx_max_paragraphs": 200,
+            "docx_max_tables": 20,
+            "docx_table_max_rows": 50,
+            "docx_table_max_cols": 12,
+            "pptx_max_slides": 50,
+            "pptx_include_notes": true,
+            "document_excerpt_max_chars": 6000
+          },
+          "pdf": {
+            "backend": "pdf_text_v1",
+            "max_pages": 5,
+            "excerpt_max_chars": 6000
+          }
+        },
+        "context": {
+          "profile_name": "daily_balanced_v1",
+          "global_max_chars": 50000,
+          "per_file_max_chars": 8000,
+          "small_file_max_bytes": 65536,
+          "medium_file_max_bytes": 1048576,
+          "large_file_max_bytes": 10485760,
+          "priority_policy_version": "default_v1",
+          "compression_policy_version": "markdown_context_v1"
+        }
+      }
+    },
+    {
+      "name": "worker_parse_backend_limits_mismatch",
+      "schema": "worker-parse-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum",
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "backend": "pdf_text_v1",
+        "remaining_timeout_ms": 30000,
+        "max_file_size_bytes": 52428800,
+        "parser_limits": {
+          "kind": "office",
+          "excel_max_sheets": 5,
+          "excel_max_rows": 50,
+          "excel_max_columns": 20,
+          "docx_max_paragraphs": 200,
+          "docx_max_tables": 20,
+          "docx_table_max_rows": 50,
+          "docx_table_max_cols": 12,
+          "pptx_max_slides": 50,
+          "pptx_include_notes": true,
+          "document_excerpt_max_chars": 6000
+        },
+        "expected_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_parse_relative_file_path",
+      "schema": "worker-parse-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "path"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "file_path": "relative\\sample.docx",
+        "file_type": ".docx",
+        "backend": "rust_office_oxide_v1",
+        "remaining_timeout_ms": 30000,
+        "max_file_size_bytes": 52428800,
+        "parser_limits": {
+          "kind": "office",
+          "excel_max_sheets": 5,
+          "excel_max_rows": 50,
+          "excel_max_columns": 20,
+          "docx_max_paragraphs": 200,
+          "docx_max_tables": 20,
+          "docx_table_max_rows": 50,
+          "docx_table_max_cols": 12,
+          "pptx_max_slides": 50,
+          "pptx_include_notes": true,
+          "document_excerpt_max_chars": 6000
+        },
+        "expected_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_parse_invalid_lane",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "content": "synthetic",
+        "parser_backend": "rust_office_oxide_v1",
+        "worker_lane": "rust_core",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_parse_response_backend_mismatch",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "content": "synthetic",
+        "parser_backend": "rust_xlsx_bounded_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_version_invalid_kind",
+      "schema": "worker-version-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "worker_kind": "python",
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "supported_backends": [
+          "rust_office_oxide_v1",
+          "rust_xlsx_bounded_v1"
+        ],
+        "supported_extensions": [
+          ".docx",
+          ".pptx",
+          ".xlsx"
+        ]
+      }
+    },
+    {
+      "name": "worker_version_backends_not_sorted",
+      "schema": "worker-version-response-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "canonicalization"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "worker_kind": "office",
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "supported_backends": [
+          "rust_xlsx_bounded_v1",
+          "rust_office_oxide_v1"
+        ],
+        "supported_extensions": [
+          ".docx",
+          ".pptx",
+          ".xlsx"
+        ]
+      }
+    },
+    {
+      "name": "profile_integer_float",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "type"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "max_workers": 4.0
+      }
+    },
+    {
+      "name": "profile_integer_numeric_string",
+      "schema": "scanner-profile-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "type"
+      ],
+      "payload": {
+        "schema_version": "scanner_profile_v1",
+        "max_workers": "4"
+      }
+    },
+    {
+      "name": "context_ok_empty_context",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "ok",
+        "file_context": "",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "context_ok_null_run_id",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "ok",
+        "file_context": "synthetic context",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": null,
+        "context_run_id": 1,
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "context_partial_empty_context",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "partial",
+        "file_context": "",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "warnings": [
+          {
+            "error_code": "INTERNAL_ERROR",
+            "message": "synthetic contract rejection",
+            "retryable": false,
+            "stage": "internal",
+            "file_path": null,
+            "backend": null
+          }
+        ],
+        "error": null
+      }
+    },
+    {
+      "name": "context_partial_null_run_id",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "partial",
+        "file_context": "synthetic context",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": 1,
+        "context_run_id": null,
+        "warnings": [
+          {
+            "error_code": "INTERNAL_ERROR",
+            "message": "synthetic contract rejection",
+            "retryable": false,
+            "stage": "internal",
+            "file_path": null,
+            "backend": null
+          }
+        ],
+        "error": null
+      }
+    },
+    {
+      "name": "context_error_without_error",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "error",
+        "file_context": "",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": null,
+        "context_run_id": null,
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "context_response_request_id_mismatch",
+      "schema": "context-envelope-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "request_id",
+        "echo"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "61111111-6111-4111-8111-611111111111",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "status": "ok",
+        "file_context": "synthetic context",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "warnings": [],
+        "error": null
+      },
+      "related_payloads": [
+        {
+          "role": "request",
+          "schema": "build-context-request-v1.schema.json",
+          "payload": {
+            "contract": "ai_daily_context",
+            "protocol_version": 1,
+            "request_id": "51111111-5111-4111-8111-511111111111",
+            "work_dir": "C:\\scanner-fixtures\\work",
+            "start_date": "2026-07-14",
+            "end_date": "2026-07-15",
+            "report_mode": "daily",
+            "compression_profile": null,
+            "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
+            "scanner_profile": {
+              "schema_version": "scanner_profile_v1"
+            },
+            "adapters": {
+              "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+              "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+              "python_module_root": "C:\\scanner-fixtures\\repo",
+              "python_document_worker_module": "src.workers.document_parser_worker"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "doctor_ok_with_error",
+      "schema": "doctor-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "checks": [
+          {
+            "name": "scan_db_parent",
+            "status": "ok",
+            "message": "synthetic check"
+          }
+        ],
+        "warnings": [],
+        "error": {
+          "error_code": "INTERNAL_ERROR",
+          "message": "synthetic contract rejection",
+          "retryable": false,
+          "stage": "internal",
+          "file_path": null,
+          "backend": null
+        }
+      }
+    },
+    {
+      "name": "doctor_partial_without_warning",
+      "schema": "doctor-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "partial",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "checks": [
+          {
+            "name": "scan_db_parent",
+            "status": "warning",
+            "message": "synthetic check"
+          }
+        ],
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "doctor_error_without_error",
+      "schema": "doctor-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "error",
+        "engine_version": "0.1.0",
+        "engine_build": "fixture-engine-build-v1",
+        "checks": [
+          {
+            "name": "scan_db_parent",
+            "status": "error",
+            "message": "synthetic check"
+          }
+        ],
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "inspect_ok_without_run_status",
+      "schema": "inspect-run-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "status": "ok",
+        "run_status": null,
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "stage_metrics": [],
+        "extension_metrics": [],
+        "files": [],
+        "decisions": [
+          {
+            "relative_path": "work\\sample.xlsx",
+            "action": "keep",
+            "reason": "synthetic",
+            "priority": 1,
+            "input_chars": 12,
+            "output_chars": 12,
+            "truncated": false,
+            "error_code": ""
+          }
+        ],
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "inspect_ok_with_error",
+      "schema": "inspect-run-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "status": "ok",
+        "run_status": "success",
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "stage_metrics": [],
+        "extension_metrics": [],
+        "files": [],
+        "decisions": [
+          {
+            "relative_path": "work\\sample.xlsx",
+            "action": "keep",
+            "reason": "synthetic",
+            "priority": 1,
+            "input_chars": 12,
+            "output_chars": 12,
+            "truncated": false,
+            "error_code": ""
+          }
+        ],
+        "warnings": [],
+        "error": {
+          "error_code": "INTERNAL_ERROR",
+          "message": "synthetic contract rejection",
+          "retryable": false,
+          "stage": "internal",
+          "file_path": null,
+          "backend": null
+        }
+      }
+    },
+    {
+      "name": "inspect_error_without_error",
+      "schema": "inspect-run-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "status": "error",
+        "run_status": null,
+        "summary": {
+          "source_file_count": 1,
+          "success_count": 1,
+          "timeout_count": 0,
+          "included_file_count": 1,
+          "omitted_file_count": 0,
+          "error_file_count": 0,
+          "input_chars": 12,
+          "output_chars": 12,
+          "total_duration_ms": 4,
+          "discovery_duration_ms": 1,
+          "parse_duration_ms": 2,
+          "compression_duration_ms": 1
+        },
+        "stage_metrics": [],
+        "extension_metrics": [],
+        "files": [],
+        "decisions": [
+          {
+            "relative_path": "work\\sample.xlsx",
+            "action": "keep",
+            "reason": "synthetic",
+            "priority": 1,
+            "input_chars": 12,
+            "output_chars": 12,
+            "truncated": false,
+            "error_code": ""
+          }
+        ],
+        "warnings": [],
+        "error": null
+      }
+    },
+    {
+      "name": "worker_parse_xlsx_wrong_backend",
+      "schema": "worker-parse-request-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "route"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.xlsx",
+        "file_type": ".xlsx",
+        "backend": "rust_office_oxide_v1",
+        "remaining_timeout_ms": 30000,
+        "max_file_size_bytes": 52428800,
+        "parser_limits": {
+          "kind": "office",
+          "excel_max_sheets": 5,
+          "excel_max_rows": 50,
+          "excel_max_columns": 20,
+          "docx_max_paragraphs": 200,
+          "docx_max_tables": 20,
+          "docx_table_max_rows": 50,
+          "docx_table_max_cols": 12,
+          "pptx_max_slides": 50,
+          "pptx_include_notes": true,
+          "document_excerpt_max_chars": 6000
+        },
+        "expected_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_parse_xlsx_wrong_lane",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "route"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.xlsx",
+        "file_type": ".xlsx",
+        "content": "synthetic",
+        "parser_backend": "rust_xlsx_bounded_v1",
+        "worker_lane": "python_document_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_parse_pdf_wrong_lane",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "route"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.pdf",
+        "file_type": ".pdf",
+        "content": "synthetic",
+        "parser_backend": "pdf_text_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_parse_ok_with_error",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "content": "synthetic",
+        "parser_backend": "rust_office_oxide_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": {
+          "error_code": "INTERNAL_ERROR",
+          "message": "synthetic contract rejection",
+          "retryable": false,
+          "stage": "internal",
+          "file_path": null,
+          "backend": null
+        },
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_parse_error_with_content",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "error",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "content": "synthetic",
+        "parser_backend": "rust_office_oxide_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": {
+          "error_code": "INTERNAL_ERROR",
+          "message": "synthetic contract rejection",
+          "retryable": false,
+          "stage": "internal",
+          "file_path": null,
+          "backend": null
+        },
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_parse_error_without_error",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "status_invariant"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "error",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "content": "",
+        "parser_backend": "rust_office_oxide_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      }
+    },
+    {
+      "name": "worker_response_request_id_mismatch",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "request_id",
+        "echo"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "62222222-6222-4222-8222-622222222222",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "content": "synthetic",
+        "parser_backend": "rust_office_oxide_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      },
+      "related_payloads": [
+        {
+          "role": "request",
+          "schema": "worker-parse-request-v1.schema.json",
+          "payload": {
+            "contract": "ai_daily_worker",
+            "protocol_version": 1,
+            "request_id": "51111111-5111-4111-8111-511111111111",
+            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+            "file_type": ".docx",
+            "backend": "rust_office_oxide_v1",
+            "remaining_timeout_ms": 30000,
+            "max_file_size_bytes": 52428800,
+            "parser_limits": {
+              "kind": "office",
+              "excel_max_sheets": 5,
+              "excel_max_rows": 50,
+              "excel_max_columns": 20,
+              "docx_max_paragraphs": 200,
+              "docx_max_tables": 20,
+              "docx_table_max_rows": 50,
+              "docx_table_max_cols": 12,
+              "pptx_max_slides": 50,
+              "pptx_include_notes": true,
+              "document_excerpt_max_chars": 6000
+            },
+            "expected_source_version": "mtime_ns=1:size=1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "worker_response_path_mismatch",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "path",
+        "echo"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\other.docx",
+        "file_type": ".docx",
+        "content": "synthetic",
+        "parser_backend": "rust_office_oxide_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      },
+      "related_payloads": [
+        {
+          "role": "request",
+          "schema": "worker-parse-request-v1.schema.json",
+          "payload": {
+            "contract": "ai_daily_worker",
+            "protocol_version": 1,
+            "request_id": "51111111-5111-4111-8111-511111111111",
+            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+            "file_type": ".docx",
+            "backend": "rust_office_oxide_v1",
+            "remaining_timeout_ms": 30000,
+            "max_file_size_bytes": 52428800,
+            "parser_limits": {
+              "kind": "office",
+              "excel_max_sheets": 5,
+              "excel_max_rows": 50,
+              "excel_max_columns": 20,
+              "docx_max_paragraphs": 200,
+              "docx_max_tables": 20,
+              "docx_table_max_rows": 50,
+              "docx_table_max_cols": 12,
+              "pptx_max_slides": 50,
+              "pptx_include_notes": true,
+              "document_excerpt_max_chars": 6000
+            },
+            "expected_source_version": "mtime_ns=1:size=1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "worker_response_file_type_mismatch",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "route",
+        "echo"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".pptx",
+        "content": "synthetic",
+        "parser_backend": "rust_office_oxide_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      },
+      "related_payloads": [
+        {
+          "role": "request",
+          "schema": "worker-parse-request-v1.schema.json",
+          "payload": {
+            "contract": "ai_daily_worker",
+            "protocol_version": 1,
+            "request_id": "51111111-5111-4111-8111-511111111111",
+            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+            "file_type": ".docx",
+            "backend": "rust_office_oxide_v1",
+            "remaining_timeout_ms": 30000,
+            "max_file_size_bytes": 52428800,
+            "parser_limits": {
+              "kind": "office",
+              "excel_max_sheets": 5,
+              "excel_max_rows": 50,
+              "excel_max_columns": 20,
+              "docx_max_paragraphs": 200,
+              "docx_max_tables": 20,
+              "docx_table_max_rows": 50,
+              "docx_table_max_cols": 12,
+              "pptx_max_slides": 50,
+              "pptx_include_notes": true,
+              "document_excerpt_max_chars": 6000
+            },
+            "expected_source_version": "mtime_ns=1:size=1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "worker_response_backend_echo_mismatch",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "route",
+        "echo"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "content": "synthetic",
+        "parser_backend": "python_office_v1",
+        "worker_lane": "python_document_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-python-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      },
+      "related_payloads": [
+        {
+          "role": "request",
+          "schema": "worker-parse-request-v1.schema.json",
+          "payload": {
+            "contract": "ai_daily_worker",
+            "protocol_version": 1,
+            "request_id": "51111111-5111-4111-8111-511111111111",
+            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+            "file_type": ".docx",
+            "backend": "rust_office_oxide_v1",
+            "remaining_timeout_ms": 30000,
+            "max_file_size_bytes": 52428800,
+            "parser_limits": {
+              "kind": "office",
+              "excel_max_sheets": 5,
+              "excel_max_rows": 50,
+              "excel_max_columns": 20,
+              "docx_max_paragraphs": 200,
+              "docx_max_tables": 20,
+              "docx_table_max_rows": 50,
+              "docx_table_max_cols": 12,
+              "pptx_max_slides": 50,
+              "pptx_include_notes": true,
+              "document_excerpt_max_chars": 6000
+            },
+            "expected_source_version": "mtime_ns=1:size=1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "worker_response_source_version_mismatch",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "source_version",
+        "echo"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "content": "synthetic",
+        "parser_backend": "rust_office_oxide_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=2:size=1"
+      },
+      "related_payloads": [
+        {
+          "role": "request",
+          "schema": "worker-parse-request-v1.schema.json",
+          "payload": {
+            "contract": "ai_daily_worker",
+            "protocol_version": 1,
+            "request_id": "51111111-5111-4111-8111-511111111111",
+            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+            "file_type": ".docx",
+            "backend": "rust_office_oxide_v1",
+            "remaining_timeout_ms": 30000,
+            "max_file_size_bytes": 52428800,
+            "parser_limits": {
+              "kind": "office",
+              "excel_max_sheets": 5,
+              "excel_max_rows": 50,
+              "excel_max_columns": 20,
+              "docx_max_paragraphs": 200,
+              "docx_max_tables": 20,
+              "docx_table_max_rows": 50,
+              "docx_table_max_cols": 12,
+              "pptx_max_slides": 50,
+              "pptx_include_notes": true,
+              "document_excerpt_max_chars": 6000
+            },
+            "expected_source_version": "mtime_ns=1:size=1"
+          }
+        }
+      ]
+    },
+    {
+      "name": "worker_response_handshake_build_mismatch",
+      "schema": "worker-parse-response-v1.schema.json",
+      "validation_layer": "semantic",
+      "rule_classes": [
+        "worker_identity",
+        "echo"
+      ],
+      "payload": {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "51111111-5111-4111-8111-511111111111",
+        "status": "ok",
+        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+        "file_type": ".docx",
+        "content": "synthetic",
+        "parser_backend": "rust_office_oxide_v1",
+        "worker_lane": "rust_office_process",
+        "truncated": false,
+        "warnings": [],
+        "error": null,
+        "duration_ms": 1,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "changed-office-worker-build-v1",
+        "observed_source_version": "mtime_ns=1:size=1"
+      },
+      "related_payloads": [
+        {
+          "role": "request",
+          "schema": "worker-parse-request-v1.schema.json",
+          "payload": {
+            "contract": "ai_daily_worker",
+            "protocol_version": 1,
+            "request_id": "51111111-5111-4111-8111-511111111111",
+            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
+            "file_type": ".docx",
+            "backend": "rust_office_oxide_v1",
+            "remaining_timeout_ms": 30000,
+            "max_file_size_bytes": 52428800,
+            "parser_limits": {
+              "kind": "office",
+              "excel_max_sheets": 5,
+              "excel_max_rows": 50,
+              "excel_max_columns": 20,
+              "docx_max_paragraphs": 200,
+              "docx_max_tables": 20,
+              "docx_table_max_rows": 50,
+              "docx_table_max_cols": 12,
+              "pptx_max_slides": 50,
+              "pptx_include_notes": true,
+              "document_excerpt_max_chars": 6000
+            },
+            "expected_source_version": "mtime_ns=1:size=1"
+          }
+        },
+        {
+          "role": "handshake",
+          "schema": "worker-version-response-v1.schema.json",
+          "payload": {
+            "contract": "ai_daily_worker",
+            "protocol_version": 1,
+            "worker_kind": "office",
+            "worker_contract_version": "ai_daily_worker_v1",
+            "worker_version": "0.1.0",
+            "worker_build": "fixture-office-worker-build-v1",
+            "supported_backends": [
+              "rust_office_oxide_v1",
+              "rust_xlsx_bounded_v1"
+            ],
+            "supported_extensions": [
+              ".docx",
+              ".pptx",
+              ".xlsx"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

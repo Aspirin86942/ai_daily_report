@@ -1,0 +1,31 @@
+{
+  "contract": "ai_daily_context",
+  "protocol_version": 1,
+  "request_id": "23232323-2323-4232-8232-232323232323",
+  "status": "partial",
+  "engine_version": "0.1.0",
+  "engine_build": "fixture-engine-build-v1",
+  "checks": [
+    {
+      "name": "scan_db_parent",
+      "status": "ok",
+      "message": "synthetic database parent is writable"
+    },
+    {
+      "name": "office_worker_handshake",
+      "status": "warning",
+      "message": "synthetic optional backend is unavailable"
+    }
+  ],
+  "warnings": [
+    {
+      "error_code": "WORKER_HANDSHAKE_FAILED",
+      "message": "synthetic optional Office worker capability is unavailable",
+      "retryable": true,
+      "stage": "doctor",
+      "file_path": null,
+      "backend": "rust_office_oxide_v1"
+    }
+  ],
+  "error": null
+}

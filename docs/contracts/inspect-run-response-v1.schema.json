@@ -1,0 +1,394 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "inspect-run-response-v1.schema.json",
+  "title": "InspectRunResponse v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "protocol_version",
+    "request_id",
+    "scan_run_id",
+    "context_run_id",
+    "status",
+    "run_status",
+    "summary",
+    "stage_metrics",
+    "extension_metrics",
+    "files",
+    "decisions",
+    "warnings",
+    "error"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ai_daily_context"
+    },
+    "protocol_version": {
+      "const": 1
+    },
+    "request_id": {
+      "$ref": "#/$defs/requestId"
+    },
+    "scan_run_id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "context_run_id": {
+      "$ref": "#/$defs/nullablePositiveInteger"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "error"
+      ]
+    },
+    "run_status": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "running",
+        "success",
+        "partial",
+        "error",
+        "abandoned"
+      ]
+    },
+    "summary": {
+      "$ref": "context-envelope-v1.schema.json#/$defs/contextSummary"
+    },
+    "stage_metrics": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "$ref": "#/$defs/stageMetric"
+      }
+    },
+    "extension_metrics": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "$ref": "#/$defs/extensionMetric"
+      }
+    },
+    "files": {
+      "type": "array",
+      "maxItems": 1000000,
+      "items": {
+        "$ref": "#/$defs/fileAudit"
+      }
+    },
+    "decisions": {
+      "type": "array",
+      "maxItems": 1000000,
+      "items": {
+        "$ref": "#/$defs/contextDecision"
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "$ref": "diagnostic-v1.schema.json"
+      }
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "diagnostic-v1.schema.json"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "ok"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "run_status": {
+            "type": "string",
+            "enum": [
+              "running",
+              "success",
+              "partial",
+              "error",
+              "abandoned"
+            ]
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "error"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "error": {
+            "$ref": "diagnostic-v1.schema.json"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullablePositiveInteger": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ]
+    },
+    "extension": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 32,
+      "pattern": "^\\.[^A-Z\\\\/:\\u0000]{1,31}$"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32767,
+      "pattern": "^(?![A-Za-z]:)(?![\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+$"
+    },
+    "sourceVersion": {
+      "type": "string",
+      "pattern": "^mtime_ns=[0-9]+:size=[0-9]+$"
+    },
+    "stageMetric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "stage",
+        "item_count",
+        "duration_ms"
+      ],
+      "properties": {
+        "stage": {
+          "type": "string",
+          "enum": [
+            "discovery",
+            "cache",
+            "parse",
+            "context"
+          ]
+        },
+        "item_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "duration_ms": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "extensionMetric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "extension",
+        "file_count",
+        "parse_duration_ms",
+        "success_count",
+        "error_count",
+        "timeout_count"
+      ],
+      "properties": {
+        "extension": {
+          "$ref": "#/$defs/extension"
+        },
+        "file_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "parse_duration_ms": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "success_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "error_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "timeout_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    },
+    "fileAudit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relative_path",
+        "file_identity",
+        "source_version",
+        "parse_status",
+        "parser_backend",
+        "worker_lane",
+        "cache_status",
+        "cache_miss_reason",
+        "truncated",
+        "content_sha256",
+        "parse_duration_ms",
+        "failure_class",
+        "fallback_backend",
+        "fallback_reason_code"
+      ],
+      "properties": {
+        "relative_path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "file_identity": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "source_version": {
+          "$ref": "#/$defs/sourceVersion"
+        },
+        "parse_status": {
+          "type": "string",
+          "enum": [
+            "success",
+            "error",
+            "timeout",
+            "not_parsed"
+          ]
+        },
+        "parser_backend": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "worker_lane": {
+          "type": "string",
+          "enum": [
+            "rust_core",
+            "rust_office_process",
+            "python_document_process",
+            "not_parsed"
+          ]
+        },
+        "cache_status": {
+          "type": "string",
+          "enum": [
+            "fresh",
+            "miss"
+          ]
+        },
+        "cache_miss_reason": {
+          "type": "string",
+          "enum": [
+            "",
+            "new_file",
+            "error_cache",
+            "source_version_changed",
+            "parser_profile_changed"
+          ]
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "parse_duration_ms": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "failure_class": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "fallback_backend": {
+          "type": "string",
+          "maxLength": 1024
+        },
+        "fallback_reason_code": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      }
+    },
+    "contextDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relative_path",
+        "action",
+        "reason",
+        "priority",
+        "input_chars",
+        "output_chars",
+        "truncated",
+        "error_code"
+      ],
+      "properties": {
+        "relative_path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "action": {
+          "type": "string",
+          "enum": [
+            "keep",
+            "compress",
+            "metadata_only",
+            "omit",
+            "error"
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "input_chars": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "output_chars": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "error_code": {
+          "type": "string",
+          "maxLength": 1024
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "contract": "ai_daily_worker",
+  "protocol_version": 1,
+  "request_id": "35555555-3555-4555-8555-355555555555",
+  "status": "ok",
+  "file_path": "\\\\?\\C:\\scanner-fixtures\\工作 目录\\nested\\sample.xlsx",
+  "file_type": ".xlsx",
+  "content": "合成长路径 XLSX 解析结果",
+  "parser_backend": "rust_xlsx_bounded_v1",
+  "worker_lane": "rust_office_process",
+  "truncated": false,
+  "warnings": [],
+  "error": null,
+  "duration_ms": 20,
+  "worker_contract_version": "ai_daily_worker_v1",
+  "worker_version": "0.1.0",
+  "worker_build": "fixture-office-worker-build-v1",
+  "observed_source_version": "mtime_ns=5000000000:size=16384"
+}

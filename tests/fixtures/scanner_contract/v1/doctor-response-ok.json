@@ -1,0 +1,27 @@
+{
+  "contract": "ai_daily_context",
+  "protocol_version": 1,
+  "request_id": "22222222-2222-4222-8222-222222222222",
+  "status": "ok",
+  "engine_version": "0.1.0",
+  "engine_build": "fixture-engine-build-v1",
+  "checks": [
+    {
+      "name": "scan_db_parent",
+      "status": "ok",
+      "message": "synthetic database parent is writable"
+    },
+    {
+      "name": "office_worker_handshake",
+      "status": "ok",
+      "message": "synthetic Office worker contract accepted"
+    },
+    {
+      "name": "python_worker_handshake",
+      "status": "ok",
+      "message": "synthetic Python worker contract accepted"
+    }
+  ],
+  "warnings": [],
+  "error": null
+}

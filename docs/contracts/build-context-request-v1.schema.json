@@ -1,0 +1,171 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "build-context-request-v1.schema.json",
+  "title": "BuildContextRequest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "protocol_version",
+    "request_id",
+    "work_dir",
+    "start_date",
+    "end_date",
+    "report_mode",
+    "compression_profile",
+    "scan_db_path",
+    "scanner_profile",
+    "adapters"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ai_daily_context"
+    },
+    "protocol_version": {
+      "const": 1
+    },
+    "request_id": {
+      "$ref": "#/$defs/requestId"
+    },
+    "work_dir": {
+      "$ref": "#/$defs/absolutePath"
+    },
+    "start_date": {
+      "$ref": "#/$defs/date"
+    },
+    "end_date": {
+      "$ref": "#/$defs/date"
+    },
+    "report_mode": {
+      "type": "string",
+      "enum": [
+        "daily",
+        "weekly",
+        "monthly"
+      ]
+    },
+    "compression_profile": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "enum": [
+        null,
+        "daily_balanced_v1",
+        "weekly_balanced_v1",
+        "monthly_balanced_v1"
+      ]
+    },
+    "scan_db_path": {
+      "$ref": "#/$defs/absolutePath"
+    },
+    "scanner_profile": {
+      "$ref": "scanner-profile-request-v1.schema.json"
+    },
+    "adapters": {
+      "$ref": "#/$defs/adapterPaths"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "report_mode": {
+            "const": "daily"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "compression_profile": {
+            "enum": [
+              null,
+              "daily_balanced_v1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "report_mode": {
+            "const": "weekly"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "compression_profile": {
+            "enum": [
+              null,
+              "weekly_balanced_v1"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "report_mode": {
+            "const": "monthly"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "compression_profile": {
+            "enum": [
+              null,
+              "monthly_balanced_v1"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32767,
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)"
+    },
+    "adapterPaths": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "office_worker_path",
+        "python_executable",
+        "python_module_root",
+        "python_document_worker_module"
+      ],
+      "properties": {
+        "office_worker_path": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "python_executable": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "python_module_root": {
+          "$ref": "#/$defs/absolutePath"
+        },
+        "python_document_worker_module": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^[A-Za-z_][A-Za-z0-9_.]*$"
+        }
+      }
+    }
+  }
+}

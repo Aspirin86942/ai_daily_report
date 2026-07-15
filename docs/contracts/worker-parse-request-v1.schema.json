@@ -1,0 +1,364 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "worker-parse-request-v1.schema.json",
+  "title": "WorkerParseRequest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "protocol_version",
+    "request_id",
+    "file_path",
+    "file_type",
+    "backend",
+    "remaining_timeout_ms",
+    "max_file_size_bytes",
+    "parser_limits",
+    "expected_source_version"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ai_daily_worker"
+    },
+    "protocol_version": {
+      "const": 1
+    },
+    "request_id": {
+      "$ref": "#/$defs/requestId"
+    },
+    "file_path": {
+      "$ref": "#/$defs/absolutePath"
+    },
+    "file_type": {
+      "$ref": "#/$defs/extension"
+    },
+    "backend": {
+      "type": "string",
+      "enum": [
+        "rust_office_oxide_v1",
+        "rust_xlsx_bounded_v1",
+        "python_office_v1",
+        "pdf_text_v1",
+        "python_sharepoint_text_v1"
+      ]
+    },
+    "remaining_timeout_ms": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 3600000
+    },
+    "max_file_size_bytes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 4294967296
+    },
+    "parser_limits": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/officeLimits"
+        },
+        {
+          "$ref": "#/$defs/pdfLimits"
+        },
+        {
+          "$ref": "#/$defs/sharePointTextLimits"
+        }
+      ]
+    },
+    "expected_source_version": {
+      "$ref": "#/$defs/sourceVersion"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "enum": [
+              "rust_office_oxide_v1",
+              "rust_xlsx_bounded_v1",
+              "python_office_v1"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parser_limits": {
+            "properties": {
+              "kind": {
+                "const": "office"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "pdf_text_v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parser_limits": {
+            "properties": {
+              "kind": {
+                "const": "pdf"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "python_sharepoint_text_v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "parser_limits": {
+            "properties": {
+              "kind": {
+                "const": "sharepoint_text"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "rust_office_oxide_v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "file_type": {
+            "enum": [
+              ".docx",
+              ".pptx"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "rust_xlsx_bounded_v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "file_type": {
+            "const": ".xlsx"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "python_office_v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "file_type": {
+            "enum": [
+              ".docx",
+              ".pptx",
+              ".xls",
+              ".xlsx"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "pdf_text_v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "file_type": {
+            "const": ".pdf"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "backend": {
+            "const": "python_sharepoint_text_v1"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "file_type": {
+            "enum": [
+              ".doc",
+              ".ppt"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "absolutePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32767,
+      "pattern": "^(?:[A-Za-z]:[\\\\/]|\\\\\\\\|/)"
+    },
+    "extension": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 32,
+      "pattern": "^\\.[^A-Z\\\\/:\\u0000]{1,31}$"
+    },
+    "sourceVersion": {
+      "type": "string",
+      "pattern": "^mtime_ns=[0-9]+:size=[0-9]+$"
+    },
+    "charBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000000
+    },
+    "rowBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1048576
+    },
+    "columnBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16384
+    },
+    "officeLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "excel_max_sheets",
+        "excel_max_rows",
+        "excel_max_columns",
+        "docx_max_paragraphs",
+        "docx_max_tables",
+        "docx_table_max_rows",
+        "docx_table_max_cols",
+        "pptx_max_slides",
+        "pptx_include_notes",
+        "document_excerpt_max_chars"
+      ],
+      "properties": {
+        "kind": {
+          "const": "office"
+        },
+        "excel_max_sheets": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "excel_max_rows": {
+          "$ref": "#/$defs/rowBudget"
+        },
+        "excel_max_columns": {
+          "$ref": "#/$defs/columnBudget"
+        },
+        "docx_max_paragraphs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "docx_max_tables": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "docx_table_max_rows": {
+          "$ref": "#/$defs/rowBudget"
+        },
+        "docx_table_max_cols": {
+          "$ref": "#/$defs/columnBudget"
+        },
+        "pptx_max_slides": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "pptx_include_notes": {
+          "type": "boolean"
+        },
+        "document_excerpt_max_chars": {
+          "$ref": "#/$defs/charBudget"
+        }
+      }
+    },
+    "pdfLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "max_pages",
+        "excerpt_max_chars"
+      ],
+      "properties": {
+        "kind": {
+          "const": "pdf"
+        },
+        "max_pages": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
+        },
+        "excerpt_max_chars": {
+          "$ref": "#/$defs/charBudget"
+        }
+      }
+    },
+    "sharePointTextLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "excerpt_max_chars"
+      ],
+      "properties": {
+        "kind": {
+          "const": "sharepoint_text"
+        },
+        "excerpt_max_chars": {
+          "$ref": "#/$defs/charBudget"
+        }
+      }
+    }
+  }
+}

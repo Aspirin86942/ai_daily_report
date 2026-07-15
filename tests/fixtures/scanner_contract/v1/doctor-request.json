@@ -1,0 +1,12 @@
+{
+  "contract": "ai_daily_context",
+  "protocol_version": 1,
+  "request_id": "22222222-2222-4222-8222-222222222222",
+  "scan_db_path": "C:\\scanner-fixtures\\state\\scan-index-v2.sqlite3",
+  "adapters": {
+    "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+    "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+    "python_module_root": "C:\\scanner-fixtures\\repo",
+    "python_document_worker_module": "src.workers.document_parser_worker"
+  }
+}

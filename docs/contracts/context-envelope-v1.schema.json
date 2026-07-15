@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "context-envelope-v1.schema.json",
+  "title": "ContextEnvelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "protocol_version",
+    "request_id",
+    "engine_version",
+    "engine_build",
+    "status",
+    "file_context",
+    "summary",
+    "scan_run_id",
+    "context_run_id",
+    "warnings",
+    "error"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ai_daily_context"
+    },
+    "protocol_version": {
+      "const": 1
+    },
+    "request_id": {
+      "$ref": "#/$defs/requestId"
+    },
+    "engine_version": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "engine_build": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ok",
+        "partial",
+        "error"
+      ]
+    },
+    "file_context": {
+      "type": "string"
+    },
+    "summary": {
+      "$ref": "#/$defs/contextSummary"
+    },
+    "scan_run_id": {
+      "$ref": "#/$defs/nullablePositiveInteger"
+    },
+    "context_run_id": {
+      "$ref": "#/$defs/nullablePositiveInteger"
+    },
+    "warnings": {
+      "$ref": "#/$defs/diagnostics"
+    },
+    "error": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "$ref": "diagnostic-v1.schema.json"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "ok"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "file_context": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scan_run_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "context_run_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "partial"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "file_context": {
+            "type": "string",
+            "minLength": 1
+          },
+          "scan_run_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "context_run_id": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "warnings": {
+            "minItems": 1
+          },
+          "error": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "error"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "file_context": {
+            "const": ""
+          },
+          "error": {
+            "$ref": "diagnostic-v1.schema.json"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "requestId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "nonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "nullablePositiveInteger": {
+      "oneOf": [
+        {
+          "type": "null"
+        },
+        {
+          "type": "integer",
+          "minimum": 1
+        }
+      ]
+    },
+    "diagnostics": {
+      "type": "array",
+      "maxItems": 100000,
+      "items": {
+        "$ref": "diagnostic-v1.schema.json"
+      }
+    },
+    "contextSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_file_count",
+        "success_count",
+        "timeout_count",
+        "included_file_count",
+        "omitted_file_count",
+        "error_file_count",
+        "input_chars",
+        "output_chars",
+        "total_duration_ms",
+        "discovery_duration_ms",
+        "parse_duration_ms",
+        "compression_duration_ms"
+      ],
+      "properties": {
+        "source_file_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "success_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "timeout_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "included_file_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "omitted_file_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "error_file_count": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "input_chars": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "output_chars": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "total_duration_ms": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "discovery_duration_ms": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "parse_duration_ms": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "compression_duration_ms": {
+          "$ref": "#/$defs/nonNegativeInteger"
+        }
+      }
+    }
+  }
+}

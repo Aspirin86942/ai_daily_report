@@ -1,0 +1,455 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "scanner-profile-normalized-v1.schema.json",
+  "title": "NormalizedScannerProfileV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "parser_profile_version",
+    "report_mode",
+    "discovery",
+    "execution",
+    "parse",
+    "context"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "normalized_scanner_profile_v1"
+    },
+    "parser_profile_version": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "report_mode": {
+      "type": "string",
+      "enum": [
+        "daily",
+        "weekly",
+        "monthly"
+      ]
+    },
+    "discovery": {
+      "$ref": "#/$defs/discovery"
+    },
+    "execution": {
+      "$ref": "#/$defs/execution"
+    },
+    "parse": {
+      "$ref": "#/$defs/parse"
+    },
+    "context": {
+      "$ref": "#/$defs/context"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "report_mode": {
+            "const": "daily"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context": {
+            "properties": {
+              "profile_name": {
+                "const": "daily_balanced_v1"
+              },
+              "global_max_chars": {
+                "const": 50000
+              },
+              "per_file_max_chars": {
+                "const": 8000
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "report_mode": {
+            "const": "weekly"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context": {
+            "properties": {
+              "profile_name": {
+                "const": "weekly_balanced_v1"
+              },
+              "global_max_chars": {
+                "const": 50000
+              },
+              "per_file_max_chars": {
+                "const": 5000
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "report_mode": {
+            "const": "monthly"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "context": {
+            "properties": {
+              "profile_name": {
+                "const": "monthly_balanced_v1"
+              },
+              "global_max_chars": {
+                "const": 60000
+              },
+              "per_file_max_chars": {
+                "const": 4000
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    },
+    "extension": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 32,
+      "pattern": "^\\.[^A-Z\\\\/:\\u0000]{1,31}$"
+    },
+    "extensionArray": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/extension"
+      }
+    },
+    "stringArray": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/nonEmptyString"
+      }
+    },
+    "discovery": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allowed_extensions",
+        "ignored_patterns",
+        "excluded_dirs"
+      ],
+      "properties": {
+        "allowed_extensions": {
+          "$ref": "#/$defs/extensionArray"
+        },
+        "ignored_patterns": {
+          "$ref": "#/$defs/stringArray"
+        },
+        "excluded_dirs": {
+          "$ref": "#/$defs/stringArray"
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_workers",
+        "max_file_size_bytes",
+        "discovery_timeout_ms",
+        "file_timeout_ms",
+        "file_timeout_by_extension_ms"
+      ],
+      "properties": {
+        "max_workers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "max_file_size_bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967296
+        },
+        "discovery_timeout_ms": {
+          "$ref": "#/$defs/timeoutMs"
+        },
+        "file_timeout_ms": {
+          "$ref": "#/$defs/timeoutMs"
+        },
+        "file_timeout_by_extension_ms": {
+          "type": "object",
+          "maxProperties": 256,
+          "propertyNames": {
+            "$ref": "#/$defs/extension"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/timeoutMs"
+          }
+        }
+      }
+    },
+    "parse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "aggregate_max_chars",
+        "text",
+        "office",
+        "pdf"
+      ],
+      "properties": {
+        "aggregate_max_chars": {
+          "$ref": "#/$defs/charBudget"
+        },
+        "text": {
+          "$ref": "#/$defs/textParse"
+        },
+        "office": {
+          "$ref": "#/$defs/officeParse"
+        },
+        "pdf": {
+          "$ref": "#/$defs/pdfParse"
+        }
+      }
+    },
+    "textParse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "read_head_bytes",
+        "read_tail_bytes",
+        "max_chars",
+        "excerpt_max_chars"
+      ],
+      "properties": {
+        "backend": {
+          "const": "light_text_v1"
+        },
+        "read_head_bytes": {
+          "$ref": "#/$defs/readBudget"
+        },
+        "read_tail_bytes": {
+          "$ref": "#/$defs/readBudget"
+        },
+        "max_chars": {
+          "$ref": "#/$defs/charBudget"
+        },
+        "excerpt_max_chars": {
+          "$ref": "#/$defs/charBudget"
+        }
+      }
+    },
+    "officeParse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary_backend",
+        "fallback_enabled",
+        "fallback_order",
+        "fallback_after_timeout",
+        "fallback_policy_version",
+        "legacy_extensions_enabled",
+        "excel_max_sheets",
+        "excel_max_rows",
+        "excel_max_columns",
+        "docx_max_paragraphs",
+        "docx_max_tables",
+        "docx_table_max_rows",
+        "docx_table_max_cols",
+        "pptx_max_slides",
+        "pptx_include_notes",
+        "document_excerpt_max_chars"
+      ],
+      "properties": {
+        "primary_backend": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "fallback_enabled": {
+          "type": "boolean"
+        },
+        "fallback_order": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "python_office_v1",
+              "python_sharepoint_text_v1"
+            ]
+          }
+        },
+        "fallback_after_timeout": {
+          "type": "boolean"
+        },
+        "fallback_policy_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "legacy_extensions_enabled": {
+          "type": "boolean"
+        },
+        "excel_max_sheets": {
+          "$ref": "#/$defs/excelSheetBudget"
+        },
+        "excel_max_rows": {
+          "$ref": "#/$defs/rowBudget"
+        },
+        "excel_max_columns": {
+          "$ref": "#/$defs/columnBudget"
+        },
+        "docx_max_paragraphs": {
+          "$ref": "#/$defs/docxParagraphBudget"
+        },
+        "docx_max_tables": {
+          "$ref": "#/$defs/documentCollectionBudget"
+        },
+        "docx_table_max_rows": {
+          "$ref": "#/$defs/rowBudget"
+        },
+        "docx_table_max_cols": {
+          "$ref": "#/$defs/columnBudget"
+        },
+        "pptx_max_slides": {
+          "$ref": "#/$defs/documentCollectionBudget"
+        },
+        "pptx_include_notes": {
+          "type": "boolean"
+        },
+        "document_excerpt_max_chars": {
+          "$ref": "#/$defs/charBudget"
+        }
+      }
+    },
+    "pdfParse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backend",
+        "max_pages",
+        "excerpt_max_chars"
+      ],
+      "properties": {
+        "backend": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "max_pages": {
+          "$ref": "#/$defs/pdfPageBudget"
+        },
+        "excerpt_max_chars": {
+          "$ref": "#/$defs/charBudget"
+        }
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "profile_name",
+        "global_max_chars",
+        "per_file_max_chars",
+        "small_file_max_bytes",
+        "medium_file_max_bytes",
+        "large_file_max_bytes",
+        "priority_policy_version",
+        "compression_policy_version"
+      ],
+      "properties": {
+        "profile_name": {
+          "type": "string",
+          "enum": [
+            "daily_balanced_v1",
+            "weekly_balanced_v1",
+            "monthly_balanced_v1"
+          ]
+        },
+        "global_max_chars": {
+          "$ref": "#/$defs/charBudget"
+        },
+        "per_file_max_chars": {
+          "$ref": "#/$defs/charBudget"
+        },
+        "small_file_max_bytes": {
+          "const": 65536
+        },
+        "medium_file_max_bytes": {
+          "const": 1048576
+        },
+        "large_file_max_bytes": {
+          "const": 10485760
+        },
+        "priority_policy_version": {
+          "const": "default_v1"
+        },
+        "compression_policy_version": {
+          "const": "markdown_context_v1"
+        }
+      }
+    },
+    "timeoutMs": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 3600000
+    },
+    "readBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 67108864
+    },
+    "charBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000000
+    },
+    "pdfPageBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    },
+    "excelSheetBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1024
+    },
+    "rowBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1048576
+    },
+    "columnBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 16384
+    },
+    "docxParagraphBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "documentCollectionBudget": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 100000
+    }
+  }
+}

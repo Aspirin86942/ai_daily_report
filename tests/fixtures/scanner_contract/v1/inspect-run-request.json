@@ -1,0 +1,8 @@
+{
+  "contract": "ai_daily_context",
+  "protocol_version": 1,
+  "request_id": "41111111-4111-4111-8111-411111111111",
+  "scan_db_path": "C:\\scanner-fixtures\\state\\scan-index-v2.sqlite3",
+  "scan_run_id": 7,
+  "include_content": false
+}

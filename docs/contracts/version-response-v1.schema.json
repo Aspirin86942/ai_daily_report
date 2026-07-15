@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "version-response-v1.schema.json",
+  "title": "VersionResponse v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract",
+    "protocol_version",
+    "binary_name",
+    "engine_version",
+    "engine_build",
+    "target_triple",
+    "supported_commands",
+    "office_worker_contract_version",
+    "python_worker_contract_version"
+  ],
+  "properties": {
+    "contract": {
+      "const": "ai_daily_context"
+    },
+    "protocol_version": {
+      "const": 1
+    },
+    "binary_name": {
+      "const": "ai-daily-scanner"
+    },
+    "engine_version": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "engine_build": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "target_triple": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "supported_commands": {
+      "const": [
+        "version",
+        "doctor",
+        "build-context",
+        "inspect-run"
+      ]
+    },
+    "office_worker_contract_version": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "python_worker_contract_version": {
+      "$ref": "#/$defs/nonEmptyString"
+    }
+  },
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1024
+    }
+  }
+}
