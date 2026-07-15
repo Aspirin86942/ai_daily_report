@@ -3,6 +3,11 @@
 from argparse import Namespace
 from datetime import date as real_date
 from pathlib import Path
+import os
+import subprocess
+import sys
+
+import pytest
 
 import main
 from src.core.healthcheck import HealthCheckResult
@@ -123,10 +128,11 @@ def test_generate_daily_report_uses_context_scheduler(monkeypatch):
     monkeypatch.setattr(main, "LLMClient", StubLLMClient)
     monkeypatch.setattr(main, "Markdown", lambda text: text)
 
-    main.generate_daily_report(
+    success = main.generate_daily_report(
         Namespace(input="今天工作", no_save=False, date=None)
     )
 
+    assert success is True
     assert [name for name, _ in calls] == [
         "init",
         "build_context",
@@ -197,10 +203,11 @@ def test_generate_daily_report_warns_when_context_scheduler_falls_back(monkeypat
     monkeypatch.setattr(main, "LLMClient", StubLLMClient)
     monkeypatch.setattr(main, "Markdown", lambda text: text)
 
-    main.generate_daily_report(
+    success = main.generate_daily_report(
         Namespace(input="今天工作", no_save=False, date=None)
     )
 
+    assert success is True
     assert any("文件上下文构建降级" in text for text in printed)
     assert any("scheduler failed" in text for text in printed)
     assert ("logger_warning", "文件上下文构建降级: scheduler failed") in calls
@@ -268,10 +275,11 @@ def test_generate_weekly_report_db_uses_sqlite_store(monkeypatch):
     monkeypatch.setattr(main, "LLMClient", StubLLMClient)
     monkeypatch.setattr(main, "Markdown", lambda text: text)
 
-    main.generate_weekly_report_cmd(
+    success = main.generate_weekly_report_cmd(
         Namespace(week="2026-W05", source="db", input=None, no_save=False)
     )
 
+    assert success is True
     assert [name for name, _ in calls] == [
         "init",
         "get_week_reports",
@@ -347,7 +355,7 @@ def test_generate_weekly_report_scan_uses_context_scheduler(monkeypatch):
     monkeypatch.setattr(main, "LLMClient", StubLLMClient)
     monkeypatch.setattr(main, "Markdown", lambda text: text)
 
-    main.generate_weekly_report_cmd(
+    success = main.generate_weekly_report_cmd(
         Namespace(
             week="2026-W20",
             source="scan",
@@ -356,6 +364,7 @@ def test_generate_weekly_report_scan_uses_context_scheduler(monkeypatch):
         )
     )
 
+    assert success is True
     assert (
         "build_context",
         ("weekly", "scan", "2026-05-11", "2026-05-17"),
@@ -423,10 +432,11 @@ def test_generate_monthly_report_db_uses_sqlite_store(monkeypatch):
     monkeypatch.setattr(main, "LLMClient", StubLLMClient)
     monkeypatch.setattr(main, "Markdown", lambda text: text)
 
-    main.generate_monthly_report_cmd(
+    success = main.generate_monthly_report_cmd(
         Namespace(month="2026-01", source="db", input=None, no_save=False)
     )
 
+    assert success is True
     assert [name for name, _ in calls] == [
         "init",
         "get_reports_in_range",
@@ -497,7 +507,7 @@ def test_generate_monthly_report_scan_uses_context_scheduler(monkeypatch):
     monkeypatch.setattr(main, "LLMClient", StubLLMClient)
     monkeypatch.setattr(main, "Markdown", lambda text: text)
 
-    main.generate_monthly_report_cmd(
+    success = main.generate_monthly_report_cmd(
         Namespace(
             month="2026-05",
             source="scan",
@@ -506,6 +516,7 @@ def test_generate_monthly_report_scan_uses_context_scheduler(monkeypatch):
         )
     )
 
+    assert success is True
     assert (
         "build_context",
         ("monthly", "scan", "2026-05-01", "2026-05-31"),
@@ -576,3 +587,267 @@ def test_run_doctor_cmd_uses_healthcheck(monkeypatch):
     assert any("LLM Provider" in str(text) for text in printed)
     assert any("警告" in str(text) for text in printed)
     assert any("所有检查通过" in str(text) for text in printed)
+
+
+@pytest.mark.parametrize(
+    ("command", "args"),
+    [
+        (
+            main.generate_daily_report,
+            Namespace(input="work", no_save=True, date=None),
+        ),
+        (
+            main.generate_weekly_report_cmd,
+            Namespace(
+                week="2026-W01",
+                source="scan",
+                input=None,
+                no_save=True,
+            ),
+        ),
+        (
+            main.generate_monthly_report_cmd,
+            Namespace(
+                month="2026-01",
+                source="scan",
+                input=None,
+                no_save=True,
+            ),
+        ),
+    ],
+    ids=["daily", "weekly", "monthly"],
+)
+def test_report_command_returns_false_when_generation_fails(
+    monkeypatch,
+    command,
+    args: Namespace,
+):
+    class StubContextScheduler:
+        def build_context(self, request) -> ContextScheduleResult:
+            return _schedule_result("report context")
+
+    class StubSQLiteStore:
+        def get_yesterday_plan(self) -> str:
+            return ""
+
+    class FailingLLMClient:
+        def generate_report(self, **kwargs):
+            raise RuntimeError("LLM unavailable")
+
+        def generate_weekly_report(self, **kwargs):
+            raise RuntimeError("LLM unavailable")
+
+        def generate_monthly_report(self, **kwargs):
+            raise RuntimeError("LLM unavailable")
+
+    printed = _patch_console(monkeypatch)
+    _patch_progress(monkeypatch)
+    monkeypatch.setattr(main, "ContextScheduler", StubContextScheduler)
+    monkeypatch.setattr(main, "SQLiteStore", StubSQLiteStore)
+    monkeypatch.setattr(main, "ReportGenerator", object)
+    monkeypatch.setattr(main, "LLMClient", FailingLLMClient)
+
+    success = command(args)
+
+    assert success is False
+    assert any("生成失败: LLM unavailable" in text for text in printed)
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "argv"),
+    [
+        ("generate_daily_report", ["daily", "--input", "work"]),
+        (
+            "generate_weekly_report_cmd",
+            ["weekly", "2026-W01", "--source", "db"],
+        ),
+        (
+            "generate_monthly_report_cmd",
+            ["monthly", "2026-01", "--source", "db"],
+        ),
+    ],
+)
+def test_main_returns_one_when_report_command_fails(
+    monkeypatch,
+    handler_name: str,
+    argv: list[str],
+):
+    monkeypatch.setattr(main, handler_name, lambda args: False)
+    monkeypatch.setattr(sys, "argv", ["main.py", *argv])
+
+    assert main.main() == 1
+
+
+@pytest.mark.parametrize(
+    ("handler_name", "argv"),
+    [
+        ("generate_daily_report", ["daily", "--input", "work"]),
+        (
+            "generate_weekly_report_cmd",
+            ["weekly", "2026-W01", "--source", "db"],
+        ),
+        (
+            "generate_monthly_report_cmd",
+            ["monthly", "2026-01", "--source", "db"],
+        ),
+    ],
+)
+def test_main_returns_zero_when_report_command_succeeds(
+    monkeypatch,
+    handler_name: str,
+    argv: list[str],
+):
+    monkeypatch.setattr(main, handler_name, lambda args: True)
+    monkeypatch.setattr(sys, "argv", ["main.py", *argv])
+
+    assert main.main() == 0
+
+
+def test_main_returns_doctor_status(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["main.py", "doctor"])
+    monkeypatch.setattr(main, "run_doctor_cmd", lambda: False)
+    assert main.main() == 1
+
+    monkeypatch.setattr(main, "run_doctor_cmd", lambda: True)
+    assert main.main() == 0
+
+
+def test_main_returns_zero_without_subcommand(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["main.py"])
+
+    assert main.main() == 0
+
+
+def test_main_returns_one_for_unexpected_exception(monkeypatch):
+    def fail() -> None:
+        raise RuntimeError("unexpected failure")
+
+    printed = _patch_console(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["main.py", "list"])
+    monkeypatch.setattr(main, "list_reports", fail)
+
+    assert main.main() == 1
+    assert any("unexpected failure" in text for text in printed)
+
+
+def test_main_returns_130_for_keyboard_interrupt(monkeypatch):
+    def interrupt() -> None:
+        raise KeyboardInterrupt
+
+    printed = _patch_console(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["main.py", "list"])
+    monkeypatch.setattr(main, "list_reports", interrupt)
+
+    assert main.main() == 130
+    assert any("操作已取消" in text for text in printed)
+
+
+def test_cli_help_exits_zero():
+    completed = subprocess.run(
+        [sys.executable, str(Path(main.__file__).resolve()), "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "usage:" in completed.stdout
+
+
+def _run_main_with_sitecustomize(
+    tmp_path: Path,
+    source: str,
+    *arguments: str,
+) -> subprocess.CompletedProcess[str]:
+    """在隔离启动钩子下运行真实 CLI 进程。"""
+    (tmp_path / "sitecustomize.py").write_text(source, encoding="utf-8")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(tmp_path), env.get("PYTHONPATH", "")])
+    )
+    return subprocess.run(
+        [sys.executable, str(Path(main.__file__).resolve()), *arguments],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        check=False,
+    )
+
+
+def test_cli_doctor_bootstraps_without_rich_or_file_logger(tmp_path):
+    """doctor 必须在完整 UI/业务依赖导入前进入轻量诊断路径。"""
+    completed = _run_main_with_sitecustomize(
+        tmp_path,
+        "\n".join(
+            [
+                "import builtins",
+                "import sys",
+                "import types",
+                "real_import = builtins.__import__",
+                "def guarded_import(name, *args, **kwargs):",
+                "    if name == 'rich' or name.startswith('rich.') or name == 'src.core.logger':",
+                "        raise RuntimeError(f'forbidden eager import: {name}')",
+                "    return real_import(name, *args, **kwargs)",
+                "builtins.__import__ = guarded_import",
+                "healthcheck = types.ModuleType('src.core.healthcheck')",
+                "class Result:",
+                "    info = {'轻量入口': '可用'}",
+                "    warnings = []",
+                "    errors = []",
+                "healthcheck.collect_healthcheck = lambda: Result()",
+                "sys.modules['src.core.healthcheck'] = healthcheck",
+            ]
+        ),
+        "doctor",
+    )
+
+    assert completed.returncode == 0
+    assert "轻量入口: 可用" in completed.stdout
+    assert "forbidden eager import" not in completed.stdout + completed.stderr
+
+
+def test_cli_doctor_redacts_bootstrap_exception_text(tmp_path):
+    """启动期异常可能含 YAML 原文，doctor 不得直接回显。"""
+    fake_secret = "dummy-secret-must-not-leak"
+    completed = _run_main_with_sitecustomize(
+        tmp_path,
+        "\n".join(
+            [
+                "import sys",
+                "import types",
+                "healthcheck = types.ModuleType('src.core.healthcheck')",
+                "def fail():",
+                f"    raise ValueError('{fake_secret}')",
+                "healthcheck.collect_healthcheck = fail",
+                "sys.modules['src.core.healthcheck'] = healthcheck",
+            ]
+        ),
+        "doctor",
+    )
+
+    combined_output = completed.stdout + completed.stderr
+    assert completed.returncode == 1
+    assert "doctor 无法启动 (ValueError)" in combined_output
+    assert fake_secret not in combined_output
+
+
+def test_cli_invalid_week_exits_nonzero():
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(Path(main.__file__).resolve()),
+            "weekly",
+            "invalid-week",
+            "--source",
+            "db",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "错误:" in completed.stdout

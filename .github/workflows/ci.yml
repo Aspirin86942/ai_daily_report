@@ -1,0 +1,84 @@
+name: CI
+
+"on":
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python-tests:
+    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.13"]
+    env:
+      DAILY_REPORT_PATHS__WORK_DIR: ${{ github.workspace }}/.ci-work
+      DEEPSEEK_API_KEY: ci-doctor-placeholder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.txt
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements.lock
+          python -m pip install --requirement requirements-dev.txt
+          python -m pip check
+      - name: Validate Windows deployment script syntax
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path -LiteralPath 'scripts/deploy_windows.ps1'),
+            [ref]$tokens,
+            [ref]$errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $messages = $errors | ForEach-Object { $_.Message }
+            throw ($messages -join [Environment]::NewLine)
+          }
+      - name: Prepare local CI configuration
+        run: >-
+          python -c "import platform, shutil; from pathlib import Path;
+          Path('.ci-work').mkdir(exist_ok=True);
+          target = 'config/settings.windows.yaml' if platform.system() == 'Windows'
+          else 'config/settings.linux.yaml';
+          shutil.copyfile('config/settings.example.yaml', target)"
+      - name: Run deployment doctor
+        run: python main.py doctor
+      - name: Run Python tests
+        run: python -m pytest tests/ -v
+
+  rust-tests:
+    name: Rust / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show Rust toolchain
+        run: |
+          rustc --version
+          cargo --version
+      - name: Test discovery CLI
+        run: cargo test --locked --manifest-path rust/discovery/Cargo.toml
+      - name: Build discovery release CLI
+        run: cargo build --release --locked --manifest-path rust/discovery/Cargo.toml
+      - name: Test Office parser CLI
+        run: cargo test --locked --manifest-path rust/office_parser/Cargo.toml
+      - name: Build Office parser release CLI
+        run: cargo build --release --locked --manifest-path rust/office_parser/Cargo.toml

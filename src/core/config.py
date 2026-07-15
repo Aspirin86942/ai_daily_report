@@ -52,8 +52,9 @@ class Config:
         config_dir: Path,
         system_name: str | None = None,
     ) -> list[str]:
-        """返回 Dynaconf 的配置文件读取顺序。"""
+        """返回本机配置读取顺序，后加载的文件拥有更高优先级。"""
         return [
+            str(config_dir / "settings.yaml"),
             str(config_dir / cls._settings_file_name(system_name)),
             str(config_dir / ".secrets.yaml"),
         ]
@@ -66,13 +67,14 @@ class Config:
     ) -> Dynaconf:
         """构建配置对象。
 
-        非敏感配置按系统拆分，敏感配置最后加载，确保本机密钥不会写进示例文件。
+        通用本机配置与系统配置递归合并，敏感配置最后加载，确保其优先级最高。
         """
         return Dynaconf(
             envvar_prefix="DAILY_REPORT",
             settings_files=cls._settings_files(config_dir, system_name),
             environments=False,
             load_dotenv=True,
+            merge_enabled=True,
         )
 
     @staticmethod
@@ -282,11 +284,19 @@ class Config:
     @property
     def deepseek_api_key(self) -> str:
         """DeepSeek API Key"""
-        key = os.getenv("DEEPSEEK_API_KEY")
+        key = (os.getenv("DEEPSEEK_API_KEY") or "").strip()
         if key:
             return key
         api_settings = getattr(self._settings, "api", None)
-        return getattr(api_settings, "deepseek_api_key", "")
+        key = str(getattr(api_settings, "deepseek_api_key", "") or "").strip()
+        if key:
+            return key
+
+        # 兼容既有本机 settings.yaml；新部署仍推荐环境变量或 .secrets.yaml。
+        llm_settings = getattr(self._settings, "llm", None)
+        return str(
+            getattr(llm_settings, "DEEPSEEK_API_KEY", "") or ""
+        ).strip()
 
     @property
     def google_api_key(self) -> str:

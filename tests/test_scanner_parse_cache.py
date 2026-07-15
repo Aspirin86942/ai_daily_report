@@ -47,7 +47,8 @@ def _cache_probe(item: InventoryItem) -> CacheProbe:
 
 
 def test_get_cached_contexts_restores_file_context_metadata():
-    item = _inventory_item(Path("/work/report.md"))
+    report_path = Path("/work/report.md")
+    item = _inventory_item(report_path)
     store = FakeParseCacheStore(
         {
             (item.file_identity, "profile-key", item.source_version): {
@@ -63,7 +64,7 @@ def test_get_cached_contexts_restores_file_context_metadata():
     [context] = get_cached_contexts(store, [item], "profile-key")
 
     assert context == FileContext(
-        file_path="/work/report.md",
+        file_path=str(report_path),
         file_type=".md",
         content="cached",
         error=None,
@@ -101,9 +102,10 @@ def test_write_parse_cache_omits_error_content_and_preserves_parser_metadata():
 
 
 def test_build_reparse_detail_includes_office_audit_and_worker_lane():
-    item = _inventory_item(Path("/work/report.docx"))
+    report_path = Path("/work/report.docx")
+    item = _inventory_item(report_path)
     context = FileContext(
-        file_path="/work/report.docx",
+        file_path=str(report_path),
         file_type=".docx",
         content="parsed",
         error=None,
@@ -124,11 +126,11 @@ def test_build_reparse_detail_includes_office_audit_and_worker_lane():
         cache_probe=_cache_probe(item),
         duration_ms=17,
         context=context,
-        office_parse_audits={"/work/report.docx": office_audit},
+        office_parse_audits={str(report_path): office_audit},
         infer_worker_lane=lambda file_type, parsed_context: "subprocess",
     )
 
-    assert detail.path == "/work/report.docx"
+    assert detail.path == str(report_path)
     assert detail.extension == ".docx"
     assert detail.parse_status == "success"
     assert detail.parser_backend == "python_office_v1"
@@ -141,7 +143,8 @@ def test_build_reparse_detail_includes_office_audit_and_worker_lane():
 
 
 def test_build_reparse_exception_detail_uses_not_parsed_lane():
-    item = _inventory_item(Path("/work/bad.txt"))
+    bad_path = Path("/work/bad.txt")
+    item = _inventory_item(bad_path)
 
     detail = build_reparse_exception_detail(
         item=item,
@@ -150,7 +153,7 @@ def test_build_reparse_exception_detail_uses_not_parsed_lane():
         not_parsed_backend="not_parsed",
     )
 
-    assert detail.path == "/work/bad.txt"
+    assert detail.path == str(bad_path)
     assert detail.parse_status == "error"
     assert detail.parse_error == "boom"
     assert detail.parser_backend == "not_parsed"

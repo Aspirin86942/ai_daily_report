@@ -10,16 +10,19 @@ from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportD
 from src.services.report_gen import ReportGenerator
 
 
-def test_report_generator_init():
+@pytest.fixture
+def report_generator(tmp_path: Path) -> ReportGenerator:
+    """为报告测试提供不依赖本机配置的输出目录。"""
+    return ReportGenerator(reports_dir=tmp_path / "reports")
+
+
+def test_report_generator_init(report_generator: ReportGenerator):
     """测试生成器初始化"""
-    gen = ReportGenerator()
-    assert gen.reports_dir.exists()
+    assert report_generator.reports_dir.exists()
 
 
-def test_render_markdown():
+def test_render_markdown(report_generator: ReportGenerator):
     """测试日报 Markdown 渲染"""
-    gen = ReportGenerator()
-
     report = DailyReportData(
         date="2026-01-28",
         completed_work="今天完成了日报模板精简，去掉了列表项和量化字段。",
@@ -27,7 +30,7 @@ def test_render_markdown():
         next_plan="明天继续修改周报和月报模板。",
     )
 
-    markdown = gen.render_markdown(report)
+    markdown = report_generator.render_markdown(report)
     assert "## 今日工作完成内容" in markdown
     assert "## 今日工作小结" in markdown
     assert "## 明日工作计划" in markdown
@@ -35,10 +38,8 @@ def test_render_markdown():
     assert "- **内容**" not in markdown
 
 
-def test_render_weekly_markdown():
+def test_render_weekly_markdown(report_generator: ReportGenerator):
     """测试周报 Markdown 渲染"""
-    gen = ReportGenerator()
-
     report = WeeklyReportData(
         week_label="2026-W05",
         date_range="2026-01-27 ~ 2026-02-02",
@@ -51,7 +52,7 @@ def test_render_weekly_markdown():
         other_notes="若项目C现场安排提前，需要同步调整项目A复核资源分配。",
     )
 
-    markdown = gen.render_weekly_markdown(report)
+    markdown = report_generator.render_weekly_markdown(report)
     headings = [
         "## 1、本周主要工作完成情况（例行及专项，体现关键数据及进度情况）",
         "## 2、自我成长（结合本周工作开展，收获了什么成长和领悟）",
@@ -76,10 +77,8 @@ def test_render_weekly_markdown():
     assert "风险与问题" not in markdown
 
 
-def test_render_monthly_markdown():
+def test_render_monthly_markdown(report_generator: ReportGenerator):
     """测试月报 Markdown 渲染"""
-    gen = ReportGenerator()
-
     report = MonthlyReportData(
         year_month="2026-01",
         overview="本月围绕审计计划执行、资料核验和报告整理持续推进，整体进度符合预期。",
@@ -88,7 +87,7 @@ def test_render_monthly_markdown():
         next_plan="下月继续完善报告初稿，跟进整改反馈，并启动新项目进场准备。",
     )
 
-    markdown = gen.render_monthly_markdown(report)
+    markdown = report_generator.render_monthly_markdown(report)
     assert "2026-01" in markdown
     assert "## 本月总览" in markdown
     assert "## 本月完成内容" in markdown
@@ -100,21 +99,19 @@ def test_render_monthly_markdown():
     assert "| 指标 | 数值 |" not in markdown
 
 
-def test_save_weekly_markdown():
+def test_save_weekly_markdown(report_generator: ReportGenerator):
     """测试周报 Markdown 保存"""
-    gen = ReportGenerator()
     content = "# 测试周报\n内容"
-    path = gen.save_weekly_markdown(content, 2026, 5)
+    path = report_generator.save_weekly_markdown(content, 2026, 5)
     assert path.exists()
     assert path.name == "2026-W05.md"
     assert path.read_text(encoding="utf-8") == content
 
 
-def test_save_monthly_markdown():
+def test_save_monthly_markdown(report_generator: ReportGenerator):
     """测试月报 Markdown 保存"""
-    gen = ReportGenerator()
     content = "# 测试月报\n内容"
-    path = gen.save_monthly_markdown(content, "2026-01")
+    path = report_generator.save_monthly_markdown(content, "2026-01")
     assert path.exists()
     assert path.name == "2026-01.md"
     assert path.read_text(encoding="utf-8") == content

@@ -1,6 +1,10 @@
 # 敏感配置
+.env
+.env.*
+!.env.example
 config/.secrets.toml
 config/.secrets.yaml
+config/settings.yaml
 config/settings.linux.yaml
 config/settings.windows.yaml
 

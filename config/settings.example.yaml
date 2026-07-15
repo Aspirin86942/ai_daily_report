@@ -5,7 +5,7 @@ app:
 paths:
   # 复制成本机配置后，按运行系统改成真实工作目录。
   # Linux 示例: /home/george/bochu_work
-  # Windows 示例: D:\bochu_work
+  # Windows 示例: D:/bochu_work（双引号 YAML 中不要使用未转义的反斜杠）
   work_dir: "/path/to/work"
   data_dir: "data"
   reports_dir: "data/reports"

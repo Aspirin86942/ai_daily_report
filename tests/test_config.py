@@ -45,15 +45,64 @@ def test_build_settings_reads_platform_yaml_and_yaml_secrets(tmp_path):
 
 
 def test_config_selects_windows_yaml_on_windows(tmp_path):
-    """Windows 运行时必须读取 Windows 专用配置，避免误用 Linux 路径。"""
+    """通用本机配置先加载，Windows 与 secrets 可依次覆盖。"""
     config_dir = tmp_path / "config"
 
     settings_files = Config._settings_files(config_dir, system_name="Windows")
 
     assert settings_files == [
+        str(config_dir / "settings.yaml"),
         str(config_dir / "settings.windows.yaml"),
         str(config_dir / ".secrets.yaml"),
     ]
+
+
+def test_build_settings_reads_generic_local_yaml(tmp_path):
+    """通用配置应与系统配置合并，并由系统配置覆盖同名值。"""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.yaml").write_text(
+        "\n".join(
+            [
+                "paths:",
+                "  work_dir: D:/audit/work",
+                "llm:",
+                "  provider: deepseek",
+                "  model_id: deepseek-chat",
+                "  DEEPSEEK_API_KEY: local-test-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    (config_dir / "settings.windows.yaml").write_text(
+        "\n".join(
+            [
+                "paths:",
+                "  work_dir: D:/audit/windows-work",
+                "llm:",
+                "  provider: deepseek",
+                "  model_id: deepseek-reasoner",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    settings = Config._build_settings(config_dir, system_name="Windows")
+
+    assert settings.paths.work_dir == "D:/audit/windows-work"
+    assert settings.llm.model_id == "deepseek-reasoner"
+    assert settings.llm.DEEPSEEK_API_KEY == "local-test-key"
+
+
+def test_deepseek_api_key_accepts_local_llm_key(monkeypatch):
+    """兼容现有 settings.yaml 把密钥放在 llm 节点的本机配置。"""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    cfg = object.__new__(Config)
+    cfg._settings = SimpleNamespace(
+        llm=SimpleNamespace(DEEPSEEK_API_KEY="local-test-key"),
+    )
+
+    assert cfg.deepseek_api_key == "local-test-key"
 
 
 def test_scanner_config_exposes_scan_index_defaults_when_keys_absent():

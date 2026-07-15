@@ -14,9 +14,15 @@ logger = setup_logger()
 class ReportGenerator:
     """报告生成器"""
 
-    def __init__(self):
-        """初始化生成器"""
-        self.reports_dir = config.reports_dir
+    def __init__(self, reports_dir: Path | None = None):
+        """初始化生成器。
+
+        ``reports_dir`` 允许测试和受控运行显式隔离输出目录；生产调用省略时
+        仍使用本机配置，避免测试依赖被 Git 忽略的 settings 文件。
+        """
+        self.reports_dir = (
+            Path(reports_dir) if reports_dir is not None else config.reports_dir
+        )
         self.reports_dir.mkdir(parents=True, exist_ok=True)
 
         # 初始化 Jinja2 环境

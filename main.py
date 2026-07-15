@@ -3,6 +3,63 @@
 import argparse
 import sys
 from datetime import date, timedelta
+
+# doctor 必须能在 Rich、业务依赖或文件日志不可用时先给出诊断。
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+
+
+def _run_bootstrap_doctor() -> int:
+    """通过轻量导入运行 doctor，避免完整业务栈遮蔽部署错误。"""
+
+    print("\n===== 环境检查 =====\n")
+    try:
+        from src.core.healthcheck import collect_healthcheck as collect
+
+        result = collect()
+    except ModuleNotFoundError as exc:
+        missing_module = exc.name or "未知模块"
+        print("错误:")
+        print(f"  [X] doctor 启动依赖缺失: {missing_module}")
+        print("\n请先安装 requirements.lock（或 requirements.txt）后重试")
+        return 1
+    except Exception as exc:
+        print("错误:")
+        print(
+            f"  [X] doctor 无法启动 ({type(exc).__name__})；"
+            "请检查依赖与本机配置格式"
+        )
+        return 1
+
+    if result.info:
+        print("配置概览")
+        for label, value in result.info.items():
+            print(f"  - {label}: {value}")
+
+    if result.warnings:
+        print("\n警告:")
+        for message in result.warnings:
+            print(f"  [!] {message}")
+
+    if result.errors:
+        print("\n错误:")
+        for message in result.errors:
+            print(f"  [X] {message}")
+        print("\n环境检查失败，请修复上述问题")
+        return 1
+
+    print("\n所有检查通过，可以正常使用")
+    return 0
+
+
+if (
+    __name__ == "__main__"
+    and len(sys.argv) == 2
+    and sys.argv[1] in {"doctor", "check-config"}
+):
+    raise SystemExit(_run_bootstrap_doctor())
+
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn
@@ -19,11 +76,6 @@ from src.services.context_scheduler import (
 from src.services.report_gen import ReportGenerator
 from src.services.sqlite_store import SQLiteStore
 from src.utils.text_tools import parse_week_label, get_month_date_range
-
-# 修复 Windows 控制台编码问题
-if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
 
 logger = setup_logger()
 console = Console()
@@ -127,7 +179,7 @@ def get_user_input() -> str:
     return "\n".join(lines).strip()
 
 
-def generate_daily_report(args: argparse.Namespace) -> None:
+def generate_daily_report(args: argparse.Namespace) -> bool:
     """生成日报"""
     console.print("\n[bold green]===== 审计日报生成器 v5.0 =====[/bold green]\n")
 
@@ -181,7 +233,7 @@ def generate_daily_report(args: argparse.Namespace) -> None:
 
     if not user_input:
         console.print("[red]错误: 未输入工作内容[/red]")
-        return
+        return False
 
     # 4. 生成日报
     with Progress(
@@ -200,7 +252,7 @@ def generate_daily_report(args: argparse.Namespace) -> None:
         except Exception as e:
             progress.update(task, completed=True)
             console.print(f"[red]✗ 生成失败: {e}[/red]")
-            return
+            return False
 
     # 覆盖日期 (支持 --date 参数)
     if args.date:
@@ -220,9 +272,10 @@ def generate_daily_report(args: argparse.Namespace) -> None:
     # 7. 预览
     console.print("[bold cyan]===== 日报预览 =====[/bold cyan]\n")
     console.print(Markdown(markdown_content))
+    return True
 
 
-def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
+def generate_weekly_report_cmd(args: argparse.Namespace) -> bool:
     """生成周报"""
     # 解析周标签
     if args.week:
@@ -230,7 +283,7 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
             year, week_num = parse_week_label(args.week)
         except ValueError as e:
             console.print(f"[red]错误: {e}[/red]")
-            return
+            return False
     else:
         # 默认本周
         today = date.today()
@@ -259,7 +312,7 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
             reports, missing_days = store.get_week_reports(year, week_num)
             if not reports:
                 console.print(f"[red]错误: 未找到 {week_label} 的日报数据[/red]")
-                return
+                return False
             console.print(
                 f"[green]✓[/green] 读取 {len(reports)} 份日报, {len(missing_days)} 天缺失\n"
             )
@@ -316,7 +369,7 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
         except Exception as e:
             progress.update(task, completed=True)
             console.print(f"[red]✗ 生成失败: {e}[/red]")
-            return
+            return False
 
     console.print("[green]✓[/green] 周报生成成功\n")
 
@@ -332,9 +385,10 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> None:
     # 预览
     console.print("[bold cyan]===== 周报预览 =====[/bold cyan]\n")
     console.print(Markdown(markdown_content))
+    return True
 
 
-def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
+def generate_monthly_report_cmd(args: argparse.Namespace) -> bool:
     """生成月报"""
     # 解析年月
     if args.month:
@@ -346,7 +400,7 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
         start_date, end_date = get_month_date_range(year_month)
     except ValueError as e:
         console.print(f"[red]错误: {e}[/red]")
-        return
+        return False
 
     console.print(
         f"\n[bold green]===== 生成月报 {year_month} ({start_date} ~ {end_date}) =====[/bold green]\n"
@@ -368,7 +422,7 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
             )
             if not reports:
                 console.print(f"[red]错误: 未找到 {year_month} 的日报数据[/red]")
-                return
+                return False
             console.print(
                 f"[green]✓[/green] 读取 {len(reports)} 份日报, {len(missing_days)} 天缺失\n"
             )
@@ -424,7 +478,7 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
         except Exception as e:
             progress.update(task, completed=True)
             console.print(f"[red]✗ 生成失败: {e}[/red]")
-            return
+            return False
 
     console.print("[green]✓[/green] 月报生成成功\n")
 
@@ -440,6 +494,7 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> None:
     # 预览
     console.print("[bold cyan]===== 月报预览 =====[/bold cyan]\n")
     console.print(Markdown(markdown_content))
+    return True
 
 
 def list_reports() -> None:
@@ -497,35 +552,39 @@ def run_doctor_cmd() -> bool:
     return True
 
 
-def main() -> None:
+def main() -> int:
     """主函数"""
     parser = build_parser()
     args = parser.parse_args()
 
     if not args.subcommand:
         parser.print_help()
-        return
+        return 0
 
     try:
         match args.subcommand:
             case "daily":
-                generate_daily_report(args)
+                return 0 if generate_daily_report(args) else 1
             case "weekly":
-                generate_weekly_report_cmd(args)
+                return 0 if generate_weekly_report_cmd(args) else 1
             case "monthly":
-                generate_monthly_report_cmd(args)
+                return 0 if generate_monthly_report_cmd(args) else 1
             case "list":
                 list_reports()
+                return 0
             case "doctor":
-                if not run_doctor_cmd():
-                    raise SystemExit(1)
+                return 0 if run_doctor_cmd() else 1
 
     except KeyboardInterrupt:
         console.print("\n[yellow]操作已取消[/yellow]")
+        return 130
     except Exception as e:
         logger.error(f"程序异常: {e}", exc_info=True)
         console.print(f"\n[red]错误: {e}[/red]")
+        return 1
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

@@ -55,7 +55,7 @@ def test_replace_inventory_replaces_snapshot_and_normalizes_values(tmp_path: Pat
     assert [dict(row) for row in rows] == [
         {
             "file_identity": "new",
-            "path": "/work/new.md",
+            "path": str(Path("/work/new.md")),
             "extension": ".md",
             "modified_date": "2026-05-02",
             "size_bytes": 2,
