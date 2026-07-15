@@ -1,11 +1,11 @@
 [package]
 name = "ai-daily-office-parser"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-office_oxide = "0.1"
-quick-xml = "0.40"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-zip = { version = "8.1", features = ["deflate"], default-features = false }
+office_oxide.workspace = true
+quick-xml.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zip.workspace = true

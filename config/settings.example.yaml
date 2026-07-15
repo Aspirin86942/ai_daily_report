@@ -37,11 +37,11 @@ scanner:
   excluded_dirs: []
   # 默认优先 Rust；二进制缺失或失败时会回退 Python。
   discovery_backend: "rust"
-  rust_discovery_bin: "rust/discovery/target/release/ai-daily-discovery"
+  rust_discovery_bin: "rust/target/release/ai-daily-discovery"
   discovery_timeout_seconds: 30
   # Office parser profile/cache defaults used to isolate parser backend changes.
   office_parser_backend: "rust_office_oxide_v1"
-  rust_office_parser_bin: "rust/office_parser/target/release/ai-daily-office-parser"
+  rust_office_parser_bin: "rust/target/release/ai-daily-office-parser"
   office_parser_fallback_enabled: true
   office_parser_fallback_order:
     - "python_office_v1"

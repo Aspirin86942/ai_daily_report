@@ -145,7 +145,7 @@ def test_scanner_config_exposes_discovery_backend_defaults_when_keys_absent():
 
     assert scanner_config["discovery_backend"] == "rust"
     assert scanner_config["rust_discovery_bin"] == (
-        "rust/discovery/target/release/ai-daily-discovery"
+        "rust/target/release/ai-daily-discovery"
     )
     assert scanner_config["discovery_timeout_seconds"] == 30
 
@@ -169,7 +169,7 @@ def test_scanner_config_exposes_office_parser_defaults_when_keys_absent():
     assert scanner_config["office_parser_backend"] == "rust_office_oxide_v1"
     assert scanner_config["pdf_parser_backend"] == "pdf_text_v1"
     assert scanner_config["rust_office_parser_bin"] == (
-        "rust/office_parser/target/release/ai-daily-office-parser"
+        "rust/target/release/ai-daily-office-parser"
     )
     assert scanner_config["office_parser_fallback_enabled"] is True
     assert scanner_config["office_parser_fallback_order"] == [
@@ -270,11 +270,11 @@ def test_scanner_config_uses_builtin_containers_and_is_picklable(tmp_path):
                 "  pdf_max_pages: 5",
                 "  text_max_chars: 6000",
                 "  discovery_backend: rust",
-                "  rust_discovery_bin: rust/discovery/target/release/ai-daily-discovery",
+                "  rust_discovery_bin: rust/target/release/ai-daily-discovery",
                 "  discovery_timeout_seconds: 12",
                 "  office_parser_backend: rust_office_oxide_v1",
                 "  pdf_parser_backend: custom_pdf_v2",
-                "  rust_office_parser_bin: rust/office_parser/target/release/ai-daily-office-parser",
+                "  rust_office_parser_bin: rust/target/release/ai-daily-office-parser",
                 "  office_parser_fallback_enabled: true",
                 "  office_parser_fallback_order:",
                 "    - python_office_v1",
@@ -299,7 +299,7 @@ def test_scanner_config_uses_builtin_containers_and_is_picklable(tmp_path):
     assert isinstance(scanner_config["file_timeout_by_extension"], dict)
     assert scanner_config["discovery_backend"] == "rust"
     assert scanner_config["rust_discovery_bin"] == (
-        "rust/discovery/target/release/ai-daily-discovery"
+        "rust/target/release/ai-daily-discovery"
     )
     assert scanner_config["discovery_timeout_seconds"] == 12
     assert scanner_config["office_parser_backend"] == "rust_office_oxide_v1"

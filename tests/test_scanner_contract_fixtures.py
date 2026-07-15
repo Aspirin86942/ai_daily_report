@@ -89,6 +89,8 @@ REQUIRED_INVALID_CLASSES = {
 
 REQUIRED_INVALID_CASES = {
     "build_request_compression_profile_mode_mismatch",
+    "build_request_dotted_module_empty_segment",
+    "build_request_braced_request_id",
     "build_request_relative_adapter_path",
     "build_request_relative_work_dir",
     "build_request_reversed_date_range",

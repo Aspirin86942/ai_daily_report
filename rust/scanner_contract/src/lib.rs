@@ -1,0 +1,2151 @@
+//! Strict, versioned DTOs shared by the scanner core and its Python caller.
+
+use serde::de::{self, DeserializeOwned};
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashSet};
+
+pub trait Validate {
+    fn validate(&self) -> Result<(), String>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Nullable<T>(pub Option<T>);
+
+fn deserialize_optional_non_null<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer)?
+        .map(Some)
+        .ok_or_else(|| de::Error::custom("explicit null is not allowed"))
+}
+
+fn deserialize_required_nullable<'de, D, T>(deserializer: D) -> Result<Nullable<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Nullable)
+}
+
+fn require_const(actual: &str, expected: &str, field: &str) -> Result<(), String> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("{field} must equal {expected}"))
+    }
+}
+
+fn require_non_empty(value: &str, max: usize, field: &str) -> Result<(), String> {
+    let length = value.chars().count();
+    if (1..=max).contains(&length) {
+        Ok(())
+    } else {
+        Err(format!("{field} length must be 1..={max}"))
+    }
+}
+
+fn require_range(value: u64, min: u64, max: u64, field: &str) -> Result<(), String> {
+    if (min..=max).contains(&value) {
+        Ok(())
+    } else {
+        Err(format!("{field} must be in {min}..={max}"))
+    }
+}
+
+fn require_absolute_path(value: &str, field: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let drive_rooted = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    let absolute = value.starts_with('/') || value.starts_with("\\\\") || drive_rooted;
+    if absolute && value.chars().count() <= 32_767 {
+        Ok(())
+    } else {
+        Err(format!("{field} must be an absolute path"))
+    }
+}
+
+fn require_request_id(value: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let valid = bytes.len() == 36
+        && [8, 13, 18, 23]
+            .into_iter()
+            .all(|index| bytes[index] == b'-')
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [8, 13, 18, 23].contains(&index) || byte.is_ascii_hexdigit())
+        && matches!(bytes[14], b'1'..=b'5')
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'A' | b'b' | b'B');
+    if valid {
+        Ok(())
+    } else {
+        Err("request_id must be an RFC 4122 UUID v1..v5".to_string())
+    }
+}
+
+fn require_date(value: &str, field: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| [4, 7].contains(&index) || byte.is_ascii_digit())
+    {
+        return Err(format!("{field} must use YYYY-MM-DD"));
+    }
+    let year: u32 = value[0..4]
+        .parse()
+        .map_err(|_| format!("invalid {field}"))?;
+    let month: u32 = value[5..7]
+        .parse()
+        .map_err(|_| format!("invalid {field}"))?;
+    let day: u32 = value[8..10]
+        .parse()
+        .map_err(|_| format!("invalid {field}"))?;
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => 0,
+    };
+    if day >= 1 && day <= max_day {
+        Ok(())
+    } else {
+        Err(format!("{field} must be a valid calendar date"))
+    }
+}
+
+fn require_extension(value: &str, field: &str) -> Result<(), String> {
+    let length = value.chars().count();
+    let valid = (2..=32).contains(&length)
+        && value.starts_with('.')
+        && value.chars().skip(1).all(|character| {
+            !character.is_ascii_uppercase() && !matches!(character, '\\' | '/' | ':' | '\0')
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(format!("{field} must be a lowercase extension"))
+    }
+}
+
+fn require_source_version(value: &str, field: &str) -> Result<(), String> {
+    let Some((mtime, size)) = value
+        .strip_prefix("mtime_ns=")
+        .and_then(|rest| rest.split_once(":size="))
+    else {
+        return Err(format!("invalid {field}"));
+    };
+    if !mtime.is_empty()
+        && !size.is_empty()
+        && mtime.bytes().all(|byte| byte.is_ascii_digit())
+        && size.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        Ok(())
+    } else {
+        Err(format!("invalid {field}"))
+    }
+}
+
+fn require_relative_path(value: &str, field: &str) -> Result<(), String> {
+    let bytes = value.as_bytes();
+    let drive_prefixed = bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':';
+    let rooted = value.starts_with('/') || value.starts_with('\\') || drive_prefixed;
+    let escapes = value.split(['/', '\\']).any(|component| component == "..");
+    if !value.is_empty() && value.chars().count() <= 32_767 && !rooted && !escapes {
+        Ok(())
+    } else {
+        Err(format!("{field} must be a safe relative path"))
+    }
+}
+
+fn require_sorted_unique(values: &[String], field: &str) -> Result<(), String> {
+    if values.windows(2).all(|pair| pair[0] < pair[1]) {
+        Ok(())
+    } else {
+        Err(format!("{field} must be sorted and unique"))
+    }
+}
+
+fn validate_extensions(values: &[String], field: &str, require_unique: bool) -> Result<(), String> {
+    if values.len() > 256 {
+        return Err(format!("{field} contains too many items"));
+    }
+    for value in values {
+        require_extension(value, field)?;
+    }
+    if require_unique {
+        require_sorted_unique(values, field)?;
+    }
+    Ok(())
+}
+
+fn validate_strings(values: &[String], field: &str, require_unique: bool) -> Result<(), String> {
+    if values.len() > 256 {
+        return Err(format!("{field} contains too many items"));
+    }
+    for value in values {
+        require_non_empty(value, 1024, field)?;
+    }
+    if require_unique {
+        require_sorted_unique(values, field)?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ReportMode {
+    #[serde(rename = "daily")]
+    Daily,
+    #[serde(rename = "weekly")]
+    Weekly,
+    #[serde(rename = "monthly")]
+    Monthly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CompressionProfile {
+    #[serde(rename = "daily_balanced_v1")]
+    DailyBalancedV1,
+    #[serde(rename = "weekly_balanced_v1")]
+    WeeklyBalancedV1,
+    #[serde(rename = "monthly_balanced_v1")]
+    MonthlyBalancedV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FallbackBackend {
+    #[serde(rename = "python_office_v1")]
+    PythonOfficeV1,
+    #[serde(rename = "python_sharepoint_text_v1")]
+    PythonSharepointTextV1,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterPaths {
+    pub office_worker_path: String,
+    pub python_executable: String,
+    pub python_module_root: String,
+    pub python_document_worker_module: String,
+}
+
+impl Validate for AdapterPaths {
+    fn validate(&self) -> Result<(), String> {
+        require_absolute_path(&self.office_worker_path, "office_worker_path")?;
+        require_absolute_path(&self.python_executable, "python_executable")?;
+        require_absolute_path(&self.python_module_root, "python_module_root")?;
+        require_non_empty(
+            &self.python_document_worker_module,
+            1024,
+            "python_document_worker_module",
+        )?;
+        let mut parts = self.python_document_worker_module.split('.');
+        if parts.all(|part| {
+            let mut chars = part.chars();
+            chars
+                .next()
+                .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+                && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+        }) {
+            Ok(())
+        } else {
+            Err("python_document_worker_module must be dotted identifiers".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawScannerProfileV1 {
+    pub schema_version: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub allowed_extensions: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub ignored_patterns: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub excluded_dirs: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub max_workers: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub max_file_size_mb: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub discovery_timeout_seconds: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub file_timeout_seconds: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub file_timeout_by_extension: Option<BTreeMap<String, u64>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub total_max_chars: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub parser_profile_version: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub office_parser_backend: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub pdf_parser_backend: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub office_fallback_policy_version: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub office_parser_fallback_enabled: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub office_fallback_after_timeout: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub office_legacy_extensions_enabled: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub pptx_include_notes: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub office_parser_fallback_order: Option<Vec<FallbackBackend>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub direct_text_max_bytes: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub direct_text_read_bytes: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub log_tail_read_bytes: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub text_excerpt_max_chars: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub excel_max_rows: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub pdf_max_pages: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub text_max_chars: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub excel_max_sheets: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub excel_max_columns: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub docx_max_paragraphs: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub docx_max_tables: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub docx_table_max_rows: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub docx_table_max_cols: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub pptx_max_slides: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub document_excerpt_max_chars: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_excel_max_rows: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_pdf_max_pages: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_text_max_chars: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_excel_max_sheets: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_excel_max_columns: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_docx_max_paragraphs: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_docx_max_tables: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_docx_table_max_rows: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_docx_table_max_cols: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_pptx_max_slides: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub summary_document_excerpt_max_chars: Option<u64>,
+}
+
+impl Validate for RawScannerProfileV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.schema_version, "scanner_profile_v1", "schema_version")?;
+        if let Some(values) = &self.allowed_extensions {
+            validate_extensions(values, "allowed_extensions", false)?;
+        }
+        if let Some(values) = &self.ignored_patterns {
+            validate_strings(values, "ignored_patterns", false)?;
+        }
+        if let Some(values) = &self.excluded_dirs {
+            validate_strings(values, "excluded_dirs", false)?;
+        }
+        macro_rules! range {
+            ($field:ident, $min:expr, $max:expr) => {
+                if let Some(value) = self.$field {
+                    require_range(value, $min, $max, stringify!($field))?;
+                }
+            };
+        }
+        range!(max_workers, 1, 64);
+        range!(max_file_size_mb, 1, 4096);
+        range!(discovery_timeout_seconds, 1, 3600);
+        range!(file_timeout_seconds, 1, 3600);
+        if let Some(timeouts) = &self.file_timeout_by_extension {
+            if timeouts.len() > 256 {
+                return Err("file_timeout_by_extension has too many entries".to_string());
+            }
+            for (extension, timeout) in timeouts {
+                require_extension(extension, "file_timeout_by_extension key")?;
+                require_range(*timeout, 1, 3600, "file_timeout_by_extension value")?;
+            }
+        }
+        range!(total_max_chars, 1, 10_000_000);
+        for (field, value) in [
+            ("parser_profile_version", &self.parser_profile_version),
+            ("office_parser_backend", &self.office_parser_backend),
+            ("pdf_parser_backend", &self.pdf_parser_backend),
+            (
+                "office_fallback_policy_version",
+                &self.office_fallback_policy_version,
+            ),
+        ] {
+            if let Some(value) = value {
+                require_non_empty(value, 1024, field)?;
+            }
+        }
+        if let Some(order) = &self.office_parser_fallback_order {
+            if order.len() > 2 || order.iter().collect::<HashSet<_>>().len() != order.len() {
+                return Err("office_parser_fallback_order must be a unique pair".to_string());
+            }
+        }
+        for (field, value) in [
+            ("direct_text_max_bytes", self.direct_text_max_bytes),
+            ("direct_text_read_bytes", self.direct_text_read_bytes),
+            ("log_tail_read_bytes", self.log_tail_read_bytes),
+        ] {
+            if let Some(value) = value {
+                require_range(value, 1, 67_108_864, field)?;
+            }
+        }
+        for (field, value) in [
+            ("text_excerpt_max_chars", self.text_excerpt_max_chars),
+            ("text_max_chars", self.text_max_chars),
+            (
+                "document_excerpt_max_chars",
+                self.document_excerpt_max_chars,
+            ),
+            ("summary_text_max_chars", self.summary_text_max_chars),
+            (
+                "summary_document_excerpt_max_chars",
+                self.summary_document_excerpt_max_chars,
+            ),
+        ] {
+            if let Some(value) = value {
+                require_range(value, 1, 10_000_000, field)?;
+            }
+        }
+        for (field, value) in [
+            ("pdf_max_pages", self.pdf_max_pages),
+            ("summary_pdf_max_pages", self.summary_pdf_max_pages),
+        ] {
+            if let Some(value) = value {
+                require_range(value, 1, 10_000, field)?;
+            }
+        }
+        for (field, value) in [
+            ("excel_max_sheets", self.excel_max_sheets),
+            ("summary_excel_max_sheets", self.summary_excel_max_sheets),
+        ] {
+            if let Some(value) = value {
+                require_range(value, 1, 1024, field)?;
+            }
+        }
+        for (field, value) in [
+            ("excel_max_rows", self.excel_max_rows),
+            ("docx_table_max_rows", self.docx_table_max_rows),
+            ("summary_excel_max_rows", self.summary_excel_max_rows),
+            (
+                "summary_docx_table_max_rows",
+                self.summary_docx_table_max_rows,
+            ),
+        ] {
+            if let Some(value) = value {
+                require_range(value, 1, 1_048_576, field)?;
+            }
+        }
+        for (field, value) in [
+            ("excel_max_columns", self.excel_max_columns),
+            ("docx_table_max_cols", self.docx_table_max_cols),
+            ("summary_excel_max_columns", self.summary_excel_max_columns),
+            (
+                "summary_docx_table_max_cols",
+                self.summary_docx_table_max_cols,
+            ),
+        ] {
+            if let Some(value) = value {
+                require_range(value, 1, 16_384, field)?;
+            }
+        }
+        for (field, value) in [
+            ("docx_max_paragraphs", self.docx_max_paragraphs),
+            (
+                "summary_docx_max_paragraphs",
+                self.summary_docx_max_paragraphs,
+            ),
+        ] {
+            if let Some(value) = value {
+                require_range(value, 1, 1_000_000, field)?;
+            }
+        }
+        for (field, value) in [
+            ("docx_max_tables", self.docx_max_tables),
+            ("pptx_max_slides", self.pptx_max_slides),
+            ("summary_docx_max_tables", self.summary_docx_max_tables),
+            ("summary_pptx_max_slides", self.summary_pptx_max_slides),
+        ] {
+            if let Some(value) = value {
+                require_range(value, 1, 100_000, field)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscoveryProfile {
+    pub allowed_extensions: Vec<String>,
+    pub ignored_patterns: Vec<String>,
+    pub excluded_dirs: Vec<String>,
+}
+
+impl Validate for DiscoveryProfile {
+    fn validate(&self) -> Result<(), String> {
+        validate_extensions(&self.allowed_extensions, "allowed_extensions", true)?;
+        validate_strings(&self.ignored_patterns, "ignored_patterns", true)?;
+        validate_strings(&self.excluded_dirs, "excluded_dirs", true)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionProfile {
+    pub max_workers: u64,
+    pub max_file_size_bytes: u64,
+    pub discovery_timeout_ms: u64,
+    pub file_timeout_ms: u64,
+    pub file_timeout_by_extension_ms: BTreeMap<String, u64>,
+}
+
+impl Validate for ExecutionProfile {
+    fn validate(&self) -> Result<(), String> {
+        require_range(self.max_workers, 1, 64, "max_workers")?;
+        require_range(
+            self.max_file_size_bytes,
+            1,
+            4_294_967_296,
+            "max_file_size_bytes",
+        )?;
+        require_range(
+            self.discovery_timeout_ms,
+            1000,
+            3_600_000,
+            "discovery_timeout_ms",
+        )?;
+        require_range(self.file_timeout_ms, 1000, 3_600_000, "file_timeout_ms")?;
+        if self.file_timeout_by_extension_ms.len() > 256 {
+            return Err("file_timeout_by_extension_ms has too many entries".to_string());
+        }
+        for (extension, timeout) in &self.file_timeout_by_extension_ms {
+            require_extension(extension, "file_timeout_by_extension_ms key")?;
+            require_range(
+                *timeout,
+                1000,
+                3_600_000,
+                "file_timeout_by_extension_ms value",
+            )?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TextParseProfile {
+    pub backend: String,
+    pub read_head_bytes: u64,
+    pub read_tail_bytes: u64,
+    pub max_chars: u64,
+    pub excerpt_max_chars: u64,
+}
+
+impl Validate for TextParseProfile {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.backend, "light_text_v1", "text.backend")?;
+        require_range(self.read_head_bytes, 1, 67_108_864, "read_head_bytes")?;
+        require_range(self.read_tail_bytes, 1, 67_108_864, "read_tail_bytes")?;
+        require_range(self.max_chars, 1, 10_000_000, "text.max_chars")?;
+        require_range(
+            self.excerpt_max_chars,
+            1,
+            10_000_000,
+            "text.excerpt_max_chars",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OfficeParseProfile {
+    pub primary_backend: String,
+    pub fallback_enabled: bool,
+    pub fallback_order: Vec<FallbackBackend>,
+    pub fallback_after_timeout: bool,
+    pub fallback_policy_version: String,
+    pub legacy_extensions_enabled: bool,
+    pub excel_max_sheets: u64,
+    pub excel_max_rows: u64,
+    pub excel_max_columns: u64,
+    pub docx_max_paragraphs: u64,
+    pub docx_max_tables: u64,
+    pub docx_table_max_rows: u64,
+    pub docx_table_max_cols: u64,
+    pub pptx_max_slides: u64,
+    pub pptx_include_notes: bool,
+    pub document_excerpt_max_chars: u64,
+}
+
+impl Validate for OfficeParseProfile {
+    fn validate(&self) -> Result<(), String> {
+        require_non_empty(&self.primary_backend, 1024, "primary_backend")?;
+        require_non_empty(
+            &self.fallback_policy_version,
+            1024,
+            "fallback_policy_version",
+        )?;
+        if self.fallback_order.len() > 2
+            || self.fallback_order.iter().collect::<HashSet<_>>().len() != self.fallback_order.len()
+        {
+            return Err("fallback_order must be unique and contain at most two items".to_string());
+        }
+        require_range(self.excel_max_sheets, 1, 1024, "excel_max_sheets")?;
+        require_range(self.excel_max_rows, 1, 1_048_576, "excel_max_rows")?;
+        require_range(self.excel_max_columns, 1, 16_384, "excel_max_columns")?;
+        require_range(
+            self.docx_max_paragraphs,
+            1,
+            1_000_000,
+            "docx_max_paragraphs",
+        )?;
+        require_range(self.docx_max_tables, 1, 100_000, "docx_max_tables")?;
+        require_range(
+            self.docx_table_max_rows,
+            1,
+            1_048_576,
+            "docx_table_max_rows",
+        )?;
+        require_range(self.docx_table_max_cols, 1, 16_384, "docx_table_max_cols")?;
+        require_range(self.pptx_max_slides, 1, 100_000, "pptx_max_slides")?;
+        require_range(
+            self.document_excerpt_max_chars,
+            1,
+            10_000_000,
+            "document_excerpt_max_chars",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdfParseProfile {
+    pub backend: String,
+    pub max_pages: u64,
+    pub excerpt_max_chars: u64,
+}
+
+impl Validate for PdfParseProfile {
+    fn validate(&self) -> Result<(), String> {
+        require_non_empty(&self.backend, 1024, "pdf.backend")?;
+        require_range(self.max_pages, 1, 10_000, "pdf.max_pages")?;
+        require_range(
+            self.excerpt_max_chars,
+            1,
+            10_000_000,
+            "pdf.excerpt_max_chars",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ParseProfile {
+    pub aggregate_max_chars: u64,
+    pub text: TextParseProfile,
+    pub office: OfficeParseProfile,
+    pub pdf: PdfParseProfile,
+}
+
+impl Validate for ParseProfile {
+    fn validate(&self) -> Result<(), String> {
+        require_range(
+            self.aggregate_max_chars,
+            1,
+            10_000_000,
+            "aggregate_max_chars",
+        )?;
+        self.text.validate()?;
+        self.office.validate()?;
+        self.pdf.validate()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextProfile {
+    pub profile_name: String,
+    pub global_max_chars: u64,
+    pub per_file_max_chars: u64,
+    pub small_file_max_bytes: u64,
+    pub medium_file_max_bytes: u64,
+    pub large_file_max_bytes: u64,
+    pub priority_policy_version: String,
+    pub compression_policy_version: String,
+}
+
+impl Validate for ContextProfile {
+    fn validate(&self) -> Result<(), String> {
+        require_range(self.global_max_chars, 1, 10_000_000, "global_max_chars")?;
+        require_range(self.per_file_max_chars, 1, 10_000_000, "per_file_max_chars")?;
+        if self.small_file_max_bytes != 65_536
+            || self.medium_file_max_bytes != 1_048_576
+            || self.large_file_max_bytes != 10_485_760
+            || self.global_max_chars < self.per_file_max_chars
+        {
+            return Err("context thresholds or budgets violate v1".to_string());
+        }
+        require_const(
+            &self.priority_policy_version,
+            "default_v1",
+            "priority_policy_version",
+        )?;
+        require_const(
+            &self.compression_policy_version,
+            "markdown_context_v1",
+            "compression_policy_version",
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NormalizedScannerProfileV1 {
+    pub schema_version: String,
+    pub parser_profile_version: String,
+    pub report_mode: ReportMode,
+    pub discovery: DiscoveryProfile,
+    pub execution: ExecutionProfile,
+    pub parse: ParseProfile,
+    pub context: ContextProfile,
+}
+
+impl Validate for NormalizedScannerProfileV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_const(
+            &self.schema_version,
+            "normalized_scanner_profile_v1",
+            "schema_version",
+        )?;
+        require_non_empty(&self.parser_profile_version, 1024, "parser_profile_version")?;
+        self.discovery.validate()?;
+        self.execution.validate()?;
+        self.parse.validate()?;
+        self.context.validate()?;
+        let expected = match self.report_mode {
+            ReportMode::Daily => ("daily_balanced_v1", 50_000, 8_000),
+            ReportMode::Weekly => ("weekly_balanced_v1", 50_000, 5_000),
+            ReportMode::Monthly => ("monthly_balanced_v1", 60_000, 4_000),
+        };
+        let actual = (
+            self.context.profile_name.as_str(),
+            self.context.global_max_chars,
+            self.context.per_file_max_chars,
+        );
+        if actual == expected {
+            Ok(())
+        } else {
+            Err("report mode and normalized context profile do not match".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BuildContextRequest {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub work_dir: String,
+    pub start_date: String,
+    pub end_date: String,
+    pub report_mode: ReportMode,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub compression_profile: Nullable<CompressionProfile>,
+    pub scan_db_path: String,
+    pub scanner_profile: RawScannerProfileV1,
+    pub adapters: AdapterPaths,
+}
+
+impl Validate for BuildContextRequest {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_context", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        require_absolute_path(&self.work_dir, "work_dir")?;
+        require_date(&self.start_date, "start_date")?;
+        require_date(&self.end_date, "end_date")?;
+        if self.start_date > self.end_date {
+            return Err("start_date must not be after end_date".to_string());
+        }
+        let compression_matches = matches!(
+            (self.report_mode, self.compression_profile.0),
+            (_, None)
+                | (ReportMode::Daily, Some(CompressionProfile::DailyBalancedV1))
+                | (
+                    ReportMode::Weekly,
+                    Some(CompressionProfile::WeeklyBalancedV1)
+                )
+                | (
+                    ReportMode::Monthly,
+                    Some(CompressionProfile::MonthlyBalancedV1)
+                )
+        );
+        if !compression_matches {
+            return Err("compression profile does not match report mode".to_string());
+        }
+        require_absolute_path(&self.scan_db_path, "scan_db_path")?;
+        self.scanner_profile.validate()?;
+        self.adapters.validate()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ErrorCode {
+    InvalidRequest,
+    ContractVersionMismatch,
+    WorkDirNotFound,
+    WorkDirNotDirectory,
+    DiscoveryEntryUnreadable,
+    FileTooLarge,
+    ParserStartFailed,
+    ParserTimeout,
+    ParserInvalidPayload,
+    ParserFailed,
+    WorkerHandshakeFailed,
+    WorkerVersionMismatch,
+    WorkerBuildChanged,
+    SourceVersionChanged,
+    CacheOpenFailed,
+    CacheWriteFailed,
+    ScanAlreadyRunning,
+    RequestInProgress,
+    RequestIdConflict,
+    RunNotFound,
+    RunCorrupt,
+    ContextBudgetInvalid,
+    NotImplemented,
+    RustCoreCrashed,
+    InternalError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticStage {
+    Request,
+    Discovery,
+    Cache,
+    Parse,
+    Context,
+    Process,
+    Doctor,
+    Inspect,
+    Internal,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Diagnostic {
+    pub error_code: ErrorCode,
+    pub message: String,
+    pub retryable: bool,
+    pub stage: DiagnosticStage,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub file_path: Nullable<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub backend: Nullable<String>,
+}
+
+impl Validate for Diagnostic {
+    fn validate(&self) -> Result<(), String> {
+        require_non_empty(&self.message, 4096, "diagnostic.message")?;
+        if let Some(file_path) = &self.file_path.0 {
+            require_absolute_path(file_path, "diagnostic.file_path")?;
+        }
+        if let Some(backend) = &self.backend.0 {
+            require_non_empty(backend, 1024, "diagnostic.backend")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextSummary {
+    pub source_file_count: u64,
+    pub success_count: u64,
+    pub timeout_count: u64,
+    pub included_file_count: u64,
+    pub omitted_file_count: u64,
+    pub error_file_count: u64,
+    pub input_chars: u64,
+    pub output_chars: u64,
+    pub total_duration_ms: u64,
+    pub discovery_duration_ms: u64,
+    pub parse_duration_ms: u64,
+    pub compression_duration_ms: u64,
+}
+
+impl Validate for ContextSummary {
+    fn validate(&self) -> Result<(), String> {
+        let classified = self
+            .success_count
+            .checked_add(self.timeout_count)
+            .and_then(|value| value.checked_add(self.error_file_count))
+            .ok_or_else(|| "summary counts overflow".to_string())?;
+        if classified <= self.source_file_count {
+            Ok(())
+        } else {
+            Err("classified file counts exceed source_file_count".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EngineStatus {
+    Ok,
+    Partial,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextEnvelope {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub engine_version: String,
+    pub engine_build: String,
+    pub status: EngineStatus,
+    pub file_context: String,
+    pub summary: ContextSummary,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub scan_run_id: Nullable<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub context_run_id: Nullable<u64>,
+    pub warnings: Vec<Diagnostic>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub error: Nullable<Diagnostic>,
+}
+
+impl Validate for ContextEnvelope {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_context", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        require_non_empty(&self.engine_version, 4096, "engine_version")?;
+        require_non_empty(&self.engine_build, 4096, "engine_build")?;
+        self.summary.validate()?;
+        if self.warnings.len() > 100_000 {
+            return Err("too many context warnings".to_string());
+        }
+        for warning in &self.warnings {
+            warning.validate()?;
+        }
+        if let Some(error) = &self.error.0 {
+            error.validate()?;
+        }
+        for (field, value) in [
+            ("scan_run_id", self.scan_run_id.0),
+            ("context_run_id", self.context_run_id.0),
+        ] {
+            if let Some(value) = value {
+                require_range(value, 1, u64::MAX, field)?;
+            }
+        }
+        match self.status {
+            EngineStatus::Ok => {
+                if self.file_context.is_empty()
+                    || self.scan_run_id.0.is_none()
+                    || self.context_run_id.0.is_none()
+                    || self.error.0.is_some()
+                {
+                    Err("ok context violates status invariants".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+            EngineStatus::Partial => {
+                if self.file_context.is_empty()
+                    || self.scan_run_id.0.is_none()
+                    || self.context_run_id.0.is_none()
+                    || self.warnings.is_empty()
+                    || self.error.0.is_some()
+                {
+                    Err("partial context violates status invariants".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+            EngineStatus::Error => {
+                if !self.file_context.is_empty() || self.error.0.is_none() {
+                    Err("error context violates status invariants".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TransportErrorResponse {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub status: String,
+    pub error: Diagnostic,
+}
+
+impl Validate for TransportErrorResponse {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_transport", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_const(&self.status, "error", "status")?;
+        self.error.validate()?;
+        if self.error.error_code == ErrorCode::InvalidRequest
+            && self.error.stage == DiagnosticStage::Request
+            && self.error.file_path.0.is_none()
+            && self.error.backend.0.is_none()
+        {
+            Ok(())
+        } else {
+            Err("transport error must describe an invalid request".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionResponse {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub binary_name: String,
+    pub engine_version: String,
+    pub engine_build: String,
+    pub target_triple: String,
+    pub supported_commands: Vec<String>,
+    pub office_worker_contract_version: String,
+    pub python_worker_contract_version: String,
+}
+
+impl Validate for VersionResponse {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_context", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_const(&self.binary_name, "ai-daily-scanner", "binary_name")?;
+        for (field, value) in [
+            ("engine_version", self.engine_version.as_str()),
+            ("engine_build", self.engine_build.as_str()),
+            ("target_triple", self.target_triple.as_str()),
+            (
+                "office_worker_contract_version",
+                self.office_worker_contract_version.as_str(),
+            ),
+            (
+                "python_worker_contract_version",
+                self.python_worker_contract_version.as_str(),
+            ),
+        ] {
+            require_non_empty(value, 1024, field)?;
+        }
+        let expected = ["version", "doctor", "build-context", "inspect-run"];
+        if self
+            .supported_commands
+            .iter()
+            .map(String::as_str)
+            .eq(expected)
+        {
+            Ok(())
+        } else {
+            Err("supported_commands must use the frozen v1 order".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoctorRequest {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub scan_db_path: String,
+    pub adapters: AdapterPaths,
+}
+
+impl Validate for DoctorRequest {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_context", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        require_absolute_path(&self.scan_db_path, "scan_db_path")?;
+        self.adapters.validate()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DoctorCheckStatus {
+    Ok,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoctorCheck {
+    pub name: String,
+    pub status: DoctorCheckStatus,
+    pub message: String,
+}
+
+impl Validate for DoctorCheck {
+    fn validate(&self) -> Result<(), String> {
+        require_non_empty(&self.name, 4096, "doctor check name")?;
+        require_non_empty(&self.message, 4096, "doctor check message")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoctorResponse {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub status: EngineStatus,
+    pub engine_version: String,
+    pub engine_build: String,
+    pub checks: Vec<DoctorCheck>,
+    pub warnings: Vec<Diagnostic>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub error: Nullable<Diagnostic>,
+}
+
+impl Validate for DoctorResponse {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_context", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        require_non_empty(&self.engine_version, 4096, "engine_version")?;
+        require_non_empty(&self.engine_build, 4096, "engine_build")?;
+        if self.checks.len() > 256 || self.warnings.len() > 256 {
+            return Err("doctor response contains too many items".to_string());
+        }
+        for check in &self.checks {
+            check.validate()?;
+        }
+        for warning in &self.warnings {
+            warning.validate()?;
+        }
+        if let Some(error) = &self.error.0 {
+            error.validate()?;
+        }
+        match self.status {
+            EngineStatus::Ok if self.error.0.is_none() => Ok(()),
+            EngineStatus::Partial if self.error.0.is_none() && !self.warnings.is_empty() => Ok(()),
+            EngineStatus::Error if self.error.0.is_some() => Ok(()),
+            _ => Err("doctor response violates status invariants".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerKind {
+    Office,
+    PythonDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerVersionResponse {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub worker_kind: WorkerKind,
+    pub worker_contract_version: String,
+    pub worker_version: String,
+    pub worker_build: String,
+    pub supported_backends: Vec<String>,
+    pub supported_extensions: Vec<String>,
+}
+
+impl Validate for WorkerVersionResponse {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_worker", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        for (field, value) in [
+            (
+                "worker_contract_version",
+                self.worker_contract_version.as_str(),
+            ),
+            ("worker_version", self.worker_version.as_str()),
+            ("worker_build", self.worker_build.as_str()),
+        ] {
+            require_non_empty(value, 1024, field)?;
+        }
+        if self.supported_backends.is_empty() || self.supported_extensions.is_empty() {
+            return Err("worker support sets must not be empty".to_string());
+        }
+        validate_strings(&self.supported_backends, "supported_backends", true)?;
+        validate_extensions(&self.supported_extensions, "supported_extensions", true)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum WorkerBackend {
+    #[serde(rename = "rust_office_oxide_v1")]
+    RustOfficeOxideV1,
+    #[serde(rename = "rust_xlsx_bounded_v1")]
+    RustXlsxBoundedV1,
+    #[serde(rename = "python_office_v1")]
+    PythonOfficeV1,
+    #[serde(rename = "pdf_text_v1")]
+    PdfTextV1,
+    #[serde(rename = "python_sharepoint_text_v1")]
+    PythonSharepointTextV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerLane {
+    RustOfficeProcess,
+    PythonDocumentProcess,
+}
+
+impl WorkerBackend {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::RustOfficeOxideV1 => "rust_office_oxide_v1",
+            Self::RustXlsxBoundedV1 => "rust_xlsx_bounded_v1",
+            Self::PythonOfficeV1 => "python_office_v1",
+            Self::PdfTextV1 => "pdf_text_v1",
+            Self::PythonSharepointTextV1 => "python_sharepoint_text_v1",
+        }
+    }
+
+    fn supports(self, extension: &str) -> bool {
+        match self {
+            Self::RustOfficeOxideV1 => matches!(extension, ".docx" | ".pptx"),
+            Self::RustXlsxBoundedV1 => extension == ".xlsx",
+            Self::PythonOfficeV1 => matches!(extension, ".docx" | ".pptx" | ".xls" | ".xlsx"),
+            Self::PdfTextV1 => extension == ".pdf",
+            Self::PythonSharepointTextV1 => matches!(extension, ".doc" | ".ppt"),
+        }
+    }
+
+    fn lane(self) -> WorkerLane {
+        match self {
+            Self::RustOfficeOxideV1 | Self::RustXlsxBoundedV1 => WorkerLane::RustOfficeProcess,
+            _ => WorkerLane::PythonDocumentProcess,
+        }
+    }
+
+    fn limit_kind(self) -> &'static str {
+        match self {
+            Self::RustOfficeOxideV1 | Self::RustXlsxBoundedV1 | Self::PythonOfficeV1 => "office",
+            Self::PdfTextV1 => "pdf",
+            Self::PythonSharepointTextV1 => "sharepoint_text",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", deny_unknown_fields)]
+pub enum WorkerParserLimits {
+    #[serde(rename = "office")]
+    Office {
+        excel_max_sheets: u64,
+        excel_max_rows: u64,
+        excel_max_columns: u64,
+        docx_max_paragraphs: u64,
+        docx_max_tables: u64,
+        docx_table_max_rows: u64,
+        docx_table_max_cols: u64,
+        pptx_max_slides: u64,
+        pptx_include_notes: bool,
+        document_excerpt_max_chars: u64,
+    },
+    #[serde(rename = "pdf")]
+    Pdf {
+        max_pages: u64,
+        excerpt_max_chars: u64,
+    },
+    #[serde(rename = "sharepoint_text")]
+    SharepointText { excerpt_max_chars: u64 },
+}
+
+impl WorkerParserLimits {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Office { .. } => "office",
+            Self::Pdf { .. } => "pdf",
+            Self::SharepointText { .. } => "sharepoint_text",
+        }
+    }
+}
+
+impl Validate for WorkerParserLimits {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Office {
+                excel_max_sheets,
+                excel_max_rows,
+                excel_max_columns,
+                docx_max_paragraphs,
+                docx_max_tables,
+                docx_table_max_rows,
+                docx_table_max_cols,
+                pptx_max_slides,
+                document_excerpt_max_chars,
+                ..
+            } => {
+                require_range(*excel_max_sheets, 1, 1024, "excel_max_sheets")?;
+                require_range(*excel_max_rows, 1, 1_048_576, "excel_max_rows")?;
+                require_range(*excel_max_columns, 1, 16_384, "excel_max_columns")?;
+                require_range(*docx_max_paragraphs, 1, 1_000_000, "docx_max_paragraphs")?;
+                require_range(*docx_max_tables, 1, 100_000, "docx_max_tables")?;
+                require_range(*docx_table_max_rows, 1, 1_048_576, "docx_table_max_rows")?;
+                require_range(*docx_table_max_cols, 1, 16_384, "docx_table_max_cols")?;
+                require_range(*pptx_max_slides, 1, 100_000, "pptx_max_slides")?;
+                require_range(
+                    *document_excerpt_max_chars,
+                    1,
+                    10_000_000,
+                    "document_excerpt_max_chars",
+                )
+            }
+            Self::Pdf {
+                max_pages,
+                excerpt_max_chars,
+            } => {
+                require_range(*max_pages, 1, 10_000, "max_pages")?;
+                require_range(*excerpt_max_chars, 1, 10_000_000, "excerpt_max_chars")
+            }
+            Self::SharepointText { excerpt_max_chars } => {
+                require_range(*excerpt_max_chars, 1, 10_000_000, "excerpt_max_chars")
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerParseRequest {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub file_path: String,
+    pub file_type: String,
+    pub backend: WorkerBackend,
+    pub remaining_timeout_ms: u64,
+    pub max_file_size_bytes: u64,
+    pub parser_limits: WorkerParserLimits,
+    pub expected_source_version: String,
+}
+
+impl Validate for WorkerParseRequest {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_worker", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        require_absolute_path(&self.file_path, "file_path")?;
+        require_extension(&self.file_type, "file_type")?;
+        require_range(
+            self.remaining_timeout_ms,
+            1,
+            3_600_000,
+            "remaining_timeout_ms",
+        )?;
+        require_range(
+            self.max_file_size_bytes,
+            1,
+            4_294_967_296,
+            "max_file_size_bytes",
+        )?;
+        self.parser_limits.validate()?;
+        require_source_version(&self.expected_source_version, "expected_source_version")?;
+        if self.backend.supports(&self.file_type)
+            && self.backend.limit_kind() == self.parser_limits.kind()
+        {
+            Ok(())
+        } else {
+            Err("worker request route is inconsistent".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerStatus {
+    Ok,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkerParseResponse {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub status: WorkerStatus,
+    pub file_path: String,
+    pub file_type: String,
+    pub content: String,
+    pub parser_backend: WorkerBackend,
+    pub worker_lane: WorkerLane,
+    pub truncated: bool,
+    pub warnings: Vec<Diagnostic>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub error: Nullable<Diagnostic>,
+    pub duration_ms: u64,
+    pub worker_contract_version: String,
+    pub worker_version: String,
+    pub worker_build: String,
+    pub observed_source_version: String,
+}
+
+impl Validate for WorkerParseResponse {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_worker", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        require_absolute_path(&self.file_path, "file_path")?;
+        require_extension(&self.file_type, "file_type")?;
+        if self.warnings.len() > 256 {
+            return Err("too many worker warnings".to_string());
+        }
+        for warning in &self.warnings {
+            warning.validate()?;
+        }
+        if let Some(error) = &self.error.0 {
+            error.validate()?;
+        }
+        for (field, value) in [
+            (
+                "worker_contract_version",
+                self.worker_contract_version.as_str(),
+            ),
+            ("worker_version", self.worker_version.as_str()),
+            ("worker_build", self.worker_build.as_str()),
+        ] {
+            require_non_empty(value, 1024, field)?;
+        }
+        require_source_version(&self.observed_source_version, "observed_source_version")?;
+        let status_valid = match self.status {
+            WorkerStatus::Ok => self.error.0.is_none(),
+            WorkerStatus::Error => self.content.is_empty() && self.error.0.is_some(),
+        };
+        if status_valid
+            && self.parser_backend.supports(&self.file_type)
+            && self.parser_backend.lane() == self.worker_lane
+        {
+            Ok(())
+        } else {
+            Err("worker response status or route is inconsistent".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectRunRequest {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub scan_db_path: String,
+    pub scan_run_id: u64,
+    pub include_content: bool,
+}
+
+impl Validate for InspectRunRequest {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_context", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        require_absolute_path(&self.scan_db_path, "scan_db_path")?;
+        require_range(self.scan_run_id, 1, u64::MAX, "scan_run_id")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Running,
+    Success,
+    Partial,
+    Error,
+    Abandoned,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StageName {
+    Discovery,
+    Cache,
+    Parse,
+    Context,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StageMetric {
+    pub stage: StageName,
+    pub item_count: u64,
+    pub duration_ms: u64,
+}
+
+impl Validate for StageMetric {
+    fn validate(&self) -> Result<(), String> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExtensionMetric {
+    pub extension: String,
+    pub file_count: u64,
+    pub parse_duration_ms: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub timeout_count: u64,
+}
+
+impl Validate for ExtensionMetric {
+    fn validate(&self) -> Result<(), String> {
+        require_extension(&self.extension, "extension metric extension")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParseStatus {
+    Success,
+    Error,
+    Timeout,
+    NotParsed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditWorkerLane {
+    RustCore,
+    RustOfficeProcess,
+    PythonDocumentProcess,
+    NotParsed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStatus {
+    Fresh,
+    Miss,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CacheMissReason {
+    #[serde(rename = "")]
+    None,
+    #[serde(rename = "new_file")]
+    NewFile,
+    #[serde(rename = "error_cache")]
+    ErrorCache,
+    #[serde(rename = "source_version_changed")]
+    SourceVersionChanged,
+    #[serde(rename = "parser_profile_changed")]
+    ParserProfileChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileAudit {
+    pub relative_path: String,
+    pub file_identity: String,
+    pub source_version: String,
+    pub parse_status: ParseStatus,
+    pub parser_backend: String,
+    pub worker_lane: AuditWorkerLane,
+    pub cache_status: CacheStatus,
+    pub cache_miss_reason: CacheMissReason,
+    pub truncated: bool,
+    pub content_sha256: String,
+    pub parse_duration_ms: u64,
+    pub failure_class: String,
+    pub fallback_backend: String,
+    pub fallback_reason_code: String,
+}
+
+impl Validate for FileAudit {
+    fn validate(&self) -> Result<(), String> {
+        require_relative_path(&self.relative_path, "file relative_path")?;
+        require_non_empty(&self.file_identity, 4096, "file_identity")?;
+        require_source_version(&self.source_version, "source_version")?;
+        require_non_empty(&self.parser_backend, 4096, "parser_backend")?;
+        if self.content_sha256.len() != 64
+            || !self
+                .content_sha256
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+        {
+            return Err("content_sha256 must be lowercase SHA-256".to_string());
+        }
+        for (field, value) in [
+            ("failure_class", self.failure_class.as_str()),
+            ("fallback_backend", self.fallback_backend.as_str()),
+            ("fallback_reason_code", self.fallback_reason_code.as_str()),
+        ] {
+            if value.chars().count() > 1024 {
+                return Err(format!("{field} is too long"));
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextAction {
+    Keep,
+    Compress,
+    MetadataOnly,
+    Omit,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextDecision {
+    pub relative_path: String,
+    pub action: ContextAction,
+    pub reason: String,
+    pub priority: u64,
+    pub input_chars: u64,
+    pub output_chars: u64,
+    pub truncated: bool,
+    pub error_code: String,
+}
+
+impl Validate for ContextDecision {
+    fn validate(&self) -> Result<(), String> {
+        require_relative_path(&self.relative_path, "decision relative_path")?;
+        require_non_empty(&self.reason, 4096, "decision reason")?;
+        if self.error_code.chars().count() <= 1024 {
+            Ok(())
+        } else {
+            Err("decision error_code is too long".to_string())
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InspectStatus {
+    Ok,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InspectRunResponse {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub scan_run_id: u64,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub context_run_id: Nullable<u64>,
+    pub status: InspectStatus,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub run_status: Nullable<RunStatus>,
+    pub summary: ContextSummary,
+    pub stage_metrics: Vec<StageMetric>,
+    pub extension_metrics: Vec<ExtensionMetric>,
+    pub files: Vec<FileAudit>,
+    pub decisions: Vec<ContextDecision>,
+    pub warnings: Vec<Diagnostic>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub error: Nullable<Diagnostic>,
+}
+
+impl Validate for InspectRunResponse {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_context", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        require_range(self.scan_run_id, 1, u64::MAX, "scan_run_id")?;
+        if let Some(context_run_id) = self.context_run_id.0 {
+            require_range(context_run_id, 1, u64::MAX, "context_run_id")?;
+        }
+        self.summary.validate()?;
+        if self.stage_metrics.len() > 32
+            || self.extension_metrics.len() > 256
+            || self.files.len() > 1_000_000
+            || self.decisions.len() > 1_000_000
+            || self.warnings.len() > 100_000
+        {
+            return Err("inspect response contains too many items".to_string());
+        }
+        for metric in &self.stage_metrics {
+            metric.validate()?;
+        }
+        for metric in &self.extension_metrics {
+            metric.validate()?;
+        }
+        for file in &self.files {
+            file.validate()?;
+        }
+        for decision in &self.decisions {
+            decision.validate()?;
+        }
+        for warning in &self.warnings {
+            warning.validate()?;
+        }
+        if let Some(error) = &self.error.0 {
+            error.validate()?;
+        }
+        match self.status {
+            InspectStatus::Ok if self.run_status.0.is_some() && self.error.0.is_none() => Ok(()),
+            InspectStatus::Error if self.error.0.is_some() => Ok(()),
+            _ => Err("inspect response violates status invariants".to_string()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RelatedPayload {
+    pub role: String,
+    pub schema: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ContractPayload {
+    BuildContextRequest(Box<BuildContextRequest>),
+    ContextEnvelope(ContextEnvelope),
+    Diagnostic(Diagnostic),
+    DoctorRequest(DoctorRequest),
+    DoctorResponse(DoctorResponse),
+    InspectRunRequest(InspectRunRequest),
+    InspectRunResponse(InspectRunResponse),
+    NormalizedScannerProfile(NormalizedScannerProfileV1),
+    RawScannerProfile(Box<RawScannerProfileV1>),
+    TransportError(TransportErrorResponse),
+    VersionResponse(VersionResponse),
+    WorkerParseRequest(WorkerParseRequest),
+    WorkerParseResponse(WorkerParseResponse),
+    WorkerVersionResponse(WorkerVersionResponse),
+}
+
+fn parse_typed<T>(value: &Value) -> Result<T, String>
+where
+    T: DeserializeOwned + Validate,
+{
+    let parsed: T = serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+    parsed.validate()?;
+    Ok(parsed)
+}
+
+fn parse_contract_payload(schema: &str, value: &Value) -> Result<ContractPayload, String> {
+    match schema {
+        "build-context-request-v1.schema.json" => Ok(ContractPayload::BuildContextRequest(
+            Box::new(parse_typed(value)?),
+        )),
+        "context-envelope-v1.schema.json" => {
+            Ok(ContractPayload::ContextEnvelope(parse_typed(value)?))
+        }
+        "diagnostic-v1.schema.json" => Ok(ContractPayload::Diagnostic(parse_typed(value)?)),
+        "doctor-request-v1.schema.json" => Ok(ContractPayload::DoctorRequest(parse_typed(value)?)),
+        "doctor-response-v1.schema.json" => {
+            Ok(ContractPayload::DoctorResponse(parse_typed(value)?))
+        }
+        "inspect-run-request-v1.schema.json" => {
+            Ok(ContractPayload::InspectRunRequest(parse_typed(value)?))
+        }
+        "inspect-run-response-v1.schema.json" => {
+            Ok(ContractPayload::InspectRunResponse(parse_typed(value)?))
+        }
+        "scanner-profile-normalized-v1.schema.json" => Ok(
+            ContractPayload::NormalizedScannerProfile(parse_typed(value)?),
+        ),
+        "scanner-profile-request-v1.schema.json" => Ok(ContractPayload::RawScannerProfile(
+            Box::new(parse_typed(value)?),
+        )),
+        "transport-error-v1.schema.json" => {
+            Ok(ContractPayload::TransportError(parse_typed(value)?))
+        }
+        "version-response-v1.schema.json" => {
+            Ok(ContractPayload::VersionResponse(parse_typed(value)?))
+        }
+        "worker-parse-request-v1.schema.json" => {
+            Ok(ContractPayload::WorkerParseRequest(parse_typed(value)?))
+        }
+        "worker-parse-response-v1.schema.json" => {
+            Ok(ContractPayload::WorkerParseResponse(parse_typed(value)?))
+        }
+        "worker-version-response-v1.schema.json" => {
+            Ok(ContractPayload::WorkerVersionResponse(parse_typed(value)?))
+        }
+        _ => Err(format!("unknown scanner contract schema: {schema}")),
+    }
+}
+
+impl ContractPayload {
+    fn to_value(&self) -> Result<Value, String> {
+        macro_rules! serialize {
+            ($payload:expr) => {
+                serde_json::to_value($payload).map_err(|error| error.to_string())
+            };
+        }
+        match self {
+            Self::BuildContextRequest(payload) => serialize!(payload),
+            Self::ContextEnvelope(payload) => serialize!(payload),
+            Self::Diagnostic(payload) => serialize!(payload),
+            Self::DoctorRequest(payload) => serialize!(payload),
+            Self::DoctorResponse(payload) => serialize!(payload),
+            Self::InspectRunRequest(payload) => serialize!(payload),
+            Self::InspectRunResponse(payload) => serialize!(payload),
+            Self::NormalizedScannerProfile(payload) => serialize!(payload),
+            Self::RawScannerProfile(payload) => serialize!(payload),
+            Self::TransportError(payload) => serialize!(payload),
+            Self::VersionResponse(payload) => serialize!(payload),
+            Self::WorkerParseRequest(payload) => serialize!(payload),
+            Self::WorkerParseResponse(payload) => serialize!(payload),
+            Self::WorkerVersionResponse(payload) => serialize!(payload),
+        }
+    }
+}
+
+/// Parse one strict DTO, apply relational checks, and return its typed round-trip JSON.
+pub fn validate_contract_payload(
+    schema: &str,
+    value: &Value,
+    related_payloads: &[RelatedPayload],
+) -> Result<Value, String> {
+    let parsed = parse_contract_payload(schema, value)?;
+    let mut request = None;
+    let mut handshake = None;
+    for related in related_payloads {
+        let related_parsed = parse_contract_payload(&related.schema, &related.payload)?;
+        match related.role.as_str() {
+            "request" => request = Some(related_parsed),
+            "handshake" => handshake = Some(related_parsed),
+            _ => return Err(format!("unknown related payload role: {}", related.role)),
+        }
+    }
+
+    if let (
+        ContractPayload::ContextEnvelope(response),
+        Some(ContractPayload::BuildContextRequest(request)),
+    ) = (&parsed, &request)
+    {
+        if response.request_id != request.request_id {
+            return Err("context response request_id mismatch".to_string());
+        }
+    }
+
+    if let (
+        ContractPayload::WorkerParseResponse(response),
+        Some(ContractPayload::WorkerParseRequest(request)),
+    ) = (&parsed, &request)
+    {
+        if response.request_id != request.request_id
+            || response.file_path != request.file_path
+            || response.file_type != request.file_type
+            || response.parser_backend != request.backend
+            || response.observed_source_version != request.expected_source_version
+        {
+            return Err("worker response does not echo its request".to_string());
+        }
+        if let Some(ContractPayload::WorkerVersionResponse(handshake)) = &handshake {
+            let expected_kind = match request.backend.lane() {
+                WorkerLane::RustOfficeProcess => WorkerKind::Office,
+                WorkerLane::PythonDocumentProcess => WorkerKind::PythonDocument,
+            };
+            if response.worker_contract_version != handshake.worker_contract_version
+                || response.worker_version != handshake.worker_version
+                || response.worker_build != handshake.worker_build
+                || handshake.worker_kind != expected_kind
+                || !handshake
+                    .supported_backends
+                    .iter()
+                    .any(|backend| backend == request.backend.as_str())
+                || !handshake
+                    .supported_extensions
+                    .iter()
+                    .any(|extension| extension == &request.file_type)
+            {
+                return Err("worker identity changed after handshake".to_string());
+            }
+        }
+    }
+
+    parsed.to_value()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    #[derive(Debug, Deserialize)]
+    struct FixtureManifest {
+        valid_fixtures: Vec<FixtureEntry>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct FixtureEntry {
+        file: String,
+        schema: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct InvalidCorpus {
+        cases: Vec<InvalidCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct InvalidCase {
+        name: String,
+        schema: String,
+        payload: Value,
+        #[serde(default)]
+        related_payloads: Vec<RelatedPayload>,
+    }
+
+    fn fixture_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("tests")
+            .join("fixtures")
+            .join("scanner_contract")
+            .join("v1")
+    }
+
+    fn read_json<T: DeserializeOwned>(path: &Path) -> T {
+        let text = fs::read_to_string(path).unwrap();
+        serde_json::from_str(&text).unwrap()
+    }
+
+    #[test]
+    fn every_golden_fixture_round_trips_through_typed_dtos() {
+        let fixture_dir = fixture_dir();
+        let manifest: FixtureManifest = read_json(&fixture_dir.join("fixture-manifest.json"));
+        for entry in manifest.valid_fixtures {
+            let value: Value = read_json(&fixture_dir.join(&entry.file));
+            let round_trip = validate_contract_payload(&entry.schema, &value, &[])
+                .unwrap_or_else(|error| panic!("{}: {error}", entry.file));
+            assert_eq!(round_trip, value, "{}", entry.file);
+        }
+    }
+
+    #[test]
+    fn every_invalid_fixture_is_rejected() {
+        let fixture_dir = fixture_dir();
+        let corpus: InvalidCorpus = read_json(&fixture_dir.join("invalid-cases.json"));
+        for case in corpus.cases {
+            let result =
+                validate_contract_payload(&case.schema, &case.payload, &case.related_payloads);
+            assert!(result.is_err(), "{} unexpectedly passed", case.name);
+        }
+    }
+}

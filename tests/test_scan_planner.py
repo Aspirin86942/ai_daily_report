@@ -31,7 +31,7 @@ def test_build_parser_profile_uses_summary_limits_when_requested():
         "text_max_chars": 2000,
         "office_parser_backend": "rust_office_oxide_v1",
         "pdf_parser_backend": "pdf_text_v1",
-        "rust_office_parser_bin": "rust/office_parser/target/release/ai-daily-office-parser",
+        "rust_office_parser_bin": "rust/target/release/ai-daily-office-parser",
         "rust_office_parser_bin_size_bytes": None,
         "rust_office_parser_bin_mtime_ns": None,
         "file_timeout_seconds": 30.0,
@@ -101,7 +101,7 @@ def test_build_parser_profile_includes_document_parser_defaults():
     assert profile["office_parser_backend"] == "rust_office_oxide_v1"
     assert profile["pdf_parser_backend"] == "pdf_text_v1"
     assert profile["rust_office_parser_bin"] == (
-        "rust/office_parser/target/release/ai-daily-office-parser"
+        "rust/target/release/ai-daily-office-parser"
     )
     assert profile["office_parser_fallback_enabled"] is True
     assert profile["office_parser_fallback_order"] == [

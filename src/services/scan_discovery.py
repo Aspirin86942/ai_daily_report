@@ -56,7 +56,7 @@ class RustDiscoveryRunner:
         result = run_rust_json_cli(
             binary_path=self.scanner_cfg.get(
                 "rust_discovery_bin",
-                "rust/discovery/target/release/ai-daily-discovery",
+                "rust/target/release/ai-daily-discovery",
             ),
             request_payload=request,
             timeout_seconds=float(self.scanner_cfg.get("discovery_timeout_seconds", 30)),

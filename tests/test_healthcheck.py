@@ -341,24 +341,10 @@ def test_collect_healthcheck_resolves_windows_rust_executables(
     (tmp_path / "data").mkdir()
     (tmp_path / "workspace").mkdir()
 
-    discovery_bin = (
-        tmp_path
-        / "rust"
-        / "discovery"
-        / "target"
-        / "release"
-        / "ai-daily-discovery.exe"
-    )
-    office_bin = (
-        tmp_path
-        / "rust"
-        / "office_parser"
-        / "target"
-        / "release"
-        / "ai-daily-office-parser.exe"
-    )
-    discovery_bin.parent.mkdir(parents=True)
-    office_bin.parent.mkdir(parents=True)
+    release_dir = tmp_path / "rust" / "target" / "release"
+    discovery_bin = release_dir / "ai-daily-discovery.exe"
+    office_bin = release_dir / "ai-daily-office-parser.exe"
+    release_dir.mkdir(parents=True)
     discovery_bin.write_bytes(b"test-rust-binary")
     office_bin.write_bytes(b"test-rust-binary")
 
@@ -367,11 +353,11 @@ def test_collect_healthcheck_resolves_windows_rust_executables(
         "max_workers": 4,
         "discovery_backend": "rust",
         "rust_discovery_bin": (
-            "rust/discovery/target/release/ai-daily-discovery"
+            "rust/target/release/ai-daily-discovery"
         ),
         "office_parser_backend": "rust_office_oxide_v1",
         "rust_office_parser_bin": (
-            "rust/office_parser/target/release/ai-daily-office-parser"
+            "rust/target/release/ai-daily-office-parser"
         ),
         "office_parser_fallback_enabled": True,
         "office_parser_fallback_order": ["python_office_v1"],

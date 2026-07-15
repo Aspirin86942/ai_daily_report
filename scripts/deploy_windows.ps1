@@ -105,14 +105,16 @@ if ($BuildRust) {
         throw "cargo is required when -BuildRust is specified."
     }
 
-    foreach ($manifest in @(
-        (Join-Path $repoRoot "rust\discovery\Cargo.toml"),
-        (Join-Path $repoRoot "rust\office_parser\Cargo.toml")
-    )) {
-        Invoke-CheckedCommand -Label "Build $manifest" `
-            -FilePath "cargo" `
-            -Arguments @("build", "--release", "--locked", "--manifest-path", $manifest)
-    }
+    $manifest = Join-Path $repoRoot "rust\Cargo.toml"
+    Invoke-CheckedCommand -Label "Build Rust workspace" `
+        -FilePath "cargo" `
+        -Arguments @(
+            "build",
+            "--manifest-path", $manifest,
+            "--workspace",
+            "--release",
+            "--locked"
+        )
 }
 
 Push-Location $repoRoot

@@ -19,7 +19,7 @@ from src.services.document_parser import (
 from src.services.rust_cli_contract import resolve_binary_path
 
 RUST_OFFICE_PARSER_BIN = resolve_binary_path(
-    "rust/office_parser/target/release/ai-daily-office-parser",
+    "rust/target/release/ai-daily-office-parser",
     project_root=Path(__file__).resolve().parents[1],
 )
 
@@ -30,8 +30,8 @@ def _require_rust_office_parser_binary() -> None:
     if os.name == "nt":
         pytest.fail(
             "Windows integration requires the built Rust Office parser .exe; "
-            "run cargo build --release --locked --manifest-path "
-            "rust/office_parser/Cargo.toml"
+            "run cargo build --manifest-path rust/Cargo.toml --workspace "
+            "--release --locked"
         )
     pytest.skip("Rust Office parser release binary has not been built")
 

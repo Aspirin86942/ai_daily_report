@@ -37,7 +37,7 @@ def test_rust_runner_returns_file_context_from_valid_payload(tmp_path, monkeypat
     sample = tmp_path / "report.xlsx"
     sample.write_bytes(b"fake")
     configured_binary = (
-        "rust/office_parser/target/release/ai-daily-office-parser"
+        "rust/target/release/ai-daily-office-parser"
     )
 
     completed = SimpleNamespace(

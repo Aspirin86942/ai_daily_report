@@ -1,0 +1,146 @@
+"""Rust/Python scanner v1 共享合同与 workspace 门禁。"""
+
+from __future__ import annotations
+
+import json
+import pickle
+from pathlib import Path
+import tomllib
+from types import SimpleNamespace
+
+import pytest
+
+from src.core.config import Config, SCANNER_CONTRACT_FIELDS
+from src.models.scanner_contract import validate_contract_payload
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CONTRACT_DIR = PROJECT_ROOT / "docs" / "contracts"
+FIXTURE_DIR = (
+    PROJECT_ROOT / "tests" / "fixtures" / "scanner_contract" / "v1"
+)
+
+
+def _load_json(path: Path) -> object:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_python_contract_accepts_and_round_trips_every_golden_fixture() -> None:
+    """Python 与 Rust 后续实现必须消费同一份 manifest，不能另造样例。"""
+    manifest = _load_json(FIXTURE_DIR / "fixture-manifest.json")
+    assert isinstance(manifest, dict)
+
+    for entry in manifest["valid_fixtures"]:
+        payload = _load_json(FIXTURE_DIR / entry["file"])
+        assert isinstance(payload, dict)
+        parsed = validate_contract_payload(entry["schema"], payload)
+        assert parsed.model_dump(mode="json", exclude_unset=True) == payload
+
+
+def test_python_contract_rejects_every_invalid_fixture() -> None:
+    """Schema 与跨 DTO 语义反例都必须在 Python 合同边界失败。"""
+    corpus = _load_json(FIXTURE_DIR / "invalid-cases.json")
+    assert isinstance(corpus, dict)
+
+    for case in corpus["cases"]:
+        with pytest.raises(ValueError, match=".+"):
+            validate_contract_payload(
+                case["schema"],
+                case["payload"],
+                related_payloads=case.get("related_payloads", []),
+            )
+
+
+def test_scanner_contract_profile_copies_only_present_raw_leaves() -> None:
+    """Python 只透传显式 scanner 叶子，不扩默认值或基础设施字段。"""
+    cfg = object.__new__(Config)
+    cfg._settings = SimpleNamespace(
+        scanner=SimpleNamespace(
+            allowed_extensions=[".xlsx"],
+            ignored_patterns=["*归档*.xlsx"],
+            max_workers=3,
+            office_fallback_after_timeout=False,
+            discovery_backend="rust",
+            rust_discovery_bin="legacy/discovery",
+            rust_office_parser_bin="legacy/office",
+            index_db_path="legacy.sqlite3",
+            worker_lane_mode="subprocess",
+            office_external_fallback="disabled",
+        )
+    )
+
+    profile = cfg.scanner_contract_profile()
+
+    assert profile == {
+        "schema_version": "scanner_profile_v1",
+        "allowed_extensions": [".xlsx"],
+        "ignored_patterns": ["*归档*.xlsx"],
+        "max_workers": 3,
+        "office_fallback_after_timeout": False,
+    }
+    pickle.dumps(profile)
+
+
+def test_scanner_contract_profile_allowlist_matches_wire_schema() -> None:
+    """配置提取 allowlist 必须与版本化 raw profile schema 同步。"""
+    schema = _load_json(CONTRACT_DIR / "scanner-profile-request-v1.schema.json")
+    assert isinstance(schema, dict)
+    expected = tuple(
+        key for key in schema["properties"] if key != "schema_version"
+    )
+    assert SCANNER_CONTRACT_FIELDS == expected
+
+
+def test_scanner_contract_profile_rejects_unknown_candidate_leaf() -> None:
+    """拼错或未版本化的新 scanner 叶子不得被静默丢弃。"""
+    cfg = object.__new__(Config)
+    cfg._settings = SimpleNamespace(
+        scanner=SimpleNamespace(
+            allowed_extensions=[".txt"],
+            unexpected_contract_leaf=1,
+        )
+    )
+
+    with pytest.raises(ValueError, match="unexpected_contract_leaf"):
+        cfg.scanner_contract_profile()
+
+
+def test_rust_workspace_and_active_paths_use_one_release_target() -> None:
+    """Workspace 只生成 rust/target，tracked 运行路径不得指向旧 target。"""
+    workspace_manifest = PROJECT_ROOT / "rust" / "Cargo.toml"
+    workspace_lock = PROJECT_ROOT / "rust" / "Cargo.lock"
+    assert workspace_manifest.is_file()
+    assert workspace_lock.is_file()
+    assert not (PROJECT_ROOT / "rust" / "discovery" / "Cargo.lock").exists()
+    assert not (PROJECT_ROOT / "rust" / "office_parser" / "Cargo.lock").exists()
+
+    workspace = tomllib.loads(workspace_manifest.read_text(encoding="utf-8"))
+    assert workspace["workspace"]["resolver"] == "2"
+    assert set(workspace["workspace"]["members"]) == {
+        "discovery",
+        "office_parser",
+        "scanner_contract",
+    }
+
+    active_files = (
+        "config/settings.example.yaml",
+        "src/core/config.py",
+        "src/core/healthcheck.py",
+        "src/services/scan_discovery.py",
+        "src/services/office_parser.py",
+        "src/services/scan_planner.py",
+        ".github/workflows/ci.yml",
+        "scripts/deploy_windows.ps1",
+        "scripts/run_scanner_benchmark_ab.ps1",
+        "README.md",
+        "docs/scanner-backends.md",
+    )
+    combined = "\n".join(
+        (PROJECT_ROOT / path).read_text(encoding="utf-8")
+        for path in active_files
+    )
+    assert "rust/discovery/target" not in combined
+    assert "rust/office_parser/target" not in combined
+    assert "rust\\discovery\\target" not in combined
+    assert "rust\\office_parser\\target" not in combined
+    assert "rust/target/release/ai-daily-discovery" in combined
+    assert "rust/target/release/ai-daily-office-parser" in combined

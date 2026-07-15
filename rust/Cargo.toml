@@ -1,0 +1,17 @@
+[workspace]
+members = ["discovery", "office_parser", "scanner_contract"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+glob = "0.3"
+office_oxide = "0.1"
+quick-xml = "0.40"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
+zip = { version = "8.1", features = ["deflate"], default-features = false }

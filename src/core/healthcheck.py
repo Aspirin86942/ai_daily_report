@@ -245,7 +245,7 @@ def _append_rust_cli_checks(
         discovery_path = resolve_binary_path(
             scanner_config.get(
                 "rust_discovery_bin",
-                "rust/discovery/target/release/ai-daily-discovery",
+                "rust/target/release/ai-daily-discovery",
             ),
             project_root=project_root,
             system_name=platform.system(),
@@ -275,7 +275,7 @@ def _append_rust_cli_checks(
         office_path = resolve_binary_path(
             scanner_config.get(
                 "rust_office_parser_bin",
-                "rust/office_parser/target/release/ai-daily-office-parser",
+                "rust/target/release/ai-daily-office-parser",
             ),
             project_root=project_root,
             system_name=platform.system(),

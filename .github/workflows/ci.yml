@@ -37,8 +37,7 @@ jobs:
       - name: Build Rust helpers for Windows Python integration tests
         if: runner.os == 'Windows'
         run: |
-          cargo build --release --locked --manifest-path rust/discovery/Cargo.toml
-          cargo build --release --locked --manifest-path rust/office_parser/Cargo.toml
+          cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
       - name: Validate Windows deployment script syntax
         if: runner.os == 'Windows'
         shell: pwsh
@@ -79,11 +78,9 @@ jobs:
         run: |
           rustc --version
           cargo --version
-      - name: Test discovery CLI
-        run: cargo test --locked --manifest-path rust/discovery/Cargo.toml
-      - name: Build discovery release CLI
-        run: cargo build --release --locked --manifest-path rust/discovery/Cargo.toml
-      - name: Test Office parser CLI
-        run: cargo test --locked --manifest-path rust/office_parser/Cargo.toml
-      - name: Build Office parser release CLI
-        run: cargo build --release --locked --manifest-path rust/office_parser/Cargo.toml
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+      - name: Test Rust workspace
+        run: cargo test --manifest-path rust/Cargo.toml --workspace --locked
+      - name: Build Rust workspace release binaries
+        run: cargo build --manifest-path rust/Cargo.toml --workspace --release --locked

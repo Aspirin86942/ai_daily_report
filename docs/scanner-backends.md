@@ -28,16 +28,15 @@ Default config:
 ```yaml
 scanner:
   discovery_backend: "rust"
-  rust_discovery_bin: "rust/discovery/target/release/ai-daily-discovery"
+  rust_discovery_bin: "rust/target/release/ai-daily-discovery"
   discovery_timeout_seconds: 30
 ```
 
 Build command:
 
 ```bash
-cd rust/discovery
-cargo test
-cargo build --release
+cargo test --manifest-path rust/Cargo.toml --workspace --locked
+cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 ```
 
 If the Rust discovery binary is missing, exits non-zero, times out, or returns invalid JSON, `FileDiscoveryService` logs a warning and falls back to Python discovery.
@@ -49,7 +48,7 @@ Default config:
 ```yaml
 scanner:
   office_parser_backend: "rust_office_oxide_v1"
-  rust_office_parser_bin: "rust/office_parser/target/release/ai-daily-office-parser"
+  rust_office_parser_bin: "rust/target/release/ai-daily-office-parser"
   office_parser_fallback_enabled: true
   office_parser_fallback_order:
     - "python_office_v1"
@@ -62,9 +61,8 @@ scanner:
 Build command:
 
 ```bash
-cd rust/office_parser
-cargo test
-cargo build --release
+cargo test --manifest-path rust/Cargo.toml --workspace --locked
+cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 ```
 
 Behavior:
@@ -124,9 +122,8 @@ For `.xlsx`, `parser_backend_summary.by_extension[".xlsx"]` should normally show
 Before closing scanner backend changes, run:
 
 ```bash
-cd rust/discovery && cargo test && cargo build --release
-cd ../../rust/office_parser && cargo test && cargo build --release
-cd ../..
+cargo test --manifest-path rust/Cargo.toml --workspace --locked
+cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 /home/george/miniconda3/bin/conda run -n test python -m pytest tests -q
 /home/george/miniconda3/bin/conda run -n test python -m compileall main.py src tests
 git diff --check

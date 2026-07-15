@@ -55,7 +55,7 @@ def test_rust_discovery_logs_successful_stderr_as_structured_warning(
 
 
 RUST_DISCOVERY_BIN = resolve_binary_path(
-    "rust/discovery/target/release/ai-daily-discovery",
+    "rust/target/release/ai-daily-discovery",
     project_root=Path(__file__).resolve().parents[1],
 )
 
@@ -66,8 +66,8 @@ def _require_rust_discovery_binary() -> None:
     if os.name == "nt":
         pytest.fail(
             "Windows integration requires the built Rust discovery .exe; "
-            "run cargo build --release --locked --manifest-path "
-            "rust/discovery/Cargo.toml"
+            "run cargo build --manifest-path rust/Cargo.toml --workspace "
+            "--release --locked"
         )
     pytest.skip("Rust discovery release binary has not been built")
 

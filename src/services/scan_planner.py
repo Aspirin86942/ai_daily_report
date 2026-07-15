@@ -32,7 +32,7 @@ from .scan_timeouts import (
 
 DEFAULT_OFFICE_PARSER_BACKEND = "rust_office_oxide_v1"
 DEFAULT_RUST_OFFICE_PARSER_BIN = (
-    "rust/office_parser/target/release/ai-daily-office-parser"
+    "rust/target/release/ai-daily-office-parser"
 )
 DEFAULT_OFFICE_FALLBACK_ORDER = [
     "python_office_v1",

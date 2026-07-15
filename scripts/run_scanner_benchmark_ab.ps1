@@ -79,16 +79,16 @@ function Invoke-CargoBuild {
         [Parameter(Mandatory = $true)]
         [string]$Name,
         [Parameter(Mandatory = $true)]
-        [string]$ProjectDir
+        [string]$ManifestPath
     )
 
-    Push-Location $ProjectDir
-    try {
-        Invoke-CheckedCommand -Label "Build $Name" -FilePath "cargo" -Arguments @("build", "--release")
-    }
-    finally {
-        Pop-Location
-    }
+    Invoke-CheckedCommand -Label "Build $Name" -FilePath "cargo" -Arguments @(
+        "build",
+        "--manifest-path", $ManifestPath,
+        "--workspace",
+        "--release",
+        "--locked"
+    )
 }
 
 function Clear-SqliteArtifacts {
@@ -121,8 +121,8 @@ function Invoke-BenchmarkRun {
 
     $env:DAILY_REPORT_SCANNER__DISCOVERY_BACKEND = $Backend
     $env:DAILY_REPORT_SCANNER__INDEX_DB_PATH = $DbPath
-    $env:DAILY_REPORT_SCANNER__RUST_DISCOVERY_BIN = "rust/discovery/target/release/ai-daily-discovery.exe"
-    $env:DAILY_REPORT_SCANNER__RUST_OFFICE_PARSER_BIN = "rust/office_parser/target/release/ai-daily-office-parser.exe"
+    $env:DAILY_REPORT_SCANNER__RUST_DISCOVERY_BIN = "rust/target/release/ai-daily-discovery.exe"
+    $env:DAILY_REPORT_SCANNER__RUST_OFFICE_PARSER_BIN = "rust/target/release/ai-daily-office-parser.exe"
 
     $args = @(
         "run",
@@ -184,8 +184,8 @@ try {
     Write-Host "Summary mode: $(-not $NoSummaryMode)"
 
     if (-not $SkipBuild) {
-        Invoke-CargoBuild -Name "Rust discovery" -ProjectDir (Join-Path $repoRoot "rust\discovery")
-        Invoke-CargoBuild -Name "Rust Office parser" -ProjectDir (Join-Path $repoRoot "rust\office_parser")
+        Invoke-CargoBuild -Name "Rust workspace" `
+            -ManifestPath (Join-Path $repoRoot "rust\Cargo.toml")
     }
 
     $pythonDb = Join-Path $BenchDir "scanner-python-$rangeLabel.sqlite3"

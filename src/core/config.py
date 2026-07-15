@@ -9,13 +9,71 @@ from dynaconf import Dynaconf
 
 DEFAULT_OFFICE_PARSER_BACKEND = "rust_office_oxide_v1"
 DEFAULT_RUST_OFFICE_PARSER_BIN = (
-    "rust/office_parser/target/release/ai-daily-office-parser"
+    "rust/target/release/ai-daily-office-parser"
 )
 DEFAULT_OFFICE_FALLBACK_ORDER = [
     "python_office_v1",
     "python_sharepoint_text_v1",
 ]
 DEFAULT_OFFICE_FALLBACK_POLICY_VERSION = "hybrid_v1"
+
+SCANNER_CONTRACT_FIELDS = (
+    "allowed_extensions",
+    "ignored_patterns",
+    "excluded_dirs",
+    "max_workers",
+    "max_file_size_mb",
+    "discovery_timeout_seconds",
+    "file_timeout_seconds",
+    "file_timeout_by_extension",
+    "total_max_chars",
+    "parser_profile_version",
+    "office_parser_backend",
+    "pdf_parser_backend",
+    "office_fallback_policy_version",
+    "office_parser_fallback_enabled",
+    "office_fallback_after_timeout",
+    "office_legacy_extensions_enabled",
+    "pptx_include_notes",
+    "office_parser_fallback_order",
+    "direct_text_max_bytes",
+    "direct_text_read_bytes",
+    "log_tail_read_bytes",
+    "text_excerpt_max_chars",
+    "excel_max_rows",
+    "pdf_max_pages",
+    "text_max_chars",
+    "excel_max_sheets",
+    "excel_max_columns",
+    "docx_max_paragraphs",
+    "docx_max_tables",
+    "docx_table_max_rows",
+    "docx_table_max_cols",
+    "pptx_max_slides",
+    "document_excerpt_max_chars",
+    "summary_excel_max_rows",
+    "summary_pdf_max_pages",
+    "summary_text_max_chars",
+    "summary_excel_max_sheets",
+    "summary_excel_max_columns",
+    "summary_docx_max_paragraphs",
+    "summary_docx_max_tables",
+    "summary_docx_table_max_rows",
+    "summary_docx_table_max_cols",
+    "summary_pptx_max_slides",
+    "summary_document_excerpt_max_chars",
+)
+
+SCANNER_INFRASTRUCTURE_FIELDS = frozenset(
+    {
+        "discovery_backend",
+        "rust_discovery_bin",
+        "rust_office_parser_bin",
+        "index_db_path",
+        "worker_lane_mode",
+        "office_external_fallback",
+    }
+)
 
 
 class Config:
@@ -187,7 +245,7 @@ class Config:
             "rust_discovery_bin": getattr(
                 self._settings.scanner,
                 "rust_discovery_bin",
-                "rust/discovery/target/release/ai-daily-discovery",
+                "rust/target/release/ai-daily-discovery",
             ),
             "office_parser_backend": str(
                 getattr(
@@ -272,6 +330,40 @@ class Config:
             if hasattr(scanner, key):
                 cfg[key] = self._to_builtin_value(getattr(scanner, key))
         return cfg
+
+    def scanner_contract_profile(self) -> Dict[str, Any]:
+        """提取调用方显式配置的 scanner v1 wire 叶子。
+
+        Rust 是默认值和归一化的唯一所有者，因此这里不读取 legacy
+        ``scanner_config``，也不补默认值或携带 helper/数据库路径。
+        """
+        scanner = self._settings.scanner
+        if isinstance(scanner, Mapping):
+            raw_items = scanner.items()
+        elif hasattr(scanner, "__dict__"):
+            raw_items = vars(scanner).items()
+        else:
+            raise ValueError("scanner settings must expose explicit leaves")
+
+        present = {
+            str(key).strip().lower(): self._to_builtin_value(value)
+            for key, value in raw_items
+        }
+        unknown = sorted(
+            set(present)
+            - set(SCANNER_CONTRACT_FIELDS)
+            - SCANNER_INFRASTRUCTURE_FIELDS
+        )
+        if unknown:
+            raise ValueError(
+                "unknown scanner contract fields: " + ", ".join(unknown)
+            )
+
+        profile: Dict[str, Any] = {"schema_version": "scanner_profile_v1"}
+        for key in SCANNER_CONTRACT_FIELDS:
+            if key in present:
+                profile[key] = present[key]
+        return profile
 
     @property
     def llm_provider(self) -> str:

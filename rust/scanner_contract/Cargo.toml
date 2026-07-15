@@ -1,11 +1,8 @@
 [package]
-name = "ai-daily-discovery"
+name = "ai-daily-scanner-contract"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-chrono.workspace = true
-glob.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-walkdir.workspace = true

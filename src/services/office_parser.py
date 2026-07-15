@@ -24,7 +24,7 @@ OFFICE_FAILURE_RECOVERABLE = "recoverable_parser_failure"
 OFFICE_FALLBACK_POLICY_VERSION = "hybrid_v1"
 OFFICE_RUST_FILE_TYPES = {".docx", ".xlsx", ".pptx", ".doc", ".xls", ".ppt"}
 DEFAULT_RUST_OFFICE_PARSER_BIN = (
-    "rust/office_parser/target/release/ai-daily-office-parser"
+    "rust/target/release/ai-daily-office-parser"
 )
 
 _MODERN_OFFICE_FILE_TYPES = {".docx", ".xlsx", ".pptx"}

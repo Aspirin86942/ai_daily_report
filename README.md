@@ -164,7 +164,7 @@ llm:
 ```yaml
 scanner:
   discovery_backend: "rust"
-  rust_discovery_bin: "rust/discovery/target/release/ai-daily-discovery"
+  rust_discovery_bin: "rust/target/release/ai-daily-discovery"
 ```
 
 本机要测试 Rust discovery 时，先构建 CLI：
@@ -172,8 +172,7 @@ scanner:
 需本机已安装 Rust toolchain，并确保 cargo 可用。
 
 ```bash
-cd rust/discovery
-cargo build --release --locked
+cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 ```
 
 然后只修改当前系统的本机配置（Linux 为 `config/settings.linux.yaml`，Windows 为 `config/settings.windows.yaml`）：
@@ -201,7 +200,7 @@ Office 文件默认优先使用 Rust parser CLI；如果 Rust CLI 缺失、执�
 ```yaml
 scanner:
   office_parser_backend: "rust_office_oxide_v1"
-  rust_office_parser_bin: "rust/office_parser/target/release/ai-daily-office-parser"
+  rust_office_parser_bin: "rust/target/release/ai-daily-office-parser"
   office_parser_fallback_enabled: true
   office_parser_fallback_order:
     - "python_office_v1"
@@ -214,9 +213,8 @@ scanner:
 本机要测试 Rust Office parser 时，先构建 CLI：
 
 ```bash
-cd rust/office_parser
-cargo test --locked
-cargo build --release --locked
+cargo test --manifest-path rust/Cargo.toml --workspace --locked
+cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 ```
 
 `.xlsx` 在 Rust CLI 内走专用 `rust_xlsx_bounded_v1` 有界预览路径，只读取配置预算内的 sheet、行、列和字符数；`.docx` / `.pptx` 继续走 `rust_office_oxide_v1`。默认扫描范围不会自动加入 `.doc` / `.ppt`。如需处理 legacy Office 文件，应先确认真实样本和 fallback 行为，再显式加入 `scanner.allowed_extensions`，避免把未验证的旧格式文件带入常规扫描。
