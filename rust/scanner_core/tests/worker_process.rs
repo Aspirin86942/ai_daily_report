@@ -252,7 +252,7 @@ fn python_outer_watchdog_closes_job_and_kills_grandchild() {
     .expect("watchdog worker should be writable");
     fs::write(
         &watchdog_script,
-        "import os, pathlib, subprocess, sys, time\nhelper, python, worker, pid_path = sys.argv[1:]\nenv = os.environ.copy()\nenv['AI_DAILY_WATCHDOG_HELPER'] = '1'\nenv['AI_DAILY_WATCHDOG_PYTHON'] = python\nenv['AI_DAILY_WATCHDOG_WORKER'] = worker\nenv['AI_DAILY_WATCHDOG_PID'] = pid_path\nproc = subprocess.Popen([helper, '--exact', 'outer_watchdog_helper', '--nocapture'], env=env)\ndeadline = time.monotonic() + 10\nwhile not pathlib.Path(pid_path).is_file() and time.monotonic() < deadline:\n    if proc.poll() is not None:\n        raise SystemExit('scanner helper exited before spawning worker')\n    time.sleep(0.02)\nif not pathlib.Path(pid_path).is_file():\n    proc.kill(); proc.wait(); raise SystemExit('grandchild PID was not recorded')\nproc.kill()\nproc.wait(timeout=5)\n",
+        "import os, pathlib, subprocess, sys, time\nhelper, python, worker, pid_path = sys.argv[1:]\nenv = os.environ.copy()\nenv['AI_DAILY_WATCHDOG_HELPER'] = '1'\nenv['AI_DAILY_WATCHDOG_PYTHON'] = python\nenv['AI_DAILY_WATCHDOG_WORKER'] = worker\nenv['AI_DAILY_WATCHDOG_PID'] = pid_path\nproc = subprocess.Popen([helper, '--exact', 'outer_watchdog_helper', '--nocapture'], env=env)\npid_file = pathlib.Path(pid_path)\ndef pid_recorded():\n    try:\n        return pid_file.read_text(encoding='ascii').strip().isdigit()\n    except OSError:\n        return False\ndeadline = time.monotonic() + 10\nwhile not pid_recorded() and time.monotonic() < deadline:\n    if proc.poll() is not None:\n        raise SystemExit('scanner helper exited before spawning worker')\n    time.sleep(0.02)\nif not pid_recorded():\n    proc.kill(); proc.wait(); raise SystemExit('grandchild PID was not recorded')\nproc.kill()\nproc.wait(timeout=5)\n",
     )
     .expect("outer watchdog should be writable");
 
@@ -275,6 +275,7 @@ fn python_outer_watchdog_closes_job_and_kills_grandchild() {
     );
     let pid: u32 = fs::read_to_string(&pid_path)
         .expect("grandchild PID should remain as audit evidence")
+        .trim()
         .parse()
         .expect("grandchild PID should be numeric");
     assert_process_exited(pid);

@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 import re
 import sys
+from time import perf_counter
 from types import SimpleNamespace
 from typing import Any
 
@@ -233,12 +234,12 @@ def compare_context_engines(
         start_date=start_date,
         end_date=end_date,
     )
-    legacy_observation = (legacy_runner or _run_legacy)(
+    legacy_observation = (legacy_runner or run_legacy_shadow)(
         request,
         work_path,
         legacy_db,
     )
-    rust_observation = (rust_runner or _run_rust)(
+    rust_observation = (rust_runner or run_rust_shadow)(
         request,
         work_path,
         rust_db,
@@ -259,7 +260,7 @@ def compare_context_engines(
     return payload
 
 
-def _run_legacy(
+def run_legacy_shadow(
     request: ContextScheduleRequest,
     work_dir: Path,
     db_path: Path,
@@ -270,20 +271,34 @@ def _run_legacy(
         scanner_config=scanner_config,
         work_dir=work_dir,
     )
-    original_config = file_scanner_module.config
-    try:
-        file_scanner_module.config = comparison_config
-        scanner = _CapturingFileScanner()
-    finally:
-        file_scanner_module.config = original_config
+    scanner_holder: dict[str, _CapturingFileScanner] = {}
 
-    envelope = PythonLegacyContextEngine(
-        scanner_factory=lambda: scanner,
-    ).build_context(request)
-    scan_result = scanner.last_scan_result
-    details_by_path = {
-        _absolute_key(item.path): item for item in scanner.last_reparse_details
-    }
+    def scanner_factory() -> _CapturingFileScanner:
+        original_config = file_scanner_module.config
+        try:
+            file_scanner_module.config = comparison_config
+            scanner = _CapturingFileScanner()
+            scanner_holder["scanner"] = scanner
+            return scanner
+        finally:
+            file_scanner_module.config = original_config
+
+    engine = PythonLegacyContextEngine(
+        scanner_factory=scanner_factory,
+    )
+    started_at = perf_counter()
+    envelope = engine.build_context(request)
+    build_wall_duration_ms = max(0.0, (perf_counter() - started_at) * 1000)
+    scanner = scanner_holder.get("scanner")
+    scan_result = None if scanner is None else scanner.last_scan_result
+    details_by_path = (
+        {}
+        if scanner is None
+        else {
+            _absolute_key(item.path): item
+            for item in scanner.last_reparse_details
+        }
+    )
     files: list[dict[str, Any]] = []
     if scan_result is not None:
         for context in scan_result.contexts:
@@ -330,7 +345,7 @@ def _run_legacy(
             )
 
     decisions: list[dict[str, Any]] = []
-    if envelope.context_run_id is not None:
+    if scanner is not None and envelope.context_run_id is not None:
         for item in scanner.scan_index_store.list_context_decisions(
             envelope.context_run_id
         ):
@@ -346,9 +361,7 @@ def _run_legacy(
                     "input_chars": item["input_chars"],
                     "output_chars": item["output_chars"],
                     "truncated": item["truncated"],
-                    "error_code": (
-                        "PARSER_FAILED" if item["error"] else ""
-                    ),
+                    "error_code": _legacy_error_code(str(item["error"])),
                 }
             )
 
@@ -361,6 +374,11 @@ def _run_legacy(
         "context_run_id": envelope.context_run_id,
         "summary": envelope.summary.model_dump(mode="json"),
         "context_sha256": _content_sha256(envelope.file_context),
+        "normalized_context_sha256": _normalized_context_sha256(
+            envelope.file_context,
+            work_dir,
+        ),
+        "build_wall_duration_ms": round(build_wall_duration_ms, 3),
         "files": files,
         "decisions": decisions,
         "warning_codes": [item.error_code for item in envelope.warnings],
@@ -369,7 +387,7 @@ def _run_legacy(
     }
 
 
-def _run_rust(
+def run_rust_shadow(
     request: ContextScheduleRequest,
     work_dir: Path,
     db_path: Path,
@@ -384,7 +402,9 @@ def _run_rust(
         scan_db_path=db_path,
         timeout_seconds=config.rust_process_timeout_seconds,
     )
+    started_at = perf_counter()
     envelope = client.build_context(request)
+    build_wall_duration_ms = max(0.0, (perf_counter() - started_at) * 1000)
     files: list[dict[str, Any]] = []
     decisions: list[dict[str, Any]] = []
     run_status: str | None = None
@@ -436,6 +456,11 @@ def _run_rust(
         "context_run_id": envelope.context_run_id,
         "summary": envelope.summary.model_dump(mode="json"),
         "context_sha256": _content_sha256(envelope.file_context),
+        "normalized_context_sha256": _normalized_context_sha256(
+            envelope.file_context,
+            work_dir,
+        ),
+        "build_wall_duration_ms": round(build_wall_duration_ms, 3),
         "files": files,
         "decisions": decisions,
         "warning_codes": list(
@@ -486,9 +511,30 @@ def _content_sha256(content: str) -> str:
     return sha256(content.encode("utf-8")).hexdigest()
 
 
+def _normalized_context_sha256(content: str, work_dir: Path) -> str:
+    """Hash context after replacing the fixture root with a stable token."""
+    resolved = work_dir.resolve(strict=True)
+    normalized = content
+    variants = {str(resolved), resolved.as_posix()}
+    for variant in sorted(variants, key=len, reverse=True):
+        normalized = normalized.replace(variant, "<WORK_DIR>")
+    return _content_sha256(normalized)
+
+
 def _reason_code(reason: str) -> str:
     candidate = reason.partition(":")[0].strip().upper()
     return candidate if _SAFE_CODE.fullmatch(candidate) else "LEGACY_FALLBACK"
+
+
+def _legacy_error_code(error: str) -> str:
+    normalized = error.strip().lower()
+    if not normalized:
+        return ""
+    if normalized.startswith("file too large:"):
+        return "FILE_TOO_LARGE"
+    if normalized.startswith("timeout:") or "timeout: file parse exceeded" in normalized:
+        return "PARSER_TIMEOUT"
+    return "PARSER_FAILED"
 
 
 def _items_by_path(items: Any, label: str) -> dict[str, dict[str, Any]]:

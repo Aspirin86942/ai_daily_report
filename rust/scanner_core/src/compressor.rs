@@ -194,12 +194,11 @@ fn render_file_section(
     if decision.action == ContextAction::MetadataOnly {
         decision.output_chars = 0;
         return format!(
-            "### {}\n- action: metadata_only\n- reason: {}\n- parser_backend: {}\n- worker_lane: {}\n- cache_status: {}\n- file_type: {}\n- size_bytes: {}\n- input_chars: {}\n- body: omitted_by_metadata_only_policy",
+            "### {}\n- action: metadata_only\n- reason: {}\n- parser_backend: {}\n- worker_lane: {}\n- file_type: {}\n- size_bytes: {}\n- input_chars: {}\n- body: omitted_by_metadata_only_policy",
             decision.relative_path,
             decision.reason,
             evidence.parser_backend,
             enum_text(&evidence.worker_lane),
-            enum_text(&evidence.cache_status),
             evidence.extension,
             evidence.size_bytes.unwrap_or(0),
             decision.input_chars,
@@ -226,13 +225,12 @@ fn render_file_section(
         ""
     };
     format!(
-        "### {}\n- action: {}\n- reason: {}\n- parser_backend: {}\n- worker_lane: {}\n- cache_status: {}\n- input_chars: {}\n- output_chars: {}{}\n```text\n{}\n```",
+        "### {}\n- action: {}\n- reason: {}\n- parser_backend: {}\n- worker_lane: {}\n- input_chars: {}\n- output_chars: {}{}\n```text\n{}\n```",
         decision.relative_path,
         enum_text(&decision.action),
         decision.reason,
         evidence.parser_backend,
         enum_text(&evidence.worker_lane),
-        enum_text(&evidence.cache_status),
         decision.input_chars,
         decision.output_chars,
         truncated_note,

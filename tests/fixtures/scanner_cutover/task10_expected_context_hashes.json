@@ -1,0 +1,9 @@
+{
+  "contract": "ai_daily_task10_context_golden",
+  "protocol_version": 1,
+  "source_file_count": 11,
+  "normalized_context_sha256": {
+    "python_legacy": "18423da752b08e84b131f900caf15de39fa897b5c1c10f7e303bd7fe2b5d529e",
+    "rust_v2": "4d00b70e358f991afc41f69f890b6282da4722187ab2e74d06b772ef135e6cf2"
+  }
+}

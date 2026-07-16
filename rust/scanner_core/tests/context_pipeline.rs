@@ -115,6 +115,20 @@ fn golden_large_log_uses_the_recent_tail_once() {
 }
 
 #[test]
+fn cache_state_does_not_change_context_bytes() {
+    let cold = evidence("notes/cache-stable.md", ".md", "stable evidence");
+    let mut warm = cold.clone();
+    warm.cache_status = CacheStatus::Fresh;
+
+    let cold_context =
+        build_context(vec![cold], &profile(2_000, 100), ReportMode::Daily).expect("cold context");
+    let warm_context =
+        build_context(vec![warm], &profile(2_000, 100), ReportMode::Daily).expect("warm context");
+
+    assert_eq!(cold_context.content, warm_context.content);
+}
+
+#[test]
 fn golden_office_pdf_error_priority_and_path_tie_break_are_frozen() {
     let mut office = evidence("zeta/report.docx", ".docx", "office");
     office.parser_backend = "rust_office_oxide_v1".to_string();

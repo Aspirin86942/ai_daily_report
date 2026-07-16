@@ -6,21 +6,20 @@ import json
 import sys
 from collections.abc import Sequence
 
-from src.models.scanner_contract import WorkerParseRequest
-
-from .contracts import (
-    invalid_request_response,
-    parse_worker_request,
-    python_worker_version_response,
-)
+from .python_worker_identity import python_worker_version_payload
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args == ["version"]:
-        _emit_json(python_worker_version_response().model_dump(mode="json"))
+        _emit_json(python_worker_version_payload())
         return 0
+
+    from .contracts import invalid_request_response, parse_worker_request
+
     if args == ["parse"]:
+        from src.models.scanner_contract import WorkerParseRequest
+
         try:
             request_json = sys.stdin.buffer.read().decode(
                 "utf-8",

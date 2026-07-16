@@ -249,25 +249,30 @@ fn explicitly_enabled_legacy_office_routes_through_strict_python_worker() {
 }
 
 #[test]
-fn missing_worker_is_environment_unavailable() {
+fn missing_office_and_python_workers_are_environment_unavailable() {
     let directory = tempfile::tempdir().expect("temporary root should exist");
-    let command = WorkerCommand {
-        program: directory.path().join("missing-worker.exe"),
-        base_args: Vec::new(),
-        current_dir: None,
-        expected_kind: WorkerKind::Office,
-        required_backends: vec!["rust_office_oxide_v1".to_string()],
-        required_extensions: vec![".docx".to_string()],
-    };
+    for (kind, backend, extension) in [
+        (WorkerKind::Office, "rust_office_oxide_v1", ".docx"),
+        (WorkerKind::PythonDocument, "pdf_text_v1", ".pdf"),
+    ] {
+        let command = WorkerCommand {
+            program: directory.path().join("missing-worker.exe"),
+            base_args: Vec::new(),
+            current_dir: None,
+            expected_kind: kind,
+            required_backends: vec![backend.to_string()],
+            required_extensions: vec![extension.to_string()],
+        };
 
-    let failure = register_worker(&command, Duration::from_secs(1))
-        .expect_err("missing worker must fail preflight");
+        let failure = register_worker(&command, Duration::from_secs(1))
+            .expect_err("missing worker must fail preflight");
 
-    assert_eq!(failure.class, FailureClass::EnvironmentUnavailable);
-    assert_eq!(
-        failure.diagnostic.error_code,
-        ErrorCode::WorkerHandshakeFailed
-    );
+        assert_eq!(failure.class, FailureClass::EnvironmentUnavailable);
+        assert_eq!(
+            failure.diagnostic.error_code,
+            ErrorCode::WorkerHandshakeFailed
+        );
+    }
 }
 
 #[test]

@@ -48,6 +48,28 @@ therefore production requirements rather than incidental portability details.
   the `rust_office_process` lane. A successful worker response reports the
   exact requested backend, keeping `parser_backend` separate from
   `worker_lane`.
+- `cache_status` remains mandatory audit evidence in `inspect-run`, but it is
+  excluded from `file_context`. Cache state is operational metadata, so an
+  unchanged cold and warm run must produce identical context bytes.
+- `parser_profile_version` is part of every route's parse-cache fingerprint.
+  Changing that semantic version invalidates otherwise unchanged entries.
+- Every new or resumed run performs both live worker version handshakes before
+  discovery or parse-cache lookup. Persisted fingerprints are audit evidence
+  only and are never substituted for a current handshake.
+
+## Accepted parity difference
+
+Task 10 freezes the sanitized corpus in `scripts/scanner_cutover_gate.py` and
+its expected root-normalized complete-context hashes in
+`tests/fixtures/scanner_cutover/task10_expected_context_hashes.json`. On that
+corpus, both engines must discover the same inventory, produce identical
+normalized hashes for text/PDF and any same-backend parse, make the same file
+decisions, stay within budget, and be independently byte-deterministic. The
+two frozen final context hashes intentionally differ: Rust replaces the legacy
+`ScanAggregator` plus `ContextCompressor` double-budget path with the single
+budgeting/rendering pipeline approved by this ADR. Any renderer drift changes
+the golden and requires an explicit ADR review; no parser-content, decision,
+fallback, or nondeterminism difference is accepted under that exception.
 
 ## Contract authority
 

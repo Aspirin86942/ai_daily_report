@@ -192,6 +192,7 @@ pub struct CacheAwarePlanEntry {
 struct ParseProfileFingerprint<'a> {
     protocol_version: u64,
     route_stack: &'a RouteStackFingerprint,
+    parser_profile_version: &'a str,
     max_file_size_bytes: u64,
     default_timeout_ms: u64,
     timeout_by_extension_ms: &'a std::collections::BTreeMap<String, u64>,
@@ -210,6 +211,7 @@ pub fn parse_profile_hash(
     let input = ParseProfileFingerprint {
         protocol_version,
         route_stack,
+        parser_profile_version: &profile.parser_profile_version,
         max_file_size_bytes: profile.execution.max_file_size_bytes,
         default_timeout_ms: profile.execution.file_timeout_ms,
         timeout_by_extension_ms: &profile.execution.file_timeout_by_extension_ms,
@@ -387,6 +389,8 @@ mod tests {
         guard.execution.max_file_size_bytes += 1;
         let mut parse = profile.clone();
         parse.parse.text.max_chars += 1;
+        let mut parser_profile_version = profile.clone();
+        parser_profile_version.parser_profile_version = "v2".to_string();
         let mut backend = profile.clone();
         backend.parse.office.primary_backend = "different_office_backend_v1".to_string();
         let mut fallback = profile.clone();
@@ -409,6 +413,10 @@ mod tests {
         );
         assert_ne!(base, parse_profile_hash(1, &route, &guard).unwrap());
         assert_ne!(base, parse_profile_hash(1, &route, &parse).unwrap());
+        assert_ne!(
+            base,
+            parse_profile_hash(1, &route, &parser_profile_version).unwrap()
+        );
         assert_ne!(base, parse_profile_hash(1, &route, &backend).unwrap());
         assert_ne!(base, parse_profile_hash(1, &route, &fallback).unwrap());
         assert_ne!(
