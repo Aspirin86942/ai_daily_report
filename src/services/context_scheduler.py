@@ -8,7 +8,6 @@ from typing import Any
 
 from ..core.config import config
 from .context_engine import ContextBuildResult, _ContextEngine
-from .python_legacy_context_engine import PythonLegacyContextEngine
 from .rust_context_client import RustContextClient
 
 
@@ -55,16 +54,15 @@ class ContextScheduler:
     @staticmethod
     def _engine_from_config(runtime_config: Any) -> _ContextEngine:
         engine_name = runtime_config.scanner_engine
-        if engine_name == "python_legacy":
-            return PythonLegacyContextEngine()
-        if engine_name == "rust_v2":
-            return RustContextClient(
-                config=runtime_config,
-                scanner_binary=runtime_config.rust_scanner_bin,
-                scan_db_path=runtime_config.rust_index_db_path,
-                timeout_seconds=runtime_config.rust_process_timeout_seconds,
-            )
-        raise ValueError(f"unsupported scanner engine: {engine_name!r}")
+        if engine_name != "rust_v2":
+            raise ValueError(f"unsupported scanner engine: {engine_name!r}")
+        return RustContextClient(
+            config=runtime_config,
+            scanner_binary=runtime_config.rust_scanner_bin,
+            scan_db_path=runtime_config.rust_index_db_path,
+            office_worker_path=runtime_config.rust_office_parser_bin,
+            timeout_seconds=runtime_config.rust_process_timeout_seconds,
+        )
 
 
 __all__ = [

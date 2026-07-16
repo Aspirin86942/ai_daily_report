@@ -2,8 +2,8 @@ use ai_daily_scanner_contract::{NormalizedScannerProfileV1, RawScannerProfileV1,
 use ai_daily_scanner_core::classifier::{classify_candidate, ClassificationError, ParserRoute};
 use ai_daily_scanner_core::config::normalize_scanner_profile;
 use ai_daily_scanner_core::discovery::{
-    bootstrap_file_identity, discover_files, discover_files_with_diagnostics,
-    normalize_contract_path_text, DiscoveredFileOut, DiscoveryIssueKind, DiscoveryRequest,
+    bootstrap_file_identity, discover_files_with_diagnostics, normalize_contract_path_text,
+    DiscoveredFileOut, DiscoveryIssueKind, DiscoveryRequest,
 };
 use ai_daily_scanner_core::planner::{plan_candidates, PlanAction};
 use chrono::Local;
@@ -128,7 +128,7 @@ fn discovery_filters_and_preserves_bootstrap_identity_and_source_version() {
 }
 
 #[test]
-fn relative_exclusions_use_work_dir_only_in_the_diagnostic_api() {
+fn relative_exclusions_are_resolved_from_the_work_dir() {
     let directory = tempdir().expect("temporary root should exist");
     let work_dir = directory.path().join("relative exclusion work");
     let unique_name = format!(
@@ -152,17 +152,14 @@ fn relative_exclusions_use_work_dir_only_in_the_diagnostic_api() {
         excluded_dirs: vec![PathBuf::from(unique_name)],
     };
 
-    let legacy = discover_files(&request).expect("legacy discovery should succeed");
-    let diagnostic =
-        discover_files_with_diagnostics(&request).expect("diagnostic discovery should succeed");
+    let discovery = discover_files_with_diagnostics(&request).expect("discovery should succeed");
 
-    assert_eq!(legacy.len(), 1, "legacy helper remains CWD-relative");
-    assert!(diagnostic.files.is_empty());
-    assert!(diagnostic.issues.is_empty());
+    assert!(discovery.files.is_empty());
+    assert!(discovery.issues.is_empty());
 }
 
 #[test]
-fn diagnostic_discovery_deduplicates_aliases_without_changing_legacy_helper_output() {
+fn discovery_deduplicates_resolved_aliases() {
     let directory = tempdir().expect("temporary root should exist");
     let work_dir = directory.path().join("alias work");
     fs::create_dir_all(&work_dir).expect("work directory should exist");
@@ -182,16 +179,13 @@ fn diagnostic_discovery_deduplicates_aliases_without_changing_legacy_helper_outp
         excluded_dirs: Vec::new(),
     };
 
-    let legacy = discover_files(&request).expect("legacy discovery should succeed");
-    let diagnostic =
-        discover_files_with_diagnostics(&request).expect("diagnostic discovery should succeed");
+    let discovery = discover_files_with_diagnostics(&request).expect("discovery should succeed");
 
-    assert_eq!(legacy.len(), 2, "legacy helper output must retain aliases");
-    assert_eq!(diagnostic.files.len(), 1);
-    assert!(diagnostic.files[0].path.ends_with("a-target.md"));
-    assert_eq!(diagnostic.issues.len(), 1);
-    assert_eq!(diagnostic.issues[0].kind, DiscoveryIssueKind::Alias);
-    assert!(diagnostic.issues[0]
+    assert_eq!(discovery.files.len(), 1);
+    assert!(discovery.files[0].path.ends_with("a-target.md"));
+    assert_eq!(discovery.issues.len(), 1);
+    assert_eq!(discovery.issues[0].kind, DiscoveryIssueKind::Alias);
+    assert!(discovery.issues[0]
         .path
         .as_deref()
         .is_some_and(|path| path.ends_with("z-alias.md")));

@@ -59,17 +59,19 @@ therefore production requirements rather than incidental portability details.
 
 ## Accepted parity difference
 
-Task 10 freezes the sanitized corpus in `scripts/scanner_cutover_gate.py` and
-its expected root-normalized complete-context hashes in
-`tests/fixtures/scanner_cutover/task10_expected_context_hashes.json`. On that
-corpus, both engines must discover the same inventory, produce identical
+Task 10 froze a sanitized corpus and its expected root-normalized
+complete-context hashes. Those migration-only executables and fixtures were
+removed with the legacy core after acceptance; the verified evidence remains
+in the Task 10 commit history and ephemeral evidence bundle. On that corpus,
+both engines had to discover the same inventory, produce identical
 normalized hashes for text/PDF and any same-backend parse, make the same file
 decisions, stay within budget, and be independently byte-deterministic. The
 two frozen final context hashes intentionally differ: Rust replaces the legacy
 `ScanAggregator` plus `ContextCompressor` double-budget path with the single
 budgeting/rendering pipeline approved by this ADR. Any renderer drift changes
-the golden and requires an explicit ADR review; no parser-content, decision,
-fallback, or nondeterminism difference is accepted under that exception.
+the accepted evidence and requires an explicit ADR review; no parser-content,
+decision, fallback, or nondeterminism difference was accepted under that
+exception.
 
 ## Task 10 cutover evidence (2026-07-16)
 
@@ -130,6 +132,23 @@ same SHA-256, and a hash-checked sentinel created inside the first `.venv`
 survived the second run, proving that the local configuration and existing
 virtual environment were preserved. No business directory was scanned and no
 LLM call was made.
+
+## Task 12 legacy-core deletion evidence (2026-07-16)
+
+The Python scanner, planner, index/cache, aggregation, compression, discovery,
+and top-level fallback implementations have been deleted. `ContextScheduler`
+now exposes only the single Rust `build-context` seam, while the retained
+Python document worker uses its own worker-internal result type. The standalone
+Rust discovery executable and the commandless Office-parser CLI branch were
+also removed; discovery remains a Rust library used by the scanner core and the
+Office worker requires an explicit versioned command.
+
+The deletion tree passed both required zero-match static gates, 211 Python
+tests with the LLM prohibition enabled, two real-release Windows Rust-core E2E
+tests, Python bytecode compilation, Cargo formatting and Clippy, all 127 Rust
+workspace tests, and a release build. Local settings were not modified, no API
+key material was read or output, and no business directory was scanned or sent
+to an LLM.
 
 ## Contract authority
 

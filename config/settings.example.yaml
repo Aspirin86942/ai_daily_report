@@ -38,11 +38,8 @@ scanner:
     - "~$*"
     - "*.tmp"
   excluded_dirs: []
-  # 默认优先 Rust；二进制缺失或失败时会回退 Python。
-  discovery_backend: "rust"
-  rust_discovery_bin: "rust/target/release/ai-daily-discovery"
   discovery_timeout_seconds: 30
-  # Office parser profile/cache defaults used to isolate parser backend changes.
+  # Rust core owns parser routing; these values participate in cache identity.
   office_parser_backend: "rust_office_oxide_v1"
   rust_office_parser_bin: "rust/target/release/ai-daily-office-parser"
   office_parser_fallback_enabled: true
@@ -51,7 +48,6 @@ scanner:
     - "python_sharepoint_text_v1"
   office_fallback_after_timeout: false
   office_fallback_policy_version: "hybrid_v1"
-  office_external_fallback: "disabled"
   # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.
   office_legacy_extensions_enabled: false
   max_workers: 4
@@ -68,6 +64,4 @@ scanner:
     ".pdf": 45
     ".xlsx": 60
     ".xls": 60
-  index_db_path: "data/db/scan_index.sqlite3"
   parser_profile_version: "v1"
-  worker_lane_mode: "direct"

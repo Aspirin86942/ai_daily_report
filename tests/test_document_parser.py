@@ -1,11 +1,7 @@
 """测试 Office/PDF bounded document parser。"""
 
-import json
-import os
-import subprocess
 from pathlib import Path
 
-import pytest
 from docx import Document
 from openpyxl import Workbook
 from pptx import Presentation
@@ -16,45 +12,6 @@ from src.services.document_parser import (
     DocumentParserOptions,
     parse_document_file,
 )
-from src.services.rust_cli_contract import resolve_binary_path
-
-RUST_OFFICE_PARSER_BIN = resolve_binary_path(
-    "rust/target/release/ai-daily-office-parser",
-    project_root=Path(__file__).resolve().parents[1],
-)
-
-
-def _require_rust_office_parser_binary() -> None:
-    if RUST_OFFICE_PARSER_BIN.is_file():
-        return
-    if os.name == "nt":
-        pytest.fail(
-            "Windows integration requires the built Rust Office parser .exe; "
-            "run cargo build --manifest-path rust/Cargo.toml --workspace "
-            "--release --locked"
-        )
-    pytest.skip("Rust Office parser release binary has not been built")
-
-
-def _run_rust_office_parser(sample: Path, file_type: str) -> dict:
-    request = {
-        "file_path": str(sample),
-        "file_type": file_type,
-        "limits": {"document_excerpt_max_chars": 4000},
-        "parser_backend": "rust_office_oxide_v1",
-    }
-    completed = subprocess.run(
-        [str(RUST_OFFICE_PARSER_BIN)],
-        input=json.dumps(request, ensure_ascii=False),
-        text=True,
-        capture_output=True,
-        timeout=20,
-        check=False,
-    )
-    assert completed.returncode == 0, completed.stderr
-    return json.loads(completed.stdout)
-
-
 def _write_minimal_pdf(path: Path, content_stream: str = "") -> None:
     """写入最小 PDF fixture，避免为测试引入额外 PDF 生成依赖。"""
     objects = [
@@ -178,42 +135,6 @@ def test_parse_pptx_extracts_slide_text(tmp_path: Path):
     assert "## Slide 1" in context.content
     assert "周报汇总" in context.content
     assert "完成 scanner 优化" in context.content
-
-
-def test_rust_office_parser_extracts_docx_bounded_xlsx_and_pptx(
-    tmp_path: Path,
-):
-    _require_rust_office_parser_binary()
-    docx_sample = tmp_path / "report.docx"
-    doc = Document()
-    doc.add_paragraph("Rust DOCX 中文")
-    doc.save(docx_sample)
-
-    xlsx_sample = tmp_path / "workbook.xlsx"
-    workbook = Workbook()
-    sheet = workbook.active
-    sheet.append(["项目", "状态"])
-    sheet.append(["Rust XLSX 中文", "完成"])
-    workbook.save(xlsx_sample)
-
-    pptx_sample = tmp_path / "deck.pptx"
-    presentation = Presentation()
-    slide = presentation.slides.add_slide(presentation.slide_layouts[1])
-    slide.shapes.title.text = "Rust PPTX 中文"
-    slide.placeholders[1].text = "完成 parser spike"
-    presentation.save(pptx_sample)
-
-    docx_context = _run_rust_office_parser(docx_sample, ".docx")
-    xlsx_context = _run_rust_office_parser(xlsx_sample, ".xlsx")
-    pptx_context = _run_rust_office_parser(pptx_sample, ".pptx")
-
-    assert docx_context["error"] is None
-    assert "Rust DOCX 中文" in docx_context["content"]
-    assert xlsx_context["error"] is None
-    assert xlsx_context["parser_backend"] == "rust_xlsx_bounded_v1"
-    assert "Rust XLSX 中文" in xlsx_context["content"]
-    assert pptx_context["error"] is None
-    assert "Rust PPTX 中文" in pptx_context["content"]
 
 
 def test_parse_pdf_extracts_text_layer(tmp_path: Path):

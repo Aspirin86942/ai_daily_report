@@ -121,7 +121,6 @@ def test_run_benchmark_uses_scheduler_result_without_file_scanner(monkeypatch) -
 
     assert payload["scan_run"]["run_id"] == 3
     assert payload["context_run"]["context_run_id"] == 7
-    assert not hasattr(benchmark_module, "FileScanner")
 
 
 def test_error_result_remains_explicit_in_benchmark_payload() -> None:

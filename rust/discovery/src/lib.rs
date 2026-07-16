@@ -54,27 +54,15 @@ pub struct DiscoveryReport {
     pub issues: Vec<DiscoveryIssue>,
 }
 
-pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFileOut>> {
-    let report = discover_files_report(request, false, None)?;
-    for issue in &report.issues {
-        eprintln!("warning: {}", issue.message);
-    }
-    Ok(report.files)
-}
-
 pub fn discover_files_with_diagnostics(request: &DiscoveryRequest) -> io::Result<DiscoveryReport> {
-    discover_files_report(request, true, Some(&request.work_dir))
+    discover_files_report(request)
 }
 
-fn discover_files_report(
-    request: &DiscoveryRequest,
-    deduplicate_aliases: bool,
-    relative_exclusion_root: Option<&Path>,
-) -> io::Result<DiscoveryReport> {
+fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryReport> {
     validate_work_dir(&request.work_dir)?;
 
     let ignored_patterns = compile_patterns(&request.ignored_patterns)?;
-    let excluded_dirs = resolve_excluded_dirs(&request.excluded_dirs, relative_exclusion_root);
+    let excluded_dirs = resolve_excluded_dirs(&request.excluded_dirs, Some(&request.work_dir));
     let mut files = Vec::new();
     let mut issues = Vec::new();
 
@@ -192,9 +180,7 @@ fn discover_files_report(
     }
 
     files.sort_by(|left, right| left.path.cmp(&right.path));
-    if deduplicate_aliases {
-        deduplicate_resolved_aliases(&mut files, &mut issues);
-    }
+    deduplicate_resolved_aliases(&mut files, &mut issues);
     issues.sort_by(|left, right| {
         left.path
             .cmp(&right.path)
@@ -528,7 +514,7 @@ mod tests {
             excluded_dirs: vec![],
         };
 
-        let error = match discover_files(&request) {
+        let error = match discover_files_with_diagnostics(&request) {
             Ok(_) => panic!("missing work_dir must not be treated as an empty scan"),
             Err(error) => error,
         };
@@ -613,7 +599,7 @@ mod tests {
             excluded_dirs: vec![],
         };
 
-        let files = discover_files(&request).unwrap();
+        let files = discover_files_with_diagnostics(&request).unwrap().files;
         let paths: Vec<&str> = files.iter().map(|item| item.path.as_str()).collect();
         let mut sorted_paths = paths.clone();
         sorted_paths.sort();
@@ -663,7 +649,7 @@ mod tests {
             excluded_dirs: vec![],
         };
 
-        let files = discover_files(&request).unwrap();
+        let files = discover_files_with_diagnostics(&request).unwrap().files;
         let target_metadata = std::fs::metadata(&target).unwrap();
         let target_path = target.canonicalize().unwrap().to_string_lossy().to_string();
         let expected_identity = format!("bootstrap:{}", target_path.to_lowercase());

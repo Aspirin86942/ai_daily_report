@@ -72,12 +72,11 @@ def test_scanner_contract_profile_copies_only_present_raw_leaves() -> None:
             ignored_patterns=["*归档*.xlsx"],
             max_workers=3,
             office_fallback_after_timeout=False,
-            discovery_backend="rust",
-            rust_discovery_bin="legacy/discovery",
-            rust_office_parser_bin="legacy/office",
-            index_db_path="legacy.sqlite3",
-            worker_lane_mode="subprocess",
-            office_external_fallback="disabled",
+            engine="rust_v2",
+            rust_scanner_bin="bin/scanner",
+            rust_office_parser_bin="bin/office-worker",
+            rust_index_db_path="state/scan_index_v2.sqlite3",
+            rust_process_timeout_seconds=45,
         )
     )
 
@@ -117,14 +116,16 @@ def test_scanner_contract_profile_rejects_unknown_candidate_leaf() -> None:
         cfg.scanner_contract_profile()
 
 
-def test_rust_workspace_and_active_paths_use_one_release_target() -> None:
-    """Workspace 只生成 rust/target，tracked 运行路径不得指向旧 target。"""
+def test_rust_workspace_keeps_discovery_as_a_library_only() -> None:
+    """Discovery 保留 workspace library，不再生成独立生产 helper。"""
     workspace_manifest = PROJECT_ROOT / "rust" / "Cargo.toml"
     workspace_lock = PROJECT_ROOT / "rust" / "Cargo.lock"
     assert workspace_manifest.is_file()
     assert workspace_lock.is_file()
     assert not (PROJECT_ROOT / "rust" / "discovery" / "Cargo.lock").exists()
     assert not (PROJECT_ROOT / "rust" / "office_parser" / "Cargo.lock").exists()
+    assert (PROJECT_ROOT / "rust" / "discovery" / "src" / "lib.rs").is_file()
+    assert not (PROJECT_ROOT / "rust" / "discovery" / "src" / "main.rs").exists()
 
     workspace = tomllib.loads(workspace_manifest.read_text(encoding="utf-8"))
     assert workspace["workspace"]["resolver"] == "2"
@@ -140,12 +141,10 @@ def test_rust_workspace_and_active_paths_use_one_release_target() -> None:
         "config/settings.example.yaml",
         "src/core/config.py",
         "src/core/healthcheck.py",
-        "src/services/scan_discovery.py",
-        "src/services/office_parser.py",
-        "src/services/scan_planner.py",
+        "src/services/context_scheduler.py",
+        "src/services/rust_context_client.py",
         ".github/workflows/ci.yml",
         "scripts/deploy_windows.ps1",
-        "scripts/run_scanner_benchmark_ab.ps1",
         "README.md",
         "docs/scanner-backends.md",
     )
@@ -157,7 +156,7 @@ def test_rust_workspace_and_active_paths_use_one_release_target() -> None:
     assert "rust/office_parser/target" not in combined
     assert "rust\\discovery\\target" not in combined
     assert "rust\\office_parser\\target" not in combined
-    assert "rust/target/release/ai-daily-discovery" in combined
+    assert "rust/target/release/ai-daily-scanner" in combined
     assert "rust/target/release/ai-daily-office-parser" in combined
 
 

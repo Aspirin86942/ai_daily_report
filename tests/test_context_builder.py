@@ -140,7 +140,7 @@ def test_scheduler_validates_before_calling_the_selected_engine() -> None:
     assert engine.calls == []
 
 
-def test_error_envelope_is_returned_without_any_legacy_fallback_call() -> None:
+def test_error_envelope_is_returned_without_a_second_engine_call() -> None:
     rust_engine = FakeEngine(_envelope("error"))
 
     result = ContextScheduler(engine=rust_engine).build_context(_request())

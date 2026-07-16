@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..models.schemas import FileContext
+from ..workers.contracts import WorkerParsePayload
 
 OFFICE_PARSER_BACKEND = "office_v1"
 PDF_TEXT_PARSER_BACKEND = "pdf_text_v1"
@@ -71,8 +71,8 @@ def parse_document_file(
     file_type: str,
     limits: Mapping[str, Any],
     options: DocumentParserOptions | None = None,
-) -> FileContext:
-    """按扩展名解析 Office/PDF 文件并返回可审计 FileContext。"""
+) -> WorkerParsePayload:
+    """按扩展名解析 Office/PDF 文件并返回 worker 内部结果。"""
     parser_options = options or DocumentParserOptions()
     normalized_type = file_type.lower()
     try:
@@ -84,7 +84,7 @@ def parse_document_file(
             return _parse_pptx(file_path, normalized_type, limits, parser_options)
         if normalized_type == ".pdf":
             return _parse_pdf(file_path, normalized_type, limits, parser_options)
-        return FileContext(
+        return WorkerParsePayload(
             file_path=str(file_path),
             file_type=normalized_type,
             content="",
@@ -93,7 +93,7 @@ def parse_document_file(
             truncated=False,
         )
     except Exception as exc:
-        return FileContext(
+        return WorkerParsePayload(
             file_path=str(file_path),
             file_type=normalized_type,
             content="",
@@ -108,7 +108,7 @@ def _parse_docx(
     file_type: str,
     limits: Mapping[str, Any],
     options: DocumentParserOptions,
-) -> FileContext:
+) -> WorkerParsePayload:
     from docx import Document
 
     document = Document(file_path)
@@ -161,7 +161,7 @@ def _parse_docx(
     content = builder.build()
     if not content:
         content = "No paragraph/table text extracted"
-    return FileContext(
+    return WorkerParsePayload(
         file_path=str(file_path),
         file_type=file_type,
         content=content,
@@ -176,7 +176,7 @@ def _parse_xlsx(
     file_type: str,
     limits: Mapping[str, Any],
     options: DocumentParserOptions,
-) -> FileContext:
+) -> WorkerParsePayload:
     from openpyxl import load_workbook
 
     workbook = load_workbook(file_path, read_only=True, data_only=True)
@@ -219,7 +219,7 @@ def _parse_xlsx(
         workbook.close()
 
     content = builder.build() or "No worksheet text extracted"
-    return FileContext(
+    return WorkerParsePayload(
         file_path=str(file_path),
         file_type=file_type,
         content=content,
@@ -234,7 +234,7 @@ def _parse_pptx(
     file_type: str,
     limits: Mapping[str, Any],
     options: DocumentParserOptions,
-) -> FileContext:
+) -> WorkerParsePayload:
     from pptx import Presentation
 
     presentation = Presentation(file_path)
@@ -269,7 +269,7 @@ def _parse_pptx(
                 break
 
     content = builder.build() or "No slide text extracted"
-    return FileContext(
+    return WorkerParsePayload(
         file_path=str(file_path),
         file_type=file_type,
         content=content,
@@ -284,7 +284,7 @@ def _parse_pdf(
     file_type: str,
     limits: Mapping[str, Any],
     options: DocumentParserOptions,
-) -> FileContext:
+) -> WorkerParsePayload:
     import pdfplumber
 
     builder = _new_builder(limits)
@@ -311,7 +311,7 @@ def _parse_pdf(
             truncated = True
 
     if not extracted_any_text:
-        return FileContext(
+        return WorkerParsePayload(
             file_path=str(file_path),
             file_type=file_type,
             content="",
@@ -320,7 +320,7 @@ def _parse_pdf(
             truncated=False,
         )
 
-    return FileContext(
+    return WorkerParsePayload(
         file_path=str(file_path),
         file_type=file_type,
         content=builder.build(),

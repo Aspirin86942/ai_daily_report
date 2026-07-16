@@ -28,7 +28,10 @@ def _make_config(provider: str, api_key: str | None, root: Path) -> SimpleNamesp
         llm_provider=provider,
         work_dir=root / "workspace",
         llm_config={"model_id": "deepseek-chat", "max_tokens": 8192},
-        scanner_config={"max_workers": 4},
+        scanner_contract_profile=lambda: {
+            "schema_version": "scanner_profile_v1",
+            "max_workers": 4,
+        },
         reports_dir=root / "data" / "reports",
         db_dir=root / "data" / "db",
         deepseek_api_key=api_key if provider == "deepseek" else "",
@@ -44,16 +47,13 @@ def _make_strict_rust_config(
     cfg = _make_config("deepseek", "synthetic-key", root)
     cfg.scanner_engine = "rust_v2"
     cfg.rust_scanner_bin = "bin/ai-daily-scanner"
+    cfg.rust_office_parser_bin = "bin/ai-daily-office-parser"
     cfg.rust_index_db_path = "data/db/scan_index_v2.sqlite3"
     cfg.rust_process_timeout_seconds = 30.0
-    cfg.scanner_config = {
+    cfg.scanner_contract_profile = lambda: {
+        "schema_version": "scanner_profile_v1",
         "max_workers": 4,
         "allowed_extensions": allowed_extensions or [".txt"],
-        "office_parser_backend": "rust_office_oxide_v1",
-        "rust_office_parser_bin": "bin/ai-daily-office-parser",
-        "office_parser_fallback_enabled": True,
-        "office_parser_fallback_order": ["python_office_v1"],
-        "office_legacy_extensions_enabled": False,
     }
     return cfg
 
@@ -178,7 +178,7 @@ def test_collect_healthcheck_strict_rejects_non_rust_effective_engine(
 ):
     _prepare_strict_root(tmp_path)
     cfg = _make_strict_rust_config(tmp_path)
-    cfg.scanner_engine = "python_legacy"
+    cfg.scanner_engine = "retired"
     monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
 
     result = healthcheck.collect_healthcheck(
@@ -554,197 +554,3 @@ def test_collect_healthcheck_reports_unwritable_log_directory(
         message.startswith(f"日志目录不可写: {tmp_path / 'logs'}")
         for message in result.errors
     )
-
-
-def test_collect_healthcheck_resolves_windows_rust_executables(
-    tmp_path,
-    monkeypatch,
-):
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / healthcheck.Config._settings_file_name()).write_text(
-        "llm:\n  provider: deepseek\n",
-        encoding="utf-8",
-    )
-    _write_templates(tmp_path)
-    (tmp_path / "data").mkdir()
-    (tmp_path / "workspace").mkdir()
-
-    release_dir = tmp_path / "rust" / "target" / "release"
-    discovery_bin = release_dir / "ai-daily-discovery.exe"
-    office_bin = release_dir / "ai-daily-office-parser.exe"
-    release_dir.mkdir(parents=True)
-    discovery_bin.write_bytes(b"test-rust-binary")
-    office_bin.write_bytes(b"test-rust-binary")
-
-    config_obj = _make_config("deepseek", "sk-test", tmp_path)
-    config_obj.scanner_config = {
-        "max_workers": 4,
-        "discovery_backend": "rust",
-        "rust_discovery_bin": (
-            "rust/target/release/ai-daily-discovery"
-        ),
-        "office_parser_backend": "rust_office_oxide_v1",
-        "rust_office_parser_bin": (
-            "rust/target/release/ai-daily-office-parser"
-        ),
-        "office_parser_fallback_enabled": True,
-        "office_parser_fallback_order": ["python_office_v1"],
-    }
-
-    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
-    monkeypatch.setattr(healthcheck.platform, "system", lambda: "Windows")
-    monkeypatch.setattr(
-        healthcheck.subprocess,
-        "run",
-        lambda *args, **kwargs: SimpleNamespace(
-            returncode=1,
-            stdout="",
-            stderr="error: EOF while parsing a value",
-        ),
-    )
-
-    result = healthcheck.collect_healthcheck(
-        project_root=tmp_path,
-        config_obj=config_obj,
-    )
-
-    assert result.info["Rust Discovery CLI"] == str(discovery_bin)
-    assert result.info["Rust Office Parser CLI"] == str(office_bin)
-    assert result.info["Rust Discovery CLI 状态"] == "可启动"
-    assert result.info["Rust Office Parser CLI 状态"] == "可启动"
-    assert not any("Rust" in message for message in result.errors)
-    assert not any("Rust" in message for message in result.warnings)
-
-
-def test_collect_healthcheck_warns_when_rust_cli_file_cannot_start(
-    tmp_path,
-    monkeypatch,
-):
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / healthcheck.Config._settings_file_name()).write_text(
-        "llm:\n  provider: deepseek\n",
-        encoding="utf-8",
-    )
-    _write_templates(tmp_path)
-    (tmp_path / "data").mkdir()
-    (tmp_path / "workspace").mkdir()
-    discovery_bin = tmp_path / "bin" / "discovery.exe"
-    discovery_bin.parent.mkdir()
-    discovery_bin.write_bytes(b"")
-
-    config_obj = _make_config("deepseek", "sk-test", tmp_path)
-    config_obj.scanner_config = {
-        "max_workers": 4,
-        "discovery_backend": "rust",
-        "rust_discovery_bin": "bin/discovery",
-        "office_parser_backend": "python_office_v1",
-    }
-
-    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
-    monkeypatch.setattr(healthcheck.platform, "system", lambda: "Windows")
-
-    result = healthcheck.collect_healthcheck(
-        project_root=tmp_path,
-        config_obj=config_obj,
-    )
-
-    assert not any("Rust" in message for message in result.errors)
-    assert result.info["Rust Discovery CLI 状态"] == (
-        "无法启动，将回退 Python discovery"
-    )
-    assert any(
-        "Rust Discovery CLI 无法启动" in message
-        and "回退 Python discovery" in message
-        for message in result.warnings
-    )
-
-
-def test_collect_healthcheck_warns_when_missing_rust_clis_have_fallback(
-    tmp_path,
-    monkeypatch,
-):
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / healthcheck.Config._settings_file_name()).write_text(
-        "llm:\n  provider: deepseek\n",
-        encoding="utf-8",
-    )
-    _write_templates(tmp_path)
-    (tmp_path / "data").mkdir()
-    (tmp_path / "workspace").mkdir()
-
-    config_obj = _make_config("deepseek", "sk-test", tmp_path)
-    config_obj.scanner_config = {
-        "max_workers": 4,
-        "discovery_backend": "rust",
-        "rust_discovery_bin": "bin/discovery",
-        "office_parser_backend": "rust_office_oxide_v1",
-        "rust_office_parser_bin": "bin/office-parser",
-        "office_parser_fallback_enabled": True,
-    }
-
-    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
-    monkeypatch.setattr(healthcheck.platform, "system", lambda: "Windows")
-
-    result = healthcheck.collect_healthcheck(
-        project_root=tmp_path,
-        config_obj=config_obj,
-    )
-
-    assert not any("Rust" in message for message in result.errors)
-    assert any(
-        "Rust Discovery CLI 不存在" in message
-        and "回退 Python discovery" in message
-        for message in result.warnings
-    )
-    assert any(
-        "Rust Office Parser CLI 不存在" in message
-        and "回退 Python Office parser" in message
-        for message in result.warnings
-    )
-    assert result.info["Rust Discovery CLI 状态"] == "缺失，将回退 Python discovery"
-    assert result.info["Rust Office Parser CLI 状态"] == (
-        "缺失，将回退 Python Office parser"
-    )
-
-
-def test_collect_healthcheck_errors_when_missing_office_cli_has_no_fallback(
-    tmp_path,
-    monkeypatch,
-):
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / healthcheck.Config._settings_file_name()).write_text(
-        "llm:\n  provider: deepseek\n",
-        encoding="utf-8",
-    )
-    _write_templates(tmp_path)
-    (tmp_path / "data").mkdir()
-    (tmp_path / "workspace").mkdir()
-
-    config_obj = _make_config("deepseek", "sk-test", tmp_path)
-    config_obj.scanner_config = {
-        "max_workers": 4,
-        "discovery_backend": "python",
-        "office_parser_backend": "rust_office_oxide_v1",
-        "rust_office_parser_bin": "bin/office-parser",
-        "office_parser_fallback_enabled": False,
-        "office_parser_fallback_order": [],
-    }
-
-    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
-    monkeypatch.setattr(healthcheck.platform, "system", lambda: "Windows")
-
-    result = healthcheck.collect_healthcheck(
-        project_root=tmp_path,
-        config_obj=config_obj,
-    )
-
-    assert any(
-        "Rust Office Parser CLI 不存在" in message
-        and "无可用 fallback" in message
-        for message in result.errors
-    )
-    assert result.info["Rust Office Parser CLI 状态"] == "缺失，无可用 fallback"

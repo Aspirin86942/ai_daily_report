@@ -13,9 +13,6 @@ import sys
 import pytest
 import yaml
 
-from src.services.context_compressor import ContextProfile
-from src.services.scan_planner import ScanPlanner
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_DIR = PROJECT_ROOT / "docs" / "contracts"
 FIXTURE_DIR = PROJECT_ROOT / "tests" / "fixtures" / "scanner_contract" / "v1"
@@ -418,7 +415,7 @@ def test_contract_fixture_corpus_is_synthetic_and_non_secret() -> None:
 
 
 def test_frozen_defaults_match_current_python_contract() -> None:
-    """冻结值必须同时匹配 example config、planner 与 context profile。"""
+    """示例配置必须继续提供冻结的显式 Rust profile 叶子。"""
     example = yaml.safe_load(
         (PROJECT_ROOT / "config" / "settings.example.yaml").read_text(
             encoding="utf-8"
@@ -456,130 +453,4 @@ def test_frozen_defaults_match_current_python_contract() -> None:
         "file_timeout_seconds": 30,
         "file_timeout_by_extension": {".pdf": 45, ".xlsx": 60, ".xls": 60},
         "total_max_chars": 50000,
-    }
-
-    planner = ScanPlanner(scanner_cfg)
-    regular = planner.build_parser_profile(summary_mode=False)
-    summary = planner.build_parser_profile(summary_mode=True)
-    frozen_routing = {
-        "parser_profile_version": "v1",
-        "text_parser_backend": "light_text_v1",
-        "office_parser_backend": "rust_office_oxide_v1",
-        "pdf_parser_backend": "pdf_text_v1",
-        "office_parser_fallback_enabled": True,
-        "office_parser_fallback_order": [
-            "python_office_v1",
-            "python_sharepoint_text_v1",
-        ],
-        "office_fallback_after_timeout": False,
-        "office_legacy_extensions_enabled": False,
-        "office_fallback_policy_version": "hybrid_v1",
-        "pptx_include_notes": True,
-        "total_max_chars": 50000,
-    }
-    for profile in (regular, summary):
-        assert {key: profile[key] for key in frozen_routing} == frozen_routing
-    assert {
-        key: regular[key]
-        for key in (
-            "text_max_chars",
-            "pdf_max_pages",
-            "excel_max_sheets",
-            "excel_max_rows",
-            "excel_max_columns",
-            "docx_max_paragraphs",
-            "docx_max_tables",
-            "docx_table_max_rows",
-            "docx_table_max_cols",
-            "pptx_max_slides",
-            "document_excerpt_max_chars",
-        )
-    } == {
-        "text_max_chars": 6000,
-        "pdf_max_pages": 5,
-        "excel_max_sheets": 5,
-        "excel_max_rows": 50,
-        "excel_max_columns": 20,
-        "docx_max_paragraphs": 200,
-        "docx_max_tables": 20,
-        "docx_table_max_rows": 50,
-        "docx_table_max_cols": 12,
-        "pptx_max_slides": 50,
-        "document_excerpt_max_chars": 6000,
-    }
-    assert {
-        key: summary[key]
-        for key in (
-            "text_max_chars",
-            "pdf_max_pages",
-            "excel_max_sheets",
-            "excel_max_rows",
-            "excel_max_columns",
-            "docx_max_paragraphs",
-            "docx_max_tables",
-            "docx_table_max_rows",
-            "docx_table_max_cols",
-            "pptx_max_slides",
-            "document_excerpt_max_chars",
-        )
-    } == {
-        "text_max_chars": 2000,
-        "pdf_max_pages": 2,
-        "excel_max_sheets": 2,
-        "excel_max_rows": 10,
-        "excel_max_columns": 12,
-        "docx_max_paragraphs": 80,
-        "docx_max_tables": 8,
-        "docx_table_max_rows": 20,
-        "docx_table_max_cols": 8,
-        "pptx_max_slides": 15,
-        "document_excerpt_max_chars": 2000,
-    }
-    assert regular["direct_text_read_bytes"] == 262144
-    assert regular["log_tail_read_bytes"] == 262144
-    assert regular["text_excerpt_max_chars"] == 6000
-    assert summary["direct_text_read_bytes"] == 262144
-    assert summary["log_tail_read_bytes"] == 262144
-    assert summary["text_excerpt_max_chars"] == 2000
-
-    assert {
-        mode: ContextProfile.for_report_mode(mode).to_profile_dict()
-        for mode in ("daily", "weekly", "monthly")
-    } == {
-        "daily": {
-            "version": "context_scheduler_v1",
-            "report_mode": "daily",
-            "compression_profile": "daily_balanced_v1",
-            "global_context_max_chars": 50000,
-            "per_file_max_chars": 8000,
-            "small_file_max_bytes": 65536,
-            "medium_file_max_bytes": 1048576,
-            "large_file_max_bytes": 10485760,
-            "priority_policy": "default_v1",
-            "compression_policy": "markdown_context_v1",
-        },
-        "weekly": {
-            "version": "context_scheduler_v1",
-            "report_mode": "weekly",
-            "compression_profile": "weekly_balanced_v1",
-            "global_context_max_chars": 50000,
-            "per_file_max_chars": 5000,
-            "small_file_max_bytes": 65536,
-            "medium_file_max_bytes": 1048576,
-            "large_file_max_bytes": 10485760,
-            "priority_policy": "default_v1",
-            "compression_policy": "markdown_context_v1",
-        },
-        "monthly": {
-            "version": "context_scheduler_v1",
-            "report_mode": "monthly",
-            "compression_profile": "monthly_balanced_v1",
-            "global_context_max_chars": 60000,
-            "per_file_max_chars": 4000,
-            "small_file_max_bytes": 65536,
-            "medium_file_max_bytes": 1048576,
-            "large_file_max_bytes": 10485760,
-            "priority_policy": "default_v1",
-            "compression_policy": "markdown_context_v1",
-        },
     }

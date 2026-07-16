@@ -157,86 +157,44 @@ llm:
 - 默认使用 `deepseek`，因此只配置 `OPENAI_API_KEY` 但不切换 `llm.provider` 时，`python main.py doctor` 仍会按 DeepSeek 路径校验并报缺少 `DEEPSEEK_API_KEY`。
 - OpenAI 用户请先把 `llm.provider` 改成 `openai`，再配置 `OPENAI_API_KEY`。
 
-### Rust Discovery Backend
+### Rust scanner/context core
 
-默认优先使用 Rust discovery；如果 Rust CLI 缺失、启动失败、超时、非零退出，或 stdout JSON / 字段契约校验失败，会记录 warning 并回退到 Python discovery：
-
-```yaml
-scanner:
-  discovery_backend: "rust"
-  rust_discovery_bin: "rust/target/release/ai-daily-discovery"
-```
-
-本机要测试 Rust discovery 时，先构建 CLI：
-
-需本机已安装 Rust toolchain，并确保 cargo 可用。
-
-```bash
-cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
-```
-
-然后只修改当前系统的本机配置（Linux 为 `config/settings.linux.yaml`，Windows 为 `config/settings.windows.yaml`）：
+生产扫描路径固定为 Python 应用壳加 Rust scanner/context core。Python 负责 CLI、配置、报告存储、模板与 LLM；Rust 负责发现、分类、parser 路由、worker deadline、缓存、审计和确定性 context 压缩。
 
 ```yaml
 scanner:
-  discovery_backend: "rust"
-```
-
-需要跑 Python baseline benchmark 时，把当前系统的本机配置临时改成：
-
-```yaml
-scanner:
-  discovery_backend: "python"
-```
-
-benchmark 报告中的 `discovery_backend` 字段用于确认本轮配置；如果看到 Rust fallback warning，说明配置是 Rust，但实际 discovery 已降级到 Python。
-
-更完整的 scanner backend 架构、fallback 行为、cache profile 和 benchmark 读法见 `docs/scanner-backends.md`。
-
-### Rust Office Parser Backend
-
-Office 文件默认优先使用 Rust parser CLI；如果 Rust CLI 缺失、执行失败或输出契约校验失败，会按配置回退到 Python backend。超时默认直接作为解析失败返回；只有显式启用 `office_fallback_after_timeout: true` 时，才会在 Rust 超时后继续尝试 Python fallback。
-
-```yaml
-scanner:
-  office_parser_backend: "rust_office_oxide_v1"
+  engine: "rust_v2"
+  rust_scanner_bin: "rust/target/release/ai-daily-scanner"
   rust_office_parser_bin: "rust/target/release/ai-daily-office-parser"
-  office_parser_fallback_enabled: true
-  office_parser_fallback_order:
-    - "python_office_v1"
-    - "python_sharepoint_text_v1"
-  office_fallback_after_timeout: false
-  office_external_fallback: "disabled"
-  office_legacy_extensions_enabled: false
+  rust_index_db_path: "data/db/scan_index_v2.sqlite3"
 ```
 
-本机要测试 Rust Office parser 时，先构建 CLI：
+Discovery 已作为 library 链接进主 scanner，不再部署独立 discovery executable。Office parser 继续作为崩溃隔离 worker；PDF 和配置允许的旧 Office 格式由 Python document worker 处理。parser fallback 由 Rust core 在单文件总 deadline 内决策和审计，不存在顶层 scanner 静默回退。
 
-```bash
+在 Windows 源码 checkout 中构建和验收：
+
+```powershell
 cargo test --manifest-path rust/Cargo.toml --workspace --locked
 cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
+.\.venv\Scripts\python.exe main.py doctor --strict
 ```
 
-`.xlsx` 在 Rust CLI 内走专用 `rust_xlsx_bounded_v1` 有界预览路径，只读取配置预算内的 sheet、行、列和字符数；`.docx` / `.pptx` 继续走 `rust_office_oxide_v1`。默认扫描范围不会自动加入 `.doc` / `.ppt`。如需处理 legacy Office 文件，应先确认真实样本和 fallback 行为，再显式加入 `scanner.allowed_extensions`，避免把未验证的旧格式文件带入常规扫描。
+`doctor --strict` 会验证 scanner 合同与 build、v2 数据库父目录和两个 worker handshake；它不会解析业务文件或调用 LLM。
 
-benchmark 报告中的 `parser_backend`、`attempted_backend`、`fallback_backend`、`fallback_reason` 字段用于确认 Rust 是否成功解析，或是否已回退到 Python backend。看到 `.xlsx` 的 `parser_backend` 为 `rust_xlsx_bounded_v1` 是当前预期行为，不表示脱离 Rust Office parser CLI。
+`.xlsx` 使用 `rust_xlsx_bounded_v1`，`.docx` / `.pptx` 使用 `rust_office_oxide_v1`。`parser_backend` 表示真正产生内容的 parser，`worker_lane` 表示执行隔离 lane，两者必须分别审计。
 
-### Backend 验收
-
-`doctor` 用于检查配置、依赖和本机运行条件；它不代表真实文件已经由 Rust 解析。部署验收时还应用一组可脱敏的 `.xlsx` / `.docx` / `.pptx` 样本运行 scanner benchmark，并同时检查：
-
-- `discovery_backend` 是配置的 discovery 路径；日志中不应出现 Rust discovery fallback warning。
-- `parser_backend` 是真正产生内容的 parser，`worker_lane` 只表示执行 lane，两者不可混用。
-- `attempted_backend`、`fallback_backend` 和 `fallback_reason` 用于证明是否实际发生 fallback。
-- 未构建 Rust CLI 时，discovery 和 Office parser 可能回退到 Python；这能保持功能，但不等于 Rust 性能路径验收通过。
+使用合成或已批准脱敏目录运行 benchmark，并指定临时 v2 数据库：
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\benchmark_scanner.py `
   --start-date 2026-05-24 `
   --end-date 2026-05-25 `
-  --json-out data\benchmarks\scanner.json `
-  --markdown-out data\benchmarks\scanner.md
+  --scan-db-path .tmp\scanner-benchmark\scan_index_v2.sqlite3 `
+  --json-out .tmp\scanner-benchmark\scanner.json `
+  --markdown-out .tmp\scanner-benchmark\scanner.md
 ```
+
+完整的路由、cache identity 和审计说明见 `docs/scanner-backends.md`。
 
 ### 数据外发与真实烟测
 

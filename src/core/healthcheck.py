@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import importlib
-import platform
-import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .config import Config, config
-from ..services.rust_cli_contract import resolve_binary_path
 from ..services.rust_context_client import (
     RustContextClient,
     RustContextProbeError,
@@ -41,7 +38,6 @@ REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
     ("jinja2", "jinja2"),
 ]
 
-RUST_CLI_PROBE_TIMEOUT_SECONDS = 3.0
 STRICT_RUST_PACKAGE_CHECKS: tuple[str, ...] = (
     "scan_db_parent",
     "office_worker_handshake",
@@ -165,11 +161,14 @@ def _append_runtime_config_checks(
     )
     reports_dir = Path(getattr(cfg, "reports_dir"))
     db_dir = Path(getattr(cfg, "db_dir"))
-    scanner_config = getattr(cfg, "scanner_config")
+    scanner_profile = cfg.scanner_contract_profile()
     result.info["LLM Provider"] = provider
     result.info["工作目录"] = str(work_dir)
     result.info["LLM 模型"] = model_id
-    result.info["最大并发"] = str(scanner_config["max_workers"])
+    max_workers = scanner_profile.get("max_workers")
+    result.info["最大并发"] = (
+        str(max_workers) if max_workers is not None else "Rust 默认"
+    )
     result.info["SQLite DB"] = str(db_dir / "reports.sqlite3")
 
     _append_work_dir_check(result, work_dir)
@@ -180,11 +179,8 @@ def _append_runtime_config_checks(
         _append_strict_rust_core_checks(
             result,
             cfg,
-            scanner_config,
             project_root,
         )
-    else:
-        _append_rust_cli_checks(result, scanner_config, project_root)
 
     if not model_id:
         result.errors.append("未配置 LLM 模型")
@@ -207,7 +203,6 @@ def _append_runtime_config_checks(
 def _append_strict_rust_core_checks(
     result: HealthCheckResult,
     cfg: Any,
-    scanner_config: Any,
     project_root: Path,
 ) -> None:
     """Validate the effective Rust production path without exposing stderr."""
@@ -227,10 +222,7 @@ def _append_strict_rust_core_checks(
             project_root=project_root,
             scanner_binary=getattr(cfg, "rust_scanner_bin"),
             scan_db_path=getattr(cfg, "rust_index_db_path"),
-            office_worker_path=scanner_config.get(
-                "rust_office_parser_bin",
-                "rust/target/release/ai-daily-office-parser",
-            ),
+            office_worker_path=getattr(cfg, "rust_office_parser_bin"),
             timeout_seconds=min(configured_timeout, 30.0),
         )
         version = client.version()
@@ -285,6 +277,7 @@ def _append_strict_rust_core_checks(
         if check.status != "ok":
             result.errors.append(f"Rust strict check failed: {check_name}")
 
+
 def _append_work_dir_check(result: HealthCheckResult, work_dir: Path) -> None:
     """校验扫描根目录，避免路径不可达被后续扫描误判为空结果。"""
 
@@ -314,125 +307,6 @@ def _append_writable_directory_check(
             pass
     except OSError as exc:
         result.errors.append(f"{label}不可写: {directory} ({exc})")
-
-
-def _probe_rust_cli(binary_path: Path) -> str | None:
-    """用空 stdin 验证 Rust JSON CLI 可启动且仍遵循统一错误前缀。"""
-
-    try:
-        completed = subprocess.run(
-            [str(binary_path)],
-            input="",
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            capture_output=True,
-            timeout=RUST_CLI_PROBE_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, TimeoutError):
-        return f"启动检查超过 {RUST_CLI_PROBE_TIMEOUT_SECONDS:g} 秒"
-    except OSError as exc:
-        return f"启动失败: {exc}"
-
-    stderr = completed.stderr if isinstance(completed.stderr, str) else ""
-    if completed.returncode == 1 and stderr.lstrip().startswith("error:"):
-        return None
-    return f"空请求契约异常 (exit code {completed.returncode})"
-
-
-def _append_rust_cli_checks(
-    result: HealthCheckResult,
-    scanner_config: Any,
-    project_root: Path,
-) -> None:
-    """展示当前实际会启动的 Rust helper 路径。"""
-
-    if str(scanner_config.get("discovery_backend", "rust")).strip().lower() == "rust":
-        discovery_path = resolve_binary_path(
-            scanner_config.get(
-                "rust_discovery_bin",
-                "rust/target/release/ai-daily-discovery",
-            ),
-            project_root=project_root,
-            system_name=platform.system(),
-        )
-        result.info["Rust Discovery CLI"] = str(discovery_path)
-        if not discovery_path.is_file():
-            result.info["Rust Discovery CLI 状态"] = "缺失，将回退 Python discovery"
-            result.warnings.append(
-                f"Rust Discovery CLI 不存在: {discovery_path}；"
-                "将回退 Python discovery"
-            )
-        elif probe_error := _probe_rust_cli(discovery_path):
-            result.info["Rust Discovery CLI 状态"] = (
-                "无法启动，将回退 Python discovery"
-            )
-            result.warnings.append(
-                f"Rust Discovery CLI 无法启动: {discovery_path} ({probe_error})；"
-                "将回退 Python discovery"
-            )
-        else:
-            result.info["Rust Discovery CLI 状态"] = "可启动"
-
-    office_backend = str(
-        scanner_config.get("office_parser_backend", "rust_office_oxide_v1")
-    ).strip()
-    if office_backend == "rust_office_oxide_v1":
-        office_path = resolve_binary_path(
-            scanner_config.get(
-                "rust_office_parser_bin",
-                "rust/target/release/ai-daily-office-parser",
-            ),
-            project_root=project_root,
-            system_name=platform.system(),
-        )
-        result.info["Rust Office Parser CLI"] = str(office_path)
-        office_exists = office_path.is_file()
-        office_probe_error = None if not office_exists else _probe_rust_cli(office_path)
-        if office_exists and office_probe_error is None:
-            result.info["Rust Office Parser CLI 状态"] = "可启动"
-        else:
-            issue = "不存在" if not office_exists else "无法启动"
-            status = "缺失" if not office_exists else "无法启动"
-            probe_detail = f" ({office_probe_error})" if office_probe_error else ""
-            if _has_office_fallback(scanner_config):
-                result.info["Rust Office Parser CLI 状态"] = (
-                    f"{status}，将回退 Python Office parser"
-                )
-                result.warnings.append(
-                    f"Rust Office Parser CLI {issue}: {office_path}"
-                    f"{probe_detail}；将按配置回退 Python Office parser"
-                )
-            else:
-                result.info["Rust Office Parser CLI 状态"] = (
-                    f"{status}，无可用 fallback"
-                )
-                result.errors.append(
-                    f"Rust Office Parser CLI {issue}: {office_path}"
-                    f"{probe_detail}；无可用 fallback"
-                )
-
-
-def _has_office_fallback(scanner_config: Any) -> bool:
-    """配置中至少有一个已支持的 Python Office fallback 才视为可降级。"""
-
-    if not bool(scanner_config.get("office_parser_fallback_enabled", True)):
-        return False
-    order = scanner_config.get(
-        "office_parser_fallback_order",
-        ["python_office_v1", "python_sharepoint_text_v1"],
-    )
-    if isinstance(order, str):
-        order = [order]
-    try:
-        return any(
-            str(backend) in {"python_office_v1", "python_sharepoint_text_v1"}
-            for backend in order
-        )
-    except TypeError:
-        return False
-
 
 def _append_dependency_checks(result: HealthCheckResult) -> None:
     """检查关键依赖是否可导入。"""

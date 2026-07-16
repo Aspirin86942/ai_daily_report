@@ -263,6 +263,7 @@ def test_run_benchmark_calls_build_then_inspect_without_file_scanner(monkeypatch
         "config",
         SimpleNamespace(
             rust_scanner_bin="scanner.exe",
+            rust_office_parser_bin="office-worker.exe",
             rust_index_db_path="state/scan_index_v2.sqlite3",
             rust_process_timeout_seconds=90,
         ),
@@ -278,5 +279,5 @@ def test_run_benchmark_calls_build_then_inspect_without_file_scanner(monkeypatch
     payload = run_benchmark(args)
 
     assert payload["status"] == "partial"
+    assert calls[0][1]["office_worker_path"] == "office-worker.exe"
     assert calls[1:] == [("build", "daily"), ("inspect", (7, False))]
-    assert not hasattr(benchmark_module, "FileScanner")

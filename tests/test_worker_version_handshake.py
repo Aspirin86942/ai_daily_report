@@ -197,7 +197,7 @@ def test_python_document_worker_process_parses_real_legacy_office(
     expected_text: str,
 ) -> None:
     sample = PROJECT_ROOT / "tests" / "fixtures" / "worker_documents" / file_name
-    request = _python_legacy_parse_request(sample, file_type, backend)
+    request = _python_document_parse_request(sample, file_type, backend)
 
     completed = subprocess.run(
         [
@@ -226,7 +226,7 @@ def test_python_document_worker_process_parses_real_legacy_office(
     assert response.observed_source_version == request["expected_source_version"]
 
 
-def test_office_worker_version_preserves_legacy_binary_and_ignores_stdin() -> None:
+def test_office_worker_version_is_requestless_and_ignores_stdin() -> None:
     _require_office_worker()
 
     completed = subprocess.run(
@@ -251,6 +251,22 @@ def test_office_worker_version_preserves_legacy_binary_and_ignores_stdin() -> No
         "rust_xlsx_bounded_v1",
     ]
     assert version.supported_extensions == [".docx", ".pptx", ".xlsx"]
+
+
+def test_office_worker_requires_an_explicit_command() -> None:
+    _require_office_worker()
+
+    completed = subprocess.run(
+        [str(OFFICE_WORKER_BIN)],
+        cwd=PROJECT_ROOT,
+        input=b"{}",
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert completed.stdout == b""
+    assert b"usage: ai-daily-office-parser <version|parse>" in completed.stderr
 
 
 @pytest.mark.parametrize("file_type", [".xlsx", ".docx", ".pptx"])
@@ -370,7 +386,7 @@ def _office_parse_request(path: Path, file_type: str, backend: str) -> dict[str,
     }
 
 
-def _python_legacy_parse_request(
+def _python_document_parse_request(
     path: Path,
     file_type: str,
     backend: str,

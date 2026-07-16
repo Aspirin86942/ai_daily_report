@@ -1,5 +1,4 @@
 from enum import Enum
-from typing import Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -45,26 +44,3 @@ class MonthlyReportData(BaseModel):
     completed_work: str = Field(description="本月完成内容，使用自然段")
     work_summary: str = Field(description="本月工作小结，使用自然段")
     next_plan: str = Field(description="下月工作计划，使用自然段")
-
-
-class FileContext(BaseModel):
-    file_path: str = Field(description="文件路径")
-    file_type: str = Field(description="文件类型")
-    content: str = Field(description="抽取文本")
-    error: Optional[str] = Field(default=None, description="发现的问题摘要")
-    parser_backend: Optional[str] = Field(
-        default=None,
-        description="解析后端标识，用于 scanner benchmark 和审计",
-    )
-    truncated: bool = Field(default=False, description="抽取内容是否被读取预算截断")
-
-
-class ScanResult(BaseModel):
-    total_files: int = Field(description="扫描文件总数")
-    success_count: int = Field(description="成功解析数")
-    error_count: int = Field(description="失败解析数")
-    contexts: list[FileContext] = Field(description="文件级上下文")
-    scan_run_id: Optional[int] = Field(
-        default=None,
-        description="本次 scanner run 的持久化 ID，用于绑定后续 context run 审计",
-    )

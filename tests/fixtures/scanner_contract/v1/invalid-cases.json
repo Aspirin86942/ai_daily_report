@@ -22,7 +22,7 @@
       ],
       "payload": {
         "schema_version": "scanner_profile_v1",
-        "rust_discovery_bin": "C:\\scanner-fixtures\\bin\\discovery.exe"
+        "deprecated_helper_path": "C:\\scanner-fixtures\\bin\\helper.exe"
       }
     },
     {
@@ -1236,7 +1236,7 @@
             ".xls": 60000,
             ".xlsx": 60000
           },
-          "worker_lane_mode": "process"
+          "deprecated_worker_mode": "process"
         },
         "parse": {
           "aggregate_max_chars": 50000,

@@ -1,8 +1,6 @@
 use std::io::{self, Read, Write};
 
-use ai_daily_office_parser::{
-    parse_office_file, parse_worker_request, worker_version_response, OfficeParseRequest,
-};
+use ai_daily_office_parser::{parse_worker_request, worker_version_response};
 use ai_daily_scanner_contract::{
     Diagnostic, DiagnosticStage, ErrorCode, Nullable, TransportErrorResponse, Validate,
     WorkerParseRequest, WorkerStatus,
@@ -21,10 +19,7 @@ fn dispatch() -> i32 {
     if args == ["parse"] {
         return strict_worker_parse();
     }
-    if args.is_empty() {
-        return legacy_parse();
-    }
-    eprintln!("usage: ai-daily-office-parser [version|parse]");
+    eprintln!("usage: ai-daily-office-parser <version|parse>");
     1
 }
 
@@ -54,24 +49,6 @@ fn strict_worker_parse() -> i32 {
         return 1;
     }
     exit_code
-}
-
-fn legacy_parse() -> i32 {
-    let mut input = String::new();
-    let result = io::stdin()
-        .read_to_string(&mut input)
-        .map_err(|error| error.to_string())
-        .and_then(|_| {
-            serde_json::from_str::<OfficeParseRequest>(&input).map_err(|e| e.to_string())
-        });
-    let request = match result {
-        Ok(request) => request,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return 1;
-        }
-    };
-    emit(&parse_office_file(&request)).map_or(1, |()| 0)
 }
 
 fn invalid_request_response() -> TransportErrorResponse {

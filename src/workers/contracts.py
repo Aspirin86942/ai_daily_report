@@ -30,7 +30,7 @@ from src.workers.python_worker_identity import (
 
 @dataclass(frozen=True, slots=True)
 class WorkerParsePayload:
-    """Worker 内部解析结果；不把 application FileContext 作为进程合同。"""
+    """Worker 内部解析结果；不把应用层 scanner 模型作为进程合同。"""
 
     file_path: str
     file_type: str

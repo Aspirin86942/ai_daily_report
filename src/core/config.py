@@ -7,15 +7,9 @@ from pathlib import Path
 from typing import Any, Dict
 from dynaconf import Dynaconf
 
-DEFAULT_OFFICE_PARSER_BACKEND = "rust_office_oxide_v1"
 DEFAULT_RUST_OFFICE_PARSER_BIN = (
     "rust/target/release/ai-daily-office-parser"
 )
-DEFAULT_OFFICE_FALLBACK_ORDER = [
-    "python_office_v1",
-    "python_sharepoint_text_v1",
-]
-DEFAULT_OFFICE_FALLBACK_POLICY_VERSION = "hybrid_v1"
 DEFAULT_SCANNER_ENGINE = "rust_v2"
 DEFAULT_RUST_SCANNER_BIN = "rust/target/release/ai-daily-scanner"
 DEFAULT_RUST_INDEX_DB_PATH = "data/db/scan_index_v2.sqlite3"
@@ -70,12 +64,7 @@ SCANNER_CONTRACT_FIELDS = (
 
 SCANNER_INFRASTRUCTURE_FIELDS = frozenset(
     {
-        "discovery_backend",
-        "rust_discovery_bin",
         "rust_office_parser_bin",
-        "index_db_path",
-        "worker_lane_mode",
-        "office_external_fallback",
         "engine",
         "rust_scanner_bin",
         "rust_index_db_path",
@@ -156,25 +145,6 @@ class Config:
         return value
 
     @staticmethod
-    def _to_string_list(value: Any) -> list[str]:
-        """把可选路径列表归一化，避免 YAML 空值把 null 传到下游 Rust。"""
-        value = Config._to_builtin_value(value)
-        if value is None:
-            return []
-        if isinstance(value, str):
-            item = value.strip()
-            return [item] if item else []
-        if isinstance(value, Sequence) and not isinstance(value, (bytes, bytearray)):
-            # 空字符串路径会被解析成当前目录，必须在配置边界过滤掉。
-            return [
-                item_text
-                for item in value
-                if (item_text := str(item).strip())
-            ]
-        item = str(value).strip()
-        return [item] if item else []
-
-    @staticmethod
     def _non_blank_string(value: Any, default: str) -> str:
         """把 YAML null/空白值收敛到默认值，避免下游 cache key 漂移。"""
         if value is None:
@@ -215,135 +185,11 @@ class Config:
             "max_retries": self._settings.llm.max_retries,
         }
 
-    @property
-    def scanner_config(self) -> Dict[str, Any]:
-        """扫描器配置"""
-        cfg: Dict[str, Any] = {
-            "allowed_extensions": self._to_builtin_value(
-                self._settings.scanner.allowed_extensions
-            ),
-            "ignored_patterns": self._to_builtin_value(
-                self._settings.scanner.ignored_patterns
-            ),
-            "excluded_dirs": self._to_string_list(
-                getattr(self._settings.scanner, "excluded_dirs", [])
-            ),
-            "max_workers": self._settings.scanner.max_workers,
-            "excel_max_rows": self._settings.scanner.excel_max_rows,
-            "pdf_max_pages": self._settings.scanner.pdf_max_pages,
-            "text_max_chars": self._settings.scanner.text_max_chars,
-            "index_db_path": getattr(
-                self._settings.scanner,
-                "index_db_path",
-                "data/db/scan_index.sqlite3",
-            ),
-            "parser_profile_version": getattr(
-                self._settings.scanner,
-                "parser_profile_version",
-                "v1",
-            ),
-            "worker_lane_mode": getattr(
-                self._settings.scanner,
-                "worker_lane_mode",
-                "direct",
-            ),
-            "discovery_backend": str(
-                getattr(self._settings.scanner, "discovery_backend", "rust")
-            ).strip().lower(),
-            "rust_discovery_bin": getattr(
-                self._settings.scanner,
-                "rust_discovery_bin",
-                "rust/target/release/ai-daily-discovery",
-            ),
-            "office_parser_backend": str(
-                getattr(
-                    self._settings.scanner,
-                    "office_parser_backend",
-                    DEFAULT_OFFICE_PARSER_BACKEND,
-                )
-            ).strip(),
-            "pdf_parser_backend": str(
-                getattr(self._settings.scanner, "pdf_parser_backend", "pdf_text_v1")
-            ).strip(),
-            "rust_office_parser_bin": getattr(
-                self._settings.scanner,
-                "rust_office_parser_bin",
-                DEFAULT_RUST_OFFICE_PARSER_BIN,
-            ),
-            "office_parser_fallback_enabled": bool(
-                getattr(self._settings.scanner, "office_parser_fallback_enabled", True)
-            ),
-            "office_parser_fallback_order": self._to_builtin_value(
-                getattr(
-                    self._settings.scanner,
-                    "office_parser_fallback_order",
-                    DEFAULT_OFFICE_FALLBACK_ORDER,
-                )
-            ),
-            "office_fallback_after_timeout": bool(
-                getattr(self._settings.scanner, "office_fallback_after_timeout", False)
-            ),
-            "office_external_fallback": str(
-                getattr(self._settings.scanner, "office_external_fallback", "disabled")
-            ).strip().lower(),
-            "office_legacy_extensions_enabled": bool(
-                getattr(self._settings.scanner, "office_legacy_extensions_enabled", False)
-            ),
-            "office_fallback_policy_version": self._non_blank_string(
-                getattr(
-                    self._settings.scanner,
-                    "office_fallback_policy_version",
-                    DEFAULT_OFFICE_FALLBACK_POLICY_VERSION,
-                ),
-                DEFAULT_OFFICE_FALLBACK_POLICY_VERSION,
-            ),
-            "discovery_timeout_seconds": getattr(
-                self._settings.scanner,
-                "discovery_timeout_seconds",
-                30,
-            ),
-        }
-        # 可选的 summary 模式配置
-        scanner = self._settings.scanner
-        for key in (
-            "summary_excel_max_rows",
-            "summary_pdf_max_pages",
-            "summary_text_max_chars",
-            "total_max_chars",
-            "max_file_size_mb",
-            "file_timeout_seconds",
-            "file_timeout_by_extension",
-            "direct_text_max_bytes",
-            "direct_text_read_bytes",
-            "log_tail_read_bytes",
-            "text_excerpt_max_chars",
-            "excel_max_sheets",
-            "excel_max_columns",
-            "docx_max_paragraphs",
-            "docx_max_tables",
-            "docx_table_max_rows",
-            "docx_table_max_cols",
-            "pptx_max_slides",
-            "pptx_include_notes",
-            "document_excerpt_max_chars",
-            "summary_excel_max_sheets",
-            "summary_excel_max_columns",
-            "summary_docx_max_paragraphs",
-            "summary_docx_max_tables",
-            "summary_docx_table_max_rows",
-            "summary_docx_table_max_cols",
-            "summary_pptx_max_slides",
-            "summary_document_excerpt_max_chars",
-        ):
-            if hasattr(scanner, key):
-                cfg[key] = self._to_builtin_value(getattr(scanner, key))
-        return cfg
-
     def scanner_contract_profile(self) -> Dict[str, Any]:
         """提取调用方显式配置的 scanner v1 wire 叶子。
 
-        Rust 是默认值和归一化的唯一所有者，因此这里不读取 legacy
-        ``scanner_config``，也不补默认值或携带 helper/数据库路径。
+        Rust 是默认值和归一化的唯一所有者，因此这里不补默认值，
+        也不携带 worker、数据库或进程路径。
         """
         scanner = self._settings.scanner
         if isinstance(scanner, Mapping):
@@ -379,7 +225,7 @@ class Config:
         value = str(
             getattr(self._settings.scanner, "engine", DEFAULT_SCANNER_ENGINE)
         ).strip().lower()
-        if value not in {"python_legacy", "rust_v2"}:
+        if value != "rust_v2":
             raise ValueError(f"unsupported scanner engine: {value!r}")
         return value
 
@@ -396,8 +242,20 @@ class Config:
         )
 
     @property
+    def rust_office_parser_bin(self) -> str:
+        """Rust Office worker 路径；worker 始终由 Rust core 隔离启动。"""
+        return self._non_blank_string(
+            getattr(
+                self._settings.scanner,
+                "rust_office_parser_bin",
+                DEFAULT_RUST_OFFICE_PARSER_BIN,
+            ),
+            DEFAULT_RUST_OFFICE_PARSER_BIN,
+        )
+
+    @property
     def rust_index_db_path(self) -> str:
-        """Rust v2 独占数据库路径；legacy 数据库保持不变。"""
+        """Rust v2 独占数据库路径；已退役的 v1 数据库保持不变。"""
         return self._non_blank_string(
             getattr(
                 self._settings.scanner,

@@ -236,6 +236,7 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     client = RustContextClient(
         config=config,
         scanner_binary=args.scanner_bin or config.rust_scanner_bin,
+        office_worker_path=config.rust_office_parser_bin,
         scan_db_path=args.scan_db_path or config.rust_index_db_path,
         timeout_seconds=config.rust_process_timeout_seconds,
     )
