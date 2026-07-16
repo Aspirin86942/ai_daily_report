@@ -2,12 +2,34 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from src.core.llm import LLMClient
 from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
 from src.services.report_gen import ReportGenerator
+
+
+def test_llm_call_guard_prevents_any_network_client_invocation(monkeypatch):
+    calls = []
+
+    class ForbiddenCompletions:
+        def create(self, **kwargs):
+            calls.append(kwargs)
+            raise AssertionError("network client must not be invoked")
+
+    client = object.__new__(LLMClient)
+    client.llm_cfg = {"max_retries": 1}
+    client.client = SimpleNamespace(
+        chat=SimpleNamespace(completions=ForbiddenCompletions())
+    )
+    monkeypatch.setenv("AI_DAILY_TEST_FORBID_LLM", "1")
+
+    with pytest.raises(RuntimeError, match="LLM calls are prohibited"):
+        client._call_llm_with_json("synthetic prompt", DailyReportData)
+
+    assert calls == []
 
 
 @pytest.fixture

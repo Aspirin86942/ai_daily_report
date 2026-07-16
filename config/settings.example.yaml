@@ -20,6 +20,9 @@ llm:
   max_retries: 3
 
 scanner:
+  engine: "rust_v2"
+  rust_scanner_bin: "rust/target/release/ai-daily-scanner"
+  rust_index_db_path: "data/db/scan_index_v2.sqlite3"
   allowed_extensions:
     - ".xlsx"
     - ".xls"

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.core import healthcheck
+from src.services.rust_context_client import RustContextProbeError
 
 
 def _write_templates(root: Path) -> None:
@@ -33,6 +34,234 @@ def _make_config(provider: str, api_key: str | None, root: Path) -> SimpleNamesp
         deepseek_api_key=api_key if provider == "deepseek" else "",
         openai_api_key=api_key if provider == "openai" else "",
     )
+
+
+def _make_strict_rust_config(
+    root: Path,
+    *,
+    allowed_extensions: list[str] | None = None,
+) -> SimpleNamespace:
+    cfg = _make_config("deepseek", "synthetic-key", root)
+    cfg.scanner_engine = "rust_v2"
+    cfg.rust_scanner_bin = "bin/ai-daily-scanner"
+    cfg.rust_index_db_path = "data/db/scan_index_v2.sqlite3"
+    cfg.rust_process_timeout_seconds = 30.0
+    cfg.scanner_config = {
+        "max_workers": 4,
+        "allowed_extensions": allowed_extensions or [".txt"],
+        "office_parser_backend": "rust_office_oxide_v1",
+        "rust_office_parser_bin": "bin/ai-daily-office-parser",
+        "office_parser_fallback_enabled": True,
+        "office_parser_fallback_order": ["python_office_v1"],
+        "office_legacy_extensions_enabled": False,
+    }
+    return cfg
+
+
+def _strict_version() -> SimpleNamespace:
+    return SimpleNamespace(
+        contract="ai_daily_context",
+        protocol_version=1,
+        engine_version="0.1.0",
+        engine_build="sha256-source-v1:synthetic",
+        target_triple="x86_64-pc-windows-msvc",
+    )
+
+
+def _strict_doctor(*checks: tuple[str, str]) -> SimpleNamespace:
+    return SimpleNamespace(
+        engine_version="0.1.0",
+        engine_build="sha256-source-v1:synthetic",
+        checks=[
+            SimpleNamespace(name=name, status=status)
+            for name, status in checks
+        ],
+    )
+
+
+def _prepare_strict_root(root: Path) -> None:
+    (root / "config").mkdir()
+    _write_templates(root)
+    (root / "data" / "db").mkdir(parents=True)
+    (root / "workspace").mkdir()
+
+
+def test_collect_healthcheck_strict_uses_effective_config_without_local_yaml(
+    tmp_path,
+    monkeypatch,
+):
+    _prepare_strict_root(tmp_path)
+    captured: dict[str, object] = {}
+
+    class StubRustContextClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        def version(self):
+            return _strict_version()
+
+        def doctor(self):
+            return _strict_doctor(
+                ("scan_db_parent", "ok"),
+                ("office_worker_handshake", "ok"),
+                ("python_worker_handshake", "ok"),
+            )
+
+    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
+    monkeypatch.setattr(
+        healthcheck,
+        "RustContextClient",
+        StubRustContextClient,
+        raising=False,
+    )
+
+    result = healthcheck.collect_healthcheck(
+        project_root=tmp_path,
+        config_obj=_make_strict_rust_config(tmp_path),
+        strict=True,
+    )
+
+    assert result.errors == []
+    assert not any("缺少配置文件" in message for message in result.errors)
+    assert result.info["Scanner Engine"] == "rust_v2"
+    assert result.info["Rust Scanner Contract"] == "ai_daily_context/v1"
+    assert result.info["Rust Scanner Engine"] == (
+        "0.1.0 (x86_64-pc-windows-msvc)"
+    )
+    assert captured["scanner_binary"] == "bin/ai-daily-scanner"
+    assert captured["scan_db_path"] == "data/db/scan_index_v2.sqlite3"
+    assert captured["office_worker_path"] == "bin/ai-daily-office-parser"
+
+
+def test_collect_healthcheck_strict_always_requires_office_worker_package(
+    tmp_path,
+    monkeypatch,
+):
+    _prepare_strict_root(tmp_path)
+
+    class StubRustContextClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def version(self):
+            return _strict_version()
+
+        def doctor(self):
+            return _strict_doctor(
+                ("scan_db_parent", "ok"),
+                ("office_worker_handshake", "error"),
+                ("python_worker_handshake", "ok"),
+            )
+
+    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
+    monkeypatch.setattr(
+        healthcheck,
+        "RustContextClient",
+        StubRustContextClient,
+    )
+
+    result = healthcheck.collect_healthcheck(
+        project_root=tmp_path,
+        config_obj=_make_strict_rust_config(
+            tmp_path,
+            allowed_extensions=[".txt"],
+        ),
+        strict=True,
+    )
+
+    assert "Rust strict check failed: office_worker_handshake" in result.errors
+
+
+def test_collect_healthcheck_strict_rejects_non_rust_effective_engine(
+    tmp_path,
+    monkeypatch,
+):
+    _prepare_strict_root(tmp_path)
+    cfg = _make_strict_rust_config(tmp_path)
+    cfg.scanner_engine = "python_legacy"
+    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
+
+    result = healthcheck.collect_healthcheck(
+        project_root=tmp_path,
+        config_obj=cfg,
+        strict=True,
+    )
+
+    assert "严格模式要求 scanner.engine=rust_v2" in result.errors
+
+
+def test_collect_healthcheck_strict_reports_safe_scanner_contract_failure(
+    tmp_path,
+    monkeypatch,
+):
+    _prepare_strict_root(tmp_path)
+
+    class FailingRustContextClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def version(self):
+            raise RustContextProbeError("version", "invalid_response")
+
+    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
+    monkeypatch.setattr(
+        healthcheck,
+        "RustContextClient",
+        FailingRustContextClient,
+        raising=False,
+    )
+
+    result = healthcheck.collect_healthcheck(
+        project_root=tmp_path,
+        config_obj=_make_strict_rust_config(tmp_path),
+        strict=True,
+    )
+
+    assert result.errors == [
+        "Rust scanner version/contract check failed (invalid_response)"
+    ]
+
+
+def test_collect_healthcheck_strict_requires_configured_worker_routes(
+    tmp_path,
+    monkeypatch,
+):
+    _prepare_strict_root(tmp_path)
+
+    class StubRustContextClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def version(self):
+            return _strict_version()
+
+        def doctor(self):
+            return _strict_doctor(
+                ("scan_db_parent", "ok"),
+                ("office_worker_handshake", "error"),
+                ("python_worker_handshake", "error"),
+            )
+
+    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
+    monkeypatch.setattr(
+        healthcheck,
+        "RustContextClient",
+        StubRustContextClient,
+        raising=False,
+    )
+    cfg = _make_strict_rust_config(
+        tmp_path,
+        allowed_extensions=[".xlsx", ".pdf"],
+    )
+
+    result = healthcheck.collect_healthcheck(
+        project_root=tmp_path,
+        config_obj=cfg,
+        strict=True,
+    )
+
+    assert "Rust strict check failed: office_worker_handshake" in result.errors
+    assert "Rust strict check failed: python_worker_handshake" in result.errors
 
 
 def test_collect_healthcheck_accepts_env_only_provider_key(tmp_path, monkeypatch):

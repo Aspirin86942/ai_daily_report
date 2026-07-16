@@ -5,8 +5,26 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
 from src.core.config import Config
+
+
+def test_example_settings_selects_the_windows_rust_core_defaults():
+    project_root = Path(__file__).resolve().parents[1]
+    settings = yaml.safe_load(
+        (project_root / "config" / "settings.example.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert settings["scanner"]["engine"] == "rust_v2"
+    assert settings["scanner"]["rust_scanner_bin"] == (
+        "rust/target/release/ai-daily-scanner"
+    )
+    assert settings["scanner"]["rust_index_db_path"] == (
+        "data/db/scan_index_v2.sqlite3"
+    )
 
 
 def test_build_settings_reads_platform_yaml_and_yaml_secrets(tmp_path):
@@ -408,11 +426,11 @@ def test_scanner_config_defaults_blank_office_fallback_policy_version():
     assert cfg.scanner_config["office_fallback_policy_version"] == "hybrid_v1"
 
 
-def test_scanner_engine_defaults_keep_python_legacy_until_cutover():
+def test_scanner_engine_defaults_to_rust_v2_after_cutover():
     cfg = object.__new__(Config)
     cfg._settings = SimpleNamespace(scanner=SimpleNamespace())
 
-    assert cfg.scanner_engine == "python_legacy"
+    assert cfg.scanner_engine == "rust_v2"
     assert cfg.rust_scanner_bin == "rust/target/release/ai-daily-scanner"
     assert cfg.rust_index_db_path == "data/db/scan_index_v2.sqlite3"
     assert cfg.rust_process_timeout_seconds == 900.0

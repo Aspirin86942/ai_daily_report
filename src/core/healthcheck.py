@@ -12,6 +12,10 @@ from typing import Any
 
 from .config import Config, config
 from ..services.rust_cli_contract import resolve_binary_path
+from ..services.rust_context_client import (
+    RustContextClient,
+    RustContextProbeError,
+)
 
 TEMPLATE_FILES: tuple[str, ...] = (
     "system_prompt.md",
@@ -38,6 +42,11 @@ REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
 ]
 
 RUST_CLI_PROBE_TIMEOUT_SECONDS = 3.0
+STRICT_RUST_PACKAGE_CHECKS: tuple[str, ...] = (
+    "scan_db_parent",
+    "office_worker_handshake",
+    "python_worker_handshake",
+)
 
 
 @dataclass
@@ -54,7 +63,12 @@ def _relative_display_path(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
-def _append_project_file_checks(result: HealthCheckResult, project_root: Path) -> None:
+def _append_project_file_checks(
+    result: HealthCheckResult,
+    project_root: Path,
+    *,
+    strict: bool = False,
+) -> None:
     """检查项目基础文件。
 
     这些检查放在前面，是为了先定位最常见的安装和拷贝不完整问题，
@@ -81,10 +95,12 @@ def _append_project_file_checks(result: HealthCheckResult, project_root: Path) -
             f"{_relative_display_path(generic_settings_file, project_root)}；"
             f"新部署建议迁移到 {_relative_display_path(settings_file, project_root)}"
         )
-    else:
+    elif not strict:
         result.errors.append(
             f"缺少配置文件: {_relative_display_path(settings_file, project_root)}"
         )
+    else:
+        result.info["本机配置"] = "有效配置（环境变量或调用方）"
 
     if not secrets_file.exists():
         result.warnings.append(
@@ -133,6 +149,8 @@ def _append_runtime_config_checks(
     result: HealthCheckResult,
     cfg: Any,
     project_root: Path,
+    *,
+    strict: bool = False,
 ) -> None:
     """检查运行期配置。
 
@@ -158,7 +176,15 @@ def _append_runtime_config_checks(
     _append_writable_directory_check(result, "报告目录", reports_dir)
     _append_writable_directory_check(result, "数据库目录", db_dir)
     _append_writable_directory_check(result, "日志目录", project_root / "logs")
-    _append_rust_cli_checks(result, scanner_config, project_root)
+    if strict:
+        _append_strict_rust_core_checks(
+            result,
+            cfg,
+            scanner_config,
+            project_root,
+        )
+    else:
+        _append_rust_cli_checks(result, scanner_config, project_root)
 
     if not model_id:
         result.errors.append("未配置 LLM 模型")
@@ -177,6 +203,87 @@ def _append_runtime_config_checks(
     # doctor 只确认凭据存在，绝不回显任何可用于识别密钥的片段。
     result.info["API Key"] = "已配置"
 
+
+def _append_strict_rust_core_checks(
+    result: HealthCheckResult,
+    cfg: Any,
+    scanner_config: Any,
+    project_root: Path,
+) -> None:
+    """Validate the effective Rust production path without exposing stderr."""
+
+    engine = str(getattr(cfg, "scanner_engine", "")).strip().lower()
+    result.info["Scanner Engine"] = engine
+    if engine != "rust_v2":
+        result.errors.append("严格模式要求 scanner.engine=rust_v2")
+        return
+
+    try:
+        configured_timeout = float(
+            getattr(cfg, "rust_process_timeout_seconds", 30.0)
+        )
+        client = RustContextClient(
+            config=cfg,
+            project_root=project_root,
+            scanner_binary=getattr(cfg, "rust_scanner_bin"),
+            scan_db_path=getattr(cfg, "rust_index_db_path"),
+            office_worker_path=scanner_config.get(
+                "rust_office_parser_bin",
+                "rust/target/release/ai-daily-office-parser",
+            ),
+            timeout_seconds=min(configured_timeout, 30.0),
+        )
+        version = client.version()
+    except RustContextProbeError as exc:
+        result.errors.append(
+            "Rust scanner version/contract check failed "
+            f"({exc.kind})"
+        )
+        return
+    except Exception as exc:
+        result.errors.append(
+            "Rust scanner version/contract check failed "
+            f"({type(exc).__name__})"
+        )
+        return
+
+    result.info["Rust Scanner Contract"] = (
+        f"{version.contract}/v{version.protocol_version}"
+    )
+    result.info["Rust Scanner Engine"] = (
+        f"{version.engine_version} ({version.target_triple})"
+    )
+    result.info["Rust Scanner Build"] = version.engine_build
+
+    try:
+        doctor = client.doctor()
+    except RustContextProbeError as exc:
+        result.errors.append(f"Rust scanner doctor failed ({exc.kind})")
+        return
+    except Exception as exc:
+        result.errors.append(
+            f"Rust scanner doctor failed ({type(exc).__name__})"
+        )
+        return
+
+    if (
+        doctor.engine_version != version.engine_version
+        or doctor.engine_build != version.engine_build
+    ):
+        result.errors.append("Rust scanner doctor identity mismatch")
+        return
+
+    checks = {check.name: check for check in doctor.checks}
+    # 严格部署验证完整生产包；即使当前 profile 暂不使用某个 worker，
+    # 也必须在切换配置前证明两个隔离 worker 都可启动且合同匹配。
+    for check_name in STRICT_RUST_PACKAGE_CHECKS:
+        check = checks.get(check_name)
+        if check is None:
+            result.errors.append(f"Rust strict check missing: {check_name}")
+            continue
+        result.info[f"Rust {check_name}"] = str(check.status)
+        if check.status != "ok":
+            result.errors.append(f"Rust strict check failed: {check_name}")
 
 def _append_work_dir_check(result: HealthCheckResult, work_dir: Path) -> None:
     """校验扫描根目录，避免路径不可达被后续扫描误判为空结果。"""
@@ -340,6 +447,8 @@ def _append_dependency_checks(result: HealthCheckResult) -> None:
 def collect_healthcheck(
     project_root: Path | None = None,
     config_obj: Any | None = None,
+    *,
+    strict: bool = False,
 ) -> HealthCheckResult:
     """汇总运行环境检查结果。"""
 
@@ -347,10 +456,10 @@ def collect_healthcheck(
     cfg = config_obj or config
     result = HealthCheckResult()
 
-    _append_project_file_checks(result, root)
+    _append_project_file_checks(result, root, strict=strict)
 
     try:
-        _append_runtime_config_checks(result, cfg, root)
+        _append_runtime_config_checks(result, cfg, root, strict=strict)
     except Exception as exc:
         # YAML 解析异常可能携带出错原文；这里只保留类型，避免回显密钥。
         result.errors.append(

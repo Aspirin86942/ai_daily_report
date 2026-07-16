@@ -16,7 +16,7 @@ DEFAULT_OFFICE_FALLBACK_ORDER = [
     "python_sharepoint_text_v1",
 ]
 DEFAULT_OFFICE_FALLBACK_POLICY_VERSION = "hybrid_v1"
-DEFAULT_SCANNER_ENGINE = "python_legacy"
+DEFAULT_SCANNER_ENGINE = "rust_v2"
 DEFAULT_RUST_SCANNER_BIN = "rust/target/release/ai-daily-scanner"
 DEFAULT_RUST_INDEX_DB_PATH = "data/db/scan_index_v2.sqlite3"
 DEFAULT_RUST_PROCESS_TIMEOUT_SECONDS = 900.0
@@ -375,7 +375,7 @@ class Config:
 
     @property
     def scanner_engine(self) -> str:
-        """选择一次完整 scanner/context engine；Task 11 前默认 legacy。"""
+        """选择一次完整 scanner/context engine；Windows 默认 Rust v2。"""
         value = str(
             getattr(self._settings.scanner, "engine", DEFAULT_SCANNER_ENGINE)
         ).strip().lower()

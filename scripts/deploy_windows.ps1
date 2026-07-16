@@ -4,20 +4,17 @@ Prepare a source checkout for local Windows execution.
 
 .DESCRIPTION
 Creates or reuses an isolated .venv, installs locked dependencies when
-requirements.lock exists, optionally builds both Rust release CLIs, and runs
-the application doctor. The script never accepts or persists API keys.
+requirements.lock exists, builds the Rust release workspace, and runs the
+strict application doctor. The script never accepts or persists API keys.
 
 .EXAMPLE
 .\scripts\deploy_windows.ps1
 
-.EXAMPLE
-.\scripts\deploy_windows.ps1 -BuildRust
 #>
 
 [CmdletBinding()]
 param(
-    [string]$Python = "python",
-    [switch]$BuildRust
+    [string]$Python = "python"
 )
 
 Set-StrictMode -Version Latest
@@ -100,28 +97,25 @@ Invoke-CheckedCommand -Label "Validate Python dependencies" `
     -FilePath $venvPython `
     -Arguments @("-m", "pip", "check")
 
-if ($BuildRust) {
-    if ($null -eq (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
-        throw "cargo is required when -BuildRust is specified."
-    }
-
-    $manifest = Join-Path $repoRoot "rust\Cargo.toml"
-    Invoke-CheckedCommand -Label "Build Rust workspace" `
-        -FilePath "cargo" `
-        -Arguments @(
-            "build",
-            "--manifest-path", $manifest,
-            "--workspace",
-            "--release",
-            "--locked"
-        )
+if ($null -eq (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
+    throw "cargo is required for the Windows production deployment."
 }
+$manifest = Join-Path $repoRoot "rust\Cargo.toml"
+Invoke-CheckedCommand -Label "Build Rust workspace" `
+    -FilePath "cargo" `
+    -Arguments @(
+        "build",
+        "--manifest-path", $manifest,
+        "--workspace",
+        "--release",
+        "--locked"
+    )
 
 Push-Location $repoRoot
 try {
     Invoke-CheckedCommand -Label "Run deployment doctor" `
         -FilePath $venvPython `
-        -Arguments @("main.py", "doctor")
+        -Arguments @("main.py", "doctor", "--strict")
 }
 finally {
     Pop-Location

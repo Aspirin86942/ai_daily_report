@@ -620,19 +620,27 @@ def test_build_parser_accepts_doctor_and_check_config_alias():
     parser = main.build_parser()
 
     doctor_args = parser.parse_args(["doctor"])
+    strict_args = parser.parse_args(["doctor", "--strict"])
     alias_args = parser.parse_args(["check-config"])
 
     assert doctor_args.subcommand == "doctor"
+    assert doctor_args.strict is False
+    assert strict_args.subcommand == "doctor"
+    assert strict_args.strict is True
     assert alias_args.subcommand == "doctor"
+    assert alias_args.strict is False
 
 
 def test_run_doctor_cmd_uses_healthcheck(monkeypatch):
     printed = _patch_console(monkeypatch)
+    strict_values = []
 
     monkeypatch.setattr(
         main,
         "collect_healthcheck",
-        lambda: HealthCheckResult(
+        lambda *, strict=False: (
+            strict_values.append(strict)
+            or HealthCheckResult(
             info={
                 "LLM Provider": "deepseek",
                 "工作目录": str(Path("D:/work")),
@@ -643,12 +651,14 @@ def test_run_doctor_cmd_uses_healthcheck(monkeypatch):
             },
             warnings=["缺少敏感配置文件: config/.secrets.yaml"],
             errors=[],
+            )
         ),
     )
 
-    success = main.run_doctor_cmd()
+    success = main.run_doctor_cmd(strict=True)
 
     assert success is True
+    assert strict_values == [True]
     assert any("环境检查" in str(text) for text in printed)
     assert any("LLM Provider" in str(text) for text in printed)
     assert any("警告" in str(text) for text in printed)
@@ -771,10 +781,10 @@ def test_main_returns_zero_when_report_command_succeeds(
 
 def test_main_returns_doctor_status(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["main.py", "doctor"])
-    monkeypatch.setattr(main, "run_doctor_cmd", lambda: False)
+    monkeypatch.setattr(main, "run_doctor_cmd", lambda *, strict=False: False)
     assert main.main() == 1
 
-    monkeypatch.setattr(main, "run_doctor_cmd", lambda: True)
+    monkeypatch.setattr(main, "run_doctor_cmd", lambda *, strict=False: True)
     assert main.main() == 0
 
 
@@ -872,6 +882,33 @@ def test_cli_doctor_bootstraps_without_rich_or_file_logger(tmp_path):
     assert completed.returncode == 0
     assert "轻量入口: 可用" in completed.stdout
     assert "forbidden eager import" not in completed.stdout + completed.stderr
+
+
+def test_cli_strict_doctor_uses_the_lightweight_entrypoint(tmp_path):
+    completed = _run_main_with_sitecustomize(
+        tmp_path,
+        "\n".join(
+            [
+                "import sys",
+                "import types",
+                "healthcheck = types.ModuleType('src.core.healthcheck')",
+                "class Result:",
+                "    warnings = []",
+                "    errors = []",
+                "def collect_healthcheck(*, strict=False):",
+                "    result = Result()",
+                "    result.info = {'严格模式': str(strict)}",
+                "    return result",
+                "healthcheck.collect_healthcheck = collect_healthcheck",
+                "sys.modules['src.core.healthcheck'] = healthcheck",
+            ]
+        ),
+        "doctor",
+        "--strict",
+    )
+
+    assert completed.returncode == 0
+    assert "严格模式: True" in completed.stdout
 
 
 def test_cli_doctor_redacts_bootstrap_exception_text(tmp_path):

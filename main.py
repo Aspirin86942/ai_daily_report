@@ -10,14 +10,14 @@ if sys.platform == "win32":
     sys.stderr.reconfigure(encoding="utf-8")
 
 
-def _run_bootstrap_doctor() -> int:
+def _run_bootstrap_doctor(*, strict: bool = False) -> int:
     """通过轻量导入运行 doctor，避免完整业务栈遮蔽部署错误。"""
 
     print("\n===== 环境检查 =====\n")
     try:
         from src.core.healthcheck import collect_healthcheck as collect
 
-        result = collect()
+        result = collect(strict=True) if strict else collect()
     except ModuleNotFoundError as exc:
         missing_module = exc.name or "未知模块"
         print("错误:")
@@ -55,10 +55,13 @@ def _run_bootstrap_doctor() -> int:
 
 if (
     __name__ == "__main__"
-    and len(sys.argv) == 2
+    and 2 <= len(sys.argv) <= 3
     and sys.argv[1] in {"doctor", "check-config"}
+    and sys.argv[2:] in ([], ["--strict"])
 ):
-    raise SystemExit(_run_bootstrap_doctor())
+    raise SystemExit(
+        _run_bootstrap_doctor(strict="--strict" in sys.argv[2:])
+    )
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -125,6 +128,11 @@ def build_parser() -> argparse.ArgumentParser:
         "doctor",
         aliases=["check-config"],
         help="检查运行环境和配置",
+    )
+    doctor_parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="按 Windows Rust 生产部署要求执行严格检查",
     )
     doctor_parser.set_defaults(subcommand="doctor")
 
@@ -506,11 +514,11 @@ def list_reports() -> None:
     console.print(f"[green]共 {len(dates)} 份日报[/green]")
 
 
-def run_doctor_cmd() -> bool:
+def run_doctor_cmd(*, strict: bool = False) -> bool:
     """检查运行环境和配置。"""
     console.print("\n[bold green]===== 环境检查 =====[/bold green]\n")
 
-    result = collect_healthcheck()
+    result = collect_healthcheck(strict=strict)
 
     if result.info:
         console.print("[bold cyan]配置概览[/bold cyan]")
@@ -554,7 +562,7 @@ def main() -> int:
                 list_reports()
                 return 0
             case "doctor":
-                return 0 if run_doctor_cmd() else 1
+                return 0 if run_doctor_cmd(strict=args.strict) else 1
 
     except KeyboardInterrupt:
         console.print("\n[yellow]操作已取消[/yellow]")

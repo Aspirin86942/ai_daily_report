@@ -8,14 +8,148 @@ permissions:
   contents: read
 
 jobs:
-  python-tests:
-    name: Python ${{ matrix.python-version }} / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-        python-version: ["3.10", "3.13"]
+  windows-production:
+    name: Windows production / Python 3.13
+    runs-on: windows-latest
+    env:
+      DAILY_REPORT_PATHS__WORK_DIR: ${{ github.workspace }}/.ci-work
+      DEEPSEEK_API_KEY: ci-doctor-placeholder
+      AI_DAILY_TEST_FORBID_LLM: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.txt
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements.lock
+          python -m pip install --requirement requirements-dev.txt
+          python -m pip check
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
+      - name: Lint Rust workspace
+        run: >-
+          cargo clippy --manifest-path rust/Cargo.toml
+          --workspace --all-targets --locked -- -D warnings
+      - name: Test Rust workspace
+        run: >-
+          cargo test --manifest-path rust/Cargo.toml
+          --workspace --locked
+      - name: Build Rust release workspace
+        run: >-
+          cargo build --manifest-path rust/Cargo.toml
+          --workspace --release --locked
+      - name: Prepare non-secret Windows configuration
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path '.ci-work' -Force | Out-Null
+          Copy-Item -LiteralPath 'config/settings.example.yaml' `
+            -Destination 'config/settings.windows.yaml'
+      - name: Run strict production doctor
+        run: python main.py doctor --strict
+      - name: Run full Python test suite
+        run: python -m pytest tests/ -v
+      - name: Run Chinese path and cold-warm cache E2E
+        run: >-
+          python -m pytest tests/test_windows_rust_core_e2e.py -v
+          -k "real_rust_chinese_path or real_rust_cold_warm_cache"
+      - name: Prove clean deployment is idempotent and does not call an LLM
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tempRoot = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd(
+            [IO.Path]::DirectorySeparatorChar,
+            [IO.Path]::AltDirectorySeparatorChar
+          )
+          $stage = [IO.Path]::GetFullPath((Join-Path $tempRoot (
+            'ai-daily-deploy-' + [guid]::NewGuid().ToString('N')
+          )))
+          $stagePrefix = $tempRoot + [IO.Path]::DirectorySeparatorChar
+          if (-not $stage.StartsWith(
+            $stagePrefix,
+            [StringComparison]::OrdinalIgnoreCase
+          )) {
+            throw 'deployment stage escaped RUNNER_TEMP'
+          }
+          git clone --quiet --no-hardlinks . $stage
+          try {
+            New-Item -ItemType Directory `
+              -Path (Join-Path $stage '.ci-work') -Force | Out-Null
+            $settings = Join-Path $stage 'config/settings.windows.yaml'
+            Copy-Item -LiteralPath (
+              Join-Path $stage 'config/settings.example.yaml'
+            ) -Destination $settings
+            $before = (Get-FileHash -LiteralPath $settings -Algorithm SHA256).Hash
+            $env:DAILY_REPORT_PATHS__WORK_DIR = Join-Path $stage '.ci-work'
+            $env:DEEPSEEK_API_KEY = 'ci-doctor-placeholder'
+            $env:AI_DAILY_TEST_FORBID_LLM = '1'
+
+            & pwsh -NoProfile -File (Join-Path $stage 'scripts/deploy_windows.ps1')
+            if ($LASTEXITCODE -ne 0) { throw 'first deployment failed' }
+            $afterFirst = (
+              Get-FileHash -LiteralPath $settings -Algorithm SHA256
+            ).Hash
+            $venvMarker = Join-Path $stage '.venv/pyvenv.cfg'
+            $venvHash = (
+              Get-FileHash -LiteralPath $venvMarker -Algorithm SHA256
+            ).Hash
+            $venvSentinel = Join-Path (
+              Join-Path $stage '.venv'
+            ) 'task11-preserve.sentinel'
+            [IO.File]::WriteAllText(
+              $venvSentinel,
+              'preserve-existing-venv',
+              [Text.UTF8Encoding]::new($false)
+            )
+            $sentinelHash = (
+              Get-FileHash -LiteralPath $venvSentinel -Algorithm SHA256
+            ).Hash
+
+            & pwsh -NoProfile -File (Join-Path $stage 'scripts/deploy_windows.ps1')
+            if ($LASTEXITCODE -ne 0) { throw 'second deployment failed' }
+            $afterSecond = (
+              Get-FileHash -LiteralPath $settings -Algorithm SHA256
+            ).Hash
+            $venvHashAfter = (
+              Get-FileHash -LiteralPath $venvMarker -Algorithm SHA256
+            ).Hash
+            if (-not (Test-Path -LiteralPath $venvSentinel -PathType Leaf)) {
+              throw 'second deployment recreated the virtual environment'
+            }
+            $sentinelHashAfter = (
+              Get-FileHash -LiteralPath $venvSentinel -Algorithm SHA256
+            ).Hash
+            if ($before -ne $afterFirst -or $before -ne $afterSecond) {
+              throw 'deployment changed the non-secret local configuration'
+            }
+            if (
+              $venvHash -ne $venvHashAfter -or
+              $sentinelHash -ne $sentinelHashAfter
+            ) {
+              throw 'second deployment recreated the virtual environment'
+            }
+          }
+          finally {
+            if (Test-Path -LiteralPath $stage) {
+              $resolvedStage = [IO.Path]::GetFullPath($stage)
+              if (-not $resolvedStage.StartsWith(
+                $stagePrefix,
+                [StringComparison]::OrdinalIgnoreCase
+              )) {
+                throw 'refusing to remove deployment stage outside RUNNER_TEMP'
+              }
+              Remove-Item -LiteralPath $stage -Recurse -Force
+            }
+          }
+
+  linux-compatibility:
+    name: Linux compatibility / Python 3.10
+    runs-on: ubuntu-latest
     env:
       DAILY_REPORT_PATHS__WORK_DIR: ${{ github.workspace }}/.ci-work
       DEEPSEEK_API_KEY: ci-doctor-placeholder
@@ -23,64 +157,18 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.10"
           cache: pip
           cache-dependency-path: |
             requirements.lock
             requirements-dev.txt
-      - name: Install dependencies
+      - name: Install compatibility dependencies
         run: |
           python -m pip install --upgrade pip
           python -m pip install --requirement requirements.lock
           python -m pip install --requirement requirements-dev.txt
           python -m pip check
-      - name: Build Rust helpers for Windows Python integration tests
-        if: runner.os == 'Windows'
+      - name: Run Linux compatibility tests
         run: |
-          cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
-      - name: Validate Windows deployment script syntax
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseFile(
-            (Resolve-Path -LiteralPath 'scripts/deploy_windows.ps1'),
-            [ref]$tokens,
-            [ref]$errors
-          ) | Out-Null
-          if ($errors.Count -gt 0) {
-            $messages = $errors | ForEach-Object { $_.Message }
-            throw ($messages -join [Environment]::NewLine)
-          }
-      - name: Prepare local CI configuration
-        run: >-
-          python -c "import platform, shutil; from pathlib import Path;
-          Path('.ci-work').mkdir(exist_ok=True);
-          target = 'config/settings.windows.yaml' if platform.system() == 'Windows'
-          else 'config/settings.linux.yaml';
-          shutil.copyfile('config/settings.example.yaml', target)"
-      - name: Run deployment doctor
-        run: python main.py doctor
-      - name: Run Python tests
-        run: python -m pytest tests/ -v
-
-  rust-tests:
-    name: Rust / ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v4
-      - name: Show Rust toolchain
-        run: |
-          rustc --version
-          cargo --version
-      - name: Check Rust formatting
-        run: cargo fmt --manifest-path rust/Cargo.toml --all --check
-      - name: Test Rust workspace
-        run: cargo test --manifest-path rust/Cargo.toml --workspace --locked
-      - name: Build Rust workspace release binaries
-        run: cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
+          mkdir -p .ci-work
+          python -m pytest tests/ -v

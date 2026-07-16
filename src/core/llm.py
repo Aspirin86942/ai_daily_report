@@ -55,6 +55,10 @@ class LLMClient:
         self, prompt: str, response_model: type[BaseModel]
     ) -> BaseModel:
         """调用 LLM 并将响应校验为指定 Pydantic 模型。"""
+        # 迁移/发布验收会处理合成文件上下文；硬开关必须在任何 SDK 调用前失败，
+        # 防止测试命令意外把上下文发送到外部服务。
+        if os.environ.get("AI_DAILY_TEST_FORBID_LLM") == "1":
+            raise RuntimeError("LLM calls are prohibited in this process")
         for attempt in range(self.llm_cfg["max_retries"]):
             try:
                 logger.info(

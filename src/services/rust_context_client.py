@@ -16,8 +16,11 @@ from src.models.scanner_contract import (
     ContextEnvelope,
     ContextSummary,
     Diagnostic,
+    DoctorRequest,
+    DoctorResponse,
     InspectRunRequest,
     InspectRunResponse,
+    VersionResponse,
     build_rust_core_crashed_envelope,
 )
 
@@ -30,6 +33,15 @@ if TYPE_CHECKING:
 DEFAULT_SCANNER_BINARY = "rust/target/release/ai-daily-scanner"
 DEFAULT_OFFICE_WORKER_BINARY = "rust/target/release/ai-daily-office-parser"
 DEFAULT_SCAN_DB = "data/db/scan_index_v2.sqlite3"
+
+
+class RustContextProbeError(RuntimeError):
+    """A strict scanner probe failed without exposing subprocess output."""
+
+    def __init__(self, operation: str, kind: str) -> None:
+        self.operation = operation
+        self.kind = kind
+        super().__init__(f"Rust scanner {operation} probe failed ({kind})")
 
 
 @lru_cache(maxsize=1)
@@ -146,6 +158,52 @@ class RustContextClient:
             raise ValueError("timeout_seconds must be positive")
         self._request_id_factory = request_id_factory
 
+    def _adapter_payload(self) -> dict[str, str]:
+        """Return the single adapter contract shared by doctor and runs."""
+        return {
+            "office_worker_path": str(self._office_worker_path),
+            "python_executable": str(self._python_executable),
+            "python_module_root": str(self._python_module_root),
+            "python_document_worker_module": (
+                self._python_document_worker_module
+            ),
+        }
+
+    def version(self) -> VersionResponse:
+        """Validate the requestless scanner identity contract."""
+        result = run_json_process(
+            command=[str(self._scanner_binary), "version"],
+            request_payload=None,
+            response_model=VersionResponse,
+            timeout_seconds=self._timeout_seconds,
+            cwd=self._project_root,
+        )
+        if result.response is None:
+            raise self._probe_error("version", result)
+        return result.response
+
+    def doctor(self) -> DoctorResponse:
+        """Validate the scan DB and the configured crash-isolated workers."""
+        request_id = str(self._request_id_factory())
+        request = DoctorRequest(
+            contract="ai_daily_context",
+            protocol_version=1,
+            request_id=request_id,
+            scan_db_path=str(self._scan_db_path),
+            adapters=self._adapter_payload(),
+        )
+        result = run_json_process(
+            command=[str(self._scanner_binary), "doctor"],
+            request_payload=request.model_dump(mode="json"),
+            response_model=DoctorResponse,
+            timeout_seconds=self._timeout_seconds,
+            expected_request_id=request_id,
+            cwd=self._project_root,
+        )
+        if result.response is None:
+            raise self._probe_error("doctor", result)
+        return result.response
+
     def build_context(
         self,
         request: ContextScheduleRequest,
@@ -162,14 +220,7 @@ class RustContextClient:
             compression_profile=request.compression_profile,
             scan_db_path=str(self._scan_db_path),
             scanner_profile=self._config.scanner_contract_profile(),
-            adapters={
-                "office_worker_path": str(self._office_worker_path),
-                "python_executable": str(self._python_executable),
-                "python_module_root": str(self._python_module_root),
-                "python_document_worker_module": (
-                    self._python_document_worker_module
-                ),
-            },
+            adapters=self._adapter_payload(),
         )
         result = run_json_process(
             command=[str(self._scanner_binary), "build-context"],
@@ -225,6 +276,19 @@ class RustContextClient:
         if os.name == "nt" and path.suffix.lower() != ".exe":
             path = Path(f"{path}.exe")
         return path
+
+    @staticmethod
+    def _probe_error(
+        operation: str,
+        result: JsonProcessResult[Any],
+    ) -> RustContextProbeError:
+        if result.failure is not None:
+            kind = result.failure.kind
+        elif result.transport_error is not None:
+            kind = "transport_error"
+        else:
+            kind = "missing_response"
+        return RustContextProbeError(operation, kind)
 
     @staticmethod
     def _crashed_envelope(

@@ -595,6 +595,78 @@ def test_rust_context_client_builds_wire_request_from_raw_profile_only(
     assert commands == [[scanner_path, "build-context"]]
 
 
+def test_rust_context_client_probes_version_and_doctor_contracts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = SimpleNamespace(work_dir=tmp_path / "work")
+    version = VersionResponse.model_validate(
+        _fixture("scanner-version-response.json")
+    )
+    doctor = DoctorResponse.model_validate(_fixture("doctor-response-ok.json"))
+    captured: list[dict[str, object]] = []
+
+    def fake_run_json_process(**kwargs):
+        captured.append(kwargs)
+        response = version if kwargs["command"][-1] == "version" else doctor
+        return JsonProcessResult(
+            response=response,
+            transport_error=None,
+            failure=None,
+            exit_code=0,
+            stderr="",
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr(
+        "src.services.rust_context_client.run_json_process",
+        fake_run_json_process,
+    )
+    request_id = UUID("22222222-2222-4222-8222-222222222222")
+    client = RustContextClient(
+        config=config,
+        project_root=tmp_path,
+        scanner_binary="bin/scanner",
+        scan_db_path="state/scan_index_v2.sqlite3",
+        office_worker_path="bin/office-parser",
+        python_executable="venv/Scripts/python.exe",
+        python_module_root="python source",
+        request_id_factory=lambda: request_id,
+    )
+
+    assert client.version() == version
+    assert client.doctor() == doctor
+
+    version_call, doctor_call = captured
+    assert version_call["command"][-1] == "version"
+    assert version_call["request_payload"] is None
+    assert version_call.get("expected_request_id") is None
+    assert doctor_call["command"][-1] == "doctor"
+    assert doctor_call["expected_request_id"] == str(request_id)
+    assert doctor_call["request_payload"] == {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": str(request_id),
+        "scan_db_path": str(
+            (tmp_path / "state" / "scan_index_v2.sqlite3").resolve()
+        ),
+        "adapters": {
+            "office_worker_path": str(
+                (tmp_path / "bin" / "office-parser.exe").resolve()
+            ),
+            "python_executable": str(
+                (tmp_path / "venv" / "Scripts" / "python.exe").resolve()
+            ),
+            "python_module_root": str(
+                (tmp_path / "python source").resolve()
+            ),
+            "python_document_worker_module": (
+                "src.workers.document_parser_worker"
+            ),
+        },
+    }
+
+
 def test_rust_context_client_maps_untrusted_process_failure_without_stderr_leak(
     tmp_path,
     monkeypatch,

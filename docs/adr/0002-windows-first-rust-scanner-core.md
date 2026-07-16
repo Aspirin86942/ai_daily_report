@@ -104,9 +104,32 @@ contained one eligible `.xlsx`, reported `rust_xlsx_bounded_v1` on
 run completed without a freeze in 76.909 seconds, contained parser-backend and
 worker-lane evidence for both engines, and left no new scanner/worker/orphan
 process. Earlier scheduling-favorable samples are not accepted in place of
-this final-source full run. Therefore the Task 10 cutover gate is not satisfied,
-`python_legacy` remains the default, and Task 11 must not start from this
-evidence.
+this final-source full run. The warm criterion therefore remains recorded as a
+technical regression rather than being relabeled as a pass. On 2026-07-16 the
+user explicitly waived only this `+1.660 ms` / `+2.80%` warm-median criterion
+for the current migration round after reviewing the complete evidence. That
+waiver authorizes Task 11; every other Task 10 result and all Task 11 production
+checks remain mandatory.
+
+## Task 11 production-default evidence (2026-07-16)
+
+The Windows production default is now `rust_v2`. Strict doctor probes the
+scanner version and contract, validates its build identity, and requires the
+scan DB parent plus both crash-isolated worker handshakes to succeed before a
+deployment is accepted. The Windows CI job sets a process-level LLM prohibition
+that fails before any SDK call, uses only synthetic Chinese/space-path data for
+end-to-end scanning, and runs cold, warm, and source-version cache checks.
+
+The final Task 11 source tree passed 119 focused Python tests and 448 full
+Python tests with the LLM prohibition enabled, Python bytecode compilation,
+Cargo fmt/clippy, all Rust workspace tests, and a locked release build. A clean
+staging checkout then ran the real source-build deployment twice. Strict doctor
+passed both times; the first run took 207.370 seconds and the idempotent second
+run took 6.868 seconds. The temporary non-secret configuration retained the
+same SHA-256, and a hash-checked sentinel created inside the first `.venv`
+survived the second run, proving that the local configuration and existing
+virtual environment were preserved. No business directory was scanned and no
+LLM call was made.
 
 ## Contract authority
 
