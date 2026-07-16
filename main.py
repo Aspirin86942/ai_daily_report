@@ -67,10 +67,9 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from src.core.healthcheck import collect_healthcheck
 from src.core.logger import setup_logger
 from src.core.llm import LLMClient
-from src.models.schemas import ScanResult
 from src.services.context_scheduler import (
+    ContextBuildResult,
     ContextScheduleRequest,
-    ContextScheduleResult,
     ContextScheduler,
 )
 from src.services.report_gen import ReportGenerator
@@ -132,33 +131,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def build_file_context(scan_result: ScanResult) -> str:
-    """从扫描结果构建文件上下文文本
-
-    Args:
-        scan_result: 文件扫描结果
-
-    Returns:
-        拼接后的文件上下文字符串
-    """
-    parts: list[str] = []
-    for ctx in scan_result.contexts:
-        if ctx.error:
-            parts.append(f"文件: {ctx.file_path}\n错误: {ctx.error}")
-        else:
-            parts.append(f"文件: {ctx.file_path}\n{ctx.content}")
-
-    return "\n\n---\n\n".join(parts) if parts else "无文件证据"
-
-
-def _print_context_scheduler_warning(context_result: ContextScheduleResult) -> None:
-    """打印上下文调度降级警告。"""
-    if not context_result.error:
-        return
-
-    # 调度器 fallback 仍允许报表继续生成，但必须让操作者看到上下文不完整。
-    console.print(f"[yellow]![/yellow] 文件上下文构建降级: {context_result.error}\n")
-    logger.warning("文件上下文构建降级: %s", context_result.error)
+def _accept_context_result(context_result: ContextBuildResult) -> bool:
+    """显示 scanner 状态；error 必须在构造 LLM client 前终止。"""
+    summary = context_result.summary
+    console.print(
+        "[green]✓[/green] 扫描完成: "
+        f"{summary.success_count}/{summary.source_file_count} 个文件\n"
+    )
+    if context_result.status == "error":
+        message = (
+            context_result.error.message
+            if context_result.error is not None
+            else "context engine returned an invalid error result"
+        )
+        console.print(f"[red]✗ 文件上下文构建失败: {message}[/red]\n")
+        logger.error("文件上下文构建失败: %s", message)
+        return False
+    if context_result.status == "partial":
+        for warning in context_result.warnings:
+            console.print(f"[yellow]![/yellow] 文件上下文不完整: {warning.message}\n")
+            logger.warning("文件上下文不完整: %s", warning.message)
+    return True
 
 
 def get_user_input() -> str:
@@ -187,7 +180,6 @@ def generate_daily_report(args: argparse.Namespace) -> bool:
     scheduler = ContextScheduler()
     store = SQLiteStore()
     report_gen = ReportGenerator()
-    llm_client = LLMClient()
 
     # 1. 构建文件上下文
     with Progress(
@@ -208,12 +200,8 @@ def generate_daily_report(args: argparse.Namespace) -> bool:
         )
         progress.update(task, completed=True)
 
-    _print_context_scheduler_warning(context_result)
-    if context_result.scan_result is not None:
-        scan_result = context_result.scan_result
-        console.print(
-            f"[green]✓[/green] 扫描完成: {scan_result.success_count}/{scan_result.total_files} 个文件\n"
-        )
+    if not _accept_context_result(context_result):
+        return False
 
     file_context = context_result.file_context
 
@@ -236,6 +224,7 @@ def generate_daily_report(args: argparse.Namespace) -> bool:
         return False
 
     # 4. 生成日报
+    llm_client = LLMClient()
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -300,7 +289,6 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> bool:
     # 初始化服务
     store = SQLiteStore()
     report_gen = ReportGenerator()
-    llm_client = LLMClient()
 
     reports = []
     missing_days: list[str] = []
@@ -337,12 +325,8 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> bool:
                 )
                 progress.update(task, completed=True)
 
-            _print_context_scheduler_warning(context_result)
-            if context_result.scan_result is not None:
-                scan_result = context_result.scan_result
-                console.print(
-                    f"[green]✓[/green] 扫描完成: {scan_result.success_count}/{scan_result.total_files} 个文件\n"
-                )
+            if not _accept_context_result(context_result):
+                return False
             file_context = context_result.file_context
 
     # 用户补充输入
@@ -350,6 +334,7 @@ def generate_weekly_report_cmd(args: argparse.Namespace) -> bool:
         file_context += f"\n\n---\n\n用户补充: {args.input}"
 
     # 生成周报
+    llm_client = LLMClient()
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -409,7 +394,6 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> bool:
     # 初始化服务
     store = SQLiteStore()
     report_gen = ReportGenerator()
-    llm_client = LLMClient()
 
     reports = []
     missing_days: list[str] = []
@@ -447,12 +431,8 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> bool:
                 )
                 progress.update(task, completed=True)
 
-            _print_context_scheduler_warning(context_result)
-            if context_result.scan_result is not None:
-                scan_result = context_result.scan_result
-                console.print(
-                    f"[green]✓[/green] 扫描完成: {scan_result.success_count}/{scan_result.total_files} 个文件\n"
-                )
+            if not _accept_context_result(context_result):
+                return False
             file_context = context_result.file_context
 
     # 用户补充输入
@@ -460,6 +440,7 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> bool:
         file_context += f"\n\n---\n\n用户补充: {args.input}"
 
     # 生成月报
+    llm_client = LLMClient()
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),

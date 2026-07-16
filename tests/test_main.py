@@ -11,9 +11,9 @@ import pytest
 
 import main
 from src.core.healthcheck import HealthCheckResult
-from src.models.schemas import DailyReportData, MonthlyReportData, ScanResult, WeeklyReportData
-from src.services.context_compressor import CompressedContext
-from src.services.context_scheduler import ContextScheduleResult
+from src.models.scanner_contract import ContextSummary, Diagnostic
+from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
+from src.services.context_scheduler import ContextBuildResult
 
 
 class DummyProgress:
@@ -47,21 +47,38 @@ def _patch_progress(monkeypatch) -> None:
 def _schedule_result(
     file_context: str,
     *,
-    include_scan_result: bool = True,
-    error: str | None = None,
-) -> ContextScheduleResult:
-    compressed = CompressedContext.empty()
-    compressed.content = file_context
-    compressed.output_chars = len(file_context)
-    return ContextScheduleResult(
-        file_context=file_context,
-        compressed_context=compressed,
-        scan_result=ScanResult(total_files=1, success_count=1, error_count=0, contexts=[])
-        if include_scan_result
-        else None,
-        context_run_id=1,
-        decisions=[],
-        error=error,
+    status: str = "ok",
+    message: str = "synthetic scanner diagnostic",
+) -> ContextBuildResult:
+    diagnostic = Diagnostic(
+        error_code=("RUST_CORE_CRASHED" if status == "error" else "PARSER_FAILED"),
+        message=message,
+        retryable=False,
+        stage=("process" if status == "error" else "parse"),
+        file_path=None,
+        backend=None,
+    )
+    return ContextBuildResult(
+        file_context="" if status == "error" else file_context,
+        status=status,
+        summary=ContextSummary(
+            source_file_count=1,
+            success_count=1 if status != "error" else 0,
+            timeout_count=0,
+            included_file_count=1 if status != "error" else 0,
+            omitted_file_count=0,
+            error_file_count=0,
+            input_chars=len(file_context) if status != "error" else 0,
+            output_chars=len(file_context) if status != "error" else 0,
+            total_duration_ms=1,
+            discovery_duration_ms=0,
+            parse_duration_ms=0,
+            compression_duration_ms=0,
+        ),
+        scan_run_id=1 if status != "error" else None,
+        context_run_id=1 if status != "error" else None,
+        warnings=[diagnostic] if status == "partial" else [],
+        error=diagnostic if status == "error" else None,
     )
 
 
@@ -74,7 +91,7 @@ def test_generate_daily_report_uses_context_scheduler(monkeypatch):
             return real_date(2026, 5, 25)
 
     class StubContextScheduler:
-        def build_context(self, request) -> ContextScheduleResult:
+        def build_context(self, request) -> ContextBuildResult:
             calls.append(
                 (
                     "build_context",
@@ -147,7 +164,7 @@ def test_generate_daily_report_uses_context_scheduler(monkeypatch):
     assert any("日报预览" in text for text in printed)
 
 
-def test_generate_daily_report_warns_when_context_scheduler_falls_back(monkeypatch):
+def test_generate_daily_report_warns_and_calls_llm_for_partial_context(monkeypatch):
     calls: list[tuple[str, object]] = []
 
     class StubLogger:
@@ -155,12 +172,12 @@ def test_generate_daily_report_warns_when_context_scheduler_falls_back(monkeypat
             calls.append(("logger_warning", message % args))
 
     class StubContextScheduler:
-        def build_context(self, request) -> ContextScheduleResult:
+        def build_context(self, request) -> ContextBuildResult:
             calls.append(("build_context", request.report_mode))
             return _schedule_result(
-                "fallback context",
-                include_scan_result=False,
-                error="scheduler failed",
+                "partial context",
+                status="partial",
+                message="one synthetic file failed",
             )
 
     class StubSQLiteStore:
@@ -189,9 +206,9 @@ def test_generate_daily_report_warns_when_context_scheduler_falls_back(monkeypat
             calls.append(("generate_report", file_context))
             return DailyReportData(
                 date="2026-02-04",
-                completed_work="fallback 后继续生成",
-                work_summary="fallback 摘要",
-                next_plan="fallback 后续",
+                completed_work="partial 后继续生成",
+                work_summary="partial 摘要",
+                next_plan="partial 后续",
             )
 
     printed = _patch_console(monkeypatch)
@@ -208,10 +225,59 @@ def test_generate_daily_report_warns_when_context_scheduler_falls_back(monkeypat
     )
 
     assert success is True
-    assert any("文件上下文构建降级" in text for text in printed)
-    assert any("scheduler failed" in text for text in printed)
-    assert ("logger_warning", "文件上下文构建降级: scheduler failed") in calls
-    assert ("generate_report", "fallback context") in calls
+    assert any("文件上下文不完整" in text for text in printed)
+    assert any("one synthetic file failed" in text for text in printed)
+    assert (
+        "logger_warning",
+        "文件上下文不完整: one synthetic file failed",
+    ) in calls
+    assert ("generate_report", "partial context") in calls
+
+
+def test_generate_daily_report_stops_before_constructing_llm_on_context_error(
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    class StubContextScheduler:
+        def build_context(self, request) -> ContextBuildResult:
+            calls.append("build_context")
+            return _schedule_result(
+                "must not reach LLM",
+                status="error",
+                message="Rust scanner process failed",
+            )
+
+    class StubSQLiteStore:
+        pass
+
+    class StubReportGenerator:
+        pass
+
+    class ForbiddenLLMClient:
+        def __init__(self) -> None:
+            calls.append("llm_init")
+
+    class StubLogger:
+        def error(self, message: str, *args) -> None:
+            calls.append("logger_error")
+
+    printed = _patch_console(monkeypatch)
+    _patch_progress(monkeypatch)
+    monkeypatch.setattr(main, "ContextScheduler", StubContextScheduler)
+    monkeypatch.setattr(main, "SQLiteStore", StubSQLiteStore)
+    monkeypatch.setattr(main, "ReportGenerator", StubReportGenerator)
+    monkeypatch.setattr(main, "LLMClient", ForbiddenLLMClient)
+    monkeypatch.setattr(main, "logger", StubLogger())
+
+    success = main.generate_daily_report(
+        Namespace(input="今天工作", no_save=True, date=None)
+    )
+
+    assert success is False
+    assert calls == ["build_context", "logger_error"]
+    assert any("文件上下文构建失败" in text for text in printed)
+    assert any("Rust scanner process failed" in text for text in printed)
 
 
 def test_generate_weekly_report_db_uses_sqlite_store(monkeypatch):
@@ -295,7 +361,7 @@ def test_generate_weekly_report_scan_uses_context_scheduler(monkeypatch):
     calls: list[tuple[str, object]] = []
 
     class StubContextScheduler:
-        def build_context(self, request) -> ContextScheduleResult:
+        def build_context(self, request) -> ContextBuildResult:
             calls.append(
                 (
                     "build_context",
@@ -452,7 +518,7 @@ def test_generate_monthly_report_scan_uses_context_scheduler(monkeypatch):
     calls: list[tuple[str, object]] = []
 
     class StubContextScheduler:
-        def build_context(self, request) -> ContextScheduleResult:
+        def build_context(self, request) -> ContextBuildResult:
             calls.append(
                 (
                     "build_context",
@@ -623,7 +689,7 @@ def test_report_command_returns_false_when_generation_fails(
     args: Namespace,
 ):
     class StubContextScheduler:
-        def build_context(self, request) -> ContextScheduleResult:
+        def build_context(self, request) -> ContextBuildResult:
             return _schedule_result("report context")
 
     class StubSQLiteStore:

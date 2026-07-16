@@ -16,6 +16,10 @@ DEFAULT_OFFICE_FALLBACK_ORDER = [
     "python_sharepoint_text_v1",
 ]
 DEFAULT_OFFICE_FALLBACK_POLICY_VERSION = "hybrid_v1"
+DEFAULT_SCANNER_ENGINE = "python_legacy"
+DEFAULT_RUST_SCANNER_BIN = "rust/target/release/ai-daily-scanner"
+DEFAULT_RUST_INDEX_DB_PATH = "data/db/scan_index_v2.sqlite3"
+DEFAULT_RUST_PROCESS_TIMEOUT_SECONDS = 900.0
 
 SCANNER_CONTRACT_FIELDS = (
     "allowed_extensions",
@@ -72,6 +76,10 @@ SCANNER_INFRASTRUCTURE_FIELDS = frozenset(
         "index_db_path",
         "worker_lane_mode",
         "office_external_fallback",
+        "engine",
+        "rust_scanner_bin",
+        "rust_index_db_path",
+        "rust_process_timeout_seconds",
     }
 )
 
@@ -364,6 +372,58 @@ class Config:
             if key in present:
                 profile[key] = present[key]
         return profile
+
+    @property
+    def scanner_engine(self) -> str:
+        """选择一次完整 scanner/context engine；Task 11 前默认 legacy。"""
+        value = str(
+            getattr(self._settings.scanner, "engine", DEFAULT_SCANNER_ENGINE)
+        ).strip().lower()
+        if value not in {"python_legacy", "rust_v2"}:
+            raise ValueError(f"unsupported scanner engine: {value!r}")
+        return value
+
+    @property
+    def rust_scanner_bin(self) -> str:
+        """Rust v2 context binary 路径，不注入 scanner wire profile。"""
+        return self._non_blank_string(
+            getattr(
+                self._settings.scanner,
+                "rust_scanner_bin",
+                DEFAULT_RUST_SCANNER_BIN,
+            ),
+            DEFAULT_RUST_SCANNER_BIN,
+        )
+
+    @property
+    def rust_index_db_path(self) -> str:
+        """Rust v2 独占数据库路径；legacy 数据库保持不变。"""
+        return self._non_blank_string(
+            getattr(
+                self._settings.scanner,
+                "rust_index_db_path",
+                DEFAULT_RUST_INDEX_DB_PATH,
+            ),
+            DEFAULT_RUST_INDEX_DB_PATH,
+        )
+
+    @property
+    def rust_process_timeout_seconds(self) -> float:
+        """Python 外层 watchdog 总预算，不替代 Rust 的逐文件 deadline。"""
+        raw = getattr(
+            self._settings.scanner,
+            "rust_process_timeout_seconds",
+            DEFAULT_RUST_PROCESS_TIMEOUT_SECONDS,
+        )
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("rust_process_timeout_seconds must be numeric") from exc
+        if not 1.0 <= value <= 86_400.0:
+            raise ValueError(
+                "rust_process_timeout_seconds must be between 1 and 86400"
+            )
+        return value
 
     @property
     def llm_provider(self) -> str:

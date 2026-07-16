@@ -1,552 +1,282 @@
-"""测试 scanner benchmark 脚本。"""
+"""测试 Rust inspect-run DTO 驱动的 scanner benchmark。"""
 
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import scripts.benchmark_scanner as benchmark_module
 from scripts.benchmark_scanner import (
     build_benchmark_payload,
     build_parser_backend_summary,
     render_markdown_report,
+    run_benchmark,
     write_report_files,
 )
-from src.models.schemas import FileContext, ScanResult
-from src.services.file_scanner import NOT_PARSED_PARSER_BACKEND
-from src.services.light_text_parser import LIGHT_TEXT_PARSER_BACKEND
-from src.services.scan_metrics import ExtensionMetrics, ReparseDetail
+from src.models.scanner_contract import (
+    ContextDecision,
+    ContextEnvelope,
+    ContextSummary,
+    Diagnostic,
+    ExtensionMetric,
+    FileAudit,
+    InspectRunResponse,
+    StageMetric,
+)
 
 
-def _make_reparse_detail(
-    extension: str,
-    parser_backend: str,
-    truncated: bool,
-    path: str = "D:\\work\\report.md",
-    worker_lane: str = "",
-    attempted_backend: str = "",
-    fallback_backend: str = "",
-    fallback_reason: str = "",
-    rust_duration_ms: int = 0,
-    fallback_duration_ms: int = 0,
-    failure_class: str = "",
-) -> ReparseDetail:
-    return ReparseDetail(
-        path=path,
-        extension=extension,
-        file_identity=f"bootstrap:{path.lower()}",
-        source_version="mtime=2:size=10",
-        cache_status="miss",
-        cache_miss_reason="source_version_changed",
-        previous_source_version="mtime=1:size=10",
-        parse_duration_ms=12,
-        parse_status="success",
-        parse_error="",
-        parser_backend=parser_backend,
-        worker_lane=worker_lane,
-        truncated=truncated,
-        attempted_backend=attempted_backend,
-        fallback_backend=fallback_backend,
-        fallback_reason=fallback_reason,
-        rust_duration_ms=rust_duration_ms,
-        fallback_duration_ms=fallback_duration_ms,
-        failure_class=failure_class,
+def _diagnostic() -> Diagnostic:
+    return Diagnostic(
+        error_code="PARSER_FAILED",
+        message="synthetic parser degradation",
+        retryable=False,
+        stage="parse",
+        file_path=None,
+        backend=None,
     )
 
 
-def test_build_parser_backend_summary_returns_empty_summary():
-    """没有重解析明细时应返回稳定的空 summary。"""
-    assert build_parser_backend_summary([]) == {
-        "direct_count": 0,
-        "not_parsed_count": 0,
-        "subprocess_count": 0,
-        "truncated_count": 0,
-        "by_extension": {},
-    }
-
-
-def test_build_parser_backend_summary_preserves_backend_dimensions_and_sorting():
-    """summary 应保留真实 backend 维度，并按 extension 稳定排序。"""
-    summary = build_parser_backend_summary(
-        [
-            _make_reparse_detail(
-                extension=".txt",
-                parser_backend="custom_backend",
-                truncated=True,
-                path="D:\\work\\custom.txt",
-            ),
-            _make_reparse_detail(
-                extension=".md",
-                parser_backend="",
-                truncated=False,
-                path="D:\\work\\fallback.md",
-            ),
-            _make_reparse_detail(
-                extension=".txt",
-                parser_backend=LIGHT_TEXT_PARSER_BACKEND,
-                truncated=True,
-                path="D:\\work\\light.txt",
-            ),
-        ]
-    )
-
-    assert summary["direct_count"] == 2
-    assert summary["not_parsed_count"] == 1
-    assert summary["subprocess_count"] == 0
-    assert summary["truncated_count"] == 2
-    assert list(summary["by_extension"]) == [".md", ".txt"]
-    assert summary["by_extension"][".txt"] == {
-        LIGHT_TEXT_PARSER_BACKEND: 1,
-        "subprocess": 0,
-        "custom_backend": 1,
-        NOT_PARSED_PARSER_BACKEND: 0,
-        "truncated": 2,
-    }
-    assert summary["by_extension"][".md"] == {
-        LIGHT_TEXT_PARSER_BACKEND: 0,
-        "subprocess": 0,
-        NOT_PARSED_PARSER_BACKEND: 1,
-        "truncated": 0,
-    }
-
-
-def test_build_parser_backend_summary_uses_worker_lane_for_office_pdf_backends():
-    """summary 应用 worker_lane 统计 subprocess，用 backend 展示真实解析器。"""
-    summary = build_parser_backend_summary(
-        [
-            _make_reparse_detail(
-                extension=".docx",
-                parser_backend="office_v1",
-                worker_lane="subprocess",
-                truncated=True,
-                path="D:\\work\\report.docx",
-            ),
-            _make_reparse_detail(
-                extension=".pdf",
-                parser_backend="pdf_text_v1",
-                worker_lane="subprocess",
-                truncated=False,
-                path="D:\\work\\report.pdf",
-            ),
-            _make_reparse_detail(
-                extension=".md",
-                parser_backend=LIGHT_TEXT_PARSER_BACKEND,
-                worker_lane="direct",
-                truncated=False,
-                path="D:\\work\\note.md",
-            ),
-            _make_reparse_detail(
-                extension=".pptx",
-                parser_backend=NOT_PARSED_PARSER_BACKEND,
-                worker_lane="not_parsed",
-                truncated=False,
-                path="D:\\work\\large.pptx",
-            ),
-        ]
-    )
-
-    assert summary["direct_count"] == 1
-    assert summary["subprocess_count"] == 2
-    assert summary["not_parsed_count"] == 1
-    assert summary["truncated_count"] == 1
-    assert summary["by_extension"][".docx"]["office_v1"] == 1
-    assert summary["by_extension"][".docx"]["subprocess"] == 1
-    assert summary["by_extension"][".pdf"]["pdf_text_v1"] == 1
-    assert summary["by_extension"][".pdf"]["subprocess"] == 1
-    assert summary["by_extension"][".pptx"][NOT_PARSED_PARSER_BACKEND] == 1
-
-
-def test_build_benchmark_payload_uses_scan_result_and_metrics():
-    """benchmark payload 应组合扫描结果、run detail 和扩展名明细。"""
-    scan_result = ScanResult(
-        total_files=2,
+def _summary() -> ContextSummary:
+    return ContextSummary(
+        source_file_count=2,
         success_count=1,
-        error_count=1,
-        contexts=[
-            FileContext(
-                file_path="a.txt",
-                file_type=".txt",
-                content="hello",
-                error=None,
-            )
-        ],
+        timeout_count=0,
+        included_file_count=1,
+        omitted_file_count=0,
+        error_file_count=1,
+        input_chars=10,
+        output_chars=100,
+        total_duration_ms=25,
+        discovery_duration_ms=2,
+        parse_duration_ms=18,
+        compression_duration_ms=1,
     )
-    run_detail = {
-        "run_id": 7,
-        "discovered_count": 2,
-        "reused_count": 0,
-        "reparsed_count": 2,
-        "total_duration_ms": 120,
-        "discovery_duration_ms": 10,
-        "inventory_cache_duration_ms": 20,
-        "parse_duration_ms": 80,
-        "aggregation_duration_ms": 5,
-        "success_count": 1,
-        "error_count": 1,
-        "timeout_count": 1,
-    }
-    extension_metrics = [
-        ExtensionMetrics(
-            extension=".txt",
-            file_count=2,
-            parse_duration_ms=80,
-            success_count=1,
-            error_count=1,
-            timeout_count=1,
-        )
-    ]
-    reparse_details = [
-        ReparseDetail(
-            path="D:\\work\\report.md",
-            extension=".md",
-            file_identity="bootstrap:d:\\work\\report.md",
-            source_version="mtime=2:size=10",
-            cache_status="miss",
-            cache_miss_reason="source_version_changed",
-            previous_source_version="mtime=1:size=10",
-            parse_duration_ms=12,
+
+
+def _files() -> list[FileAudit]:
+    return [
+        FileAudit(
+            relative_path="notes\\a.md",
+            file_identity="fixture:a",
+            source_version="mtime_ns=1:size=10",
             parse_status="success",
-            parse_error="",
-            parser_backend=LIGHT_TEXT_PARSER_BACKEND,
-            worker_lane="direct",
-            truncated=True,
-        )
-    ]
-
-    payload = build_benchmark_payload(
-        scan_result=scan_result,
-        run_detail=run_detail,
-        extension_metrics=extension_metrics,
-        reparse_details=reparse_details,
-        start_date=date(2026, 5, 23),
-        end_date=date(2026, 5, 24),
-        summary_mode=True,
-        discovery_backend="rust",
-    )
-
-    assert payload["parameters"] == {
-        "start_date": "2026-05-23",
-        "end_date": "2026-05-24",
-        "summary_mode": True,
-        "discovery_backend": "rust",
-    }
-    assert payload["scan_result"] == {
-        "total_files": 2,
-        "success_count": 1,
-        "error_count": 1,
-    }
-    assert payload["metrics"]["run_id"] == 7
-    assert payload["extension_metrics"] == [
-        {
-            "extension": ".txt",
-            "file_count": 2,
-            "parse_duration_ms": 80,
-            "success_count": 1,
-            "error_count": 1,
-            "timeout_count": 1,
-        }
-    ]
-    assert payload["reparse_details"] == [
-        {
-            "path": "D:\\work\\report.md",
-            "extension": ".md",
-            "file_identity": "bootstrap:d:\\work\\report.md",
-            "source_version": "mtime=2:size=10",
-            "cache_status": "miss",
-            "cache_miss_reason": "source_version_changed",
-            "previous_source_version": "mtime=1:size=10",
-            "parse_duration_ms": 12,
-            "parse_status": "success",
-            "parse_error": "",
-            "parser_backend": LIGHT_TEXT_PARSER_BACKEND,
-            "worker_lane": "direct",
-            "truncated": True,
-            "attempted_backend": "",
-            "fallback_backend": "",
-            "fallback_reason": "",
-            "rust_duration_ms": 0,
-            "fallback_duration_ms": 0,
-            "failure_class": "",
-        }
-    ]
-    assert payload["parser_backend_summary"] == {
-        "direct_count": 1,
-        "not_parsed_count": 0,
-        "subprocess_count": 0,
-        "truncated_count": 1,
-        "by_extension": {
-            ".md": {
-                LIGHT_TEXT_PARSER_BACKEND: 1,
-                "subprocess": 0,
-                NOT_PARSED_PARSER_BACKEND: 0,
-                "truncated": 1,
-            }
-        },
-    }
-
-
-def test_build_benchmark_payload_preserves_office_fallback_audit_fields():
-    """benchmark JSON 应保留 Office Rust 尝试和 Python fallback 审计字段。"""
-    scan_result = ScanResult(
-        total_files=1,
-        success_count=1,
-        error_count=0,
-        contexts=[],
-    )
-    run_detail = {
-        "run_id": 8,
-        "discovered_count": 1,
-        "reused_count": 0,
-        "reparsed_count": 1,
-        "total_duration_ms": 70,
-        "discovery_duration_ms": 5,
-        "inventory_cache_duration_ms": 6,
-        "parse_duration_ms": 50,
-        "aggregation_duration_ms": 2,
-        "success_count": 1,
-        "error_count": 0,
-        "timeout_count": 0,
-    }
-    reparse_details = [
-        _make_reparse_detail(
-            extension=".xlsx",
-            parser_backend="python_office_v1",
-            worker_lane="subprocess",
+            parser_backend="light_text_v1",
+            worker_lane="rust_core",
+            cache_status="fresh",
+            cache_miss_reason="",
             truncated=False,
-            path="D:\\work\\bad.xlsx",
-            attempted_backend="rust_office_oxide_v1",
-            fallback_backend="python_office_v1",
-            fallback_reason="RUST_OFFICE_PARSE_FAILED: bad zip",
-            rust_duration_ms=13,
-            fallback_duration_ms=21,
+            content_sha256="a" * 64,
+            parse_duration_ms=0,
+            failure_class="",
+            fallback_backend="",
+            fallback_reason_code="",
+        ),
+        FileAudit(
+            relative_path="docs\\broken.pdf",
+            file_identity="fixture:b",
+            source_version="mtime_ns=2:size=20",
+            parse_status="error",
+            parser_backend="pdf_text_v1",
+            worker_lane="python_document_process",
+            cache_status="miss",
+            cache_miss_reason="new_file",
+            truncated=True,
+            content_sha256="b" * 64,
+            parse_duration_ms=18,
             failure_class="recoverable_parser_failure",
-        )
+            fallback_backend="",
+            fallback_reason_code="",
+        ),
     ]
 
+
+def _envelope() -> ContextEnvelope:
+    return ContextEnvelope(
+        contract="ai_daily_context",
+        protocol_version=1,
+        request_id="11111111-1111-4111-8111-111111111111",
+        engine_version="0.1.0",
+        engine_build="synthetic-build",
+        status="partial",
+        file_context="private synthetic context",
+        summary=_summary(),
+        scan_run_id=7,
+        context_run_id=7,
+        warnings=[_diagnostic()],
+        error=None,
+    )
+
+
+def _inspection() -> InspectRunResponse:
+    return InspectRunResponse(
+        contract="ai_daily_context",
+        protocol_version=1,
+        request_id="21111111-2111-4111-8111-211111111111",
+        scan_run_id=7,
+        context_run_id=7,
+        status="ok",
+        run_status="partial",
+        summary=_summary(),
+        stage_metrics=[
+            StageMetric(stage="discovery", item_count=2, duration_ms=2),
+            StageMetric(stage="cache", item_count=2, duration_ms=1),
+            StageMetric(stage="parse", item_count=1, duration_ms=18),
+            StageMetric(stage="context", item_count=2, duration_ms=1),
+        ],
+        extension_metrics=[
+            ExtensionMetric(
+                extension=".md",
+                file_count=1,
+                parse_duration_ms=0,
+                success_count=1,
+                error_count=0,
+                timeout_count=0,
+            ),
+            ExtensionMetric(
+                extension=".pdf",
+                file_count=1,
+                parse_duration_ms=18,
+                success_count=0,
+                error_count=1,
+                timeout_count=0,
+            ),
+        ],
+        files=_files(),
+        decisions=[
+            ContextDecision(
+                relative_path="notes\\a.md",
+                action="keep",
+                reason="small_file_keep",
+                priority=30,
+                input_chars=10,
+                output_chars=10,
+                truncated=False,
+                error_code="",
+            ),
+            ContextDecision(
+                relative_path="docs\\broken.pdf",
+                action="error",
+                reason="parse_error",
+                priority=80,
+                input_chars=0,
+                output_chars=0,
+                truncated=True,
+                error_code="PARSER_FAILED",
+            ),
+        ],
+        warnings=[_diagnostic()],
+        error=None,
+    )
+
+
+def test_backend_summary_keeps_parser_and_worker_lane_dimensions_separate():
+    summary = build_parser_backend_summary(_files())
+
+    assert summary["backend_counts"] == {
+        "light_text_v1": 1,
+        "pdf_text_v1": 1,
+    }
+    assert summary["worker_lane_counts"] == {
+        "python_document_process": 1,
+        "rust_core": 1,
+    }
+    assert summary["by_extension"][".pdf"]["backends"] == {
+        "pdf_text_v1": 1
+    }
+    assert summary["by_extension"][".pdf"]["lanes"] == {
+        "python_document_process": 1
+    }
+
+
+def test_payload_uses_inspect_dto_and_never_contains_context_content():
     payload = build_benchmark_payload(
-        scan_result=scan_result,
-        run_detail=run_detail,
-        extension_metrics=[],
-        reparse_details=reparse_details,
-        start_date=date(2026, 5, 23),
-        end_date=date(2026, 5, 24),
+        envelope=_envelope(),
+        inspection=_inspection(),
+        start_date=date(2026, 7, 15),
+        end_date=date(2026, 7, 16),
         summary_mode=False,
-        discovery_backend="rust",
     )
 
-    assert payload["reparse_details"][0]["attempted_backend"] == (
-        "rust_office_oxide_v1"
-    )
-    assert payload["reparse_details"][0]["fallback_backend"] == "python_office_v1"
-    assert payload["reparse_details"][0]["fallback_reason"] == (
-        "RUST_OFFICE_PARSE_FAILED: bad zip"
-    )
-    assert payload["reparse_details"][0]["rust_duration_ms"] == 13
-    assert payload["reparse_details"][0]["fallback_duration_ms"] == 21
-    assert payload["reparse_details"][0]["failure_class"] == (
-        "recoverable_parser_failure"
-    )
+    assert payload["metrics"]["run_id"] == 7
+    assert payload["metrics"]["reused_count"] == 1
+    assert payload["metrics"]["reparsed_count"] == 1
+    assert payload["metrics"]["cache_duration_ms"] == 1
+    assert payload["files"][0]["relative_path"] == "notes\\a.md"
+    assert "private synthetic context" not in str(payload)
+    assert "file_context" not in str(payload)
 
 
-def test_render_markdown_report_contains_stage_and_extension_metrics():
-    """Markdown 报告应包含阶段耗时和扩展名明细表。"""
-    payload = {
-        "parameters": {
-            "start_date": "2026-05-23",
-            "end_date": "2026-05-24",
-            "summary_mode": False,
-            "discovery_backend": "rust",
-        },
-        "scan_result": {
-            "total_files": 2,
-            "success_count": 1,
-            "error_count": 1,
-        },
-        "metrics": {
-            "run_id": 7,
-            "discovered_count": 2,
-            "reused_count": 0,
-            "reparsed_count": 2,
-            "total_duration_ms": 120,
-            "discovery_duration_ms": 10,
-            "inventory_cache_duration_ms": 20,
-            "parse_duration_ms": 80,
-            "aggregation_duration_ms": 5,
-            "success_count": 1,
-            "error_count": 1,
-            "timeout_count": 1,
-        },
-        "extension_metrics": [
-            {
-                "extension": ".txt",
-                "file_count": 2,
-                "parse_duration_ms": 80,
-                "success_count": 1,
-                "error_count": 1,
-                "timeout_count": 1,
-            }
-        ],
-        "reparse_details": [
-            {
-                "path": "D:\\work\\report.md",
-                "extension": ".md",
-                "file_identity": "bootstrap:d:\\work\\report.md",
-                "source_version": "mtime=2:size=10",
-                "cache_status": "miss",
-                "cache_miss_reason": "source_version_changed",
-                "previous_source_version": "mtime=1:size=10",
-                "parse_duration_ms": 12,
-                "parse_status": "success",
-                "parse_error": "",
-                "parser_backend": LIGHT_TEXT_PARSER_BACKEND,
-                "truncated": True,
-                "attempted_backend": "rust_office_oxide_v1",
-                "fallback_backend": "python_office_v1",
-                "fallback_reason": "RUST_OFFICE_PARSE_FAILED: bad zip",
-                "failure_class": "environment_unavailable",
-                "rust_duration_ms": 13,
-                "fallback_duration_ms": 21,
-            }
-        ],
-        "parser_backend_summary": {
-            "direct_count": 1,
-            "subprocess_count": 0,
-            "truncated_count": 1,
-            "by_extension": {
-                ".md": {
-                    LIGHT_TEXT_PARSER_BACKEND: 1,
-                    "subprocess": 0,
-                    "truncated": 1,
-                }
-            },
-        },
-    }
+def test_payload_rejects_build_and_inspect_identity_mismatch():
+    inspection = _inspection().model_copy(update={"scan_run_id": 8})
 
+    with pytest.raises(ValueError, match="DTOs disagree"):
+        build_benchmark_payload(
+            envelope=_envelope(),
+            inspection=inspection,
+            start_date=date(2026, 7, 15),
+            end_date=date(2026, 7, 16),
+            summary_mode=False,
+        )
+
+
+def test_render_and_write_report_preserve_metadata_only(tmp_path: Path):
+    payload = build_benchmark_payload(
+        envelope=_envelope(),
+        inspection=_inspection(),
+        start_date=date(2026, 7, 15),
+        end_date=date(2026, 7, 16),
+        summary_mode=True,
+    )
     markdown = render_markdown_report(payload)
+    json_out = tmp_path / "scanner.json"
+    markdown_out = tmp_path / "scanner.md"
 
-    assert "# Scanner Benchmark Report" in markdown
-    assert "| total | 120 |" in markdown
-    assert "| discovery | 10 |" in markdown
-    assert "- discovery_backend: `rust`" in markdown
-    assert "| .txt | 2 | 80 | 1 | 1 | 1 |" in markdown
-    assert "## Parser Backend Summary" in markdown
-    assert "- direct_count: `1`" in markdown
-    assert "- not_parsed_count: `0`" in markdown
-    assert "- subprocess_count: `0`" in markdown
-    assert "- truncated_count: `1`" in markdown
-    assert "| .md | light_text_v1 | 1 | 0 | 1 |" in markdown
-    assert "## Reparse Details" in markdown
-    assert (
-        "| .md | source_version_changed | 12 | success | rust_office_oxide_v1 | "
-        "python_office_v1 | RUST_OFFICE_PARSE_FAILED: bad zip | "
-        "environment_unavailable | 13 | 21 | "
-        "D:\\work\\report.md |"
-    ) in markdown
-    assert "rust_office_oxide_v1" in markdown
-    assert "python_office_v1" in markdown
-    assert "RUST_OFFICE_PARSE_FAILED: bad zip" in markdown
-    assert "failure_class" in markdown
-    assert "environment_unavailable" in markdown
-    assert "cannot evaluate Rust parser performance" in markdown
+    write_report_files(payload, json_out, markdown_out)
+
+    assert "# Rust Scanner Benchmark Report" in markdown
+    assert "Parser Backend And Worker Lane" in markdown
+    assert '"worker_lane": "rust_core"' in json_out.read_text(encoding="utf-8")
+    assert "# Rust Scanner Benchmark Report" in markdown_out.read_text(
+        encoding="utf-8"
+    )
 
 
-def test_render_markdown_report_orders_backend_summary_rows_stably():
-    """Markdown backend summary 应按 extension/backend 稳定输出真实 backend 行。"""
-    payload = {
-        "parameters": {
-            "start_date": "2026-05-23",
-            "end_date": "2026-05-24",
-            "summary_mode": False,
-        },
-        "scan_result": {
-            "total_files": 0,
-            "success_count": 0,
-            "error_count": 0,
-        },
-        "metrics": {
-            "run_id": 7,
-            "discovered_count": 0,
-            "reused_count": 0,
-            "reparsed_count": 0,
-            "total_duration_ms": 0,
-            "discovery_duration_ms": 0,
-            "inventory_cache_duration_ms": 0,
-            "parse_duration_ms": 0,
-            "aggregation_duration_ms": 0,
-            "success_count": 0,
-            "error_count": 0,
-            "timeout_count": 0,
-        },
-        "extension_metrics": [],
-        "reparse_details": [],
-        "parser_backend_summary": build_parser_backend_summary(
-            [
-                _make_reparse_detail(
-                    extension=".txt",
-                    parser_backend="custom_backend",
-                    truncated=True,
-                    path="D:\\work\\custom.txt",
-                ),
-                _make_reparse_detail(
-                    extension=".md",
-                    parser_backend="",
-                    truncated=False,
-                    path="D:\\work\\fallback.md",
-                ),
-                _make_reparse_detail(
-                    extension=".txt",
-                    parser_backend=LIGHT_TEXT_PARSER_BACKEND,
-                    truncated=True,
-                    path="D:\\work\\light.txt",
-                ),
-            ]
+def test_run_benchmark_calls_build_then_inspect_without_file_scanner(monkeypatch):
+    calls: list[tuple[str, object]] = []
+
+    class StubClient:
+        def __init__(self, **kwargs) -> None:
+            calls.append(("init", kwargs))
+
+        def build_context(self, request) -> ContextEnvelope:
+            calls.append(("build", request.report_mode))
+            return _envelope()
+
+        def inspect_run(self, scan_run_id: int, *, include_content: bool):
+            calls.append(("inspect", (scan_run_id, include_content)))
+            return _inspection()
+
+    monkeypatch.setattr(benchmark_module, "RustContextClient", StubClient)
+    monkeypatch.setattr(
+        benchmark_module,
+        "config",
+        SimpleNamespace(
+            rust_scanner_bin="scanner.exe",
+            rust_index_db_path="state/scan_index_v2.sqlite3",
+            rust_process_timeout_seconds=90,
         ),
-    }
+    )
+    args = SimpleNamespace(
+        start_date=date(2026, 7, 15),
+        end_date=date(2026, 7, 16),
+        summary_mode=False,
+        scanner_bin=None,
+        scan_db_path=None,
+    )
 
-    markdown = render_markdown_report(payload)
+    payload = run_benchmark(args)
 
-    not_parsed_row = "| .md | not_parsed | 1 | 0 | 0 |"
-    light_row = "| .txt | light_text_v1 | 1 | 0 | 2 |"
-    custom_row = "| .txt | custom_backend | 1 | 0 | 2 |"
-    assert "- not_parsed_count: `1`" in markdown
-    assert not_parsed_row in markdown
-    assert light_row in markdown
-    assert custom_row in markdown
-    assert markdown.index(not_parsed_row) < markdown.index(light_row)
-    assert markdown.index(light_row) < markdown.index(custom_row)
-
-
-def test_write_report_files_writes_utf8_json_and_markdown(tmp_path: Path):
-    """脚本输出文件应显式用 UTF-8，保留中文字段。"""
-    payload = {
-        "parameters": {
-            "start_date": "2026-05-23",
-            "end_date": "2026-05-24",
-            "summary_mode": False,
-        },
-        "scan_result": {
-            "total_files": 0,
-            "success_count": 0,
-            "error_count": 0,
-        },
-        "metrics": {
-            "run_id": 1,
-            "discovered_count": 0,
-            "reused_count": 0,
-            "reparsed_count": 0,
-            "total_duration_ms": 0,
-            "discovery_duration_ms": 0,
-            "inventory_cache_duration_ms": 0,
-            "parse_duration_ms": 0,
-            "aggregation_duration_ms": 0,
-            "success_count": 0,
-            "error_count": 0,
-            "timeout_count": 0,
-        },
-        "extension_metrics": [],
-        "reparse_details": [],
-    }
-    json_out = tmp_path / "benchmark.json"
-    markdown_out = tmp_path / "benchmark.md"
-
-    write_report_files(payload, json_out=json_out, markdown_out=markdown_out)
-
-    assert '"start_date": "2026-05-23"' in json_out.read_text(encoding="utf-8")
-    assert "Scanner Benchmark Report" in markdown_out.read_text(encoding="utf-8")
+    assert payload["status"] == "partial"
+    assert calls[1:] == [("build", "daily"), ("inspect", (7, False))]
+    assert not hasattr(benchmark_module, "FileScanner")

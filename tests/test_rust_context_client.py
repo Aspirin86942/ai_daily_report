@@ -428,23 +428,11 @@ def test_rust_context_client_builds_wire_request_from_raw_profile_only(
         scanner_contract_profile=lambda: raw_profile.copy(),
     )
     response = ContextEnvelope.model_validate(_fixture("response-error.json"))
-    version = VersionResponse.model_validate(
-        _fixture("scanner-version-response.json")
-    )
     captured: dict[str, object] = {}
     commands: list[list[str]] = []
 
     def fake_run_json_process(**kwargs):
         commands.append(kwargs["command"])
-        if kwargs["command"][-1] == "version":
-            return JsonProcessResult(
-                response=version,
-                transport_error=None,
-                failure=None,
-                exit_code=0,
-                stderr="",
-                duration_ms=1,
-            )
         captured.update(kwargs)
         return JsonProcessResult(
             response=response,
@@ -513,10 +501,7 @@ def test_rust_context_client_builds_wire_request_from_raw_profile_only(
             / "ai-daily-scanner.exe"
         ).resolve()
     )
-    assert commands == [
-        [scanner_path, "version"],
-        [scanner_path, "build-context"],
-    ]
+    assert commands == [[scanner_path, "build-context"]]
 
 
 def test_rust_context_client_maps_untrusted_process_failure_without_stderr_leak(
@@ -574,7 +559,56 @@ def test_rust_context_client_maps_untrusted_process_failure_without_stderr_leak(
     assert response.summary.total_duration_ms == 19
 
 
-def test_rust_context_client_rejects_engine_build_change_after_handshake(
+def test_rust_context_client_inspect_run_uses_stable_dto_without_content(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = SimpleNamespace(
+        work_dir=tmp_path / "work",
+        scanner_contract_profile=lambda: {
+            "schema_version": "scanner_profile_v1"
+        },
+    )
+    response = InspectRunResponse.model_validate(
+        _fixture("inspect-run-response-ok.json")
+    )
+    captured: dict[str, object] = {}
+
+    def fake_run_json_process(**kwargs):
+        captured.update(kwargs)
+        return JsonProcessResult(
+            response=response,
+            transport_error=None,
+            failure=None,
+            exit_code=0,
+            stderr="",
+            duration_ms=1,
+        )
+
+    monkeypatch.setattr(
+        "src.services.rust_context_client.run_json_process",
+        fake_run_json_process,
+    )
+    request_id = UUID(str(response.request_id))
+    client = RustContextClient(
+        config=config,
+        project_root=tmp_path,
+        request_id_factory=lambda: request_id,
+    )
+
+    result = client.inspect_run(response.scan_run_id, include_content=False)
+
+    assert result == response
+    assert captured["command"][-1] == "inspect-run"
+    assert captured["expected_request_id"] == str(request_id)
+    payload = captured["request_payload"]
+    assert isinstance(payload, dict)
+    assert payload["scan_run_id"] == response.scan_run_id
+    assert payload["include_content"] is False
+    assert "file_context" not in payload
+
+
+def test_rust_context_client_watchdog_bounds_the_single_build_process(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -586,45 +620,34 @@ def test_rust_context_client_rejects_engine_build_change_after_handshake(
             "schema_version": "scanner_profile_v1"
         },
     )
-    version = VersionResponse.model_validate(
-        _fixture("scanner-version-response.json")
-    )
-    changed_response = ContextEnvelope.model_validate(
-        _fixture("response-error.json")
-    ).model_copy(update={"engine_build": "replaced-after-handshake"})
-    results = iter(
-        [
-            JsonProcessResult(
-                response=version,
-                transport_error=None,
-                failure=None,
-                exit_code=0,
-                stderr="",
-                duration_ms=2,
-            ),
-            JsonProcessResult(
-                response=changed_response,
-                transport_error=None,
-                failure=None,
-                exit_code=1,
-                stderr="private replacement detail",
-                duration_ms=3,
-            ),
-        ]
-    )
+    response = ContextEnvelope.model_validate(_fixture("response-ok.json"))
+    timeouts: list[float] = []
+
+    def fake_run_json_process(**kwargs):
+        timeouts.append(kwargs["timeout_seconds"])
+        return JsonProcessResult(
+            response=response,
+            transport_error=None,
+            failure=None,
+            exit_code=0,
+            stderr="",
+            duration_ms=300,
+        )
+
     monkeypatch.setattr(
         "src.services.rust_context_client.run_json_process",
-        lambda **kwargs: next(results),
+        fake_run_json_process,
     )
     client = RustContextClient(
         config=config,
         project_root=tmp_path,
+        timeout_seconds=1.0,
         request_id_factory=lambda: UUID(
             "11111111-1111-4111-8111-111111111111"
         ),
     )
 
-    response = client.build_context(
+    result = client.build_context(
         ContextScheduleRequest(
             report_mode="daily",
             source="scan",
@@ -633,11 +656,8 @@ def test_rust_context_client_rejects_engine_build_change_after_handshake(
         )
     )
 
-    assert response.status == "error"
-    assert response.error is not None
-    assert response.error.error_code == "RUST_CORE_CRASHED"
-    assert "replacement" not in response.error.message
-    assert response.summary.total_duration_ms == 5
+    assert result == response
+    assert timeouts == [1.0]
 
 
 def test_rust_scanner_version_is_requestless_strict_json() -> None:

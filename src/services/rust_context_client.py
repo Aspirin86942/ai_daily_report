@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 import sys
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
 from src.models.scanner_contract import (
@@ -13,12 +13,15 @@ from src.models.scanner_contract import (
     ContextEnvelope,
     ContextSummary,
     Diagnostic,
-    VersionResponse,
+    InspectRunRequest,
+    InspectRunResponse,
     build_rust_core_crashed_envelope,
 )
 
-from .context_scheduler import ContextScheduleRequest
 from .json_process_client import JsonProcessResult, run_json_process
+
+if TYPE_CHECKING:
+    from .context_scheduler import ContextScheduleRequest
 
 
 DEFAULT_SCANNER_BINARY = "rust/target/release/ai-daily-scanner"
@@ -60,6 +63,8 @@ class RustContextClient:
         )
         self._python_document_worker_module = python_document_worker_module
         self._timeout_seconds = float(timeout_seconds)
+        if self._timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
         self._request_id_factory = request_id_factory
 
     def build_context(
@@ -67,19 +72,6 @@ class RustContextClient:
         request: ContextScheduleRequest,
     ) -> ContextEnvelope:
         request_id = str(self._request_id_factory())
-        version_result = run_json_process(
-            command=[str(self._scanner_binary), "version"],
-            request_payload=None,
-            response_model=VersionResponse,
-            timeout_seconds=self._timeout_seconds,
-            cwd=self._project_root,
-        )
-        version = version_result.response
-        if version is None or not self._is_supported_version(version):
-            return build_rust_core_crashed_envelope(
-                request_id=request_id,
-                duration_ms=version_result.duration_ms,
-            )
         wire_request = BuildContextRequest(
             contract="ai_daily_context",
             protocol_version=1,
@@ -112,26 +104,36 @@ class RustContextClient:
             cwd=self._project_root,
         )
         if result.response is not None:
-            if (
-                result.response.engine_version == version.engine_version
-                and result.response.engine_build == version.engine_build
-            ):
-                return result.response
-            return build_rust_core_crashed_envelope(
-                request_id=request_id,
-                duration_ms=(
-                    version_result.duration_ms + result.duration_ms
-                ),
-            )
+            return result.response
         return self._crashed_envelope(request_id, result)
 
-    @staticmethod
-    def _is_supported_version(version: VersionResponse) -> bool:
-        return (
-            version.office_worker_contract_version == "ai_daily_worker_v1"
-            and version.python_worker_contract_version
-            == "ai_daily_worker_v1"
+    def inspect_run(
+        self,
+        scan_run_id: int,
+        *,
+        include_content: bool = False,
+    ) -> InspectRunResponse:
+        """通过稳定 DTO 读取 Rust-owned run；不暴露或查询表结构。"""
+        request_id = str(self._request_id_factory())
+        request = InspectRunRequest(
+            contract="ai_daily_context",
+            protocol_version=1,
+            request_id=request_id,
+            scan_db_path=str(self._scan_db_path),
+            scan_run_id=scan_run_id,
+            include_content=include_content,
         )
+        result = run_json_process(
+            command=[str(self._scanner_binary), "inspect-run"],
+            request_payload=request.model_dump(mode="json"),
+            response_model=InspectRunResponse,
+            timeout_seconds=self._timeout_seconds,
+            expected_request_id=request_id,
+            cwd=self._project_root,
+        )
+        if result.response is None:
+            raise RuntimeError("Rust inspect-run did not return a trusted response")
+        return result.response
 
     def _resolve_path(self, value: str | Path) -> Path:
         path = Path(value)

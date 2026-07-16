@@ -10,6 +10,7 @@ from src.services.context_compressor import (
     ACTION_METADATA_ONLY,
 )
 from src.services.context_scheduler import ContextScheduleRequest, ContextScheduler
+from src.services.python_legacy_context_engine import PythonLegacyContextEngine
 
 
 class StubStore:
@@ -64,7 +65,21 @@ class StubScanner:
 
 class FailingCompressor:
     def compress(self, **kwargs: object) -> None:
-        raise RuntimeError("compress failed")
+        raise RuntimeError("secret-value-must-not-be-persisted")
+
+
+def _legacy_scheduler(
+    scanner: StubScanner,
+    *,
+    compressor=None,
+) -> ContextScheduler:
+    return ContextScheduler(
+        engine=PythonLegacyContextEngine(
+            scanner_factory=lambda: scanner,
+            compressor=compressor,
+            request_id_factory=lambda: "11111111-1111-4111-8111-111111111111",
+        )
+    )
 
 
 def test_scheduler_builds_weekly_context_and_records_audit(tmp_path: Path) -> None:
@@ -97,7 +112,7 @@ def test_scheduler_builds_weekly_context_and_records_audit(tmp_path: Path) -> No
         scan_run_id=77,
     )
     scanner = StubScanner(scan_result)
-    scheduler = ContextScheduler(scanner_factory=lambda: scanner)
+    scheduler = _legacy_scheduler(scanner)
 
     result = scheduler.build_context(
         ContextScheduleRequest(
@@ -111,10 +126,13 @@ def test_scheduler_builds_weekly_context_and_records_audit(tmp_path: Path) -> No
     assert scanner.calls == [(start_date, end_date, True)]
     assert result.context_run_id == 123
     assert "# Small" in result.file_context
-    assert [decision.action for decision in result.decisions] == [
+    saved_decisions = scanner.scan_index_store.context_decisions[0][1]
+    assert [decision.action for decision in saved_decisions] == [
         ACTION_KEEP,
         ACTION_COMPRESS,
     ]
+    assert result.status == "ok"
+    assert result.summary.source_file_count == 2
     assert scanner.scan_index_store.context_runs[0]["report_mode"] == "weekly"
     assert scanner.scan_index_store.context_runs[0]["scan_run_id"] == 77
     assert scanner.scan_index_store.context_decisions[0][0] == 123
@@ -147,7 +165,7 @@ def test_scheduler_uses_scan_result_run_id_instead_of_latest_scan_run(
 
     store = RacingStore()
     scanner = StubScanner(scan_result, store=store)
-    scheduler = ContextScheduler(scanner_factory=lambda: scanner)
+    scheduler = _legacy_scheduler(scanner)
 
     scheduler.build_context(
         ContextScheduleRequest(
@@ -178,9 +196,10 @@ def test_scheduler_marks_oversized_file_as_metadata_only(tmp_path: Path) -> None
                 truncated=True,
             )
         ],
+        scan_run_id=77,
     )
     scanner = StubScanner(scan_result)
-    scheduler = ContextScheduler(scanner_factory=lambda: scanner)
+    scheduler = _legacy_scheduler(scanner)
 
     result = scheduler.build_context(
         ContextScheduleRequest(
@@ -191,9 +210,101 @@ def test_scheduler_marks_oversized_file_as_metadata_only(tmp_path: Path) -> None
         )
     )
 
-    assert result.decisions[0].action == ACTION_METADATA_ONLY
-    assert result.decisions[0].reason == "file_size_policy"
+    decision = scanner.scan_index_store.context_decisions[0][1][0]
+    assert decision.action == ACTION_METADATA_ONLY
+    assert decision.reason == "file_size_policy"
     assert "sheet preview" not in result.file_context
+
+
+def test_legacy_adapter_marks_error_context_partial_even_if_count_drifted(
+    tmp_path: Path,
+) -> None:
+    """逐文件错误证据不能因旧汇总计数漂移而伪装成 ok。"""
+    failed_file = tmp_path / "broken.txt"
+    scan_result = ScanResult(
+        total_files=1,
+        success_count=1,
+        error_count=0,
+        contexts=[
+            FileContext(
+                file_path=str(failed_file),
+                file_type=".txt",
+                content="",
+                error="synthetic parser failure",
+                parser_backend="not_parsed",
+            )
+        ],
+        scan_run_id=77,
+    )
+
+    result = _legacy_scheduler(StubScanner(scan_result)).build_context(
+        ContextScheduleRequest(
+            report_mode="daily",
+            source="scan",
+            start_date=date(2026, 5, 24),
+            end_date=date(2026, 5, 24),
+        )
+    )
+
+    assert result.status == "partial"
+    assert [warning.error_code for warning in result.warnings] == [
+        "PARSER_FAILED"
+    ]
+    assert result.summary.success_count == 0
+    assert result.summary.error_file_count == 1
+
+
+def test_legacy_adapter_maps_timeout_and_stage_metrics_from_scan_audit(
+    tmp_path: Path,
+) -> None:
+    """legacy envelope 应把 timeout 与普通错误拆开，并保留 scanner 阶段证据。"""
+
+    class MetricsStore(StubStore):
+        def get_scan_run_detail(self, run_id: int) -> dict[str, int]:
+            assert run_id == 77
+            return {
+                "run_id": 77,
+                "total_duration_ms": 7,
+                "discovery_duration_ms": 2,
+                "parse_duration_ms": 4,
+                "success_count": 0,
+                "error_count": 1,
+                "timeout_count": 1,
+            }
+
+    scan_result = ScanResult(
+        total_files=1,
+        success_count=0,
+        error_count=1,
+        contexts=[
+            FileContext(
+                file_path=str(tmp_path / "slow.pdf"),
+                file_type=".pdf",
+                content="",
+                error="timeout: synthetic deadline",
+                parser_backend="not_parsed",
+            )
+        ],
+        scan_run_id=77,
+    )
+
+    result = _legacy_scheduler(
+        StubScanner(scan_result, store=MetricsStore())
+    ).build_context(
+        ContextScheduleRequest(
+            report_mode="daily",
+            source="scan",
+            start_date=date(2026, 5, 24),
+            end_date=date(2026, 5, 24),
+        )
+    )
+
+    assert result.status == "partial"
+    assert result.summary.success_count == 0
+    assert result.summary.timeout_count == 1
+    assert result.summary.error_file_count == 0
+    assert result.summary.discovery_duration_ms == 2
+    assert result.summary.parse_duration_ms == 4
 
 
 def test_scheduler_records_error_run_when_compressor_fails(tmp_path: Path) -> None:
@@ -212,10 +323,11 @@ def test_scheduler_records_error_run_when_compressor_fails(tmp_path: Path) -> No
                 parser_backend="light_text_v1",
             )
         ],
+        scan_run_id=77,
     )
     scanner = StubScanner(scan_result)
-    scheduler = ContextScheduler(
-        scanner_factory=lambda: scanner,
+    scheduler = _legacy_scheduler(
+        scanner,
         compressor=FailingCompressor(),
     )
 
@@ -228,10 +340,16 @@ def test_scheduler_records_error_run_when_compressor_fails(tmp_path: Path) -> No
         )
     )
 
-    assert result.error == "compress failed"
-    assert "文件上下文构建失败" in result.file_context
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.error.error_code == "INTERNAL_ERROR"
+    assert result.file_context == ""
     assert scanner.scan_index_store.context_runs[0]["status"] == "error"
-    assert scanner.scan_index_store.context_runs[0]["error"] == "compress failed"
+    assert scanner.scan_index_store.context_runs[0]["error"] == (
+        "PYTHON_LEGACY_CONTEXT_FAILED"
+    )
+    assert "secret-value" not in result.error.message
+    assert "secret-value" not in str(scanner.scan_index_store.context_runs)
 
 
 def test_scheduler_does_not_leave_success_run_when_decision_save_fails(
@@ -252,10 +370,11 @@ def test_scheduler_does_not_leave_success_run_when_decision_save_fails(
                 parser_backend="light_text_v1",
             )
         ],
+        scan_run_id=77,
     )
     store = FailingDecisionStore()
     scanner = StubScanner(scan_result, store=store)
-    scheduler = ContextScheduler(scanner_factory=lambda: scanner)
+    scheduler = _legacy_scheduler(scanner)
 
     result = scheduler.build_context(
         ContextScheduleRequest(
@@ -266,8 +385,13 @@ def test_scheduler_does_not_leave_success_run_when_decision_save_fails(
         )
     )
 
-    assert result.error == "decision insert failed"
-    assert "文件上下文构建失败" in result.file_context
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.file_context == ""
+    assert result.context_run_id is None
+    assert [warning.message for warning in result.warnings] == [
+        "Python legacy audit persistence failed"
+    ]
     assert [run["status"] for run in store.context_runs] == ["error"]
 
 
@@ -289,10 +413,11 @@ def test_scheduler_preserves_compressed_audit_when_atomic_save_fails(
                 parser_backend="light_text_v1",
             )
         ],
+        scan_run_id=77,
     )
     store = AtomicSaveFailingStore()
     scanner = StubScanner(scan_result, store=store)
-    scheduler = ContextScheduler(scanner_factory=lambda: scanner)
+    scheduler = _legacy_scheduler(scanner)
 
     result = scheduler.build_context(
         ContextScheduleRequest(
@@ -303,8 +428,9 @@ def test_scheduler_preserves_compressed_audit_when_atomic_save_fails(
         )
     )
 
-    assert result.error == "atomic save failed"
-    assert "文件上下文构建失败" in result.file_context
+    assert result.status == "error"
+    assert result.error is not None
+    assert result.file_context == ""
     assert [run["status"] for run in store.context_runs] == ["error"]
     error_run = store.context_runs[0]
     assert error_run["included_file_count"] == 1
@@ -315,5 +441,4 @@ def test_scheduler_preserves_compressed_audit_when_atomic_save_fails(
     assert saved_context_run_id == 123
     assert saved_decisions[0].action == ACTION_KEEP
     assert saved_decisions[0].output_chars > 0
-    assert result.decisions[0].action == ACTION_KEEP
-    assert result.decisions[0].output_chars > 0
+    assert result.summary.included_file_count == 1

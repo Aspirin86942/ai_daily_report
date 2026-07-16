@@ -437,13 +437,16 @@ class EngineStatus(str, Enum):
     ERROR = "error"
 
 
+ContextStatus = Literal["ok", "partial", "error"]
+
+
 class ContextEnvelope(ContractModel):
     contract: Literal["ai_daily_context"]
     protocol_version: Literal[1]
     request_id: RequestId
     engine_version: NonEmpty4096
     engine_build: NonEmpty4096
-    status: Literal["ok", "partial", "error"]
+    status: ContextStatus
     file_context: str
     summary: ContextSummary
     scan_run_id: PositiveInt | None
