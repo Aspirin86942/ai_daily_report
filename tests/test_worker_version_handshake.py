@@ -76,6 +76,31 @@ def test_python_document_worker_version_is_strict_requestless_json() -> None:
     ]
 
 
+def test_python_document_worker_version_import_path_stays_stdlib_light() -> None:
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            (
+                "import sys; "
+                "import src.workers.document_parser_worker; "
+                "forbidden={'json','pathlib','typing'} & set(sys.modules); "
+                "raise SystemExit(1 if forbidden else 0)"
+            ),
+        ],
+        cwd=PROJECT_ROOT,
+        input=b"",
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode(
+        "utf-8",
+        errors="replace",
+    )
+
+
 def test_python_document_worker_parse_no_longer_returns_transitional_error() -> None:
     request_path = (
         PROJECT_ROOT

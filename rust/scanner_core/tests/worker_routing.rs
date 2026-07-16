@@ -13,7 +13,8 @@ use ai_daily_scanner_core::fallback::FailureClass;
 use ai_daily_scanner_core::parsers::office::parse_with_fallback;
 use ai_daily_scanner_core::parsers::{
     execute_worker_request, preflight_commands_then, preflight_then, register_worker,
-    ParsedPayload, ParserScheduler, RegisteredWorker, WorkerCommand, WorkerRegistry,
+    register_worker_pair, ParsedPayload, ParserScheduler, RegisteredWorker, WorkerCommand,
+    WorkerRegistry,
 };
 use ai_daily_scanner_core::planner::plan_candidates;
 use tempfile::TempDir;
@@ -120,13 +121,52 @@ fn office_and_python_handshakes_both_finish_before_cache_continuation() {
             assert!(registry.office.is_some());
             assert!(registry.python_document.is_some());
             let marker_text = fs::read_to_string(&marker).expect("handshake marker should exist");
-            assert_eq!(
-                marker_text.lines().collect::<Vec<_>>(),
-                ["office", "python"]
-            );
+            let mut completed = marker_text.lines().collect::<Vec<_>>();
+            completed.sort_unstable();
+            assert_eq!(completed, ["office", "python"]);
         },
     )
     .expect("both worker handshakes should precede cache continuation");
+}
+
+#[test]
+fn office_and_python_worker_handshakes_overlap() {
+    let Some(python) = python_executable() else {
+        return;
+    };
+    let directory = tempfile::tempdir().expect("temporary worker root should exist");
+    let script = directory.path().join("fake_worker.py");
+    fs::write(&script, FAKE_WORKER).expect("fake worker should be writable");
+    let office_marker = directory.path().join("office.started");
+    let python_marker = directory.path().join("python.started");
+    let command = |kind: WorkerKind, own: &Path, peer: &Path| {
+        let identity = identity(kind);
+        WorkerCommand {
+            program: python.clone(),
+            base_args: vec![
+                OsString::from(script.as_os_str()),
+                OsString::from("rendezvous"),
+                OsString::from(match kind {
+                    WorkerKind::Office => "office",
+                    WorkerKind::PythonDocument => "python",
+                }),
+                OsString::from(own.as_os_str()),
+                OsString::from(peer.as_os_str()),
+            ],
+            current_dir: Some(directory.path().to_path_buf()),
+            expected_kind: kind,
+            required_backends: identity.supported_backends,
+            required_extensions: identity.supported_extensions,
+        }
+    };
+    let office = command(WorkerKind::Office, &office_marker, &python_marker);
+    let python_document = command(WorkerKind::PythonDocument, &python_marker, &office_marker);
+
+    let (office_result, python_result) =
+        register_worker_pair(&office, &python_document, Duration::from_secs(5));
+
+    office_result.expect("office handshake should rendezvous");
+    python_result.expect("Python handshake should rendezvous");
 }
 
 #[test]
@@ -791,6 +831,12 @@ if operation == "version":
             marker.write(kind + "\n")
     if mode == "version_sleep":
         time.sleep(30)
+    if mode == "rendezvous":
+        deadline = time.monotonic() + 2
+        while not os.path.exists(sys.argv[4]) and time.monotonic() < deadline:
+            time.sleep(0.005)
+        if not os.path.exists(sys.argv[4]):
+            raise SystemExit(7)
     print(json.dumps({
         "contract": "ai_daily_worker",
         "protocol_version": 1,

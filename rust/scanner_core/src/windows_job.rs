@@ -25,8 +25,8 @@ use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT,
-    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    WaitForSingleObject, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
+    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 use crate::process::{
@@ -72,7 +72,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
             null(),
             null(),
             1,
-            CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
             null(),
             current_dir_ptr,
             &startup.StartupInfo,
@@ -82,7 +82,6 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     if created == 0 {
         return Err(ProcessError::StartFailed);
     }
-
     let Some(process) = OwnedHandle::new(process_info.hProcess) else {
         if let Some(thread_handle) = OwnedHandle::new(process_info.hThread) {
             drop(thread_handle);
@@ -98,7 +97,6 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     drop(child_stdin);
     drop(child_stdout);
     drop(child_stderr);
-
     if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
         if !stop_uncontained_process(process.raw()) {
             return Err(ProcessError::ContainmentFailed);
@@ -118,13 +116,18 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     let mut stderr_file = unsafe { File::from_raw_handle(parent_stderr.into_raw()) };
     let input = spec.stdin.clone();
     let capture_limit = spec.capture_limit;
-    let input_thread = thread::spawn(move || -> Result<(), ProcessError> {
-        match stdin_file.write_all(&input) {
-            Ok(()) => Ok(()),
-            Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
-            Err(_) => Err(ProcessError::IoFailed),
-        }
-    });
+    let mut input_thread = if input.is_empty() {
+        drop(stdin_file);
+        None
+    } else {
+        Some(thread::spawn(move || -> Result<(), ProcessError> {
+            match stdin_file.write_all(&input) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+                Err(_) => Err(ProcessError::IoFailed),
+            }
+        }))
+    };
     let stdout_thread = thread::spawn(move || read_bounded(&mut stdout_file, capture_limit));
     let stderr_thread = thread::spawn(move || read_bounded(&mut stderr_file, capture_limit));
 
@@ -138,7 +141,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
         if !terminate_and_wait(&job, &process) {
             return Err(ProcessError::ContainmentFailed);
         }
-        let _ = join_writer(input_thread);
+        let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
         let _ = join_reader(stderr_thread);
         return Err(ProcessError::TimedOut);
@@ -147,7 +150,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
         if !terminate_and_wait(&job, &process) {
             return Err(ProcessError::ContainmentFailed);
         }
-        let _ = join_writer(input_thread);
+        let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
         let _ = join_reader(stderr_thread);
         return Err(ProcessError::IoFailed);
@@ -158,7 +161,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
         if !terminate_and_wait(&job, &process) {
             return Err(ProcessError::ContainmentFailed);
         }
-        let _ = join_writer(input_thread);
+        let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
         let _ = join_reader(stderr_thread);
         return Err(ProcessError::IoFailed);
@@ -173,7 +176,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     {
         return Err(ProcessError::ContainmentFailed);
     }
-    join_writer(input_thread)?;
+    join_optional_writer(&mut input_thread)?;
     let stdout = join_reader(stdout_thread)?;
     let stderr = join_reader(stderr_thread)?;
 
@@ -183,6 +186,15 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
         stderr,
         duration: started.elapsed(),
     })
+}
+
+fn join_optional_writer(
+    writer: &mut Option<thread::JoinHandle<Result<(), ProcessError>>>,
+) -> Result<(), ProcessError> {
+    match writer.take() {
+        Some(handle) => join_writer(handle),
+        None => Ok(()),
+    }
 }
 
 fn create_kill_on_close_job() -> Result<OwnedHandle, ProcessError> {
@@ -249,15 +261,11 @@ fn wait_for_process(process: HANDLE, timeout: Duration) -> bool {
 }
 
 fn wait_for_job_empty(job: HANDLE, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    loop {
-        match active_processes(job) {
-            Some(0) => return true,
-            Some(_) if Instant::now() < deadline => {}
-            _ => return false,
-        }
-        thread::sleep(Duration::from_millis(5));
-    }
+    // Job objects become signaled when their active-process count reaches
+    // zero. Waiting on the kernel object avoids a fixed polling sleep on every
+    // short-lived worker while the accounting record catches up.
+    (unsafe { WaitForSingleObject(job, duration_to_wait_ms(timeout)) }) == WAIT_OBJECT_0
+        && active_processes(job) == Some(0)
 }
 
 fn active_processes(job: HANDLE) -> Option<u32> {

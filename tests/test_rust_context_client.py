@@ -18,6 +18,7 @@ from src.models.scanner_contract import (
     InspectRunResponse,
     TransportErrorResponse,
     VersionResponse,
+    WorkerVersionResponse,
 )
 from src.services.context_scheduler import ContextScheduleRequest
 from src.services.json_process_client import (
@@ -25,7 +26,11 @@ from src.services.json_process_client import (
     JsonProcessResult,
     run_json_process,
 )
-from src.services.rust_context_client import RustContextClient
+from src.services.rust_context_client import (
+    RustContextClient,
+    _default_python_worker_executable,
+    _materialize_windows_python_worker_executable,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -35,6 +40,92 @@ FIXTURE_DIR = (
 SCANNER_BIN = (
     PROJECT_ROOT / "rust" / "target" / "release" / "ai-daily-scanner.exe"
 )
+
+
+def test_managed_python_worker_copy_is_content_addressed_and_non_destructive(
+    tmp_path: Path,
+) -> None:
+    prefix = tmp_path / "venv"
+    scripts_dir = prefix / "Scripts"
+    scripts_dir.mkdir(parents=True)
+    (prefix / "pyvenv.cfg").write_text("home = synthetic\n", encoding="utf-8")
+    configured = scripts_dir / "python.exe"
+    configured.write_bytes(b"existing venv launcher")
+    base = tmp_path / "base-python.exe"
+    base.write_bytes(b"MZ synthetic CPython image")
+
+    managed = _materialize_windows_python_worker_executable(
+        configured=configured,
+        base=base,
+        prefix=prefix,
+        version_tag="313",
+    )
+    repeated = _materialize_windows_python_worker_executable(
+        configured=configured,
+        base=base,
+        prefix=prefix,
+        version_tag="313",
+    )
+
+    assert managed == repeated
+    assert managed.parent == scripts_dir
+    assert managed.name.startswith("ai-daily-python-worker-313-")
+    assert managed.read_bytes() == base.read_bytes()
+    assert configured.read_bytes() == b"existing venv launcher"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows venv launcher contract")
+def test_managed_python_worker_copy_preserves_real_venv_semantics(
+    tmp_path: Path,
+) -> None:
+    import venv
+
+    prefix = tmp_path / "managed worker venv"
+    venv.EnvBuilder(with_pip=False).create(prefix)
+    configured = prefix / "Scripts" / "python.exe"
+    managed = _materialize_windows_python_worker_executable(
+        configured=configured,
+        base=Path(sys._base_executable).resolve(),
+        prefix=prefix,
+        version_tag=f"{sys.version_info.major}{sys.version_info.minor}",
+    )
+
+    prefix_probe = subprocess.run(
+        [
+            str(managed),
+            "-c",
+            "import json,sys; print(json.dumps({'prefix': sys.prefix}))",
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert prefix_probe.returncode == 0, prefix_probe.stderr.decode(
+        "utf-8",
+        errors="replace",
+    )
+    assert (
+        Path(json.loads(prefix_probe.stdout)["prefix"]).resolve()
+        == prefix.resolve()
+    )
+
+    handshake = subprocess.run(
+        [
+            str(managed),
+            "-S",
+            "-m",
+            "src.workers.document_parser_worker",
+            "version",
+        ],
+        cwd=PROJECT_ROOT,
+        capture_output=True,
+        check=False,
+    )
+    assert handshake.returncode == 0, handshake.stderr.decode(
+        "utf-8",
+        errors="replace",
+    )
+    response = WorkerVersionResponse.model_validate_json(handshake.stdout)
+    assert response.worker_kind == "python_document"
 
 
 def _fixture(name: str) -> dict[str, object]:
@@ -484,7 +575,7 @@ def test_rust_context_client_builds_wire_request_from_raw_profile_only(
                 / "ai-daily-office-parser.exe"
             ).resolve()
         ),
-        "python_executable": str(Path(sys.executable).resolve()),
+        "python_executable": str(_default_python_worker_executable()),
         "python_module_root": str(tmp_path.resolve()),
         "python_document_worker_module": "src.workers.document_parser_worker",
     }

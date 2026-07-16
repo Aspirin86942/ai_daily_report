@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
-from pathlib import Path
+import shutil
 import sys
+from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
@@ -27,6 +30,82 @@ if TYPE_CHECKING:
 DEFAULT_SCANNER_BINARY = "rust/target/release/ai-daily-scanner"
 DEFAULT_OFFICE_WORKER_BINARY = "rust/target/release/ai-daily-office-parser"
 DEFAULT_SCAN_DB = "data/db/scan_index_v2.sqlite3"
+
+
+@lru_cache(maxsize=1)
+def _default_python_worker_executable() -> Path:
+    """Use the venv with a direct CPython image on Windows when safe."""
+    configured = Path(sys.executable).resolve()
+    if os.name != "nt" or sys.prefix == sys.base_prefix:
+        return configured
+    base_value = getattr(sys, "_base_executable", "")
+    if not base_value:
+        return configured
+    return _materialize_windows_python_worker_executable(
+        configured=configured,
+        base=Path(base_value).resolve(),
+        prefix=Path(sys.prefix).resolve(),
+        version_tag=f"{sys.version_info.major}{sys.version_info.minor}",
+    )
+
+
+def _materialize_windows_python_worker_executable(
+    *,
+    configured: Path,
+    base: Path,
+    prefix: Path,
+    version_tag: str,
+) -> Path:
+    """Create a content-addressed CPython copy without replacing venv files."""
+    scripts_dir = configured.parent
+    if (
+        not base.is_file()
+        or base.suffix.lower() != ".exe"
+        or scripts_dir.parent != prefix
+        or not (prefix / "pyvenv.cfg").is_file()
+    ):
+        return configured
+    try:
+        digest = _file_sha256(base)
+        target = scripts_dir / (
+            f"ai-daily-python-worker-{version_tag}-{digest[:16]}.exe"
+        )
+        if target.exists():
+            return target if _same_executable_bytes(base, target, digest) else configured
+        temporary = target.with_name(
+            f".{target.name}.{os.getpid()}.{uuid4().hex}.tmp"
+        )
+        try:
+            shutil.copyfile(base, temporary)
+            if _file_sha256(temporary) != digest:
+                return configured
+            try:
+                temporary.rename(target)
+            except FileExistsError:
+                pass
+        finally:
+            temporary.unlink(missing_ok=True)
+        return target if _same_executable_bytes(base, target, digest) else configured
+    except OSError:
+        return configured
+
+
+def _same_executable_bytes(base: Path, target: Path, base_digest: str) -> bool:
+    """Accept only the managed byte-for-byte CPython copy; never overwrite drift."""
+    if target.is_symlink() or not target.is_file():
+        return False
+    return (
+        target.stat().st_size == base.stat().st_size
+        and _file_sha256(target) == base_digest
+    )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(128 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class RustContextClient:
@@ -56,7 +135,7 @@ class RustContextClient:
         self._scan_db_path = self._resolve_path(scan_db_path)
         self._office_worker_path = self._resolve_executable(office_worker_path)
         self._python_executable = self._resolve_path(
-            python_executable or sys.executable
+            python_executable or _default_python_worker_executable()
         )
         self._python_module_root = self._resolve_path(
             python_module_root or self._project_root

@@ -41,7 +41,14 @@ pub struct WorkerCommand {
 
 impl WorkerCommand {
     fn args_for(&self, operation: &str) -> Vec<OsString> {
-        let mut args = self.base_args.clone();
+        let mut args = Vec::with_capacity(self.base_args.len() + 2);
+        if operation == "version"
+            && self.expected_kind == WorkerKind::PythonDocument
+            && !self.base_args.iter().any(|value| value == "-S")
+        {
+            args.push(OsString::from("-S"));
+        }
+        args.extend(self.base_args.iter().cloned());
         args.push(OsString::from(operation));
         args
     }
@@ -113,6 +120,15 @@ impl ParserScheduler {
         &self,
         files: &[PlannedFile],
     ) -> Result<Vec<ScheduledFileParse>, ParseFailure> {
+        if files.is_empty() {
+            return Ok(Vec::new());
+        }
+        if files.len() == 1 || self.profile.execution.max_workers == 1 {
+            return Ok(files
+                .iter()
+                .map(|planned| self.parse_one(planned))
+                .collect());
+        }
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.profile.execution.max_workers as usize)
             .build()
@@ -376,15 +392,48 @@ fn preflight_worker_commands(
     python_command: Option<&WorkerCommand>,
     timeout: Duration,
 ) -> Result<WorkerRegistry, ParseFailure> {
-    let office = office_command
-        .map(|command| register_worker(command, timeout))
-        .transpose()?;
-    let python_document = python_command
-        .map(|command| register_worker(command, timeout))
-        .transpose()?;
+    let (office, python_document) = match (office_command, python_command) {
+        (Some(office), Some(python)) => {
+            let (office_result, python_result) = register_worker_pair(office, python, timeout);
+            (Some(office_result?), Some(python_result?))
+        }
+        (office, python) => (
+            office
+                .map(|command| register_worker(command, timeout))
+                .transpose()?,
+            python
+                .map(|command| register_worker(command, timeout))
+                .transpose()?,
+        ),
+    };
     Ok(WorkerRegistry {
         office,
         python_document,
+    })
+}
+
+/// Runs the independent Office and Python version handshakes concurrently.
+pub fn register_worker_pair(
+    office_command: &WorkerCommand,
+    python_command: &WorkerCommand,
+    timeout: Duration,
+) -> (
+    Result<RegisteredWorker, ParseFailure>,
+    Result<RegisteredWorker, ParseFailure>,
+) {
+    std::thread::scope(|scope| {
+        let office_task = scope.spawn(|| register_worker(office_command, timeout));
+        let python_result = register_worker(python_command, timeout);
+        let office_result = office_task.join().unwrap_or_else(|_| {
+            Err(contract_failure(
+                ErrorCode::WorkerHandshakeFailed,
+                "Office worker handshake thread failed",
+                None,
+                None,
+                DiagnosticStage::Process,
+            ))
+        });
+        (office_result, python_result)
     })
 }
 

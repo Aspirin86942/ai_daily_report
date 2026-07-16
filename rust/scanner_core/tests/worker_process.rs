@@ -58,6 +58,23 @@ fn worker_stdout_stderr_and_exit_code_are_captured() {
 }
 
 #[test]
+fn empty_worker_input_is_an_immediate_eof() {
+    let Some(python) = python_executable() else {
+        return;
+    };
+    let mut spec = ProcessSpec::new(python, Duration::from_secs(5));
+    spec.args = vec![
+        OsString::from("-c"),
+        OsString::from("import sys; print(len(sys.stdin.buffer.read()))"),
+    ];
+
+    let output = run_process(&spec).expect("empty input should complete");
+
+    assert_eq!(output.exit_code, 0);
+    assert_eq!(output.stdout, b"0\r\n");
+}
+
+#[test]
 fn windows_command_line_quoting_preserves_exact_arguments() {
     let Some(python) = python_executable() else {
         return;

@@ -71,6 +71,43 @@ budgeting/rendering pipeline approved by this ADR. Any renderer drift changes
 the golden and requires an explicit ADR review; no parser-content, decision,
 fallback, or nondeterminism difference is accepted under that exception.
 
+## Task 10 cutover evidence (2026-07-16)
+
+Warm-start work retained every frozen safety boundary: each new run still
+performs both live worker handshakes before discovery/cache lookup, error rows
+are retried, and Windows workers still use suspended creation followed by Job
+assignment and resume. The measured implementation overlaps the independent
+handshakes, uses a stdlib-only `-S` Python version path, avoids a Rayon pool for
+zero/one parse candidates, creates the heartbeat connection only after the
+first interval, and uses `synchronous=NORMAL` for staging transactions before
+restoring `FULL` for the atomic terminal transaction. On Windows venvs it may
+create a hash-verified, content-addressed copy of the base CPython image beside
+the existing launcher; it never replaces the launcher or `pyvenv.cfg`, and an
+unverifiable existing target falls back to the configured executable. The
+Windows one-request Python worker explicitly flushes its contract response
+before using the native process exit path, avoiding interpreter-finalizer work
+without reusing a process or skipping a live handshake.
+
+The final full cutover run used 21 alternating cold/warm pairs per engine and
+remained red:
+
+| boundary | Python legacy | Rust v2 | criterion |
+|---|---:|---:|---|
+| cold median | 2055.858 ms | 1360.819 ms | pass (`<= +10%`) |
+| cold p95 | 2256.308 ms | 1437.662 ms | pass (`<= +20%`) |
+| warm median | 59.271 ms | 60.931 ms | fail (`+1.660 ms`, `+2.80%`) |
+
+Parity, cache semantics, the frozen fault matrix, real-directory comparison,
+and process cleanup all passed in that same run. The real-directory evidence
+contained one eligible `.xlsx`, reported `rust_xlsx_bounded_v1` on
+`rust_office_process`, and retained only aggregate metadata. The performance
+run completed without a freeze in 76.909 seconds, contained parser-backend and
+worker-lane evidence for both engines, and left no new scanner/worker/orphan
+process. Earlier scheduling-favorable samples are not accepted in place of
+this final-source full run. Therefore the Task 10 cutover gate is not satisfied,
+`python_legacy` remains the default, and Task 11 must not start from this
+evidence.
+
 ## Contract authority
 
 The exact v1 wire shapes are frozen by the JSON Schemas under

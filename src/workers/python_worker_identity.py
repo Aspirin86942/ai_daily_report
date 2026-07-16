@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-import hashlib
-from pathlib import Path
-from typing import Any
+try:
+    from _sha2 import sha256 as _sha256
+except ImportError:  # Python 3.10-3.13 expose the same primitive here.
+    try:
+        from _sha256 import sha256 as _sha256
+    except ImportError:
+        from _hashlib import openssl_sha256 as _sha256
 
 
 WORKER_CONTRACT_VERSION = "ai_daily_worker_v1"
@@ -25,11 +29,12 @@ PDF_TEXT_BACKEND = "pdf_text_v1"
 
 def _compute_python_worker_build() -> str:
     """Hash only the frozen repository-relative worker/parser source allowlist."""
-    repository_root = Path(__file__).resolve().parents[2]
-    digest = hashlib.sha256()
+    repository_root = __file__.replace("\\", "/").rsplit("/", 3)[0]
+    digest = _sha256()
     for relative_path in PYTHON_WORKER_BUILD_INPUTS:
         path_bytes = relative_path.encode("utf-8", errors="strict")
-        file_bytes = (repository_root / relative_path).read_bytes()
+        with open(f"{repository_root}/{relative_path}", "rb") as source:
+            file_bytes = source.read()
         digest.update(len(path_bytes).to_bytes(8, "little"))
         digest.update(path_bytes)
         digest.update(len(file_bytes).to_bytes(8, "little"))
@@ -40,7 +45,7 @@ def _compute_python_worker_build() -> str:
 PYTHON_WORKER_BUILD = _compute_python_worker_build()
 
 
-def python_worker_version_payload() -> dict[str, Any]:
+def python_worker_version_payload() -> dict[str, object]:
     """Return the strict identity without importing Pydantic or parser modules."""
     return {
         "contract": "ai_daily_worker",
@@ -64,3 +69,20 @@ def python_worker_version_payload() -> dict[str, Any]:
             ".xlsx",
         ],
     }
+
+
+_PYTHON_WORKER_VERSION_JSON = (
+    b'{"contract":"ai_daily_worker","protocol_version":1,'
+    b'"worker_kind":"python_document",'
+    b'"worker_contract_version":"ai_daily_worker_v1",'
+    b'"worker_version":"0.1.0","worker_build":"'
+    + PYTHON_WORKER_BUILD.encode("ascii", errors="strict")
+    + b'","supported_backends":["pdf_text_v1","python_office_v1",'
+    b'"python_sharepoint_text_v1"],"supported_extensions":'
+    b'[".doc",".docx",".pdf",".ppt",".pptx",".xls",".xlsx"]}'
+)
+
+
+def python_worker_version_json() -> bytes:
+    """Return the strict version response without importing JSON machinery."""
+    return _PYTHON_WORKER_VERSION_JSON

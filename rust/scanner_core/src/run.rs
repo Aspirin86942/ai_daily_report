@@ -26,8 +26,8 @@ use crate::context_audit::{
     stage_metrics, InspectAuditError, LocalParserFingerprint, ScanAuditBundle, StageMetricInputs,
 };
 use crate::parsers::{
-    document, office, register_worker, ParserScheduler, RegisteredWorker, WorkerCommand,
-    WorkerRegistry, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
+    document, office, register_worker, register_worker_pair, ParserScheduler, RegisteredWorker,
+    WorkerCommand, WorkerRegistry, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
 };
 use crate::planner::{plan_candidates, PlanAction};
 use crate::store::{
@@ -431,14 +431,10 @@ fn execute_active_build(
     heartbeat: &mut LeaseHeartbeat,
     started_at: Instant,
 ) -> Result<CommandOutput, EngineShellError> {
-    let office_result = register_worker(
-        &office::worker_command(&request.adapters),
-        WORKER_HANDSHAKE_TIMEOUT,
-    );
-    let python_result = register_worker(
-        &document::worker_command(&request.adapters),
-        WORKER_HANDSHAKE_TIMEOUT,
-    );
+    let office_command = office::worker_command(&request.adapters);
+    let python_command = document::worker_command(&request.adapters);
+    let (office_result, python_result) =
+        register_worker_pair(&office_command, &python_command, WORKER_HANDSHAKE_TIMEOUT);
     let (office_worker, office_error) = split_handshake(office_result, "rust_office_oxide_v1");
     let (python_worker, python_error) = split_handshake(python_result, "python_office_v1");
     let office_fingerprint = office_worker.as_ref().map(worker_fingerprint);
@@ -702,16 +698,7 @@ fn execute_active_build(
         }
     };
     let context_duration_ms = elapsed_ms(context_started);
-    if let Err(error) = stop_and_verify_heartbeat(heartbeat, store, active) {
-        return build_error_output(
-            request,
-            version,
-            error.diagnostic(DiagnosticStage::Cache),
-            warnings,
-            elapsed_summary(started_at),
-            Some(active.scan_run_id()),
-        );
-    }
+    heartbeat.stop();
     if let Some(error) = heartbeat.take_background_error() {
         warnings.push(diagnostic(
             ErrorCode::CacheWriteFailed,
@@ -1082,16 +1069,7 @@ fn finish_active_error(
     error: Diagnostic,
     summary: ContextSummary,
 ) -> Result<CommandOutput, EngineShellError> {
-    if let Err(heartbeat_error) = stop_and_verify_heartbeat(heartbeat, store, active) {
-        return build_error_output(
-            request,
-            version,
-            heartbeat_error.diagnostic(DiagnosticStage::Cache),
-            warnings,
-            summary,
-            Some(active.scan_run_id()),
-        );
-    }
+    heartbeat.stop();
     if let Some(background_error) = heartbeat.take_background_error() {
         warnings.push(diagnostic(
             ErrorCode::CacheWriteFailed,
@@ -1218,15 +1196,6 @@ fn build_error_output(
     CommandOutput::with_exit(&response, 1)
 }
 
-fn stop_and_verify_heartbeat(
-    heartbeat: &mut LeaseHeartbeat,
-    store: &mut ScannerStore,
-    active: &ActiveRun,
-) -> Result<(), StoreError> {
-    heartbeat.stop();
-    store.heartbeat(active, current_time_millis()?)
-}
-
 struct LeaseHeartbeat {
     stop_sender: Option<mpsc::Sender<()>>,
     handle: Option<thread::JoinHandle<Option<StoreError>>>,
@@ -1237,20 +1206,31 @@ impl LeaseHeartbeat {
     fn start(database_path: PathBuf, active: ActiveRun) -> Self {
         let (stop_sender, stop_receiver) = mpsc::channel();
         let handle = thread::spawn(move || {
-            let mut store = match ScannerStore::open_existing(&database_path) {
-                Ok(store) => store,
-                Err(error) => return Some(error),
-            };
+            let mut store = None;
             let mut last_error = None;
             loop {
                 match stop_receiver.recv_timeout(Duration::from_millis(HEARTBEAT_INTERVAL_MS)) {
                     Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return last_error,
-                    Err(mpsc::RecvTimeoutError::Timeout) => match current_time_millis()
-                        .and_then(|now_ms| store.heartbeat(&active, now_ms))
-                    {
-                        Ok(()) => last_error = None,
-                        Err(error) => last_error = Some(error),
-                    },
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        if store.is_none() {
+                            match ScannerStore::open_existing(&database_path) {
+                                Ok(opened) => store = Some(opened),
+                                Err(error) => {
+                                    last_error = Some(error);
+                                    continue;
+                                }
+                            }
+                        }
+                        let Some(store) = store.as_mut() else {
+                            continue;
+                        };
+                        match current_time_millis()
+                            .and_then(|now_ms| store.heartbeat(&active, now_ms))
+                        {
+                            Ok(()) => last_error = None,
+                            Err(error) => last_error = Some(error),
+                        }
+                    }
                 }
             }
         });

@@ -59,6 +59,7 @@ def run_json_process(
         request_bytes = json.dumps(
             request_payload,
             ensure_ascii=False,
+            separators=(",", ":"),
         ).encode("utf-8", errors="strict")
 
     try:
@@ -84,34 +85,19 @@ def run_json_process(
             "process could not be started",
         )
     stderr = _decode_stderr(completed.stderr)
-    try:
-        stdout = completed.stdout.decode("utf-8", errors="strict")
-    except UnicodeDecodeError:
-        return _failure_result(
-            started_at,
-            "invalid_utf8",
-            "process stdout is not valid UTF-8",
-            exit_code=completed.returncode,
-            stderr=stderr,
-        )
-    try:
-        payload = json.loads(stdout)
-    except json.JSONDecodeError:
-        return _failure_result(
-            started_at,
-            "invalid_json",
-            "process stdout is not one valid JSON response",
-            exit_code=completed.returncode,
-            stderr=stderr,
-        )
+    stdout = completed.stdout
     if completed.returncode == 2:
         try:
-            transport_error = TransportErrorResponse.model_validate(payload)
-        except (ValidationError, TypeError, ValueError):
+            transport_error = TransportErrorResponse.model_validate_json(stdout)
+        except (ValidationError, TypeError, ValueError) as exc:
+            failure_kind = _validation_failure_kind(exc, stdout)
             return _failure_result(
                 started_at,
-                "invalid_response",
-                "exit 2 requires a transport error response",
+                failure_kind,
+                _validation_failure_message(
+                    failure_kind,
+                    invalid_response="exit 2 requires a transport error response",
+                ),
                 exit_code=completed.returncode,
                 stderr=stderr,
             )
@@ -124,12 +110,16 @@ def run_json_process(
             duration_ms=_elapsed_ms(started_at),
         )
     try:
-        response = response_model.model_validate(payload)
-    except (ValidationError, TypeError, ValueError):
+        response = response_model.model_validate_json(stdout)
+    except (ValidationError, TypeError, ValueError) as exc:
+        failure_kind = _validation_failure_kind(exc, stdout)
         return _failure_result(
             started_at,
-            "invalid_response",
-            "process response violates its contract",
+            failure_kind,
+            _validation_failure_message(
+                failure_kind,
+                invalid_response="process response violates its contract",
+            ),
             exit_code=completed.returncode,
             stderr=stderr,
         )
@@ -195,6 +185,33 @@ def _decode_stderr(value: object) -> str:
     if not isinstance(value, bytes):
         return ""
     return value.decode("utf-8", errors="replace")
+
+
+def _validation_failure_kind(
+    error: ValidationError | TypeError | ValueError,
+    stdout: bytes,
+) -> JsonProcessFailureKind:
+    if isinstance(error, ValidationError) and any(
+        item.get("type") == "json_invalid" for item in error.errors()
+    ):
+        try:
+            stdout.decode("utf-8", errors="strict")
+        except UnicodeDecodeError:
+            return "invalid_utf8"
+        return "invalid_json"
+    return "invalid_response"
+
+
+def _validation_failure_message(
+    failure_kind: JsonProcessFailureKind,
+    *,
+    invalid_response: str,
+) -> str:
+    if failure_kind == "invalid_utf8":
+        return "process stdout is not valid UTF-8"
+    if failure_kind == "invalid_json":
+        return "process stdout is not one valid JSON response"
+    return invalid_response
 
 
 def _elapsed_ms(started_at: float) -> int:

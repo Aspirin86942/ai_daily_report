@@ -227,6 +227,12 @@ pub fn configure_connection(connection: &Connection) -> Result<(), SchemaError> 
     connection.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
     connection.pragma_update(None, "foreign_keys", true)?;
     let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(())
+}
+
+pub fn require_durable_finalization(connection: &Connection) -> Result<(), SchemaError> {
+    connection.pragma_update(None, "synchronous", "FULL")?;
     Ok(())
 }
 
@@ -272,6 +278,9 @@ mod tests {
         let journal_mode: String = connection
             .pragma_query_value(None, "journal_mode", |row| row.get(0))
             .expect("journal_mode");
+        let synchronous: i32 = connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .expect("synchronous");
         let tables: Vec<String> = connection
             .prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
             .expect("schema query")
@@ -283,6 +292,12 @@ mod tests {
         assert_eq!(version, LATEST_USER_VERSION);
         assert_eq!(foreign_keys, 1);
         assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        assert_eq!(synchronous, 1);
+        require_durable_finalization(&connection).expect("durable finalization");
+        let final_synchronous: i32 = connection
+            .pragma_query_value(None, "synchronous", |row| row.get(0))
+            .expect("final synchronous");
+        assert_eq!(final_synchronous, 2);
         assert_eq!(
             tables,
             vec![

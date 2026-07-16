@@ -27,3 +27,9 @@ tempfile = "3"
 thiserror = "2"
 walkdir = "2"
 zip = { version = "8.1", features = ["deflate"], default-features = false }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"

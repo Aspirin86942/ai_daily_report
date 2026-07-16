@@ -777,11 +777,13 @@ impl ScannerStore {
     ) -> Result<(), StoreError> {
         let envelope = validate_finalization(active, batch)?;
         let now_ms = checked_i64(now_ms, "finalization timestamp")?;
+        schema::require_durable_finalization(&self.connection)
+            .map_err(|error| cache_write(error.to_string()))?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(cache_write)?;
-        ensure_owner(&transaction, active)?;
+        heartbeat_in_transaction(&transaction, active, now_ms)?;
         ensure_engine_fingerprint(&transaction, active, &envelope)?;
         let handshake_failed = batch.diagnostics.iter().any(|record| {
             record.severity == DiagnosticSeverity::Error
