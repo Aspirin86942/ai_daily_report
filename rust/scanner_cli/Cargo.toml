@@ -1,0 +1,12 @@
+[package]
+name = "ai-daily-scanner"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ai-daily-scanner-core = { path = "../scanner_core" }
+serde_json.workspace = true
+
+[dev-dependencies]
+ai-daily-scanner-contract = { path = "../scanner_contract" }
+assert_cmd.workspace = true

@@ -1,3 +1,4 @@
+use ai_daily_scanner_contract::{WorkerKind, WorkerVersionResponse};
 use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -8,6 +9,29 @@ use zip::read::ZipArchive;
 
 pub const RUST_OFFICE_BACKEND: &str = "rust_office_oxide_v1";
 pub const RUST_XLSX_BOUNDED_BACKEND: &str = "rust_xlsx_bounded_v1";
+pub const WORKER_CONTRACT_VERSION: &str = "ai_daily_worker_v1";
+
+pub fn worker_version_response() -> WorkerVersionResponse {
+    WorkerVersionResponse {
+        contract: "ai_daily_worker".to_string(),
+        protocol_version: 1,
+        worker_kind: WorkerKind::Office,
+        worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
+        worker_version: env!("CARGO_PKG_VERSION").to_string(),
+        worker_build: option_env!("AI_DAILY_OFFICE_WORKER_BUILD")
+            .unwrap_or("dev-office-worker")
+            .to_string(),
+        supported_backends: vec![
+            RUST_OFFICE_BACKEND.to_string(),
+            RUST_XLSX_BOUNDED_BACKEND.to_string(),
+        ],
+        supported_extensions: vec![
+            ".docx".to_string(),
+            ".pptx".to_string(),
+            ".xlsx".to_string(),
+        ],
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct OfficeParseRequest {

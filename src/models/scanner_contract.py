@@ -470,6 +470,48 @@ class ContextEnvelope(ContractModel):
         return self
 
 
+def build_rust_core_crashed_envelope(
+    *,
+    request_id: str,
+    duration_ms: int,
+) -> ContextEnvelope:
+    """在进程层没有可信 Rust envelope 时构造唯一的稳定错误。"""
+    return ContextEnvelope(
+        contract="ai_daily_context",
+        protocol_version=1,
+        request_id=request_id,
+        engine_version="unknown",
+        engine_build="unknown",
+        status="error",
+        file_context="",
+        summary=ContextSummary(
+            source_file_count=0,
+            success_count=0,
+            timeout_count=0,
+            included_file_count=0,
+            omitted_file_count=0,
+            error_file_count=0,
+            input_chars=0,
+            output_chars=0,
+            total_duration_ms=duration_ms,
+            discovery_duration_ms=0,
+            parse_duration_ms=0,
+            compression_duration_ms=0,
+        ),
+        scan_run_id=None,
+        context_run_id=None,
+        warnings=[],
+        error=Diagnostic(
+            error_code="RUST_CORE_CRASHED",
+            message="Rust scanner process did not return a trusted envelope",
+            retryable=False,
+            stage="process",
+            file_path=None,
+            backend=None,
+        ),
+    )
+
+
 class TransportErrorResponse(ContractModel):
     contract: Literal["ai_daily_transport"]
     protocol_version: Literal[1]
@@ -884,5 +926,6 @@ __all__ = [
     "WorkerParseResponse",
     "WorkerParserLimits",
     "WorkerVersionResponse",
+    "build_rust_core_crashed_envelope",
     "validate_contract_payload",
 ]

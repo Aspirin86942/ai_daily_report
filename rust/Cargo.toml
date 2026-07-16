@@ -1,5 +1,11 @@
 [workspace]
-members = ["discovery", "office_parser", "scanner_contract"]
+members = [
+    "discovery",
+    "office_parser",
+    "scanner_cli",
+    "scanner_contract",
+    "scanner_core",
+]
 resolver = "2"
 
 [workspace.package]
@@ -7,11 +13,14 @@ version = "0.1.0"
 edition = "2021"
 
 [workspace.dependencies]
+assert_cmd = "2"
 chrono = { version = "0.4", features = ["serde"] }
 glob = "0.3"
 office_oxide = "0.1"
 quick-xml = "0.40"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
+thiserror = "2"
 walkdir = "2"
 zip = { version = "8.1", features = ["deflate"], default-features = false }

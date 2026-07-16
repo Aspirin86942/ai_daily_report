@@ -11,7 +11,10 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.config import Config, SCANNER_CONTRACT_FIELDS
-from src.models.scanner_contract import validate_contract_payload
+from src.models.scanner_contract import (
+    build_rust_core_crashed_envelope,
+    validate_contract_payload,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT_DIR = PROJECT_ROOT / "docs" / "contracts"
@@ -118,7 +121,9 @@ def test_rust_workspace_and_active_paths_use_one_release_target() -> None:
     assert set(workspace["workspace"]["members"]) == {
         "discovery",
         "office_parser",
+        "scanner_cli",
         "scanner_contract",
+        "scanner_core",
     }
 
     active_files = (
@@ -144,3 +149,23 @@ def test_rust_workspace_and_active_paths_use_one_release_target() -> None:
     assert "rust\\office_parser\\target" not in combined
     assert "rust/target/release/ai-daily-discovery" in combined
     assert "rust/target/release/ai-daily-office-parser" in combined
+
+
+def test_python_builds_one_strict_rust_core_crashed_envelope() -> None:
+    envelope = build_rust_core_crashed_envelope(
+        request_id="11111111-1111-4111-8111-111111111111",
+        duration_ms=17,
+    )
+
+    assert envelope.status == "error"
+    assert envelope.engine_version == "unknown"
+    assert envelope.engine_build == "unknown"
+    assert envelope.file_context == ""
+    assert envelope.scan_run_id is None
+    assert envelope.context_run_id is None
+    assert envelope.summary.total_duration_ms == 17
+    assert envelope.error is not None
+    assert envelope.error.error_code == "RUST_CORE_CRASHED"
+    assert envelope.error.stage == "process"
+    assert envelope.error.file_path is None
+    assert envelope.error.backend is None

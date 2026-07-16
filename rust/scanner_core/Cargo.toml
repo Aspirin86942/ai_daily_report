@@ -1,12 +1,13 @@
 [package]
-name = "ai-daily-office-parser"
+name = "ai-daily-scanner-core"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 ai-daily-scanner-contract = { path = "../scanner_contract" }
-office_oxide.workspace = true
-quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-zip.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
