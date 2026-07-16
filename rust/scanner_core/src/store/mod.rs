@@ -6,9 +6,10 @@ pub mod schema;
 
 use ai_daily_discovery::normalize_contract_path_text;
 use ai_daily_scanner_contract::{
-    BuildContextRequest, ContextDecision, ContextEnvelope, ContextSummary, Diagnostic,
-    DiagnosticStage, EngineStatus, ErrorCode, ExtensionMetric, NormalizedScannerProfileV1,
-    Nullable, RunStatus, StageMetric, Validate, VersionResponse,
+    BuildContextRequest, ContextAction, ContextDecision, ContextEnvelope, ContextSummary,
+    Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, ExtensionMetric,
+    NormalizedScannerProfileV1, Nullable, ParseStatus, RunStatus, StageMetric, StageName, Validate,
+    VersionResponse,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
@@ -958,6 +959,37 @@ impl ScannerStore {
             })
             .collect()
     }
+
+    pub fn inspect_run(
+        &mut self,
+        scan_run_id: u64,
+        include_content: bool,
+    ) -> Result<crate::context_audit::InspectSnapshot, crate::context_audit::InspectLoadError> {
+        let scan_run_id =
+            i64::try_from(scan_run_id).map_err(|_| crate::context_audit::InspectLoadError {
+                error: crate::context_audit::InspectAuditError::RunNotFound,
+                run_status: None,
+            })?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Deferred)
+            .map_err(|error| crate::context_audit::InspectLoadError {
+                error: crate::context_audit::InspectAuditError::Sql(error),
+                run_status: None,
+            })?;
+        let snapshot = crate::context_audit::load_inspect_snapshot(
+            &transaction,
+            scan_run_id,
+            include_content,
+        )?;
+        transaction
+            .commit()
+            .map_err(|error| crate::context_audit::InspectLoadError {
+                error: crate::context_audit::InspectAuditError::Sql(error),
+                run_status: Some(snapshot.run_status),
+            })?;
+        Ok(snapshot)
+    }
 }
 
 pub fn canonical_envelope_json(envelope: &ContextEnvelope) -> Result<String, StoreError> {
@@ -1484,6 +1516,13 @@ fn validate_finalization(
                     "context rows disagree with the final envelope".to_string(),
                 ));
             }
+            validate_context_relations(
+                context,
+                &inventory_by_identity,
+                &file_results_by_identity,
+                &batch.stage_metrics,
+                &batch.extension_metrics,
+            )?;
         }
         (None, None) => {}
         _ => {
@@ -1493,6 +1532,160 @@ fn validate_finalization(
         }
     }
     Ok(envelope)
+}
+
+fn validate_context_relations(
+    context: &ContextRunRecord,
+    inventory: &std::collections::HashMap<&str, &InventoryRecord>,
+    file_results: &std::collections::HashMap<&str, &FileResultRecord>,
+    stage_metrics: &[StageMetric],
+    extension_metrics: &[ExtensionMetric],
+) -> Result<(), StoreError> {
+    let summary = &context.summary;
+    let success_count = file_results
+        .values()
+        .filter(|result| result.parse_status == ParseStatus::Success)
+        .count() as u64;
+    let timeout_count = file_results
+        .values()
+        .filter(|result| result.parse_status == ParseStatus::Timeout)
+        .count() as u64;
+    let error_count = file_results.len() as u64 - success_count - timeout_count;
+    let included_count = context
+        .decisions
+        .iter()
+        .filter(|record| {
+            matches!(
+                record.decision.action,
+                ContextAction::Keep | ContextAction::Compress | ContextAction::MetadataOnly
+            )
+        })
+        .count() as u64;
+    let omitted_count = context
+        .decisions
+        .iter()
+        .filter(|record| record.decision.action == ContextAction::Omit)
+        .count() as u64;
+    let decision_error_count = context
+        .decisions
+        .iter()
+        .filter(|record| record.decision.action == ContextAction::Error)
+        .count() as u64;
+    let input_chars = context.decisions.iter().try_fold(0_u64, |total, record| {
+        total
+            .checked_add(record.decision.input_chars)
+            .ok_or_else(|| StoreError::InvalidRequest("decision input count overflows".to_string()))
+    })?;
+    for record in &context.decisions {
+        let item = inventory
+            .get(record.file_identity.as_str())
+            .ok_or_else(|| {
+                StoreError::InvalidRequest("decision inventory is missing".to_string())
+            })?;
+        if item.relative_path != record.decision.relative_path {
+            return Err(StoreError::InvalidRequest(
+                "decision path disagrees with inventory".to_string(),
+            ));
+        }
+    }
+    if summary.success_count != success_count
+        || summary.timeout_count != timeout_count
+        || summary.error_file_count != error_count
+        || summary.included_file_count != included_count
+        || summary.omitted_file_count != omitted_count
+        || decision_error_count != error_count + timeout_count
+        || included_count + omitted_count + decision_error_count != context.decisions.len() as u64
+        || summary.input_chars != input_chars
+        || summary.output_chars != context.final_context.chars().count() as u64
+    {
+        return Err(StoreError::InvalidRequest(
+            "context summary disagrees with file or decision rows".to_string(),
+        ));
+    }
+
+    let stage_by_name: std::collections::HashMap<StageName, &StageMetric> = stage_metrics
+        .iter()
+        .map(|metric| (metric.stage, metric))
+        .collect();
+    if stage_metrics.len() != 4
+        || stage_by_name.len() != 4
+        || stage_by_name
+            .get(&StageName::Discovery)
+            .is_none_or(|metric| {
+                metric.item_count != summary.source_file_count
+                    || metric.duration_ms != summary.discovery_duration_ms
+            })
+        || stage_by_name
+            .get(&StageName::Cache)
+            .is_none_or(|metric| metric.item_count != summary.source_file_count)
+        || stage_by_name
+            .get(&StageName::Parse)
+            .is_none_or(|metric| metric.duration_ms != summary.parse_duration_ms)
+        || stage_by_name.get(&StageName::Context).is_none_or(|metric| {
+            metric.item_count != context.decisions.len() as u64
+                || metric.duration_ms != summary.compression_duration_ms
+        })
+    {
+        return Err(StoreError::InvalidRequest(
+            "context summary disagrees with stage metrics".to_string(),
+        ));
+    }
+    let stage_duration = stage_metrics.iter().try_fold(0_u64, |total, metric| {
+        total
+            .checked_add(metric.duration_ms)
+            .ok_or_else(|| StoreError::InvalidRequest("stage durations overflow".to_string()))
+    })?;
+    if summary.total_duration_ms < stage_duration {
+        return Err(StoreError::InvalidRequest(
+            "total duration is shorter than its stages".to_string(),
+        ));
+    }
+
+    let mut expected_extensions: std::collections::BTreeMap<&str, (u64, u64, u64, u64, u64)> =
+        std::collections::BTreeMap::new();
+    for (identity, item) in inventory {
+        let result = file_results.get(identity).ok_or_else(|| {
+            StoreError::InvalidRequest("extension metric file result is missing".to_string())
+        })?;
+        let values = expected_extensions
+            .entry(item.file_type.as_str())
+            .or_insert((0, 0, 0, 0, 0));
+        values.0 = values.0.checked_add(1).ok_or_else(|| {
+            StoreError::InvalidRequest("extension file count overflows".to_string())
+        })?;
+        values.1 = values
+            .1
+            .checked_add(result.parse_duration_ms)
+            .ok_or_else(|| {
+                StoreError::InvalidRequest("extension duration overflows".to_string())
+            })?;
+        match result.parse_status {
+            ParseStatus::Success => values.2 += 1,
+            ParseStatus::Error | ParseStatus::NotParsed => values.3 += 1,
+            ParseStatus::Timeout => values.4 += 1,
+        }
+    }
+    if extension_metrics.len() != expected_extensions.len()
+        || extension_metrics.iter().any(|metric| {
+            expected_extensions
+                .get(metric.extension.as_str())
+                .is_none_or(|expected| {
+                    *expected
+                        != (
+                            metric.file_count,
+                            metric.parse_duration_ms,
+                            metric.success_count,
+                            metric.error_count,
+                            metric.timeout_count,
+                        )
+                })
+        })
+    {
+        return Err(StoreError::InvalidRequest(
+            "context summary disagrees with extension metrics".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_context(context: &ContextRunRecord) -> Result<(), StoreError> {
@@ -1949,11 +2142,28 @@ mod tests {
                 content,
             )],
             diagnostics: Vec::new(),
-            stage_metrics: vec![StageMetric {
-                stage: ai_daily_scanner_contract::StageName::Parse,
-                item_count: 1,
-                duration_ms: 3,
-            }],
+            stage_metrics: vec![
+                StageMetric {
+                    stage: StageName::Discovery,
+                    item_count: 1,
+                    duration_ms: 2,
+                },
+                StageMetric {
+                    stage: StageName::Cache,
+                    item_count: 1,
+                    duration_ms: 1,
+                },
+                StageMetric {
+                    stage: StageName::Parse,
+                    item_count: 1,
+                    duration_ms: 3,
+                },
+                StageMetric {
+                    stage: StageName::Context,
+                    item_count: 1,
+                    duration_ms: 1,
+                },
+            ],
             extension_metrics: vec![ExtensionMetric {
                 extension: ".txt".to_string(),
                 file_count: 1,
@@ -2694,6 +2904,84 @@ mod tests {
                 .envelope_json,
             batch.envelope_json
         );
+    }
+
+    #[test]
+    fn inspect_run_returns_stable_rows_and_guards_fixture_content_mode() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000019");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1_000,
+                )
+                .unwrap(),
+        );
+        record_both_workers(&mut harness.store, &active, 1_001);
+        let batch = success_batch(
+            &active,
+            "file-a",
+            "mtime_ns=100:size=5",
+            &"a".repeat(64),
+            "hello",
+        );
+        harness.store.finalize(&active, &batch, 1_010).unwrap();
+
+        let snapshot = harness
+            .store
+            .inspect_run(active.scan_run_id(), false)
+            .expect("metadata-only inspect");
+        assert_eq!(snapshot.run_status, RunStatus::Success);
+        assert_eq!(snapshot.context_run_id, Some(active.context_run_id()));
+        assert_eq!(snapshot.summary.source_file_count, 1);
+        assert_eq!(snapshot.stage_metrics.len(), 4);
+        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.decisions.len(), 1);
+
+        let restricted = harness
+            .store
+            .inspect_run(active.scan_run_id(), true)
+            .expect_err("production databases reject content mode");
+        assert!(matches!(
+            restricted.error,
+            crate::context_audit::InspectAuditError::ContentForbidden
+        ));
+        assert_eq!(restricted.run_status, Some(RunStatus::Success));
+
+        harness
+            .store
+            .connection
+            .pragma_update(
+                None,
+                "application_id",
+                crate::context_audit::SANITIZED_FIXTURE_APPLICATION_ID,
+            )
+            .unwrap();
+        harness
+            .store
+            .inspect_run(active.scan_run_id(), true)
+            .expect("sanitized fixture content mode");
+
+        harness
+            .store
+            .connection
+            .execute(
+                "UPDATE context_decisions SET relative_path='tampered.txt'
+                 WHERE context_run_id=?1",
+                [active.context_run_id() as i64],
+            )
+            .unwrap();
+        let corrupt = harness
+            .store
+            .inspect_run(active.scan_run_id(), false)
+            .expect_err("decision identity/path mismatch is corrupt");
+        assert!(matches!(
+            corrupt.error,
+            crate::context_audit::InspectAuditError::RunCorrupt(_)
+        ));
     }
 
     #[test]

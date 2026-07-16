@@ -52,6 +52,63 @@ def _require_scanner_binary() -> None:
     pytest.skip("Rust scanner release binary is not built")
 
 
+def _synthetic_build_request(tmp_path: Path, request_id: str) -> dict[str, object]:
+    work_dir = tmp_path / "合成 工作目录"
+    work_dir.mkdir()
+    (work_dir / "daily evidence.txt").write_text(
+        "synthetic context evidence",
+        encoding="utf-8",
+    )
+    request = _fixture("request.json")
+    request.update(
+        {
+            "request_id": request_id,
+            "work_dir": str(work_dir.resolve()),
+            "start_date": "2000-01-01",
+            "end_date": "2099-12-31",
+            "scan_db_path": str((tmp_path / "scan_index_v2.sqlite3").resolve()),
+            "adapters": {
+                "office_worker_path": str(
+                    (
+                        PROJECT_ROOT
+                        / "rust"
+                        / "target"
+                        / "release"
+                        / "ai-daily-office-parser.exe"
+                    ).resolve()
+                ),
+                "python_executable": str(Path(sys.executable).resolve()),
+                "python_module_root": str(PROJECT_ROOT.resolve()),
+                "python_document_worker_module": (
+                    "src.workers.document_parser_worker"
+                ),
+            },
+        }
+    )
+    return request
+
+
+def _run_synthetic_build(
+    tmp_path: Path,
+    request_id: str,
+) -> tuple[dict[str, object], ContextEnvelope]:
+    request = _synthetic_build_request(tmp_path, request_id)
+    completed = subprocess.run(
+        [str(SCANNER_BIN), "build-context"],
+        cwd=PROJECT_ROOT,
+        input=json.dumps(request, ensure_ascii=False).encode("utf-8"),
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout.decode(
+        "utf-8",
+        errors="replace",
+    )
+    assert completed.stderr == b""
+    payload = json.loads(completed.stdout.decode("utf-8", errors="strict"))
+    return request, ContextEnvelope.model_validate(payload)
+
+
 def test_json_process_client_round_trips_strict_utf8_bytes(
     monkeypatch,
 ) -> None:
@@ -631,35 +688,39 @@ def test_rust_scanner_invalid_json_returns_transport_error_exit_two() -> None:
     assert transport.error.stage == "request"
 
 
-def test_rust_scanner_build_context_returns_transitional_not_implemented() -> None:
+def test_rust_scanner_build_context_completes_synthetic_fixture(tmp_path) -> None:
     _require_scanner_binary()
-    request = _fixture("request.json")
-
-    completed = subprocess.run(
-        [str(SCANNER_BIN), "build-context"],
-        cwd=PROJECT_ROOT,
-        input=json.dumps(request, ensure_ascii=False).encode("utf-8"),
-        capture_output=True,
-        check=False,
+    request, response = _run_synthetic_build(
+        tmp_path,
+        "11111111-1111-4111-8111-111111111111",
     )
 
-    assert completed.returncode == 1
-    assert completed.stderr == b""
-    payload = json.loads(completed.stdout.decode("utf-8", errors="strict"))
-    response = ContextEnvelope.model_validate(payload)
     assert response.request_id == request["request_id"]
-    assert response.status == "error"
-    assert response.file_context == ""
-    assert response.scan_run_id is None
-    assert response.context_run_id is None
-    assert response.error is not None
-    assert response.error.error_code == "NOT_IMPLEMENTED"
-    assert response.error.stage == "context"
+    assert response.status == "ok"
+    assert "synthetic context evidence" in response.file_context
+    assert response.scan_run_id is not None
+    assert response.context_run_id is not None
+    assert response.error is None
+    assert response.summary.source_file_count == 1
+    assert response.summary.success_count == 1
+    assert response.summary.included_file_count == 1
 
 
-def test_rust_scanner_inspect_run_returns_read_only_placeholder() -> None:
+def test_rust_scanner_inspect_run_returns_stable_read_only_dto(tmp_path) -> None:
     _require_scanner_binary()
-    request = _fixture("inspect-run-request.json")
+    build_request, build_response = _run_synthetic_build(
+        tmp_path,
+        "31111111-3111-4111-8111-311111111111",
+    )
+    assert build_response.scan_run_id is not None
+    request = {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "41111111-4111-4111-8111-411111111111",
+        "scan_db_path": build_request["scan_db_path"],
+        "scan_run_id": build_response.scan_run_id,
+        "include_content": False,
+    }
 
     completed = subprocess.run(
         [str(SCANNER_BIN), "inspect-run"],
@@ -669,17 +730,22 @@ def test_rust_scanner_inspect_run_returns_read_only_placeholder() -> None:
         check=False,
     )
 
-    assert completed.returncode == 1
+    assert completed.returncode == 0
     assert completed.stderr == b""
     payload = json.loads(completed.stdout.decode("utf-8", errors="strict"))
     response = InspectRunResponse.model_validate(payload)
     assert response.request_id == request["request_id"]
     assert response.scan_run_id == request["scan_run_id"]
-    assert response.status == "error"
-    assert response.run_status is None
-    assert response.error is not None
-    assert response.error.error_code == "NOT_IMPLEMENTED"
-    assert response.error.stage == "inspect"
+    assert response.status == "ok"
+    assert response.run_status == "success"
+    assert response.context_run_id == build_response.context_run_id
+    assert response.error is None
+    assert len(response.files) == 1
+    assert response.files[0].worker_lane == "rust_core"
+    assert response.files[0].cache_status == "miss"
+    assert len(response.decisions) == 1
+    assert response.decisions[0].action == "keep"
+    assert "file_context" not in payload
 
 
 def test_rust_scanner_doctor_checks_db_parent_and_both_worker_handshakes(

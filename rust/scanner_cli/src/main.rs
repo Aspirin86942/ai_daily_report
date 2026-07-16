@@ -21,16 +21,10 @@ fn main() {
 
 fn exit_with_output(result: Result<CommandOutput, EngineShellError>) -> ! {
     match result {
-        Ok(output) => match serde_json::to_string(&output.payload) {
-            Ok(json) => {
-                println!("{json}");
-                std::process::exit(output.exit_code);
-            }
-            Err(error) => {
-                eprintln!("failed to serialize response: {error}");
-                std::process::exit(1);
-            }
-        },
+        Ok(output) => {
+            println!("{}", output.json);
+            std::process::exit(output.exit_code);
+        }
         Err(error) => {
             eprintln!("{error}");
             std::process::exit(1);

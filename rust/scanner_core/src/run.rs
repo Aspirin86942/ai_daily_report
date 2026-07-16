@@ -1,20 +1,40 @@
+use ai_daily_discovery::{
+    discover_files_with_diagnostics, normalize_contract_path_text, DiscoveryIssue, DiscoveryReport,
+    DiscoveryRequest,
+};
 use ai_daily_scanner_contract::{
     BuildContextRequest, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
     DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest,
-    InspectRunResponse, InspectStatus, Nullable, TransportErrorResponse, Validate, VersionResponse,
+    InspectRunResponse, InspectStatus, Nullable, RunStatus, TransportErrorResponse, Validate,
+    VersionResponse,
 };
+use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
-use serde_json::Value;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+use crate::compressor::build_context;
+use crate::config::normalize_scanner_profile;
+use crate::context_audit::{
+    assemble_scan_audit, context_profile_hash, extension_metrics, rejected_profile_hash,
+    stage_metrics, InspectAuditError, LocalParserFingerprint, ScanAuditBundle, StageMetricInputs,
+};
 use crate::parsers::{
-    document, office, register_worker, WorkerCommand, WORKER_CONTRACT_VERSION,
-    WORKER_HANDSHAKE_TIMEOUT,
+    document, office, register_worker, ParserScheduler, RegisteredWorker, WorkerCommand,
+    WorkerRegistry, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
+};
+use crate::planner::{plan_candidates, PlanAction};
+use crate::store::{
+    canonical_envelope_json, current_time_millis, ActiveRun, AttemptRuntime, BeginRunOutcome,
+    CacheLookup, ContextDecisionRecord, ContextRunRecord, DiagnosticSeverity, FinalizationBatch,
+    RouteStackFingerprint, RouteStackFingerprints, RunDiagnosticRecord, ScannerStore, StoreError,
+    WorkerFingerprint, HEARTBEAT_INTERVAL_MS,
 };
 
 #[derive(Debug, Error)]
@@ -25,23 +45,28 @@ pub enum EngineShellError {
 
 #[derive(Debug)]
 pub struct CommandOutput {
-    pub payload: Value,
+    pub json: String,
     pub exit_code: i32,
 }
 
 impl CommandOutput {
     fn success<T: Serialize>(payload: &T) -> Result<Self, EngineShellError> {
         Ok(Self {
-            payload: serde_json::to_value(payload)?,
+            json: serde_json::to_string(payload)?,
             exit_code: 0,
         })
     }
 
     fn with_exit<T: Serialize>(payload: &T, exit_code: i32) -> Result<Self, EngineShellError> {
         Ok(Self {
-            payload: serde_json::to_value(payload)?,
+            json: serde_json::to_string(payload)?,
             exit_code,
         })
+    }
+
+    fn canonical_json(json: String, exit_code: i32) -> Result<Self, EngineShellError> {
+        let _: serde_json::Value = serde_json::from_str(&json)?;
+        Ok(Self { json, exit_code })
     }
 }
 
@@ -53,7 +78,7 @@ pub fn dispatch(command: &str, input: &[u8]) -> Result<CommandOutput, EngineShel
                 Ok(request) => request,
                 Err(_) => return invalid_request_output(),
             };
-            build_context_placeholder(&request)
+            build_context_command(&request)
         }
         "doctor" => {
             let request = match decode_request::<DoctorRequest>(input) {
@@ -67,7 +92,7 @@ pub fn dispatch(command: &str, input: &[u8]) -> Result<CommandOutput, EngineShel
                 Ok(request) => request,
                 Err(_) => return invalid_request_output(),
             };
-            inspect_run_placeholder(&request)
+            inspect_run_command(&request)
         }
         _ => invalid_request_output(),
     }
@@ -202,7 +227,64 @@ fn record_handshake(
     }
 }
 
-fn inspect_run_placeholder(request: &InspectRunRequest) -> Result<CommandOutput, EngineShellError> {
+fn inspect_run_command(request: &InspectRunRequest) -> Result<CommandOutput, EngineShellError> {
+    let mut store = match ScannerStore::open_existing(Path::new(&request.scan_db_path)) {
+        Ok(store) => store,
+        Err(error) => {
+            return inspect_error_output(
+                request,
+                error.error_code(),
+                error.to_string(),
+                error.retryable(),
+                None,
+            );
+        }
+    };
+    match store.inspect_run(request.scan_run_id, request.include_content) {
+        Ok(snapshot) => {
+            let response = InspectRunResponse {
+                contract: "ai_daily_context".to_string(),
+                protocol_version: 1,
+                request_id: request.request_id.clone(),
+                scan_run_id: request.scan_run_id,
+                context_run_id: Nullable(snapshot.context_run_id),
+                status: InspectStatus::Ok,
+                run_status: Nullable(Some(snapshot.run_status)),
+                summary: snapshot.summary,
+                stage_metrics: snapshot.stage_metrics,
+                extension_metrics: snapshot.extension_metrics,
+                files: snapshot.files,
+                decisions: snapshot.decisions,
+                warnings: snapshot.warnings,
+                error: Nullable(None),
+            };
+            CommandOutput::success(&response)
+        }
+        Err(error) => {
+            let (error_code, retryable) = match &error.error {
+                InspectAuditError::RunNotFound => (ErrorCode::RunNotFound, false),
+                InspectAuditError::RunCorrupt(_) => (ErrorCode::RunCorrupt, false),
+                InspectAuditError::ContentForbidden => (ErrorCode::InvalidRequest, false),
+                InspectAuditError::Sql(_) => (ErrorCode::CacheOpenFailed, true),
+            };
+            inspect_error_output(
+                request,
+                error_code,
+                error.error.to_string(),
+                retryable,
+                error.run_status,
+            )
+        }
+    }
+}
+
+fn inspect_error_output(
+    request: &InspectRunRequest,
+    error_code: ErrorCode,
+    message: String,
+    retryable: bool,
+    run_status: Option<RunStatus>,
+) -> Result<CommandOutput, EngineShellError> {
     let response = InspectRunResponse {
         contract: "ai_daily_context".to_string(),
         protocol_version: 1,
@@ -210,7 +292,7 @@ fn inspect_run_placeholder(request: &InspectRunRequest) -> Result<CommandOutput,
         scan_run_id: request.scan_run_id,
         context_run_id: Nullable(None),
         status: InspectStatus::Error,
-        run_status: Nullable(None),
+        run_status: Nullable(run_status),
         summary: empty_summary(),
         stage_metrics: Vec::new(),
         extension_metrics: Vec::new(),
@@ -218,9 +300,9 @@ fn inspect_run_placeholder(request: &InspectRunRequest) -> Result<CommandOutput,
         decisions: Vec::new(),
         warnings: Vec::new(),
         error: Nullable(Some(Diagnostic {
-            error_code: ErrorCode::NotImplemented,
-            message: "inspect-run is not implemented in Task 4".to_string(),
-            retryable: false,
+            error_code,
+            message: truncate_chars(&message, 4_096),
+            retryable,
             stage: DiagnosticStage::Inspect,
             file_path: Nullable(None),
             backend: Nullable(None),
@@ -229,32 +311,1009 @@ fn inspect_run_placeholder(request: &InspectRunRequest) -> Result<CommandOutput,
     CommandOutput::with_exit(&response, 1)
 }
 
-fn build_context_placeholder(
-    request: &BuildContextRequest,
-) -> Result<CommandOutput, EngineShellError> {
+fn build_context_command(request: &BuildContextRequest) -> Result<CommandOutput, EngineShellError> {
+    let started_at = Instant::now();
     let version = version_response();
+    let work_dir = match validate_build_work_dir(&request.work_dir) {
+        Ok(path) => path,
+        Err(error) => {
+            return build_error_output(request, &version, error, Vec::new(), empty_summary(), None);
+        }
+    };
+    let profile = match normalize_scanner_profile(&request.scanner_profile, request.report_mode) {
+        Ok(profile) => profile,
+        Err(message) => {
+            return build_error_output(
+                request,
+                &version,
+                diagnostic(
+                    ErrorCode::InvalidRequest,
+                    message,
+                    false,
+                    DiagnosticStage::Request,
+                ),
+                Vec::new(),
+                empty_summary(),
+                None,
+            );
+        }
+    };
+    let canonical = match ScannerStore::canonicalize_request(request, &profile) {
+        Ok(canonical) => canonical,
+        Err(error) => {
+            return build_error_output(
+                request,
+                &version,
+                error.diagnostic(DiagnosticStage::Request),
+                Vec::new(),
+                empty_summary(),
+                None,
+            );
+        }
+    };
+    let runtime = match AttemptRuntime::from_request(request, &version) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return build_error_output(
+                request,
+                &version,
+                error.diagnostic(DiagnosticStage::Request),
+                Vec::new(),
+                empty_summary(),
+                None,
+            );
+        }
+    };
+    let mut store = match ScannerStore::open(Path::new(&request.scan_db_path)) {
+        Ok(store) => store,
+        Err(error) => {
+            return build_error_output(
+                request,
+                &version,
+                error.diagnostic(DiagnosticStage::Cache),
+                Vec::new(),
+                empty_summary(),
+                None,
+            );
+        }
+    };
+    let now_ms = match current_time_millis() {
+        Ok(value) => value,
+        Err(error) => {
+            return build_error_output(
+                request,
+                &version,
+                error.diagnostic(DiagnosticStage::Internal),
+                Vec::new(),
+                empty_summary(),
+                None,
+            );
+        }
+    };
+    let active = match store.begin_run(&request.request_id, &canonical, &runtime, now_ms) {
+        Ok(BeginRunOutcome::Stored(stored)) => {
+            let exit_code = i32::from(stored.envelope.status == EngineStatus::Error);
+            return CommandOutput::canonical_json(stored.envelope_json, exit_code);
+        }
+        Ok(BeginRunOutcome::Started(active)) => active,
+        Err(error) => {
+            return build_error_output(
+                request,
+                &version,
+                error.diagnostic(DiagnosticStage::Cache),
+                Vec::new(),
+                empty_summary(),
+                None,
+            );
+        }
+    };
+    let mut heartbeat = LeaseHeartbeat::start(PathBuf::from(&request.scan_db_path), active.clone());
+    execute_active_build(
+        request,
+        &version,
+        &profile,
+        &work_dir,
+        &mut store,
+        &active,
+        &mut heartbeat,
+        started_at,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_active_build(
+    request: &BuildContextRequest,
+    version: &VersionResponse,
+    profile: &ai_daily_scanner_contract::NormalizedScannerProfileV1,
+    work_dir: &Path,
+    store: &mut ScannerStore,
+    active: &ActiveRun,
+    heartbeat: &mut LeaseHeartbeat,
+    started_at: Instant,
+) -> Result<CommandOutput, EngineShellError> {
+    let office_result = register_worker(
+        &office::worker_command(&request.adapters),
+        WORKER_HANDSHAKE_TIMEOUT,
+    );
+    let python_result = register_worker(
+        &document::worker_command(&request.adapters),
+        WORKER_HANDSHAKE_TIMEOUT,
+    );
+    let (office_worker, office_error) = split_handshake(office_result, "rust_office_oxide_v1");
+    let (python_worker, python_error) = split_handshake(python_result, "python_office_v1");
+    let office_fingerprint = office_worker.as_ref().map(worker_fingerprint);
+    let python_fingerprint = python_worker.as_ref().map(worker_fingerprint);
+    let fingerprint_now_ms = match current_time_millis() {
+        Ok(value) => value,
+        Err(error) => {
+            heartbeat.stop();
+            return build_error_output(
+                request,
+                version,
+                error.diagnostic(DiagnosticStage::Internal),
+                Vec::new(),
+                elapsed_summary(started_at),
+                Some(active.scan_run_id()),
+            );
+        }
+    };
+    if let Err(error) = store.record_worker_fingerprints(
+        active,
+        office_fingerprint.as_ref(),
+        python_fingerprint.as_ref(),
+        fingerprint_now_ms,
+    ) {
+        heartbeat.stop();
+        return build_error_output(
+            request,
+            version,
+            error.diagnostic(DiagnosticStage::Cache),
+            Vec::new(),
+            elapsed_summary(started_at),
+            Some(active.scan_run_id()),
+        );
+    }
+    let mut handshake_errors: Vec<Diagnostic> =
+        [office_error, python_error].into_iter().flatten().collect();
+    if !handshake_errors.is_empty() {
+        let error = handshake_errors.remove(0);
+        return finish_active_error(
+            request,
+            version,
+            store,
+            active,
+            heartbeat,
+            handshake_errors,
+            error,
+            elapsed_summary(started_at),
+        );
+    }
+    let (Some(office_worker), Some(python_worker)) = (office_worker, python_worker) else {
+        return finish_active_error(
+            request,
+            version,
+            store,
+            active,
+            heartbeat,
+            Vec::new(),
+            diagnostic(
+                ErrorCode::InternalError,
+                "worker preflight completed without both identities".to_string(),
+                false,
+                DiagnosticStage::Process,
+            ),
+            elapsed_summary(started_at),
+        );
+    };
+    let registry = WorkerRegistry {
+        office: Some(office_worker.clone()),
+        python_document: Some(python_worker.clone()),
+    };
+    let route_stacks =
+        match route_stack_fingerprints(version, profile, &office_worker, &python_worker) {
+            Ok(value) => value,
+            Err(message) => {
+                return finish_active_error(
+                    request,
+                    version,
+                    store,
+                    active,
+                    heartbeat,
+                    Vec::new(),
+                    diagnostic(
+                        ErrorCode::InternalError,
+                        message,
+                        false,
+                        DiagnosticStage::Cache,
+                    ),
+                    elapsed_summary(started_at),
+                );
+            }
+        };
+
+    let discovery_started = Instant::now();
+    let discovery = match discover_with_timeout(work_dir, request, profile) {
+        Ok(report) => report,
+        Err(error) => {
+            let mut summary = elapsed_summary(started_at);
+            summary.discovery_duration_ms = elapsed_ms(discovery_started);
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                Vec::new(),
+                error,
+                summary,
+            );
+        }
+    };
+    let discovery_duration_ms = elapsed_ms(discovery_started);
+    let discovered_count = discovery.files.len() as u64;
+    let mut warnings: Vec<Diagnostic> = discovery
+        .issues
+        .iter()
+        .map(discovery_issue_diagnostic)
+        .collect();
+
+    let planned = plan_candidates(discovery.files, profile);
+    let cache_started = Instant::now();
+    let cache_plan = match store.attach_cache_evidence(planned, profile, &route_stacks) {
+        Ok(value) => value,
+        Err(error) => {
+            let mut summary = elapsed_summary(started_at);
+            summary.source_file_count = discovered_count;
+            summary.discovery_duration_ms = discovery_duration_ms;
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                error.diagnostic(DiagnosticStage::Cache),
+                summary,
+            );
+        }
+    };
+    let cache_duration_ms = elapsed_ms(cache_started);
+    let parse_candidates: Vec<_> = cache_plan
+        .iter()
+        .filter(|entry| {
+            matches!(entry.planned.action, PlanAction::Parse(_))
+                && matches!(entry.cache_lookup, Some(CacheLookup::Miss(_)))
+        })
+        .map(|entry| entry.planned.clone())
+        .collect();
+    let parsed_item_count = parse_candidates.len() as u64;
+    let parse_started = Instant::now();
+    let parser = ParserScheduler::from_registry(profile, registry);
+    let parsed = match parser.parse_planned_files(&parse_candidates) {
+        Ok(value) => value,
+        Err(error) => {
+            let mut summary = elapsed_summary(started_at);
+            summary.source_file_count = cache_plan.len() as u64;
+            summary.discovery_duration_ms = discovery_duration_ms;
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                error.diagnostic,
+                summary,
+            );
+        }
+    };
+    let parse_duration_ms = elapsed_ms(parse_started);
+    let rejected_hash = match rejected_profile_hash(1, &version.engine_build, profile) {
+        Ok(value) => value,
+        Err(message) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Cache,
+                ),
+                elapsed_summary(started_at),
+            );
+        }
+    };
+    let local_parser = LocalParserFingerprint {
+        contract: version.contract.clone(),
+        version: version.engine_version.clone(),
+        build: version.engine_build.clone(),
+    };
+    let audit =
+        match assemble_scan_audit(cache_plan, parsed, work_dir, &rejected_hash, &local_parser) {
+            Ok(value) => value,
+            Err(message) => {
+                return finish_active_error(
+                    request,
+                    version,
+                    store,
+                    active,
+                    heartbeat,
+                    warnings,
+                    diagnostic(
+                        ErrorCode::InternalError,
+                        message,
+                        false,
+                        DiagnosticStage::Internal,
+                    ),
+                    elapsed_summary(started_at),
+                );
+            }
+        };
+    warnings.extend(audit.degradation_diagnostics.clone());
+    if warnings.len() > 100_000 {
+        return finish_active_error(
+            request,
+            version,
+            store,
+            active,
+            heartbeat,
+            Vec::new(),
+            diagnostic(
+                ErrorCode::InternalError,
+                "scanner produced too many diagnostics".to_string(),
+                false,
+                DiagnosticStage::Internal,
+            ),
+            elapsed_summary(started_at),
+        );
+    }
+
+    let ScanAuditBundle {
+        inventory,
+        cache_writes,
+        file_results,
+        context_evidence,
+        degradation_diagnostics: _,
+    } = audit;
+    let context_started = Instant::now();
+    let compressed = match build_context(context_evidence, &profile.context, request.report_mode) {
+        Ok(value) => value,
+        Err(message) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                diagnostic(
+                    ErrorCode::ContextBudgetInvalid,
+                    message,
+                    false,
+                    DiagnosticStage::Context,
+                ),
+                elapsed_summary(started_at),
+            );
+        }
+    };
+    let context_duration_ms = elapsed_ms(context_started);
+    if let Err(error) = stop_and_verify_heartbeat(heartbeat, store, active) {
+        return build_error_output(
+            request,
+            version,
+            error.diagnostic(DiagnosticStage::Cache),
+            warnings,
+            elapsed_summary(started_at),
+            Some(active.scan_run_id()),
+        );
+    }
+    if let Some(error) = heartbeat.take_background_error() {
+        warnings.push(diagnostic(
+            ErrorCode::CacheWriteFailed,
+            format!("lease heartbeat recovered after a transient failure: {error}"),
+            true,
+            DiagnosticStage::Cache,
+        ));
+    }
+
+    let extension_metrics = match extension_metrics(&inventory, &file_results) {
+        Ok(value) => value,
+        Err(message) => {
+            return persist_active_error_without_heartbeat(
+                request,
+                version,
+                store,
+                active,
+                warnings,
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Internal,
+                ),
+                elapsed_summary(started_at),
+            );
+        }
+    };
+    let stage_metrics = stage_metrics(StageMetricInputs {
+        source_file_count: inventory.len() as u64,
+        cache_item_count: inventory.len() as u64,
+        parsed_item_count,
+        context_item_count: compressed.decisions.len() as u64,
+        discovery_duration_ms,
+        cache_duration_ms,
+        parse_duration_ms,
+        context_duration_ms,
+    });
+    let total_duration_ms = elapsed_ms(started_at);
+    let summary = ContextSummary {
+        source_file_count: compressed.source_file_count,
+        success_count: compressed.success_count,
+        timeout_count: compressed.timeout_count,
+        included_file_count: compressed.included_file_count,
+        omitted_file_count: compressed.omitted_file_count,
+        error_file_count: compressed.error_file_count,
+        input_chars: compressed.input_chars,
+        output_chars: compressed.output_chars,
+        total_duration_ms,
+        discovery_duration_ms,
+        parse_duration_ms,
+        compression_duration_ms: context_duration_ms,
+    };
+    let run_status = if warnings.is_empty() {
+        RunStatus::Success
+    } else {
+        RunStatus::Partial
+    };
+    let engine_status = if run_status == RunStatus::Success {
+        EngineStatus::Ok
+    } else {
+        EngineStatus::Partial
+    };
+    let envelope = ContextEnvelope {
+        contract: "ai_daily_context".to_string(),
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        engine_version: version.engine_version.clone(),
+        engine_build: version.engine_build.clone(),
+        status: engine_status,
+        file_context: compressed.content.clone(),
+        summary: summary.clone(),
+        scan_run_id: Nullable(Some(active.scan_run_id())),
+        context_run_id: Nullable(Some(active.context_run_id())),
+        warnings: warnings.clone(),
+        error: Nullable(None),
+    };
+    let envelope_json = match canonical_envelope_json(&envelope) {
+        Ok(value) => value,
+        Err(error) => {
+            return persist_active_error_without_heartbeat(
+                request,
+                version,
+                store,
+                active,
+                warnings,
+                error.diagnostic(DiagnosticStage::Internal),
+                summary,
+            );
+        }
+    };
+    let profile_hash = match context_profile_hash(1, &version.engine_build, profile) {
+        Ok(value) => value,
+        Err(message) => {
+            return persist_active_error_without_heartbeat(
+                request,
+                version,
+                store,
+                active,
+                warnings,
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Context,
+                ),
+                summary,
+            );
+        }
+    };
+    let context_decisions = compressed
+        .decisions
+        .into_iter()
+        .map(|record| ContextDecisionRecord {
+            file_identity: record.file_identity,
+            decision: record.decision,
+        })
+        .collect();
+    let diagnostics = warnings
+        .iter()
+        .cloned()
+        .map(|diagnostic| RunDiagnosticRecord {
+            severity: DiagnosticSeverity::Warning,
+            diagnostic,
+        })
+        .collect();
+    let batch = FinalizationBatch {
+        status: run_status,
+        envelope_json: envelope_json.clone(),
+        inventory,
+        cache_writes,
+        file_results,
+        diagnostics,
+        stage_metrics,
+        extension_metrics,
+        context: Some(ContextRunRecord {
+            context_profile_hash: profile_hash,
+            status: run_status,
+            final_context: compressed.content.clone(),
+            context_sha256: crate::store::sha256_hex(compressed.content.as_bytes()),
+            summary,
+            decisions: context_decisions,
+        }),
+    };
+    let finalize_now_ms = match current_time_millis() {
+        Ok(value) => value,
+        Err(error) => {
+            return build_error_output(
+                request,
+                version,
+                error.diagnostic(DiagnosticStage::Internal),
+                warnings,
+                batch
+                    .context
+                    .as_ref()
+                    .map(|context| context.summary.clone())
+                    .unwrap_or_else(empty_summary),
+                Some(active.scan_run_id()),
+            );
+        }
+    };
+    match store.finalize(active, &batch, finalize_now_ms) {
+        Ok(()) => CommandOutput::canonical_json(envelope_json, 0),
+        Err(error) => build_error_output(
+            request,
+            version,
+            error.diagnostic(DiagnosticStage::Cache),
+            warnings,
+            batch
+                .context
+                .as_ref()
+                .map(|context| context.summary.clone())
+                .unwrap_or_else(empty_summary),
+            Some(active.scan_run_id()),
+        ),
+    }
+}
+
+fn validate_build_work_dir(work_dir: &str) -> Result<PathBuf, Diagnostic> {
+    let path = Path::new(work_dir);
+    let metadata = fs::metadata(path).map_err(|error| {
+        let error_code = if error.kind() == std::io::ErrorKind::NotFound {
+            ErrorCode::WorkDirNotFound
+        } else {
+            ErrorCode::DiscoveryEntryUnreadable
+        };
+        diagnostic(
+            error_code,
+            "work_dir is unavailable".to_string(),
+            error.kind() != std::io::ErrorKind::NotFound,
+            DiagnosticStage::Request,
+        )
+    })?;
+    if !metadata.is_dir() {
+        return Err(diagnostic(
+            ErrorCode::WorkDirNotDirectory,
+            "work_dir is not a directory".to_string(),
+            false,
+            DiagnosticStage::Request,
+        ));
+    }
+    fs::canonicalize(path)
+        .map(|canonical| PathBuf::from(normalize_contract_path_text(&canonical.to_string_lossy())))
+        .map_err(|_| {
+            diagnostic(
+                ErrorCode::DiscoveryEntryUnreadable,
+                "work_dir could not be canonicalized".to_string(),
+                true,
+                DiagnosticStage::Request,
+            )
+        })
+}
+
+fn split_handshake(
+    result: Result<RegisteredWorker, crate::fallback::ParseFailure>,
+    backend: &str,
+) -> (Option<RegisteredWorker>, Option<Diagnostic>) {
+    match result {
+        Ok(worker) => (Some(worker), None),
+        Err(failure) => {
+            let mut diagnostic = failure.diagnostic;
+            if diagnostic.backend.0.is_none() {
+                diagnostic.backend = Nullable(Some(backend.to_string()));
+            }
+            (None, Some(diagnostic))
+        }
+    }
+}
+
+fn worker_fingerprint(worker: &RegisteredWorker) -> WorkerFingerprint {
+    WorkerFingerprint {
+        contract: worker.identity.worker_contract_version.clone(),
+        version: worker.identity.worker_version.clone(),
+        build: worker.identity.worker_build.clone(),
+    }
+}
+
+fn route_stack_fingerprints(
+    version: &VersionResponse,
+    profile: &ai_daily_scanner_contract::NormalizedScannerProfileV1,
+    office_worker: &RegisteredWorker,
+    python_worker: &RegisteredWorker,
+) -> Result<RouteStackFingerprints, String> {
+    let python_fallback = profile.parse.office.fallback_enabled.then_some((
+        python_worker.identity.worker_contract_version.as_str(),
+        python_worker.identity.worker_build.as_str(),
+    ));
+    Ok(RouteStackFingerprints {
+        text_like: RouteStackFingerprint::text(&version.engine_build)?,
+        modern_office: RouteStackFingerprint::modern_office(
+            &version.engine_build,
+            &office_worker.identity.worker_contract_version,
+            &office_worker.identity.worker_build,
+            python_fallback,
+        )?,
+        python_document: RouteStackFingerprint::python_document(
+            &version.engine_build,
+            &python_worker.identity.worker_contract_version,
+            &python_worker.identity.worker_build,
+        )?,
+    })
+}
+
+fn discover_with_timeout(
+    work_dir: &Path,
+    request: &BuildContextRequest,
+    profile: &ai_daily_scanner_contract::NormalizedScannerProfileV1,
+) -> Result<DiscoveryReport, Diagnostic> {
+    let start_date = NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d").map_err(|_| {
+        diagnostic(
+            ErrorCode::InvalidRequest,
+            "start_date is invalid".to_string(),
+            false,
+            DiagnosticStage::Request,
+        )
+    })?;
+    let end_date = NaiveDate::parse_from_str(&request.end_date, "%Y-%m-%d").map_err(|_| {
+        diagnostic(
+            ErrorCode::InvalidRequest,
+            "end_date is invalid".to_string(),
+            false,
+            DiagnosticStage::Request,
+        )
+    })?;
+    let discovery_request = DiscoveryRequest {
+        work_dir: work_dir.to_path_buf(),
+        start_date,
+        end_date,
+        allowed_extensions: profile.discovery.allowed_extensions.clone(),
+        ignored_patterns: profile.discovery.ignored_patterns.clone(),
+        excluded_dirs: profile
+            .discovery
+            .excluded_dirs
+            .iter()
+            .map(PathBuf::from)
+            .collect(),
+    };
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let handle = thread::spawn(move || {
+        let _ = sender.send(discover_files_with_diagnostics(&discovery_request));
+    });
+    match receiver.recv_timeout(Duration::from_millis(
+        profile.execution.discovery_timeout_ms,
+    )) {
+        Ok(Ok(report)) => {
+            if handle.join().is_err() {
+                Err(diagnostic(
+                    ErrorCode::InternalError,
+                    "discovery worker panicked".to_string(),
+                    false,
+                    DiagnosticStage::Discovery,
+                ))
+            } else {
+                Ok(report)
+            }
+        }
+        Ok(Err(error)) => {
+            let error_code = match error.kind() {
+                std::io::ErrorKind::NotFound => ErrorCode::WorkDirNotFound,
+                std::io::ErrorKind::InvalidInput => ErrorCode::WorkDirNotDirectory,
+                _ => ErrorCode::DiscoveryEntryUnreadable,
+            };
+            Err(diagnostic(
+                error_code,
+                "file discovery failed".to_string(),
+                error.kind() != std::io::ErrorKind::InvalidInput,
+                DiagnosticStage::Discovery,
+            ))
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(diagnostic(
+            ErrorCode::InternalError,
+            "file discovery exceeded its configured deadline".to_string(),
+            true,
+            DiagnosticStage::Discovery,
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(diagnostic(
+            ErrorCode::InternalError,
+            "file discovery worker exited without a result".to_string(),
+            true,
+            DiagnosticStage::Discovery,
+        )),
+    }
+}
+
+fn discovery_issue_diagnostic(issue: &DiscoveryIssue) -> Diagnostic {
+    let file_path = issue
+        .path
+        .as_ref()
+        .filter(|path| Path::new(path).is_absolute());
+    Diagnostic {
+        error_code: ErrorCode::DiscoveryEntryUnreadable,
+        message: truncate_chars(&issue.message, 4_096),
+        retryable: true,
+        stage: DiagnosticStage::Discovery,
+        file_path: Nullable(file_path.cloned()),
+        backend: Nullable(None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_active_error(
+    request: &BuildContextRequest,
+    version: &VersionResponse,
+    store: &mut ScannerStore,
+    active: &ActiveRun,
+    heartbeat: &mut LeaseHeartbeat,
+    mut warnings: Vec<Diagnostic>,
+    error: Diagnostic,
+    summary: ContextSummary,
+) -> Result<CommandOutput, EngineShellError> {
+    if let Err(heartbeat_error) = stop_and_verify_heartbeat(heartbeat, store, active) {
+        return build_error_output(
+            request,
+            version,
+            heartbeat_error.diagnostic(DiagnosticStage::Cache),
+            warnings,
+            summary,
+            Some(active.scan_run_id()),
+        );
+    }
+    if let Some(background_error) = heartbeat.take_background_error() {
+        warnings.push(diagnostic(
+            ErrorCode::CacheWriteFailed,
+            format!("lease heartbeat recovered after a transient failure: {background_error}"),
+            true,
+            DiagnosticStage::Cache,
+        ));
+    }
+    persist_active_error_without_heartbeat(
+        request, version, store, active, warnings, error, summary,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_active_error_without_heartbeat(
+    request: &BuildContextRequest,
+    version: &VersionResponse,
+    store: &mut ScannerStore,
+    active: &ActiveRun,
+    mut warnings: Vec<Diagnostic>,
+    error: Diagnostic,
+    summary: ContextSummary,
+) -> Result<CommandOutput, EngineShellError> {
+    warnings.truncate(100_000);
+    let envelope = ContextEnvelope {
+        contract: "ai_daily_context".to_string(),
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        engine_version: version.engine_version.clone(),
+        engine_build: version.engine_build.clone(),
+        status: EngineStatus::Error,
+        file_context: String::new(),
+        summary: summary.clone(),
+        scan_run_id: Nullable(Some(active.scan_run_id())),
+        context_run_id: Nullable(None),
+        warnings: warnings.clone(),
+        error: Nullable(Some(error.clone())),
+    };
+    let envelope_json = match canonical_envelope_json(&envelope) {
+        Ok(value) => value,
+        Err(serialization_error) => {
+            return build_error_output(
+                request,
+                version,
+                serialization_error.diagnostic(DiagnosticStage::Internal),
+                warnings,
+                summary,
+                Some(active.scan_run_id()),
+            );
+        }
+    };
+    let mut diagnostics: Vec<RunDiagnosticRecord> = warnings
+        .iter()
+        .cloned()
+        .map(|diagnostic| RunDiagnosticRecord {
+            severity: DiagnosticSeverity::Warning,
+            diagnostic,
+        })
+        .collect();
+    diagnostics.push(RunDiagnosticRecord {
+        severity: DiagnosticSeverity::Error,
+        diagnostic: error,
+    });
+    let batch = FinalizationBatch {
+        status: RunStatus::Error,
+        envelope_json: envelope_json.clone(),
+        inventory: Vec::new(),
+        cache_writes: Vec::new(),
+        file_results: Vec::new(),
+        diagnostics,
+        stage_metrics: Vec::new(),
+        extension_metrics: Vec::new(),
+        context: None,
+    };
+    let now_ms = match current_time_millis() {
+        Ok(value) => value,
+        Err(time_error) => {
+            return build_error_output(
+                request,
+                version,
+                time_error.diagnostic(DiagnosticStage::Internal),
+                warnings,
+                summary,
+                Some(active.scan_run_id()),
+            );
+        }
+    };
+    match store.finalize(active, &batch, now_ms) {
+        Ok(()) => CommandOutput::canonical_json(envelope_json, 1),
+        Err(write_error) => build_error_output(
+            request,
+            version,
+            write_error.diagnostic(DiagnosticStage::Cache),
+            warnings,
+            summary,
+            Some(active.scan_run_id()),
+        ),
+    }
+}
+
+fn build_error_output(
+    request: &BuildContextRequest,
+    version: &VersionResponse,
+    error: Diagnostic,
+    mut warnings: Vec<Diagnostic>,
+    summary: ContextSummary,
+    scan_run_id: Option<u64>,
+) -> Result<CommandOutput, EngineShellError> {
+    warnings.truncate(100_000);
     let response = ContextEnvelope {
         contract: "ai_daily_context".to_string(),
         protocol_version: 1,
         request_id: request.request_id.clone(),
-        engine_version: version.engine_version,
-        engine_build: version.engine_build,
+        engine_version: version.engine_version.clone(),
+        engine_build: version.engine_build.clone(),
         status: EngineStatus::Error,
         file_context: String::new(),
-        summary: empty_summary(),
-        scan_run_id: Nullable(None),
+        summary,
+        scan_run_id: Nullable(scan_run_id),
         context_run_id: Nullable(None),
-        warnings: Vec::new(),
-        error: Nullable(Some(Diagnostic {
-            error_code: ErrorCode::NotImplemented,
-            message: "build-context is not implemented in Task 4".to_string(),
-            retryable: false,
-            stage: DiagnosticStage::Context,
-            file_path: Nullable(None),
-            backend: Nullable(None),
-        })),
+        warnings,
+        error: Nullable(Some(error)),
     };
     CommandOutput::with_exit(&response, 1)
+}
+
+fn stop_and_verify_heartbeat(
+    heartbeat: &mut LeaseHeartbeat,
+    store: &mut ScannerStore,
+    active: &ActiveRun,
+) -> Result<(), StoreError> {
+    heartbeat.stop();
+    store.heartbeat(active, current_time_millis()?)
+}
+
+struct LeaseHeartbeat {
+    stop_sender: Option<mpsc::Sender<()>>,
+    handle: Option<thread::JoinHandle<Option<StoreError>>>,
+    background_error: Option<StoreError>,
+}
+
+impl LeaseHeartbeat {
+    fn start(database_path: PathBuf, active: ActiveRun) -> Self {
+        let (stop_sender, stop_receiver) = mpsc::channel();
+        let handle = thread::spawn(move || {
+            let mut store = match ScannerStore::open_existing(&database_path) {
+                Ok(store) => store,
+                Err(error) => return Some(error),
+            };
+            let mut last_error = None;
+            loop {
+                match stop_receiver.recv_timeout(Duration::from_millis(HEARTBEAT_INTERVAL_MS)) {
+                    Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => return last_error,
+                    Err(mpsc::RecvTimeoutError::Timeout) => match current_time_millis()
+                        .and_then(|now_ms| store.heartbeat(&active, now_ms))
+                    {
+                        Ok(()) => last_error = None,
+                        Err(error) => last_error = Some(error),
+                    },
+                }
+            }
+        });
+        Self {
+            stop_sender: Some(stop_sender),
+            handle: Some(handle),
+            background_error: None,
+        }
+    }
+
+    fn stop(&mut self) {
+        if let Some(sender) = self.stop_sender.take() {
+            let _ = sender.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            self.background_error = match handle.join() {
+                Ok(error) => error,
+                Err(_) => Some(StoreError::CacheWrite {
+                    detail: "lease heartbeat thread panicked".to_string(),
+                }),
+            };
+        }
+    }
+
+    fn take_background_error(&mut self) -> Option<StoreError> {
+        self.background_error.take()
+    }
+}
+
+impl Drop for LeaseHeartbeat {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+fn diagnostic(
+    error_code: ErrorCode,
+    message: String,
+    retryable: bool,
+    stage: DiagnosticStage,
+) -> Diagnostic {
+    Diagnostic {
+        error_code,
+        message: truncate_chars(&message, 4_096),
+        retryable,
+        stage,
+        file_path: Nullable(None),
+        backend: Nullable(None),
+    }
+}
+
+fn elapsed_summary(started_at: Instant) -> ContextSummary {
+    let mut summary = empty_summary();
+    summary.total_duration_ms = elapsed_ms(started_at);
+    summary
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 fn empty_summary() -> ContextSummary {
