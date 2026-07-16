@@ -1,0 +1,11 @@
+{
+  "algorithm": "sha256-python-worker-build-v1",
+  "inputs": [
+    "requirements.lock",
+    "src/models/scanner_contract.py",
+    "src/models/schemas.py",
+    "src/services/document_parser.py",
+    "src/workers/contracts.py",
+    "src/workers/document_parser_worker.py"
+  ]
+}

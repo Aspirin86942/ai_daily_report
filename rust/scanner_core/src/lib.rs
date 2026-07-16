@@ -3,10 +3,12 @@
 pub mod classifier;
 pub mod config;
 pub mod fallback;
+pub mod metrics;
 pub mod parsers;
 pub mod planner;
 pub mod process;
 mod run;
+pub mod store;
 
 #[cfg(windows)]
 mod windows_job;

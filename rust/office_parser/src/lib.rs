@@ -24,9 +24,7 @@ pub fn worker_version_response() -> WorkerVersionResponse {
         worker_kind: WorkerKind::Office,
         worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
         worker_version: env!("CARGO_PKG_VERSION").to_string(),
-        worker_build: option_env!("AI_DAILY_OFFICE_WORKER_BUILD")
-            .unwrap_or("dev-office-worker")
-            .to_string(),
+        worker_build: env!("AI_DAILY_OFFICE_WORKER_BUILD").to_string(),
         supported_backends: vec![
             RUST_OFFICE_BACKEND.to_string(),
             RUST_XLSX_BOUNDED_BACKEND.to_string(),
@@ -473,6 +471,24 @@ mod tests {
     use std::fs::File;
     use std::io::Write;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn local_office_worker_build_uses_the_shared_source_fingerprint() {
+        let build = worker_version_response().worker_build;
+        if let Some(ci_build) =
+            option_env!("AI_DAILY_BUILD_ID").filter(|value| !value.trim().is_empty())
+        {
+            assert_eq!(build, ci_build);
+        } else {
+            let digest = build
+                .strip_prefix("sha256-source-v1:")
+                .expect("local build must use the source hash prefix");
+            assert_eq!(digest.len(), 64);
+            assert!(digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
+        }
+    }
 
     fn write_test_xlsx(parts: &[(&str, &str)]) -> PathBuf {
         let unique = SystemTime::now()

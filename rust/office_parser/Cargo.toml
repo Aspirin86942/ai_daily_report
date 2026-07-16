@@ -2,6 +2,7 @@
 name = "ai-daily-office-parser"
 version.workspace = true
 edition.workspace = true
+build = "../scanner_core/build.rs"
 
 [dependencies]
 ai-daily-discovery = { path = "../discovery" }
@@ -11,6 +12,9 @@ quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zip.workspace = true
+
+[build-dependencies]
+sha2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
-import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,13 +21,34 @@ from src.models.scanner_contract import (
 
 WORKER_CONTRACT_VERSION = "ai_daily_worker_v1"
 PYTHON_WORKER_VERSION = "0.1.0"
-PYTHON_WORKER_BUILD = os.environ.get(
-    "AI_DAILY_PYTHON_WORKER_BUILD",
-    "dev-python-document-worker",
+PYTHON_WORKER_BUILD_INPUTS = (
+    "requirements.lock",
+    "src/models/scanner_contract.py",
+    "src/models/schemas.py",
+    "src/services/document_parser.py",
+    "src/workers/contracts.py",
+    "src/workers/document_parser_worker.py",
 )
 PYTHON_OFFICE_BACKEND = "python_office_v1"
 PYTHON_SHAREPOINT_TEXT_BACKEND = "python_sharepoint_text_v1"
 PDF_TEXT_BACKEND = "pdf_text_v1"
+
+
+def _compute_python_worker_build() -> str:
+    """Hash only the frozen repository-relative worker/parser source allowlist."""
+    repository_root = Path(__file__).resolve().parents[2]
+    digest = hashlib.sha256()
+    for relative_path in PYTHON_WORKER_BUILD_INPUTS:
+        path_bytes = relative_path.encode("utf-8", errors="strict")
+        file_bytes = (repository_root / relative_path).read_bytes()
+        digest.update(len(path_bytes).to_bytes(8, "little"))
+        digest.update(path_bytes)
+        digest.update(len(file_bytes).to_bytes(8, "little"))
+        digest.update(file_bytes)
+    return digest.hexdigest()
+
+
+PYTHON_WORKER_BUILD = _compute_python_worker_build()
 
 
 @dataclass(frozen=True, slots=True)

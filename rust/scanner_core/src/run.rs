@@ -306,9 +306,7 @@ pub fn version_response() -> VersionResponse {
         protocol_version: 1,
         binary_name: "ai-daily-scanner".to_string(),
         engine_version: env!("CARGO_PKG_VERSION").to_string(),
-        engine_build: option_env!("AI_DAILY_ENGINE_BUILD")
-            .unwrap_or("dev-scanner-engine")
-            .to_string(),
+        engine_build: env!("AI_DAILY_ENGINE_BUILD").to_string(),
         target_triple: target_triple(),
         supported_commands: vec![
             "version".to_string(),
@@ -347,6 +345,24 @@ mod tests {
         response.validate().expect("version response must be valid");
         assert_eq!(response.binary_name, "ai-daily-scanner");
         assert_eq!(response.supported_commands[0], "version");
+    }
+
+    #[test]
+    fn local_scanner_build_uses_a_deterministic_source_fingerprint() {
+        let build = version_response().engine_build;
+        if let Some(ci_build) =
+            option_env!("AI_DAILY_BUILD_ID").filter(|value| !value.trim().is_empty())
+        {
+            assert_eq!(build, ci_build);
+        } else {
+            let digest = build
+                .strip_prefix("sha256-source-v1:")
+                .expect("local build must use the source hash prefix");
+            assert_eq!(digest.len(), 64);
+            assert!(digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
+        }
     }
 
     #[test]
