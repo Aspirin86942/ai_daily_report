@@ -56,12 +56,16 @@ class HealthCheckResult:
 
 def _relative_display_path(path: Path, root: Path) -> str:
     """诊断输出统一使用 /，避免 Windows 反斜杠影响测试和复制排查。"""
-    return path.relative_to(root).as_posix()
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
 
 
 def _append_project_file_checks(
     result: HealthCheckResult,
     project_root: Path,
+    cfg: Any,
     *,
     strict: bool = False,
 ) -> None:
@@ -71,7 +75,7 @@ def _append_project_file_checks(
     避免后续配置加载异常把真实原因淹没掉。
     """
 
-    config_dir = project_root / "config"
+    config_dir = Path(getattr(cfg, "config_dir", project_root / "config"))
     settings_file = config_dir / Config._settings_file_name()
     generic_settings_file = config_dir / "settings.yaml"
     secrets_file = config_dir / ".secrets.yaml"
@@ -112,7 +116,7 @@ def _append_project_file_checks(
                 f"缺少模板文件: {_relative_display_path(template_path, project_root)}"
             )
 
-    data_dir = project_root / "data"
+    data_dir = Path(getattr(cfg, "data_dir", project_root / "data"))
     if not data_dir.exists():
         result.warnings.append(
             f"数据目录不存在: {_relative_display_path(data_dir, project_root)} (将自动创建)"
@@ -161,7 +165,22 @@ def _append_runtime_config_checks(
     )
     reports_dir = Path(getattr(cfg, "reports_dir"))
     db_dir = Path(getattr(cfg, "db_dir"))
+    data_dir = Path(getattr(cfg, "data_dir", project_root / "data"))
+    log_dir = Path(getattr(cfg, "log_dir", project_root / "logs"))
+    config_dir = Path(getattr(cfg, "config_dir", project_root / "config"))
+    installed_mode = bool(getattr(cfg, "installed_mode", False))
     scanner_profile = cfg.scanner_contract_profile()
+    result.info["运行模式"] = "installed" if installed_mode else "source"
+    if installed_mode:
+        result.info["安装根目录"] = str(getattr(cfg, "install_root"))
+    result.info["配置目录"] = str(config_dir)
+    result.info["数据目录"] = str(data_dir)
+    result.info["报告目录"] = str(reports_dir)
+    result.info["数据库目录"] = str(db_dir)
+    result.info["日志目录"] = str(log_dir)
+    config_source = getattr(cfg, "config_source", None)
+    if config_source is not None:
+        result.info["配置来源"] = str(config_source)
     result.info["LLM Provider"] = provider
     result.info["工作目录"] = str(work_dir)
     result.info["LLM 模型"] = model_id
@@ -174,8 +193,9 @@ def _append_runtime_config_checks(
     _append_work_dir_check(result, work_dir)
     _append_writable_directory_check(result, "报告目录", reports_dir)
     _append_writable_directory_check(result, "数据库目录", db_dir)
-    _append_writable_directory_check(result, "日志目录", project_root / "logs")
+    _append_writable_directory_check(result, "日志目录", log_dir)
     if strict:
+        _append_installed_containment_checks(result, cfg)
         _append_strict_rust_core_checks(
             result,
             cfg,
@@ -278,6 +298,30 @@ def _append_strict_rust_core_checks(
             result.errors.append(f"Rust strict check failed: {check_name}")
 
 
+def _append_installed_containment_checks(
+    result: HealthCheckResult,
+    cfg: Any,
+) -> None:
+    """Strict doctor proves installed runtime state stays below shared/."""
+
+    if not bool(getattr(cfg, "installed_mode", False)):
+        return
+    install_root = Path(getattr(cfg, "install_root")).resolve()
+    shared_root = (install_root / "shared").resolve()
+    for label, attribute in (
+        ("配置目录", "config_dir"),
+        ("数据目录", "data_dir"),
+        ("报告目录", "reports_dir"),
+        ("数据库目录", "db_dir"),
+        ("日志目录", "log_dir"),
+    ):
+        path = Path(getattr(cfg, attribute)).resolve()
+        if not path.is_relative_to(shared_root):
+            result.errors.append(
+                f"installed mode {label} escaped install-root/shared: {path}"
+            )
+
+
 def _append_work_dir_check(result: HealthCheckResult, work_dir: Path) -> None:
     """校验扫描根目录，避免路径不可达被后续扫描误判为空结果。"""
 
@@ -330,7 +374,7 @@ def collect_healthcheck(
     cfg = config_obj or config
     result = HealthCheckResult()
 
-    _append_project_file_checks(result, root, strict=strict)
+    _append_project_file_checks(result, root, cfg, strict=strict)
 
     try:
         _append_runtime_config_checks(result, cfg, root, strict=strict)

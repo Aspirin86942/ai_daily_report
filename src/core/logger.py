@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+from .config import config
 
 
 def setup_logger(
@@ -15,7 +15,7 @@ def setup_logger(
 
     Args:
         name: 日志器名称
-        log_dir: 日志目录；未指定时使用仓库根目录下的 ``logs``
+        log_dir: 日志目录；未指定时使用 ``Config.log_dir``
 
     Returns:
         配置好的 Logger 实例
@@ -28,7 +28,7 @@ def setup_logger(
         return logger
 
     # 创建日志目录
-    log_path = PROJECT_ROOT / "logs" if log_dir is None else Path(log_dir)
+    log_path = config.log_dir if log_dir is None else Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
 
     # 文件 handler

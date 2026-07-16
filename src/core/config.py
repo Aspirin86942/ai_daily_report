@@ -15,6 +15,15 @@ DEFAULT_RUST_SCANNER_BIN = "rust/target/release/ai-daily-scanner"
 DEFAULT_RUST_INDEX_DB_PATH = "data/db/scan_index_v2.sqlite3"
 DEFAULT_RUST_PROCESS_TIMEOUT_SECONDS = 900.0
 
+INSTALLED_PATH_ENV_VARS = {
+    "install_root": "DAILY_REPORT_INSTALL_ROOT",
+    "config_dir": "DAILY_REPORT_CONFIG_DIR",
+    "data_dir": "DAILY_REPORT_DATA_DIR",
+    "reports_dir": "DAILY_REPORT_REPORTS_DIR",
+    "db_dir": "DAILY_REPORT_DB_DIR",
+    "log_dir": "DAILY_REPORT_LOG_DIR",
+}
+
 SCANNER_CONTRACT_FIELDS = (
     "allowed_extensions",
     "ignored_patterns",
@@ -87,11 +96,59 @@ class Config:
 
     def _initialize(self):
         """初始化配置"""
-        # 获取项目根目录
-        root_dir = Path(__file__).parent.parent.parent
-        config_dir = root_dir / "config"
+        self._project_root = Path(__file__).resolve().parents[2]
+        installed_paths = self._resolve_installed_paths()
+        self._install_root = (
+            installed_paths["install_root"] if installed_paths else None
+        )
+        self._config_dir = (
+            installed_paths["config_dir"]
+            if installed_paths
+            else self._project_root / "config"
+        )
+        self._data_dir = installed_paths["data_dir"] if installed_paths else None
+        self._reports_dir = (
+            installed_paths["reports_dir"] if installed_paths else None
+        )
+        self._db_dir = installed_paths["db_dir"] if installed_paths else None
+        self._log_dir = installed_paths["log_dir"] if installed_paths else None
+        self._settings = self._build_settings(self._config_dir)
 
-        self._settings = self._build_settings(config_dir)
+    @classmethod
+    def _resolve_installed_paths(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> dict[str, Path] | None:
+        """验证 launcher 提供的 installed-mode 外部路径。"""
+
+        values = os.environ if environ is None else environ
+        install_text = str(values.get(INSTALLED_PATH_ENV_VARS["install_root"], ""))
+        if not install_text.strip():
+            return None
+
+        resolved: dict[str, Path] = {}
+        for name, env_name in INSTALLED_PATH_ENV_VARS.items():
+            raw = str(values.get(env_name, "")).strip()
+            if not raw:
+                raise ValueError(f"installed mode requires {env_name}")
+            path = Path(raw)
+            if not path.is_absolute():
+                raise ValueError(f"{env_name} must be absolute")
+            try:
+                path = path.resolve(strict=True)
+            except OSError as exc:
+                raise ValueError(f"{env_name} must be an existing directory") from exc
+            if not path.is_dir():
+                raise ValueError(f"{env_name} must be an existing directory")
+            resolved[name] = path
+
+        shared_root = (resolved["install_root"] / "shared").resolve()
+        for name in ("config_dir", "data_dir", "reports_dir", "db_dir", "log_dir"):
+            path = resolved[name]
+            if not path.is_relative_to(shared_root):
+                env_name = INSTALLED_PATH_ENV_VARS[name]
+                raise ValueError(f"{env_name} must stay under install-root/shared")
+        return resolved
 
     @staticmethod
     def _settings_file_name(system_name: str | None = None) -> str:
@@ -140,7 +197,10 @@ class Config:
                 str(key): Config._to_builtin_value(item)
                 for key, item in value.items()
             }
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        if isinstance(value, Sequence) and not isinstance(
+            value,
+            (str, bytes, bytearray),
+        ):
             return [Config._to_builtin_value(item) for item in value]
         return value
 
@@ -155,25 +215,73 @@ class Config:
     @property
     def work_dir(self) -> Path:
         """工作目录"""
-        return Path(self._settings.paths.work_dir)
+        path = Path(self._settings.paths.work_dir)
+        if self.installed_mode and not path.is_absolute():
+            raise ValueError("installed-mode paths.work_dir must be absolute")
+        return path
+
+    @property
+    def project_root(self) -> Path:
+        """当前源码 checkout 或已选中 release 的绝对根目录。"""
+        return getattr(
+            self,
+            "_project_root",
+            Path(__file__).resolve().parents[2],
+        )
+
+    @property
+    def installed_mode(self) -> bool:
+        """是否由 side-by-side launcher 启动。"""
+        return getattr(self, "_install_root", None) is not None
+
+    @property
+    def install_root(self) -> Path | None:
+        """已安装根目录；源码运行返回 ``None``。"""
+        return getattr(self, "_install_root", None)
+
+    @property
+    def config_dir(self) -> Path:
+        """唯一配置目录，不读取 release/version-local 配置。"""
+        return getattr(self, "_config_dir", self.project_root / "config")
+
+    @property
+    def config_source(self) -> Path:
+        """报告当前平台实际优先使用的非敏感配置路径。"""
+        platform_file = self.config_dir / self._settings_file_name()
+        generic_file = self.config_dir / "settings.yaml"
+        return platform_file if platform_file.is_file() else generic_file
 
     @property
     def data_dir(self) -> Path:
         """数据目录"""
-        root_dir = Path(__file__).parent.parent.parent
-        return root_dir / self._settings.paths.data_dir
+        installed = getattr(self, "_data_dir", None)
+        if installed is not None:
+            return installed
+        return self.project_root / self._settings.paths.data_dir
 
     @property
     def reports_dir(self) -> Path:
         """报告目录"""
-        root_dir = Path(__file__).parent.parent.parent
-        return root_dir / self._settings.paths.reports_dir
+        installed = getattr(self, "_reports_dir", None)
+        if installed is not None:
+            return installed
+        return self.project_root / self._settings.paths.reports_dir
 
     @property
     def db_dir(self) -> Path:
         """数据库目录"""
-        root_dir = Path(__file__).parent.parent.parent
-        return root_dir / self._settings.paths.db_dir
+        installed = getattr(self, "_db_dir", None)
+        if installed is not None:
+            return installed
+        return self.project_root / self._settings.paths.db_dir
+
+    @property
+    def log_dir(self) -> Path:
+        """日志目录；installed mode 始终位于 shared。"""
+        installed = getattr(self, "_log_dir", None)
+        if installed is not None:
+            return installed
+        return self.project_root / "logs"
 
     @property
     def llm_config(self) -> Dict[str, Any]:
@@ -232,6 +340,8 @@ class Config:
     @property
     def rust_scanner_bin(self) -> str:
         """Rust v2 context binary 路径，不注入 scanner wire profile。"""
+        if self.installed_mode:
+            return str((self.project_root / DEFAULT_RUST_SCANNER_BIN).resolve())
         return self._non_blank_string(
             getattr(
                 self._settings.scanner,
@@ -244,6 +354,10 @@ class Config:
     @property
     def rust_office_parser_bin(self) -> str:
         """Rust Office worker 路径；worker 始终由 Rust core 隔离启动。"""
+        if self.installed_mode:
+            return str(
+                (self.project_root / DEFAULT_RUST_OFFICE_PARSER_BIN).resolve()
+            )
         return self._non_blank_string(
             getattr(
                 self._settings.scanner,
@@ -256,6 +370,8 @@ class Config:
     @property
     def rust_index_db_path(self) -> str:
         """Rust v2 独占数据库路径；已退役的 v1 数据库保持不变。"""
+        if self.installed_mode:
+            return str((self.db_dir / "scan_index_v2.sqlite3").resolve())
         return self._non_blank_string(
             getattr(
                 self._settings.scanner,

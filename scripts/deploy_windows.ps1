@@ -34,6 +34,10 @@ $genericSettings = Join-Path $repoRoot "config\settings.yaml"
 $windowsSettings = Join-Path $repoRoot "config\settings.windows.yaml"
 $lockFile = Join-Path $repoRoot "requirements.lock"
 $requirementsFile = Join-Path $repoRoot "requirements.txt"
+$installedMode = -not [string]::IsNullOrWhiteSpace(
+    $env:DAILY_REPORT_INSTALL_ROOT
+)
+$env:PYTHONDONTWRITEBYTECODE = "1"
 
 function Invoke-CheckedCommand {
     param(
@@ -52,7 +56,21 @@ function Invoke-CheckedCommand {
     }
 }
 
-if (-not (Test-Path -LiteralPath $windowsSettings -PathType Leaf)) {
+if ($installedMode) {
+    $externalConfig = $env:DAILY_REPORT_CONFIG_DIR
+    if ([string]::IsNullOrWhiteSpace($externalConfig)) {
+        throw "Installed mode requires DAILY_REPORT_CONFIG_DIR"
+    }
+    $externalWindowsSettings = Join-Path $externalConfig "settings.windows.yaml"
+    $externalGenericSettings = Join-Path $externalConfig "settings.yaml"
+    if (
+        -not (Test-Path -LiteralPath $externalWindowsSettings -PathType Leaf) -and
+        -not (Test-Path -LiteralPath $externalGenericSettings -PathType Leaf)
+    ) {
+        throw "Installed mode requires an existing shared settings file"
+    }
+    Write-Host "Using existing shared configuration; no settings were copied."
+} elseif (-not (Test-Path -LiteralPath $windowsSettings -PathType Leaf)) {
     if (Test-Path -LiteralPath $genericSettings -PathType Leaf) {
         Write-Host "Using existing config\settings.yaml; no Windows settings file was created."
     } elseif (-not (Test-Path -LiteralPath $exampleSettings -PathType Leaf)) {
@@ -97,19 +115,30 @@ Invoke-CheckedCommand -Label "Validate Python dependencies" `
     -FilePath $venvPython `
     -Arguments @("-m", "pip", "check")
 
-if ($null -eq (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
-    throw "cargo is required for the Windows production deployment."
+if ($installedMode) {
+    foreach ($binary in @(
+        (Join-Path $repoRoot "rust\target\release\ai-daily-scanner.exe"),
+        (Join-Path $repoRoot "rust\target\release\ai-daily-office-parser.exe")
+    )) {
+        if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "Installed package is missing verified Rust binary: $binary"
+        }
+    }
+} else {
+    if ($null -eq (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
+        throw "cargo is required for the Windows production deployment."
+    }
+    $manifest = Join-Path $repoRoot "rust\Cargo.toml"
+    Invoke-CheckedCommand -Label "Build Rust workspace" `
+        -FilePath "cargo" `
+        -Arguments @(
+            "build",
+            "--manifest-path", $manifest,
+            "--workspace",
+            "--release",
+            "--locked"
+        )
 }
-$manifest = Join-Path $repoRoot "rust\Cargo.toml"
-Invoke-CheckedCommand -Label "Build Rust workspace" `
-    -FilePath "cargo" `
-    -Arguments @(
-        "build",
-        "--manifest-path", $manifest,
-        "--workspace",
-        "--release",
-        "--locked"
-    )
 
 Push-Location $repoRoot
 try {

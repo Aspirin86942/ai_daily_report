@@ -150,6 +150,32 @@ workspace tests, and a release build. Local settings were not modified, no API
 key material was read or output, and no business directory was scanned or sent
 to an LLM.
 
+## Task 13 Windows release evidence (2026-07-16)
+
+The Windows x64 release is a manifest-allowlisted ZIP verified by a trusted
+bootstrap before extraction or package-code execution. Installation is
+side-by-side under `releases/<version>`; all mutable configuration, report and
+scanner databases, Markdown output, and logs remain under `shared/`.
+`current.json` is replaced atomically only after integrity checks, dependency
+installation, binary/worker handshakes, and strict doctor succeed. Rollback
+revalidates the previous release and runs its strict doctor before changing the
+pointer.
+
+The final fast Python suite passed 235 tests with the LLM prohibition enabled;
+the clean installed-package E2E was then enabled separately and passed in
+284.21 seconds. That E2E built and installed locally identified A and B
+packages under a GUID path containing spaces and Chinese characters, launched
+strict doctor and a zero-network command from an unrelated cwd, created both
+report and scanner databases only under `shared/`, preserved shared config and
+data hashes across the B switch and B-to-A rollback, and reran doctor plus a
+scanner smoke after rollback. Fourteen package structure/tamper tests proved
+that Python, template, lock, PowerShell, Rust binary, manifest-path, unsafe ZIP
+name, duplicate/case collision, symlink, and extra-entry changes fail before
+pointer mutation or untrusted code execution. Cargo formatting, Clippy, all
+127 Rust workspace tests, and the locked release build also passed. No local
+settings were overwritten, no API key material was read or output, no business
+directory was scanned, and no LLM call was permitted.
+
 ## Contract authority
 
 The exact v1 wire shapes are frozen by the JSON Schemas under

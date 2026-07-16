@@ -27,6 +27,8 @@ error. There is no top-level fallback to another scanner implementation.
 
 ## Production paths
 
+The repository values below are source-checkout defaults:
+
 ```yaml
 scanner:
   engine: "rust_v2"
@@ -39,6 +41,14 @@ The discovery crate is a library linked into `ai-daily-scanner`; it is not a
 standalone production executable. The Office executable remains a separate,
 crash-isolated worker.
 
+An installed release does not trust caller cwd or version-local mutable paths.
+`run_current_release.ps1` selects one verified `releases/<version>` directory,
+sets it as the child working directory, and supplies absolute scanner, Office
+worker, Python worker, module-root, config, report, database, and log paths.
+Mutable state remains below `<install-root>/shared`; `Config` rejects a missing,
+relative, version-local, or `shared/`-escaping installed path. Strict doctor
+reports every effective path before probing the Rust core.
+
 Build and validate the source checkout on Windows with:
 
 ```powershell
@@ -50,6 +60,14 @@ cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 Strict doctor validates the scanner contract/build, writable v2 database
 parent, and both worker handshakes. It does not parse a business file or call
 an LLM.
+
+The Windows package manifest and `SHA256SUMS` cover both Rust executables,
+every shipped Python source/template/PowerShell file, `requirements.lock`, and
+the example config. A trusted external verifier checks the exact archive entry
+set and all hashes before extracting or executing package code, then validates
+the scanner and Office-worker handshakes. Side-by-side install and rollback
+switch only `current.json`; scanner cache, report storage, and logs remain in
+shared paths. See `windows-deployment.md` for the trust and rollback contract.
 
 ## Parser routes and fallback
 

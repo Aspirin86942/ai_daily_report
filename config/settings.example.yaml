@@ -3,10 +3,11 @@ app:
   version: "5.0.0"
 
 paths:
-  # 复制成本机配置后，按运行系统改成真实工作目录。
-  # Linux 示例: /home/george/bochu_work
-  # Windows 示例: D:/bochu_work（双引号 YAML 中不要使用未转义的反斜杠）
-  work_dir: "/path/to/work"
+  # Source checkout: copy this file locally and use an absolute work directory.
+  # Installed mode keeps config/data/reports/db/logs below <install-root>/shared
+  # through the launcher-owned DAILY_REPORT_* absolute path contract.
+  # Windows example: D:/audit-work (escape backslashes inside quoted YAML).
+  work_dir: "D:/audit-work"
   data_dir: "data"
   reports_dir: "data/reports"
   db_dir: "data/db"

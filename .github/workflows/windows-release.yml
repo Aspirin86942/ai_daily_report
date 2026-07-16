@@ -1,0 +1,68 @@
+name: Windows release package
+
+"on":
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-verify-package:
+    name: Build and verify Windows x64 package
+    runs-on: windows-latest
+    env:
+      AI_DAILY_TEST_FORBID_LLM: "1"
+      AI_DAILY_RUN_WINDOWS_RELEASE_E2E: "1"
+      AI_DAILY_BUILD_ID: ${{ github.sha }}
+      DEEPSEEK_API_KEY: release-doctor-placeholder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-dev.txt
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install --requirement requirements.lock
+          python -m pip install --requirement requirements-dev.txt
+          python -m pip check
+      - name: Check and test Rust workspace
+        run: |
+          cargo fmt --manifest-path rust/Cargo.toml --all --check
+          cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked -- -D warnings
+          cargo test --manifest-path rust/Cargo.toml --workspace --locked
+          cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
+      - name: Run clean installed-package and tamper E2E
+        shell: pwsh
+        run: >-
+          python -m pytest tests/test_windows_release_package.py -v
+          --basetemp "$env:RUNNER_TEMP/ai-daily-release-pytest"
+      - name: Build distributable archive
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          $version = "git-$($env:GITHUB_SHA.Substring(0, 12))"
+          & ./scripts/package_windows.ps1 `
+            -OutputPath ./dist/ai-daily-report-windows-x64.zip `
+            -ReleaseVersion $version `
+            -GitCommit $env:GITHUB_SHA
+      - name: Verify distributable with trusted checkout bootstrap
+        shell: pwsh
+        run: >-
+          ./scripts/verify_windows_package.ps1
+          -ArchivePath ./dist/ai-daily-report-windows-x64.zip
+          -ExpectedGitCommit $env:GITHUB_SHA
+      - name: Upload integrity-checked artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-daily-report-windows-x64-${{ github.sha }}
+          path: dist/ai-daily-report-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 14

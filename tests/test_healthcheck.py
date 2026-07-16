@@ -554,3 +554,115 @@ def test_collect_healthcheck_reports_unwritable_log_directory(
         message.startswith(f"日志目录不可写: {tmp_path / 'logs'}")
         for message in result.errors
     )
+
+
+def test_strict_installed_healthcheck_reports_all_shared_runtime_paths(
+    tmp_path,
+    monkeypatch,
+):
+    release = tmp_path / "install" / "releases" / "版本-a"
+    release.mkdir(parents=True)
+    _prepare_strict_root(release)
+    shared = tmp_path / "install" / "shared"
+    config_dir = shared / "config"
+    data_dir = shared / "data"
+    reports_dir = data_dir / "reports"
+    db_dir = data_dir / "db"
+    log_dir = shared / "logs"
+    for directory in (config_dir, reports_dir, db_dir, log_dir):
+        directory.mkdir(parents=True, exist_ok=True)
+    settings = config_dir / "settings.windows.yaml"
+    settings.write_text("llm:\n  provider: deepseek\n", encoding="utf-8")
+    cfg = _make_strict_rust_config(release)
+    cfg.installed_mode = True
+    cfg.install_root = tmp_path / "install"
+    cfg.config_dir = config_dir
+    cfg.config_source = settings
+    cfg.data_dir = data_dir
+    cfg.reports_dir = reports_dir
+    cfg.db_dir = db_dir
+    cfg.log_dir = log_dir
+
+    class StubRustContextClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def version(self):
+            return _strict_version()
+
+        def doctor(self):
+            return _strict_doctor(
+                ("scan_db_parent", "ok"),
+                ("office_worker_handshake", "ok"),
+                ("python_worker_handshake", "ok"),
+            )
+
+    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
+    monkeypatch.setattr(healthcheck, "RustContextClient", StubRustContextClient)
+
+    result = healthcheck.collect_healthcheck(
+        project_root=release,
+        config_obj=cfg,
+        strict=True,
+    )
+
+    assert result.errors == []
+    assert result.info["运行模式"] == "installed"
+    assert result.info["配置来源"] == str(settings)
+    assert result.info["数据目录"] == str(data_dir)
+    assert result.info["报告目录"] == str(reports_dir)
+    assert result.info["数据库目录"] == str(db_dir)
+    assert result.info["日志目录"] == str(log_dir)
+
+
+def test_strict_installed_healthcheck_rejects_version_local_log_path(
+    tmp_path,
+    monkeypatch,
+):
+    release = tmp_path / "install" / "releases" / "v1"
+    release.mkdir(parents=True)
+    _prepare_strict_root(release)
+    cfg = _make_strict_rust_config(release)
+    cfg.installed_mode = True
+    cfg.install_root = tmp_path / "install"
+    cfg.config_dir = tmp_path / "install" / "shared" / "config"
+    cfg.data_dir = tmp_path / "install" / "shared" / "data"
+    cfg.reports_dir = cfg.data_dir / "reports"
+    cfg.db_dir = cfg.data_dir / "db"
+    cfg.log_dir = release / "logs"
+    for directory in (
+        cfg.config_dir,
+        cfg.data_dir,
+        cfg.reports_dir,
+        cfg.db_dir,
+        cfg.log_dir,
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+
+    class StubRustContextClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def version(self):
+            return _strict_version()
+
+        def doctor(self):
+            return _strict_doctor(
+                ("scan_db_parent", "ok"),
+                ("office_worker_handshake", "ok"),
+                ("python_worker_handshake", "ok"),
+            )
+
+    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
+    monkeypatch.setattr(healthcheck, "RustContextClient", StubRustContextClient)
+
+    result = healthcheck.collect_healthcheck(
+        project_root=release,
+        config_obj=cfg,
+        strict=True,
+    )
+
+    assert any(
+        message.startswith("installed mode 日志目录 escaped install-root/shared")
+        for message in result.errors
+    )
