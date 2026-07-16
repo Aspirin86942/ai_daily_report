@@ -5,7 +5,6 @@ from pathlib import Path
 from datetime import date, timedelta
 from typing import List, Mapping, Optional
 from time import perf_counter
-import pandas as pd
 import pdfplumber
 from pptx import Presentation
 
@@ -13,6 +12,10 @@ from ..models.schemas import FileContext, ScanResult
 from ..core.config import config
 from ..core.logger import setup_logger
 from ..utils.text_tools import truncate_text
+from ..workers.contracts import (
+    parse_excel_table_content as parse_worker_excel_table_content,
+    parse_legacy_excel_payload,
+)
 from .scan_discovery import DiscoveredFile, FileDiscoveryService
 from .scan_index_store import InventoryItem, ScanIndexStore
 from .light_text_parser import (
@@ -291,52 +294,48 @@ def _parse_legacy_excel_fallback(
         limits.get("excel_max_rows"),
         _positive_int(scanner_cfg.get("excel_max_rows"), 50),
     )
+    max_sheets = _positive_int(
+        limits.get("excel_max_sheets"),
+        _positive_int(scanner_cfg.get("excel_max_sheets"), 5),
+    )
+    max_columns = _positive_int(
+        limits.get("excel_max_columns"),
+        _positive_int(scanner_cfg.get("excel_max_columns"), 20),
+    )
     text_max_chars = _positive_int(
-        limits.get("text_max_chars"),
+        limits.get("document_excerpt_max_chars", limits.get("text_max_chars")),
         _positive_int(scanner_cfg.get("text_max_chars"), 6000),
     )
-    try:
-        raw_content = _parse_excel_table_content(file_path, max_rows)
-        truncated = len(raw_content) > text_max_chars
-        content = truncate_text(raw_content, text_max_chars)
-        return FileContext(
-            file_path=str(file_path),
-            file_type=file_type,
-            content=content,
-            error=None,
-            parser_backend=PYTHON_OFFICE_BACKEND,
-            truncated=truncated,
-        )
-    except Exception as exc:
-        return FileContext(
-            file_path=str(file_path),
-            file_type=file_type,
-            content="",
-            error=f"PYTHON_OFFICE_XLS_FAILED: {exc}",
-            parser_backend=PYTHON_OFFICE_BACKEND,
-            truncated=False,
-        )
+    payload = parse_legacy_excel_payload(
+        file_path,
+        file_type,
+        {
+            "excel_max_sheets": max_sheets,
+            "excel_max_rows": max_rows,
+            "excel_max_columns": max_columns,
+            "text_max_chars": text_max_chars,
+        },
+        excel_reader=parse_worker_excel_table_content,
+    )
+    return FileContext(
+        file_path=payload.file_path,
+        file_type=payload.file_type,
+        content=payload.content,
+        error=payload.error,
+        parser_backend=payload.parser_backend,
+        truncated=payload.truncated,
+    )
 
 
 def _parse_excel_table_content(file_path: Path, max_rows: int) -> str:
     """解析 Excel 文件为 Markdown 表格文本，供旧 scanner 和 .xls fallback 共用。"""
-    content_parts = []
-    excel_file = pd.ExcelFile(file_path)
-
-    for sheet_name in excel_file.sheet_names:
-        df = pd.read_excel(file_path, sheet_name=sheet_name, nrows=max_rows)
-        df = df.dropna(how="all")
-
-        if len(df) > max_rows:
-            df = df.head(max_rows)
-            content_parts.append(f"## {sheet_name} (仅显示前 {max_rows} 行)")
-        else:
-            content_parts.append(f"## {sheet_name}")
-
-        if not df.empty:
-            content_parts.append(df.to_markdown(index=False))
-
-    return "\n\n".join(content_parts)
+    content, _ = parse_worker_excel_table_content(
+        file_path,
+        1024,
+        max_rows,
+        16_384,
+    )
+    return content
 
 
 def _build_python_office_fallback_options(

@@ -18,7 +18,7 @@ from pydantic import (
 
 
 def _absolute_path(value: str) -> str:
-    if not re.match(r"^(?:[A-Za-z]:[\\/]|\\\\|/)", value):
+    if "\x00" in value or not re.match(r"^(?:[A-Za-z]:[\\/]|\\\\|/)", value):
         raise ValueError("path must be absolute")
     return value
 

@@ -1559,12 +1559,17 @@ def test_scan_files_prefers_legacy_excel_fallback_for_xls_after_rust_failure(
         "bootstrap_full_scan",
         lambda start_date, end_date: discovered,
     )
-    excel_calls: list[tuple[Path, int]] = []
+    excel_calls: list[tuple[Path, int, int, int]] = []
     sharepoint_calls: list[Path] = []
 
-    def fake_excel_table_content(file_path: Path, max_rows: int) -> str:
-        excel_calls.append((file_path, max_rows))
-        return "## LegacySheet\n\n| item | qty |\n|---|---:|\n| A | 2 |"
+    def fake_excel_table_content(
+        file_path: Path,
+        max_sheets: int,
+        max_rows: int,
+        max_columns: int,
+    ) -> tuple[str, bool]:
+        excel_calls.append((file_path, max_sheets, max_rows, max_columns))
+        return "## LegacySheet\n\n| item | qty |\n|---|---:|\n| A | 2 |", False
 
     def fake_sharepoint_text(
         file_path: Path,
@@ -1618,7 +1623,7 @@ def test_scan_files_prefers_legacy_excel_fallback_for_xls_after_rust_failure(
 
     monkeypatch.setattr(
         file_scanner_module,
-        "_parse_excel_table_content",
+        "parse_worker_excel_table_content",
         fake_excel_table_content,
         raising=False,
     )
@@ -1638,7 +1643,7 @@ def test_scan_files_prefers_legacy_excel_fallback_for_xls_after_rust_failure(
     assert result.success_count == 1
     assert result.contexts[0].parser_backend == "python_office_v1"
     assert "LegacySheet" in result.contexts[0].content
-    assert excel_calls == [(sample, 50)]
+    assert excel_calls == [(sample, 5, 50, 20)]
     assert sharepoint_calls == []
     detail = scanner.last_reparse_details[0]
     assert detail.fallback_backend == "python_office_v1"

@@ -12,6 +12,7 @@ import pytest
 
 from src.core.config import Config, SCANNER_CONTRACT_FIELDS
 from src.models.scanner_contract import (
+    WorkerParseRequest,
     build_rust_core_crashed_envelope,
     validate_contract_payload,
 )
@@ -51,6 +52,15 @@ def test_python_contract_rejects_every_invalid_fixture() -> None:
                 case["payload"],
                 related_payloads=case.get("related_payloads", []),
             )
+
+
+def test_worker_contract_rejects_embedded_nul_in_absolute_path() -> None:
+    payload = _load_json(FIXTURE_DIR / "worker-parse-xlsx-request.json")
+    assert isinstance(payload, dict)
+    payload["file_path"] = "C:\\evidence\x00hidden.xlsx"
+
+    with pytest.raises(ValueError, match="path must be absolute"):
+        WorkerParseRequest.model_validate(payload)
 
 
 def test_scanner_contract_profile_copies_only_present_raw_leaves() -> None:

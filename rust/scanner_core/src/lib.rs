@@ -2,9 +2,14 @@
 
 pub mod classifier;
 pub mod config;
+pub mod fallback;
 pub mod parsers;
 pub mod planner;
+pub mod process;
 mod run;
+
+#[cfg(windows)]
+mod windows_job;
 
 pub mod discovery {
     pub use ai_daily_discovery::*;

@@ -10,7 +10,7 @@ from src.models.scanner_contract import WorkerParseRequest
 
 from .contracts import (
     invalid_request_response,
-    python_not_implemented_response,
+    parse_worker_request,
     python_worker_version_response,
 )
 
@@ -30,9 +30,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except (UnicodeError, ValueError):
             _emit_json(invalid_request_response().model_dump(mode="json"))
             return 2
-        payload = python_not_implemented_response(request).model_dump(mode="json")
-        _emit_json(payload)
-        return 1
+        response = parse_worker_request(request)
+        _emit_json(response.model_dump(mode="json"))
+        return 0 if response.status == "ok" else 1
 
     _emit_json(invalid_request_response().model_dump(mode="json"))
     return 2

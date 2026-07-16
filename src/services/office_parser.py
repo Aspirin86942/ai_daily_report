@@ -317,41 +317,21 @@ def parse_with_sharepoint_text(
     *,
     import_module: Callable[[str], Any] = importlib.import_module,
 ) -> FileContext:
-    normalized_type = file_type.lower()
-    try:
-        sharepoint2text = import_module("sharepoint2text")
-    except ModuleNotFoundError:
-        return FileContext(
-            file_path=str(file_path),
-            file_type=normalized_type,
-            content="",
-            error="PYTHON_SHAREPOINT_TEXT_UNAVAILABLE: sharepoint2text",
-            parser_backend=PYTHON_SHAREPOINT_TEXT_BACKEND,
-            truncated=False,
-        )
+    from ..workers.contracts import parse_sharepoint_text_payload
 
-    try:
-        result = next(sharepoint2text.read_file(str(file_path)))
-        raw_text = result.get_full_text()
-    except Exception as exc:
-        return FileContext(
-            file_path=str(file_path),
-            file_type=normalized_type,
-            content="",
-            error=f"PYTHON_SHAREPOINT_TEXT_FAILED: {exc}",
-            parser_backend=PYTHON_SHAREPOINT_TEXT_BACKEND,
-            truncated=False,
-        )
-
-    max_chars = _positive_limit(limits, "document_excerpt_max_chars", 6000)
-    content, truncated = _truncate_text(raw_text or "No Office text extracted", max_chars)
+    payload = parse_sharepoint_text_payload(
+        file_path,
+        file_type.lower(),
+        limits,
+        import_module=import_module,
+    )
     return FileContext(
-        file_path=str(file_path),
-        file_type=normalized_type,
-        content=content,
-        error=None,
-        parser_backend=PYTHON_SHAREPOINT_TEXT_BACKEND,
-        truncated=truncated,
+        file_path=payload.file_path,
+        file_type=payload.file_type,
+        content=payload.content,
+        error=payload.error,
+        parser_backend=payload.parser_backend,
+        truncated=payload.truncated,
     )
 
 
@@ -478,12 +458,6 @@ def _positive_limit(limits: Mapping[str, Any], key: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
-
-
-def _truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
-    if len(text) <= max_chars:
-        return text, False
-    return text[:max_chars], True
 
 
 def _fallback_order(scanner_cfg: Mapping[str, Any]) -> Sequence[str]:

@@ -63,7 +63,7 @@ fn require_absolute_path(value: &str, field: &str) -> Result<(), String> {
         && bytes[1] == b':'
         && matches!(bytes[2], b'\\' | b'/');
     let absolute = value.starts_with('/') || value.starts_with("\\\\") || drive_rooted;
-    if absolute && value.chars().count() <= 32_767 {
+    if absolute && !value.contains('\0') && value.chars().count() <= 32_767 {
         Ok(())
     } else {
         Err(format!("{field} must be an absolute path"))
@@ -1411,7 +1411,7 @@ pub enum WorkerLane {
 }
 
 impl WorkerBackend {
-    fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::RustOfficeOxideV1 => "rust_office_oxide_v1",
             Self::RustXlsxBoundedV1 => "rust_xlsx_bounded_v1",
@@ -1421,7 +1421,7 @@ impl WorkerBackend {
         }
     }
 
-    fn supports(self, extension: &str) -> bool {
+    pub fn supports(self, extension: &str) -> bool {
         match self {
             Self::RustOfficeOxideV1 => matches!(extension, ".docx" | ".pptx"),
             Self::RustXlsxBoundedV1 => extension == ".xlsx",
@@ -1431,14 +1431,14 @@ impl WorkerBackend {
         }
     }
 
-    fn lane(self) -> WorkerLane {
+    pub const fn lane(self) -> WorkerLane {
         match self {
             Self::RustOfficeOxideV1 | Self::RustXlsxBoundedV1 => WorkerLane::RustOfficeProcess,
             _ => WorkerLane::PythonDocumentProcess,
         }
     }
 
-    fn limit_kind(self) -> &'static str {
+    pub const fn limit_kind(self) -> &'static str {
         match self {
             Self::RustOfficeOxideV1 | Self::RustXlsxBoundedV1 | Self::PythonOfficeV1 => "office",
             Self::PdfTextV1 => "pdf",
@@ -2147,5 +2147,10 @@ mod tests {
                 validate_contract_payload(&case.schema, &case.payload, &case.related_payloads);
             assert!(result.is_err(), "{} unexpectedly passed", case.name);
         }
+    }
+
+    #[test]
+    fn absolute_paths_reject_embedded_nul() {
+        assert!(require_absolute_path("C:\\evidence\0hidden.xlsx", "file_path").is_err());
     }
 }
