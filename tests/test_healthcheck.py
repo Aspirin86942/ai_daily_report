@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.core import healthcheck
+from src.core.config import UnknownScannerContractFieldsError
 from src.services.rust_context_client import RustContextProbeError
 
 
@@ -84,6 +85,16 @@ def _prepare_strict_root(root: Path) -> None:
     _write_templates(root)
     (root / "data" / "db").mkdir(parents=True)
     (root / "workspace").mkdir()
+
+
+def _prepare_platform_config_root(root: Path) -> None:
+    config_dir = root / "config"
+    config_dir.mkdir()
+    (config_dir / healthcheck.Config._settings_file_name()).write_text(
+        "llm:\n  provider: deepseek\n",
+        encoding="utf-8",
+    )
+    _write_templates(root)
 
 
 def test_collect_healthcheck_strict_uses_effective_config_without_local_yaml(
@@ -348,13 +359,7 @@ def test_collect_healthcheck_reports_missing_work_dir(tmp_path, monkeypatch):
 
 def test_collect_healthcheck_redacts_runtime_config_exception(tmp_path, monkeypatch):
     """配置解析异常可能包含密钥原文，结果中只能保留异常类型。"""
-    config_dir = tmp_path / "config"
-    config_dir.mkdir()
-    (config_dir / healthcheck.Config._settings_file_name()).write_text(
-        "llm:\n  provider: deepseek\n",
-        encoding="utf-8",
-    )
-    _write_templates(tmp_path)
+    _prepare_platform_config_root(tmp_path)
 
     fake_secret = "dummy-secret-must-not-leak"
 
@@ -372,6 +377,32 @@ def test_collect_healthcheck_redacts_runtime_config_exception(tmp_path, monkeypa
 
     assert "配置加载失败 (ValueError)，请检查本机配置格式" in result.errors
     assert fake_secret not in repr(result)
+
+
+def test_collect_healthcheck_reports_unknown_scanner_contract_fields(
+    tmp_path,
+    monkeypatch,
+):
+    """受控的 scanner 字段错误应直接指出字段名，避免只得到通用提示。"""
+    _prepare_platform_config_root(tmp_path)
+
+    cfg = _make_config("deepseek", "synthetic-key", tmp_path)
+    cfg.scanner_contract_profile = lambda: (_ for _ in ()).throw(
+        UnknownScannerContractFieldsError(
+            ("worker_lane_mode", "discovery_backend")
+        )
+    )
+    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
+
+    result = healthcheck.collect_healthcheck(
+        project_root=tmp_path,
+        config_obj=cfg,
+    )
+
+    assert result.errors == [
+        "配置校验失败: unknown scanner contract fields: "
+        "discovery_backend, worker_lane_mode"
+    ]
 
 
 @pytest.mark.parametrize("api_key", [None, "", "   ", "  ${OPENAI_API_KEY}"])

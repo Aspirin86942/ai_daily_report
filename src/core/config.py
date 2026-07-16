@@ -82,6 +82,16 @@ SCANNER_INFRASTRUCTURE_FIELDS = frozenset(
 )
 
 
+class UnknownScannerContractFieldsError(ValueError):
+    """表示 scanner 配置包含不能进入版本化 wire contract 的字段。"""
+
+    def __init__(self, fields: Sequence[str]) -> None:
+        self.fields = tuple(sorted(set(fields)))
+        super().__init__(
+            "unknown scanner contract fields: " + ", ".join(self.fields)
+        )
+
+
 class Config:
     """全局配置管理器 (单例模式)"""
 
@@ -317,9 +327,7 @@ class Config:
             - SCANNER_INFRASTRUCTURE_FIELDS
         )
         if unknown:
-            raise ValueError(
-                "unknown scanner contract fields: " + ", ".join(unknown)
-            )
+            raise UnknownScannerContractFieldsError(unknown)
 
         profile: Dict[str, Any] = {"schema_version": "scanner_profile_v1"}
         for key in SCANNER_CONTRACT_FIELDS:

@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import Config, config
+from .config import Config, UnknownScannerContractFieldsError, config
 from ..services.rust_context_client import (
     RustContextClient,
     RustContextProbeError,
@@ -378,6 +378,9 @@ def collect_healthcheck(
 
     try:
         _append_runtime_config_checks(result, cfg, root, strict=strict)
+    except UnknownScannerContractFieldsError as exc:
+        # 该异常只包含配置字段名，可安全展示，帮助定位过期或拼错的配置。
+        result.errors.append(f"配置校验失败: {exc}")
     except Exception as exc:
         # YAML 解析异常可能携带出错原文；这里只保留类型，避免回显密钥。
         result.errors.append(
