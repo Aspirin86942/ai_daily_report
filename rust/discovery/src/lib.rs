@@ -1,6 +1,7 @@
 use chrono::{Local, NaiveDate, TimeZone};
 use glob::Pattern;
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::BTreeMap;
 use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ pub struct DiscoveryRequest {
     pub excluded_dirs: Vec<PathBuf>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct DiscoveredFileOut {
     pub file_identity: String,
     pub path: String,
@@ -28,12 +29,54 @@ pub struct DiscoveredFileOut {
     pub source_version: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscoveryIssueKind {
+    Walk,
+    Metadata,
+    ModifiedTime,
+    Canonicalize,
+    SourceVersion,
+    AbsolutePath,
+    Alias,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiscoveryIssue {
+    pub kind: DiscoveryIssueKind,
+    pub path: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct DiscoveryReport {
+    pub files: Vec<DiscoveredFileOut>,
+    pub issues: Vec<DiscoveryIssue>,
+}
+
 pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFileOut>> {
+    let report = discover_files_report(request, false, None)?;
+    for issue in &report.issues {
+        eprintln!("warning: {}", issue.message);
+    }
+    Ok(report.files)
+}
+
+pub fn discover_files_with_diagnostics(request: &DiscoveryRequest) -> io::Result<DiscoveryReport> {
+    discover_files_report(request, true, Some(&request.work_dir))
+}
+
+fn discover_files_report(
+    request: &DiscoveryRequest,
+    deduplicate_aliases: bool,
+    relative_exclusion_root: Option<&Path>,
+) -> io::Result<DiscoveryReport> {
     validate_work_dir(&request.work_dir)?;
 
     let ignored_patterns = compile_patterns(&request.ignored_patterns)?;
-    let excluded_dirs = resolve_excluded_dirs(&request.excluded_dirs);
+    let excluded_dirs = resolve_excluded_dirs(&request.excluded_dirs, relative_exclusion_root);
     let mut files = Vec::new();
+    let mut issues = Vec::new();
 
     let walker = WalkDir::new(&request.work_dir)
         .follow_links(false)
@@ -50,7 +93,11 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
         let entry = match entry_result {
             Ok(value) => value,
             Err(error) => {
-                eprintln!("warning: cannot walk entry: {error}");
+                issues.push(DiscoveryIssue {
+                    kind: DiscoveryIssueKind::Walk,
+                    path: error.path().map(contract_path_string),
+                    message: format!("cannot walk entry: {error}"),
+                });
                 continue;
             }
         };
@@ -63,10 +110,21 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
             continue;
         }
 
-        let metadata = match fs::metadata(entry.path()) {
+        let resolved_path = match fs::canonicalize(entry.path()) {
             Ok(value) => value,
             Err(error) => {
-                eprintln!("warning: cannot stat {}: {}", entry.path().display(), error);
+                issues.push(path_issue(
+                    DiscoveryIssueKind::Canonicalize,
+                    entry.path(),
+                    format!("cannot canonicalize {}: {error}", entry.path().display()),
+                ));
+                continue;
+            }
+        };
+        let metadata = match read_candidate_metadata(&resolved_path, entry.path()) {
+            Ok(value) => value,
+            Err(issue) => {
+                issues.push(issue);
                 continue;
             }
         };
@@ -76,11 +134,14 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
         let modified_local = match metadata_modified_local(&metadata) {
             Ok(value) => value,
             Err(error) => {
-                eprintln!(
-                    "warning: cannot read modified time {}: {}",
-                    entry.path().display(),
-                    error
-                );
+                issues.push(path_issue(
+                    DiscoveryIssueKind::ModifiedTime,
+                    entry.path(),
+                    format!(
+                        "cannot read modified time {}: {error}",
+                        entry.path().display()
+                    ),
+                ));
                 continue;
             }
         };
@@ -89,44 +150,39 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
             continue;
         }
 
-        let resolved_path = match fs::canonicalize(entry.path()) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!(
-                    "warning: cannot canonicalize {}: {}",
-                    entry.path().display(),
-                    error
-                );
-                continue;
-            }
-        };
         let size_bytes = metadata.len();
         let mtime_ns = match metadata_mtime_ns(&metadata) {
             Ok(value) => value,
             Err(error) => {
-                eprintln!(
-                    "warning: cannot read modified nanoseconds {}: {}",
-                    entry.path().display(),
-                    error
-                );
+                issues.push(path_issue(
+                    DiscoveryIssueKind::SourceVersion,
+                    entry.path(),
+                    format!(
+                        "cannot read modified nanoseconds {}: {error}",
+                        entry.path().display()
+                    ),
+                ));
                 continue;
             }
         };
         let discovered_path = match absolute_discovered_path(entry.path()) {
             Ok(value) => value,
             Err(error) => {
-                eprintln!(
-                    "warning: cannot build absolute discovered path {}: {}",
-                    entry.path().display(),
-                    error
-                );
+                issues.push(path_issue(
+                    DiscoveryIssueKind::AbsolutePath,
+                    entry.path(),
+                    format!(
+                        "cannot build absolute discovered path {}: {error}",
+                        entry.path().display()
+                    ),
+                ));
                 continue;
             }
         };
         let resolved_path_text = contract_path_string(&resolved_path);
         let discovered_path_text = contract_path_string(&discovered_path);
         files.push(DiscoveredFileOut {
-            file_identity: format!("bootstrap:{}", resolved_path_text.to_lowercase()),
+            file_identity: bootstrap_file_identity_from_text(&resolved_path_text),
             path: discovered_path_text,
             extension: lower_extension(&discovered_path),
             modified_at: modified_naive.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
@@ -136,7 +192,61 @@ pub fn discover_files(request: &DiscoveryRequest) -> io::Result<Vec<DiscoveredFi
     }
 
     files.sort_by(|left, right| left.path.cmp(&right.path));
-    Ok(files)
+    if deduplicate_aliases {
+        deduplicate_resolved_aliases(&mut files, &mut issues);
+    }
+    issues.sort_by(|left, right| {
+        left.path
+            .cmp(&right.path)
+            .then(left.kind.cmp(&right.kind))
+            .then(left.message.cmp(&right.message))
+    });
+    Ok(DiscoveryReport { files, issues })
+}
+
+fn path_issue(kind: DiscoveryIssueKind, path: &Path, message: String) -> DiscoveryIssue {
+    DiscoveryIssue {
+        kind,
+        path: Some(contract_path_string(path)),
+        message,
+    }
+}
+
+fn read_candidate_metadata(
+    resolved_path: &Path,
+    display_path: &Path,
+) -> Result<Metadata, DiscoveryIssue> {
+    fs::metadata(resolved_path).map_err(|error| {
+        path_issue(
+            DiscoveryIssueKind::Metadata,
+            display_path,
+            format!("cannot stat {}: {error}", display_path.display()),
+        )
+    })
+}
+
+fn deduplicate_resolved_aliases(
+    files: &mut Vec<DiscoveredFileOut>,
+    issues: &mut Vec<DiscoveryIssue>,
+) {
+    let mut chosen_paths = BTreeMap::new();
+    let mut unique_files = Vec::with_capacity(files.len());
+    for file in std::mem::take(files) {
+        if let Some(chosen_path) = chosen_paths.get(&file.file_identity) {
+            issues.push(DiscoveryIssue {
+                kind: DiscoveryIssueKind::Alias,
+                path: Some(file.path.clone()),
+                message: format!(
+                    "alias {} resolves to the same file identity as {chosen_path}",
+                    file.path
+                ),
+            });
+            continue;
+        }
+        chosen_paths.insert(file.file_identity.clone(), file.path.clone());
+        unique_files.push(file);
+    }
+    *files = unique_files;
 }
 
 fn validate_work_dir(work_dir: &Path) -> io::Result<()> {
@@ -162,11 +272,20 @@ fn validate_work_dir(work_dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn resolve_excluded_dirs(paths: &[PathBuf]) -> Vec<PathBuf> {
+fn resolve_excluded_dirs(paths: &[PathBuf], relative_root: Option<&Path>) -> Vec<PathBuf> {
     paths
         .iter()
         .filter(|path| !path.as_os_str().is_empty())
-        .map(|path| fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+        .map(|path| {
+            let rooted = if path.is_absolute() {
+                path.clone()
+            } else if let Some(root) = relative_root {
+                root.join(path)
+            } else {
+                path.clone()
+            };
+            fs::canonicalize(&rooted).unwrap_or(rooted)
+        })
         .collect()
 }
 
@@ -182,17 +301,7 @@ fn is_within_date_range(
     start_date: NaiveDate,
     end_date: NaiveDate,
 ) -> io::Result<bool> {
-    let start_dt = start_date.and_hms_opt(0, 0, 0).ok_or_else(|| {
-        io::Error::new(io::ErrorKind::InvalidInput, "invalid start date boundary")
-    })?;
-    let next_day = end_date
-        .succ_opt()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid end date boundary"))?;
-    let next_day_start = next_day
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid end date boundary"))?;
-
-    Ok(modified_at >= start_dt && modified_at < next_day_start)
+    Ok(modified_at.date() >= start_date && modified_at.date() <= end_date)
 }
 
 fn absolute_discovered_path(path: &Path) -> io::Result<PathBuf> {
@@ -203,11 +312,17 @@ fn absolute_discovered_path(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn contract_path_string(path: &Path) -> String {
-    normalize_windows_verbatim_prefix(path.to_string_lossy().as_ref())
+    #[cfg(windows)]
+    {
+        normalize_contract_path_text(path.to_string_lossy().as_ref())
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_string_lossy().into_owned()
+    }
 }
 
-#[cfg(windows)]
-fn normalize_windows_verbatim_prefix(value: &str) -> String {
+pub fn normalize_contract_path_text(value: &str) -> String {
     if let Some(stripped) = value.strip_prefix(r"\\?\UNC\") {
         return format!(r"\\{stripped}");
     }
@@ -217,9 +332,12 @@ fn normalize_windows_verbatim_prefix(value: &str) -> String {
     value.to_string()
 }
 
-#[cfg(not(windows))]
-fn normalize_windows_verbatim_prefix(value: &str) -> String {
-    value.to_string()
+pub fn bootstrap_file_identity(resolved_path: &Path) -> String {
+    bootstrap_file_identity_from_text(&contract_path_string(resolved_path))
+}
+
+fn bootstrap_file_identity_from_text(resolved_path: &str) -> String {
+    format!("bootstrap:{}", resolved_path.to_lowercase())
 }
 
 fn has_allowed_extension(file_name_lower: &str, allowed_extensions: &[String]) -> bool {
@@ -295,7 +413,7 @@ fn metadata_mtime_ns(metadata: &Metadata) -> io::Result<u128> {
     Ok(duration.as_nanos())
 }
 
-fn build_source_version(mtime_ns: u128, size_bytes: u64) -> String {
+pub fn build_source_version(mtime_ns: u128, size_bytes: u64) -> String {
     format!("mtime_ns={mtime_ns}:size={size_bytes}")
 }
 
@@ -423,6 +541,25 @@ mod tests {
     }
 
     #[test]
+    fn candidate_metadata_failure_is_a_structured_issue() {
+        let missing = std::env::temp_dir().join(format!(
+            "ai_daily_discovery_missing_candidate_{}_{}.md",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let issue = read_candidate_metadata(&missing, &missing)
+            .expect_err("missing candidate should return an issue");
+
+        assert_eq!(issue.kind, DiscoveryIssueKind::Metadata);
+        assert_eq!(issue.path, Some(contract_path_string(&missing)));
+        assert!(issue.message.contains("cannot stat"));
+    }
+
+    #[test]
     fn source_version_uses_mtime_ns_and_size() {
         assert_eq!(build_source_version(123, 456), "mtime_ns=123:size=456");
     }
@@ -439,6 +576,15 @@ mod tests {
 
         assert!(is_within_date_range(final_day_last_ns, start_date, end_date).unwrap());
         assert!(!is_within_date_range(next_day_start, start_date, end_date).unwrap());
+    }
+
+    #[test]
+    fn date_range_accepts_the_maximum_valid_end_date() {
+        let final_instant = NaiveDate::MAX
+            .and_hms_nano_opt(23, 59, 59, 999_999_999)
+            .unwrap();
+
+        assert!(is_within_date_range(final_instant, NaiveDate::MIN, NaiveDate::MAX).unwrap());
     }
 
     #[cfg(unix)]

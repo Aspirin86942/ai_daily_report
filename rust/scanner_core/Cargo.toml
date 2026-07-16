@@ -4,10 +4,12 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+ai-daily-discovery = { path = "../discovery" }
 ai-daily-scanner-contract = { path = "../scanner_contract" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+chrono.workspace = true
 tempfile.workspace = true

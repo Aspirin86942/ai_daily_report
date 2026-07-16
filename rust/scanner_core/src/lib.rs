@@ -1,6 +1,14 @@
 //! Windows-first scanner engine process shell.
 
+pub mod classifier;
+pub mod config;
+pub mod parsers;
+pub mod planner;
 mod run;
+
+pub mod discovery {
+    pub use ai_daily_discovery::*;
+}
 
 pub use run::{
     dispatch, invalid_request_output, version_response, CommandOutput, EngineShellError,

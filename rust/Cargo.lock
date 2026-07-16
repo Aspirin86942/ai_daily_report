@@ -53,7 +53,9 @@ dependencies = [
 name = "ai-daily-scanner-core"
 version = "0.1.0"
 dependencies = [
+ "ai-daily-discovery",
  "ai-daily-scanner-contract",
+ "chrono",
  "serde",
  "serde_json",
  "tempfile",
