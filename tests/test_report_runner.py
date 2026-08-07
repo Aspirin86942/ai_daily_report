@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 
 from src.models.scanner_contract import ContextSummary, Diagnostic
-from src.models.schemas import DailyReportData
+from src.models.schemas import DailyReportData, WeeklyReportData
 from src.services.context_engine import ContextBuildResult
 from src.services.report_runner.outcomes import (
     ErrorCode,
@@ -14,7 +14,10 @@ from src.services.report_runner.outcomes import (
     ReportRunSuccess,
 )
 from src.services.report_runner.model_port import LLMModelPort
-from src.services.report_runner.requests import DailyReportRunRequest
+from src.services.report_runner.requests import (
+    DailyReportRunRequest,
+    WeeklyReportRunRequest,
+)
 
 
 class FakeScheduler:
@@ -373,4 +376,162 @@ def test_daily_scanner_error_does_not_construct_llm_client():
 
     assert isinstance(outcome, ReportRunFailure)
     assert outcome.error.error_code is ErrorCode.SCANNER_FAILED
+    assert factory_calls == 0
+
+
+def test_weekly_db_zero_scanner_calls_and_publishes(tmp_path):
+    from src.services.report_gen import ReportGenerator
+    from src.services.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(db_path=tmp_path / "weekly.sqlite3")
+    store.save_report(
+        DailyReportData(
+            date="2026-05-11",
+            completed_work="c",
+            work_summary="w",
+            next_plan="n",
+        )
+    )
+    renderer = ReportGenerator(reports_dir=tmp_path / "reports")
+
+    class RecordingClient:
+        def generate_weekly_report(
+            self,
+            *,
+            reports,
+            file_context: str,
+            year: int,
+            week: int,
+            missing_days: list[str],
+            data_source: str,
+        ) -> WeeklyReportData:
+            assert [report.date for report in reports] == ["2026-05-11"]
+            assert file_context == "无文件证据"
+            assert missing_days == [
+                "2026-05-12",
+                "2026-05-13",
+                "2026-05-14",
+                "2026-05-15",
+            ]
+            assert data_source == "db"
+            return WeeklyReportData(
+                week_label=f"{year}-W{week:02d}",
+                date_range="2026-05-11 ~ 2026-05-17",
+                completed_work="cw",
+                self_growth="",
+                improvement_actions="",
+                work_summary="",
+                next_plan="",
+                support_needed="",
+                other_notes="",
+            )
+
+    scheduler = FakeScheduler(_context())
+    runner = _make_runner(
+        scheduler=scheduler,
+        store=store,
+        renderer=renderer,
+        model_port=LLMModelPort(client_factory=RecordingClient),
+    )
+
+    outcome = runner.run(
+        WeeklyReportRunRequest(
+            as_of_date=date(2026, 5, 18),
+            source="db",
+            save=True,
+            week_label="2026-W20",
+        )
+    )
+
+    assert scheduler.calls == []
+    assert isinstance(outcome, ReportRunSuccess)
+    assert outcome.source_evidence.report_count == 1
+    assert outcome.publication.markdown_state == "written"
+    assert (tmp_path / "reports" / "weekly" / "2026-W20.md").is_file()
+
+
+def test_weekly_scan_calls_scanner_once_and_appends_supplement(tmp_path):
+    from src.services.report_gen import ReportGenerator
+
+    renderer = ReportGenerator(reports_dir=tmp_path / "reports")
+    scheduler = FakeScheduler(_context())
+
+    class RecordingClient:
+        def generate_weekly_report(
+            self,
+            *,
+            reports,
+            file_context: str,
+            year: int,
+            week: int,
+            missing_days: list[str],
+            data_source: str,
+        ) -> WeeklyReportData:
+            assert reports == []
+            assert missing_days == []
+            assert file_context == "ctx\n\n---\n\n用户补充: 补丁"
+            assert data_source == "scan"
+            return WeeklyReportData(
+                week_label=f"{year}-W{week:02d}",
+                date_range="2026-05-11 ~ 2026-05-17",
+                completed_work="cw",
+                self_growth="",
+                improvement_actions="",
+                work_summary="",
+                next_plan="",
+                support_needed="",
+                other_notes="",
+            )
+
+    runner = _make_runner(
+        scheduler=scheduler,
+        renderer=renderer,
+        model_port=LLMModelPort(client_factory=RecordingClient),
+    )
+
+    outcome = runner.run(
+        WeeklyReportRunRequest(
+            as_of_date=date(2026, 5, 18),
+            source="scan",
+            save=False,
+            week_label="2026-W20",
+            supplemental_input="补丁",
+        )
+    )
+
+    assert isinstance(outcome, ReportRunSuccess)
+    assert len(scheduler.calls) == 1
+    schedule = scheduler.calls[0]
+    assert schedule.start_date == date(2026, 5, 11)
+    assert schedule.end_date == date(2026, 5, 17)
+
+
+def test_weekly_db_no_reports_fails_before_llm(tmp_path):
+    from src.services.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(db_path=tmp_path / "empty.sqlite3")
+    factory_calls = 0
+
+    def client_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("无 DB 报告时不得构造 LLM client")
+
+    runner = _make_runner(
+        store=store,
+        model_port=LLMModelPort(client_factory=client_factory),
+    )
+
+    outcome = runner.run(
+        WeeklyReportRunRequest(
+            as_of_date=date(2026, 5, 18),
+            source="db",
+            save=False,
+            week_label="2026-W20",
+        )
+    )
+
+    assert isinstance(outcome, ReportRunFailure)
+    assert outcome.error.error_code is ErrorCode.NO_SOURCE_REPORTS
+    assert outcome.source == "db"
     assert factory_calls == 0
