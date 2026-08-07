@@ -6,7 +6,7 @@ from datetime import date
 from pathlib import Path
 
 from src.models.scanner_contract import ContextSummary, Diagnostic
-from src.models.schemas import DailyReportData, WeeklyReportData
+from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
 from src.services.context_engine import ContextBuildResult
 from src.services.report_runner.outcomes import (
     ErrorCode,
@@ -16,6 +16,7 @@ from src.services.report_runner.outcomes import (
 from src.services.report_runner.model_port import LLMModelPort
 from src.services.report_runner.requests import (
     DailyReportRunRequest,
+    MonthlyReportRunRequest,
     WeeklyReportRunRequest,
 )
 
@@ -535,3 +536,114 @@ def test_weekly_db_no_reports_fails_before_llm(tmp_path):
     assert outcome.error.error_code is ErrorCode.NO_SOURCE_REPORTS
     assert outcome.source == "db"
     assert factory_calls == 0
+
+
+def test_monthly_db_zero_scanner_calls(tmp_path):
+    from src.services.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(db_path=tmp_path / "monthly.sqlite3")
+    store.save_report(
+        DailyReportData(
+            date="2026-05-05",
+            completed_work="c",
+            work_summary="w",
+            next_plan="n",
+        )
+    )
+    scheduler = FakeScheduler(_context())
+
+    class RecordingClient:
+        def generate_monthly_report(
+            self,
+            *,
+            reports,
+            file_context: str,
+            year_month: str,
+            missing_days: list[str],
+            data_source: str,
+        ) -> MonthlyReportData:
+            assert [report.date for report in reports] == ["2026-05-05"]
+            assert file_context == "无文件证据"
+            assert year_month == "2026-05"
+            assert missing_days == sorted(missing_days)
+            assert "2026-05-04" in missing_days
+            assert "2026-05-31" not in missing_days
+            assert data_source == "db"
+            return MonthlyReportData(
+                year_month=year_month,
+                overview="ov",
+                completed_work="cw",
+                work_summary="",
+                next_plan="",
+            )
+
+    runner = _make_runner(
+        scheduler=scheduler,
+        store=store,
+        model_port=LLMModelPort(client_factory=RecordingClient),
+    )
+
+    outcome = runner.run(
+        MonthlyReportRunRequest(
+            as_of_date=date(2026, 5, 20),
+            source="db",
+            save=False,
+            year_month="2026-05",
+        )
+    )
+
+    assert scheduler.calls == []
+    assert isinstance(outcome, ReportRunSuccess)
+    assert outcome.period.start_date == date(2026, 5, 1)
+    assert outcome.period.end_date == date(2026, 5, 31)
+
+
+def test_monthly_scan_calls_scanner_once(tmp_path):
+    from src.services.report_gen import ReportGenerator
+
+    renderer = ReportGenerator(reports_dir=tmp_path / "reports")
+    scheduler = FakeScheduler(_context())
+
+    class RecordingClient:
+        def generate_monthly_report(
+            self,
+            *,
+            reports,
+            file_context: str,
+            year_month: str,
+            missing_days: list[str],
+            data_source: str,
+        ) -> MonthlyReportData:
+            assert reports == []
+            assert missing_days == []
+            assert file_context == "ctx\n\n---\n\n用户补充: 月补充"
+            assert data_source == "scan"
+            return MonthlyReportData(
+                year_month=year_month,
+                overview="ov",
+                completed_work="cw",
+                work_summary="",
+                next_plan="",
+            )
+
+    runner = _make_runner(
+        scheduler=scheduler,
+        renderer=renderer,
+        model_port=LLMModelPort(client_factory=RecordingClient),
+    )
+
+    outcome = runner.run(
+        MonthlyReportRunRequest(
+            as_of_date=date(2026, 5, 20),
+            source="scan",
+            save=False,
+            year_month="2026-05",
+            supplemental_input="月补充",
+        )
+    )
+
+    assert isinstance(outcome, ReportRunSuccess)
+    assert len(scheduler.calls) == 1
+    schedule = scheduler.calls[0]
+    assert schedule.start_date == date(2026, 5, 1)
+    assert schedule.end_date == date(2026, 5, 31)
