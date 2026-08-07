@@ -13,33 +13,35 @@
 
 ## Commands
 
+Python 依赖与测试统一走 uv；Rust 组件仍用 cargo。
+
 ```bash
-# 安装依赖
-pip install -r requirements.txt
+# 安装依赖（uv）
+uv sync
 
 # 环境与配置检查
-python main.py doctor
+uv run python main.py doctor
 
 # 日报
-python main.py daily
-python main.py daily -i "今日工作内容"
-python main.py daily --no-save -i "预览模式"
-python main.py daily --date 2026-02-05 -i "..."
+uv run python main.py daily
+uv run python main.py daily -i "今日工作内容"
+uv run python main.py daily --no-save -i "预览模式"
+uv run python main.py daily --date 2026-02-05 -i "..."
 
 # 周报
-python main.py weekly --source db
-python main.py weekly 2026-W05 --source scan -i "补充"
-python main.py weekly --source db --no-save
+uv run python main.py weekly --source db
+uv run python main.py weekly 2026-W05 --source scan -i "补充"
+uv run python main.py weekly --source db --no-save
 
 # 月报
-python main.py monthly --source db
-python main.py monthly 2026-01 --source scan -i "补充"
+uv run python main.py monthly --source db
+uv run python main.py monthly 2026-01 --source scan -i "补充"
 
 # 列表
-python main.py list
+uv run python main.py list
 
 # 测试
-python -m pytest tests/ -v
+uv run pytest
 
 # Rust scanner helpers
 cd rust/discovery && cargo test && cargo build --release

@@ -21,6 +21,8 @@ __pycache__/
 env/
 venv/
 .venv/
+.uv/
+.tmp/
 .pytest_cache/
 
 # IDE
