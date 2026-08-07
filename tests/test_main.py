@@ -14,6 +14,21 @@ from src.core.healthcheck import HealthCheckResult
 from src.models.scanner_contract import ContextSummary, Diagnostic
 from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
 from src.services.context_scheduler import ContextBuildResult
+from src.services.report_runner.outcomes import (
+    DatabaseEvidence,
+    ErrorCode,
+    PublicationReceipt,
+    ReportError,
+    ReportRunFailure,
+    ReportRunSuccess,
+    ScanEvidence,
+)
+from src.services.report_runner.period import ResolvedPeriod
+from src.services.report_runner.requests import (
+    DailyReportRunRequest,
+    MonthlyReportRunRequest,
+    WeeklyReportRunRequest,
+)
 
 
 class DummyProgress:
@@ -82,6 +97,178 @@ def _schedule_result(
     )
 
 
+def _report_success(mode: str, source: str, markdown: str) -> ReportRunSuccess:
+    as_of_date = real_date(2026, 5, 25)
+    if mode == "daily":
+        report = DailyReportData(
+            date="2026-05-25",
+            completed_work="完成日报",
+            work_summary="日报摘要",
+            next_plan="后续计划",
+        )
+    elif mode == "weekly":
+        report = WeeklyReportData(
+            week_label="2026-W20",
+            date_range="2026-05-11 ~ 2026-05-17",
+            completed_work="完成周报",
+            self_growth="",
+            improvement_actions="",
+            work_summary="",
+            next_plan="",
+            support_needed="",
+            other_notes="",
+        )
+    else:
+        report = MonthlyReportData(
+            year_month="2026-05",
+            overview="月报概览",
+            completed_work="完成月报",
+            work_summary="月报总结",
+            next_plan="下月计划",
+        )
+    evidence = (
+        ScanEvidence(
+            status="ok",
+            source_file_count=2,
+            success_count=2,
+            scan_run_id=1,
+            context_run_id=1,
+        )
+        if source == "scan"
+        else DatabaseEvidence(report_count=1, missing_days=[])
+    )
+    return ReportRunSuccess(
+        mode=mode,
+        source=source,
+        status="ok",
+        period=ResolvedPeriod(
+            mode=mode,
+            source=source,
+            start_date=real_date(2026, 5, 24),
+            end_date=as_of_date,
+            display_label=(
+                "2026-05-25"
+                if mode == "daily"
+                else "2026-W20" if mode == "weekly" else "2026-05"
+            ),
+            as_of_date=as_of_date,
+        ),
+        report=report,
+        markdown=markdown,
+        warnings=[],
+        source_evidence=evidence,
+        publication=PublicationReceipt(
+            requested=False,
+            sqlite_state="not_attempted",
+            markdown_state="not_attempted",
+        ),
+    )
+
+
+def test_daily_command_maps_namespace_to_report_runner_request(monkeypatch):
+    captured: list[object] = []
+
+    class FixedDate(real_date):
+        @classmethod
+        def today(cls) -> real_date:
+            return real_date(2026, 5, 25)
+
+    class StubRunner:
+        def run(self, request):
+            captured.append(request)
+            return _report_success("daily", "scan", "# 日报")
+
+    printed = _patch_console(monkeypatch)
+    monkeypatch.setattr(main, "date", FixedDate)
+    monkeypatch.setattr(main, "_build_report_runner", lambda: StubRunner())
+    monkeypatch.setattr(main, "Markdown", lambda text: text)
+
+    success = main.generate_daily_report(
+        Namespace(input="今天工作", no_save=True, date="2026-05-20")
+    )
+
+    assert success is True
+    request = captured[0]
+    assert isinstance(request, DailyReportRunRequest)
+    assert request.as_of_date == real_date(2026, 5, 25)
+    assert request.user_input == "今天工作"
+    assert request.save is False
+    assert request.report_date_override == "2026-05-20"
+    assert any("日报预览" in text for text in printed)
+
+
+def test_weekly_command_maps_namespace_to_report_runner_request(monkeypatch):
+    captured: list[object] = []
+
+    class FixedDate(real_date):
+        @classmethod
+        def today(cls) -> real_date:
+            return real_date(2026, 5, 25)
+
+    class StubRunner:
+        def run(self, request):
+            captured.append(request)
+            return _report_success("weekly", "db", "# 周报")
+
+    monkeypatch.setattr(main, "date", FixedDate)
+    monkeypatch.setattr(main, "_build_report_runner", lambda: StubRunner())
+    monkeypatch.setattr(main, "Markdown", lambda text: text)
+
+    success = main.generate_weekly_report_cmd(
+        Namespace(
+            week="2026-W20",
+            source="db",
+            input="周补充",
+            no_save=True,
+        )
+    )
+
+    assert success is True
+    request = captured[0]
+    assert isinstance(request, WeeklyReportRunRequest)
+    assert request.as_of_date == real_date(2026, 5, 25)
+    assert request.source == "db"
+    assert request.week_label == "2026-W20"
+    assert request.supplemental_input == "周补充"
+    assert request.save is False
+
+
+def test_monthly_command_maps_namespace_to_report_runner_request(monkeypatch):
+    captured: list[object] = []
+
+    class FixedDate(real_date):
+        @classmethod
+        def today(cls) -> real_date:
+            return real_date(2026, 5, 25)
+
+    class StubRunner:
+        def run(self, request):
+            captured.append(request)
+            return _report_success("monthly", "scan", "# 月报")
+
+    monkeypatch.setattr(main, "date", FixedDate)
+    monkeypatch.setattr(main, "_build_report_runner", lambda: StubRunner())
+    monkeypatch.setattr(main, "Markdown", lambda text: text)
+
+    success = main.generate_monthly_report_cmd(
+        Namespace(
+            month="2026-05",
+            source="scan",
+            input="月补充",
+            no_save=False,
+        )
+    )
+
+    assert success is True
+    request = captured[0]
+    assert isinstance(request, MonthlyReportRunRequest)
+    assert request.as_of_date == real_date(2026, 5, 25)
+    assert request.source == "scan"
+    assert request.year_month == "2026-05"
+    assert request.supplemental_input == "月补充"
+    assert request.save is True
+
+
 def test_generate_daily_report_uses_context_scheduler(monkeypatch):
     calls: list[tuple[str, object]] = []
 
@@ -109,7 +296,7 @@ def test_generate_daily_report_uses_context_scheduler(monkeypatch):
         def __init__(self) -> None:
             calls.append(("init", None))
 
-        def get_yesterday_plan(self) -> str:
+        def get_yesterday_plan(self, target_date=None) -> str:
             calls.append(("get_yesterday_plan", None))
             return "昨日计划"
 
@@ -121,8 +308,9 @@ def test_generate_daily_report_uses_context_scheduler(monkeypatch):
             calls.append(("render_markdown", report.date))
             return "daily markdown"
 
-        def save_markdown(self, markdown: str, report_date: str) -> None:
+        def save_markdown(self, markdown: str, report_date: str) -> Path:
             calls.append(("save_markdown", report_date))
+            return Path(f"{report_date}.md")
 
     class StubLLMClient:
         def generate_report(
@@ -184,7 +372,7 @@ def test_generate_daily_report_warns_and_calls_llm_for_partial_context(monkeypat
         def __init__(self) -> None:
             calls.append(("init", None))
 
-        def get_yesterday_plan(self) -> str:
+        def get_yesterday_plan(self, target_date=None) -> str:
             calls.append(("get_yesterday_plan", None))
             return ""
 
@@ -196,8 +384,9 @@ def test_generate_daily_report_warns_and_calls_llm_for_partial_context(monkeypat
             calls.append(("render_markdown", report.date))
             return "daily markdown"
 
-        def save_markdown(self, markdown: str, report_date: str) -> None:
+        def save_markdown(self, markdown: str, report_date: str) -> Path:
             calls.append(("save_markdown", report_date))
+            return Path(f"{report_date}.md")
 
     class StubLLMClient:
         def generate_report(
@@ -308,8 +497,11 @@ def test_generate_weekly_report_db_uses_sqlite_store(monkeypatch):
             calls.append(("render_weekly_markdown", report.week_label))
             return "weekly markdown"
 
-        def save_weekly_markdown(self, markdown: str, year: int, week: int) -> None:
+        def save_weekly_markdown(
+            self, markdown: str, year: int, week: int
+        ) -> Path:
             calls.append(("save_weekly_markdown", (year, week)))
+            return Path(f"{year}-W{week:02d}.md")
 
     class StubLLMClient:
         def generate_weekly_report(
@@ -387,8 +579,11 @@ def test_generate_weekly_report_scan_uses_context_scheduler(monkeypatch):
             calls.append(("render_weekly_markdown", report.week_label))
             return "weekly markdown"
 
-        def save_weekly_markdown(self, markdown: str, year: int, week: int) -> None:
+        def save_weekly_markdown(
+            self, markdown: str, year: int, week: int
+        ) -> Path:
             calls.append(("save_weekly_markdown", (year, week)))
+            return Path(f"{year}-W{week:02d}.md")
 
     class StubLLMClient:
         def generate_weekly_report(
@@ -470,8 +665,11 @@ def test_generate_monthly_report_db_uses_sqlite_store(monkeypatch):
             calls.append(("render_monthly_markdown", report.year_month))
             return "monthly markdown"
 
-        def save_monthly_markdown(self, markdown: str, year_month: str) -> None:
+        def save_monthly_markdown(
+            self, markdown: str, year_month: str
+        ) -> Path:
             calls.append(("save_monthly_markdown", year_month))
+            return Path(f"{year_month}.md")
 
     class StubLLMClient:
         def generate_monthly_report(
@@ -544,8 +742,11 @@ def test_generate_monthly_report_scan_uses_context_scheduler(monkeypatch):
             calls.append(("render_monthly_markdown", report.year_month))
             return "monthly markdown"
 
-        def save_monthly_markdown(self, markdown: str, year_month: str) -> None:
+        def save_monthly_markdown(
+            self, markdown: str, year_month: str
+        ) -> Path:
             calls.append(("save_monthly_markdown", year_month))
+            return Path(f"{year_month}.md")
 
     class StubLLMClient:
         def generate_monthly_report(
@@ -703,7 +904,7 @@ def test_report_command_returns_false_when_generation_fails(
             return _schedule_result("report context")
 
     class StubSQLiteStore:
-        def get_yesterday_plan(self) -> str:
+        def get_yesterday_plan(self, target_date=None) -> str:
             return ""
 
     class FailingLLMClient:

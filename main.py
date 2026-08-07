@@ -76,6 +76,21 @@ from src.services.context_scheduler import (
     ContextScheduler,
 )
 from src.services.report_gen import ReportGenerator
+from src.services.report_runner import (
+    DailyReportRunRequest,
+    MonthlyReportRunRequest,
+    ReportRunFailure,
+    ReportRunSuccess,
+    ReportRunner,
+    WeeklyReportRunRequest,
+)
+from src.services.report_runner.input_adapter import ConsoleDailyInputAdapter
+from src.services.report_runner.model_port import LLMModelPort
+from src.services.report_runner.outcomes import (
+    DatabaseEvidence,
+    ErrorCode,
+    ScanEvidence,
+)
 from src.services.sqlite_store import SQLiteStore
 from src.utils.text_tools import parse_week_label, get_month_date_range
 
@@ -180,310 +195,109 @@ def get_user_input() -> str:
     return "\n".join(lines).strip()
 
 
-def generate_daily_report(args: argparse.Namespace) -> bool:
-    """生成日报"""
-    console.print("\n[bold green]===== 审计日报生成器 v5.0 =====[/bold green]\n")
+def _build_report_runner() -> ReportRunner:
+    """装配 production 依赖；报告命令只负责 request/outcome 映射。"""
+    return ReportRunner(
+        scheduler=ContextScheduler(),
+        store=SQLiteStore(),
+        renderer=ReportGenerator(),
+        model_port=LLMModelPort(client_factory=LLMClient),
+        daily_input=ConsoleDailyInputAdapter(console=console),
+    )
 
-    # 初始化服务
-    scheduler = ContextScheduler()
-    store = SQLiteStore()
-    report_gen = ReportGenerator()
 
-    # 1. 构建文件上下文
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("构建今日文件上下文...", total=None)
-        today = date.today()
-        # scan 路径统一交给调度器，避免 CLI 继续散落 scanner/parser 细节。
-        context_result = scheduler.build_context(
-            ContextScheduleRequest(
-                report_mode="daily",
-                source="scan",
-                start_date=today - timedelta(days=1),
-                end_date=today,
-            )
+def _present_report_outcome(
+    outcome: ReportRunSuccess | ReportRunFailure,
+    label: str,
+) -> bool:
+    """把 typed outcome 映射为既有提示、预览与 bool 退出语义。"""
+    period = outcome.period
+    if period is not None and label == "周报":
+        console.print(
+            f"\n[bold green]===== 生成周报 {period.display_label} "
+            f"({period.start_date} ~ {period.end_date}) =====[/bold green]\n"
         )
-        progress.update(task, completed=True)
+    elif period is not None and label == "月报":
+        console.print(
+            f"\n[bold green]===== 生成月报 {period.display_label} "
+            f"({period.start_date} ~ {period.end_date}) =====[/bold green]\n"
+        )
 
-    if not _accept_context_result(context_result):
+    evidence = outcome.source_evidence
+    if isinstance(evidence, ScanEvidence):
+        console.print(
+            "[green]✓[/green] 扫描完成: "
+            f"{evidence.success_count}/{evidence.source_file_count} 个文件\n"
+        )
+    elif isinstance(evidence, DatabaseEvidence):
+        console.print(
+            f"[green]✓[/green] 读取 {evidence.report_count} 份日报, "
+            f"{len(evidence.missing_days)} 天缺失\n"
+        )
+
+    for warning in outcome.warnings:
+        console.print(f"[yellow]![/yellow] 文件上下文不完整: {warning.message}\n")
+        logger.warning("文件上下文不完整: %s", warning.message)
+
+    if isinstance(outcome, ReportRunFailure):
+        message = outcome.error.message
+        if outcome.error.error_code is ErrorCode.SCANNER_FAILED:
+            console.print(f"[red]✗ 文件上下文构建失败: {message}[/red]\n")
+            logger.error("文件上下文构建失败: %s", message)
+        elif outcome.phase == "generation":
+            console.print(f"[red]✗ 生成失败: {message}[/red]")
+        else:
+            console.print(f"[red]错误: {message}[/red]")
         return False
 
-    file_context = context_result.file_context
-
-    # 2. 读取昨日计划
-    yesterday_plan = store.get_yesterday_plan()
-    if yesterday_plan:
-        console.print("[green]✓[/green] 已读取昨日计划参考\n")
-    else:
-        console.print("[yellow]![/yellow] 无昨日计划参考\n")
-
-    # 3. 获取用户输入
-    if args.input:
-        user_input = args.input
-        console.print("[green]✓[/green] 使用命令行输入\n")
-    else:
-        user_input = get_user_input()
-
-    if not user_input:
-        console.print("[red]错误: 未输入工作内容[/red]")
-        return False
-
-    # 4. 生成日报
-    llm_client = LLMClient()
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("正在生成日报...", total=None)
-        try:
-            report_data = llm_client.generate_report(
-                user_input=user_input,
-                file_context=file_context,
-                yesterday_plan=yesterday_plan,
-            )
-            progress.update(task, completed=True)
-        except Exception as e:
-            progress.update(task, completed=True)
-            console.print(f"[red]✗ 生成失败: {e}[/red]")
-            return False
-
-    # 覆盖日期 (支持 --date 参数)
-    if args.date:
-        report_data.date = args.date
-
-    console.print("[green]✓[/green] 日报生成成功\n")
-
-    # 5. 渲染 Markdown
-    markdown_content = report_gen.render_markdown(report_data)
-
-    # 6. 保存
-    if not args.no_save:
-        store.save_report(report_data)
-        report_gen.save_markdown(markdown_content, report_data.date)
-        console.print("[green]✓[/green] 日报已保存\n")
-
-    # 7. 预览
-    console.print("[bold cyan]===== 日报预览 =====[/bold cyan]\n")
-    console.print(Markdown(markdown_content))
+    console.print(f"[green]✓[/green] {label}生成成功\n")
+    if outcome.publication.requested:
+        console.print(f"[green]✓[/green] {label}已保存\n")
+    console.print(f"[bold cyan]===== {label}预览 =====[/bold cyan]\n")
+    console.print(Markdown(outcome.markdown))
     return True
+
+
+def generate_daily_report(args: argparse.Namespace) -> bool:
+    """映射 daily CLI 参数并展示 ReportRunner outcome。"""
+    console.print("\n[bold green]===== 审计日报生成器 v5.0 =====[/bold green]\n")
+    outcome = _build_report_runner().run(
+        DailyReportRunRequest(
+            as_of_date=date.today(),
+            save=not args.no_save,
+            user_input=args.input,
+            report_date_override=args.date,
+        )
+    )
+    return _present_report_outcome(outcome, "日报")
 
 
 def generate_weekly_report_cmd(args: argparse.Namespace) -> bool:
-    """生成周报"""
-    # 解析周标签
-    if args.week:
-        try:
-            year, week_num = parse_week_label(args.week)
-        except ValueError as e:
-            console.print(f"[red]错误: {e}[/red]")
-            return False
-    else:
-        # 默认本周
-        today = date.today()
-        year, week_num, _ = today.isocalendar()
-
-    week_label = f"{year}-W{week_num:02d}"
-    monday = date.fromisocalendar(year, week_num, 1)
-    sunday = date.fromisocalendar(year, week_num, 7)
-
-    console.print(
-        f"\n[bold green]===== 生成周报 {week_label} ({monday} ~ {sunday}) =====[/bold green]\n"
+    """映射 weekly CLI 参数并展示 ReportRunner outcome。"""
+    outcome = _build_report_runner().run(
+        WeeklyReportRunRequest(
+            as_of_date=date.today(),
+            source=args.source,
+            save=not args.no_save,
+            week_label=args.week,
+            supplemental_input=args.input,
+        )
     )
-
-    # 初始化服务
-    store = SQLiteStore()
-    report_gen = ReportGenerator()
-
-    reports = []
-    missing_days: list[str] = []
-    file_context = "无文件证据"
-
-    match args.source:
-        case "db":
-            # 从数据库聚合日报
-            reports, missing_days = store.get_week_reports(year, week_num)
-            if not reports:
-                console.print(f"[red]错误: 未找到 {week_label} 的日报数据[/red]")
-                return False
-            console.print(
-                f"[green]✓[/green] 读取 {len(reports)} 份日报, {len(missing_days)} 天缺失\n"
-            )
-
-        case "scan":
-            # scan 路径统一交给调度器，周报 CLI 只负责传入周期边界。
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task(
-                    f"构建 {monday} ~ {sunday} 文件上下文...", total=None
-                )
-                context_result = ContextScheduler().build_context(
-                    ContextScheduleRequest(
-                        report_mode="weekly",
-                        source="scan",
-                        start_date=monday,
-                        end_date=sunday,
-                    )
-                )
-                progress.update(task, completed=True)
-
-            if not _accept_context_result(context_result):
-                return False
-            file_context = context_result.file_context
-
-    # 用户补充输入
-    if args.input:
-        file_context += f"\n\n---\n\n用户补充: {args.input}"
-
-    # 生成周报
-    llm_client = LLMClient()
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("正在生成周报...", total=None)
-        try:
-            report_data = llm_client.generate_weekly_report(
-                reports=reports,
-                file_context=file_context,
-                year=year,
-                week=week_num,
-                missing_days=missing_days,
-                data_source=args.source,
-            )
-            progress.update(task, completed=True)
-        except Exception as e:
-            progress.update(task, completed=True)
-            console.print(f"[red]✗ 生成失败: {e}[/red]")
-            return False
-
-    console.print("[green]✓[/green] 周报生成成功\n")
-
-    # 渲染 Markdown
-    markdown_content = report_gen.render_weekly_markdown(report_data)
-
-    # 保存
-    if not args.no_save:
-        store.save_weekly_report(report_data)
-        report_gen.save_weekly_markdown(markdown_content, year, week_num)
-        console.print("[green]✓[/green] 周报已保存\n")
-
-    # 预览
-    console.print("[bold cyan]===== 周报预览 =====[/bold cyan]\n")
-    console.print(Markdown(markdown_content))
-    return True
+    return _present_report_outcome(outcome, "周报")
 
 
 def generate_monthly_report_cmd(args: argparse.Namespace) -> bool:
-    """生成月报"""
-    # 解析年月
-    if args.month:
-        year_month = args.month
-    else:
-        year_month = date.today().strftime("%Y-%m")
-
-    try:
-        start_date, end_date = get_month_date_range(year_month)
-    except ValueError as e:
-        console.print(f"[red]错误: {e}[/red]")
-        return False
-
-    console.print(
-        f"\n[bold green]===== 生成月报 {year_month} ({start_date} ~ {end_date}) =====[/bold green]\n"
+    """映射 monthly CLI 参数并展示 ReportRunner outcome。"""
+    outcome = _build_report_runner().run(
+        MonthlyReportRunRequest(
+            as_of_date=date.today(),
+            source=args.source,
+            save=not args.no_save,
+            year_month=args.month,
+            supplemental_input=args.input,
+        )
     )
-
-    # 初始化服务
-    store = SQLiteStore()
-    report_gen = ReportGenerator()
-
-    reports = []
-    missing_days: list[str] = []
-    file_context = "无文件证据"
-
-    match args.source:
-        case "db":
-            reports, missing_days = store.get_reports_in_range(
-                start_date, end_date
-            )
-            if not reports:
-                console.print(f"[red]错误: 未找到 {year_month} 的日报数据[/red]")
-                return False
-            console.print(
-                f"[green]✓[/green] 读取 {len(reports)} 份日报, {len(missing_days)} 天缺失\n"
-            )
-
-        case "scan":
-            # scan 路径统一交给调度器，月报 CLI 只负责传入月份边界。
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=console,
-            ) as progress:
-                task = progress.add_task(
-                    f"构建 {start_date} ~ {end_date} 文件上下文...", total=None
-                )
-                context_result = ContextScheduler().build_context(
-                    ContextScheduleRequest(
-                        report_mode="monthly",
-                        source="scan",
-                        start_date=start_date,
-                        end_date=end_date,
-                    )
-                )
-                progress.update(task, completed=True)
-
-            if not _accept_context_result(context_result):
-                return False
-            file_context = context_result.file_context
-
-    # 用户补充输入
-    if args.input:
-        file_context += f"\n\n---\n\n用户补充: {args.input}"
-
-    # 生成月报
-    llm_client = LLMClient()
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console,
-    ) as progress:
-        task = progress.add_task("正在生成月报...", total=None)
-        try:
-            report_data = llm_client.generate_monthly_report(
-                reports=reports,
-                file_context=file_context,
-                year_month=year_month,
-                missing_days=missing_days,
-                data_source=args.source,
-            )
-            progress.update(task, completed=True)
-        except Exception as e:
-            progress.update(task, completed=True)
-            console.print(f"[red]✗ 生成失败: {e}[/red]")
-            return False
-
-    console.print("[green]✓[/green] 月报生成成功\n")
-
-    # 渲染 Markdown
-    markdown_content = report_gen.render_monthly_markdown(report_data)
-
-    # 保存
-    if not args.no_save:
-        store.save_monthly_report(report_data)
-        report_gen.save_monthly_markdown(markdown_content, year_month)
-        console.print("[green]✓[/green] 月报已保存\n")
-
-    # 预览
-    console.print("[bold cyan]===== 月报预览 =====[/bold cyan]\n")
-    console.print(Markdown(markdown_content))
-    return True
+    return _present_report_outcome(outcome, "月报")
 
 
 def list_reports() -> None:
