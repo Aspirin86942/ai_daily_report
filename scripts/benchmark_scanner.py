@@ -23,6 +23,13 @@ from src.services.context_scheduler import ContextScheduleRequest  # noqa: E402
 from src.services.rust_context_client import RustContextClient  # noqa: E402
 
 
+def calculate_files_per_second(*, file_count: int, duration_ms: int) -> float:
+    """按 scanner 汇总耗时计算文件吞吐；零工作量或零耗时不虚构结果。"""
+    if file_count <= 0 or duration_ms <= 0:
+        return 0.0
+    return round(file_count * 1000 / duration_ms, 3)
+
+
 def build_parser_backend_summary(files: list[FileAudit]) -> dict[str, Any]:
     """分别汇总真实 parser backend 和 worker lane，禁止混成一个维度。"""
     backend_counts: dict[str, int] = {}
@@ -124,6 +131,10 @@ def build_benchmark_payload(
             ),
             "parse_duration_ms": summary.parse_duration_ms,
             "context_duration_ms": summary.compression_duration_ms,
+            "files_per_second": calculate_files_per_second(
+                file_count=summary.source_file_count,
+                duration_ms=summary.total_duration_ms,
+            ),
         },
         "stage_metrics": stage_metrics,
         "extension_metrics": extension_metrics,
@@ -156,6 +167,7 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
         f"- timeout_count: `{result['timeout_count']}`",
         f"- reused_count: `{metrics['reused_count']}`",
         f"- reparsed_count: `{metrics['reparsed_count']}`",
+        f"- files_per_second: `{metrics['files_per_second']}`",
         "",
         "## Stage Durations",
         "",

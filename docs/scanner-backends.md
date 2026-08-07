@@ -95,17 +95,48 @@ report prompt context.
 
 ## Benchmark evidence
 
-Use a synthetic or approved sanitized directory and a temporary v2 database:
+Use a synthetic or approved sanitized directory and a fresh v2 database. The
+following Windows PowerShell example runs the tracked Office fixtures once cold
+and once warm while keeping all generated evidence under the ignored `.uv/`
+directory:
 
 ```powershell
-.\.venv\Scripts\python.exe scripts\benchmark_scanner.py `
-  --start-date 2026-05-24 `
-  --end-date 2026-05-25 `
-  --scan-db-path .tmp\scanner-benchmark\scan_index_v2.sqlite3 `
-  --json-out .tmp\scanner-benchmark\scanner.json `
-  --markdown-out .tmp\scanner-benchmark\scanner.md
+$benchmarkRun = Join-Path '.uv\benchmarks' (
+  'scanner-fixture-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+)
+New-Item -ItemType Directory -Path $benchmarkRun -Force | Out-Null
+$previousWorkDir = $env:DAILY_REPORT_PATHS__WORK_DIR
+$env:DAILY_REPORT_PATHS__WORK_DIR = (
+  Resolve-Path -LiteralPath 'tests\fixtures\worker_documents'
+).Path
+
+try {
+  uv run python scripts\benchmark_scanner.py `
+    --start-date 2000-01-01 `
+    --end-date 2100-01-01 `
+    --scan-db-path (Join-Path $benchmarkRun 'scan_index_v2.sqlite3') `
+    --json-out (Join-Path $benchmarkRun 'cold.json') `
+    --markdown-out (Join-Path $benchmarkRun 'cold.md')
+
+  uv run python scripts\benchmark_scanner.py `
+    --start-date 2000-01-01 `
+    --end-date 2100-01-01 `
+    --scan-db-path (Join-Path $benchmarkRun 'scan_index_v2.sqlite3') `
+    --json-out (Join-Path $benchmarkRun 'warm.json') `
+    --markdown-out (Join-Path $benchmarkRun 'warm.md')
+} finally {
+  if ([string]::IsNullOrEmpty($previousWorkDir)) {
+    Remove-Item Env:DAILY_REPORT_PATHS__WORK_DIR -ErrorAction SilentlyContinue
+  } else {
+    $env:DAILY_REPORT_PATHS__WORK_DIR = $previousWorkDir
+  }
+}
 ```
 
 Review parser-backend counts, worker-lane counts, cache status/reasons, stage
-durations, and structured diagnostics. Benchmarking a business directory is
-not authorization to send its content to an LLM.
+durations, `files_per_second`, and structured diagnostics. The throughput is
+defined as `discovered_count * 1000 / total_duration_ms`. The fixed-corpus gate
+requires both runs to succeed without errors/timeouts, the warm run to reuse all
+files without reparsing, matching content hashes/backend/lane summaries, and
+positive warm throughput greater than cold throughput. Benchmarking a business
+directory is not authorization to send its content to an LLM.

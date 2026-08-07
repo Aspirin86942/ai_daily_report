@@ -10,6 +10,7 @@ import scripts.benchmark_scanner as benchmark_module
 from scripts.benchmark_scanner import (
     build_benchmark_payload,
     build_parser_backend_summary,
+    calculate_files_per_second,
     render_markdown_report,
     run_benchmark,
     write_report_files,
@@ -170,6 +171,12 @@ def _inspection() -> InspectRunResponse:
     )
 
 
+def test_calculate_files_per_second_handles_normal_and_zero_duration():
+    assert calculate_files_per_second(file_count=2, duration_ms=25) == 80.0
+    assert calculate_files_per_second(file_count=0, duration_ms=25) == 0.0
+    assert calculate_files_per_second(file_count=2, duration_ms=0) == 0.0
+
+
 def test_backend_summary_keeps_parser_and_worker_lane_dimensions_separate():
     summary = build_parser_backend_summary(_files())
 
@@ -202,6 +209,7 @@ def test_payload_uses_inspect_dto_and_never_contains_context_content():
     assert payload["metrics"]["reused_count"] == 1
     assert payload["metrics"]["reparsed_count"] == 1
     assert payload["metrics"]["cache_duration_ms"] == 1
+    assert payload["metrics"]["files_per_second"] == 80.0
     assert payload["files"][0]["relative_path"] == "notes\\a.md"
     assert "private synthetic context" not in str(payload)
     assert "file_context" not in str(payload)
@@ -236,6 +244,7 @@ def test_render_and_write_report_preserve_metadata_only(tmp_path: Path):
 
     assert "# Rust Scanner Benchmark Report" in markdown
     assert "Parser Backend And Worker Lane" in markdown
+    assert "files_per_second: `80.0`" in markdown
     assert '"worker_lane": "rust_core"' in json_out.read_text(encoding="utf-8")
     assert "# Rust Scanner Benchmark Report" in markdown_out.read_text(
         encoding="utf-8"

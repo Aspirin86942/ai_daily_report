@@ -59,3 +59,24 @@
 - 在退出旧的 Conda base 进程环境后，`SSL_CERT_DIR` / `SSL_CERT_FILE` 均不再注入，uv 同步、锁文件检查、pytest 与 CLI 全程无证书警告。
 - 当前已启动的 Codex/终端进程仍可能继承修改前的 `(base)` 环境；关闭后重新打开即可使用新的不自动激活设置。
 - 干净环境首次填充新 cache 用时约 2 分 45 秒，属于一次性下载与准备成本；随后使用 hardlink 安装 58 个包仅耗时 1.10s。
+
+## 固定脱敏语料 scanner 吞吐门禁
+
+基准语料为仓库跟踪的 `tests/fixtures/worker_documents`，日期窗口固定为
+2000-01-01 至 2100-01-01，确保 checkout 文件时间变化时仍覆盖全部允许格式。
+每组使用全新 v2 scanner DB 跑 cold，再复用同一 DB 跑 warm；不访问本机业务目录，
+不调用 LLM，原始 JSON/Markdown 存放在已忽略的 `.uv/benchmarks/`。
+
+| 指标 | cold | warm |
+|---|---:|---:|
+| status | ok | ok |
+| 发现/成功/错误/超时 | 3 / 3 / 0 / 0 | 3 / 3 / 0 / 0 |
+| reused / reparsed | 0 / 3 | 3 / 0 |
+| total_duration_ms | 4,956 | 41 |
+| files_per_second | 0.605 | 73.171 |
+
+- warm 吞吐约为 cold 的 120.9 倍。
+- 两次内容 SHA-256、parser backend 汇总和 worker lane 汇总完全一致。
+- backend 为 `rust_office_oxide_v1: 2`、`python_office_v1: 1`；lane 为 `rust_office_process: 2`、`python_document_process: 1`。
+- 门禁条件：两次均 `status=ok` 且零错误/超时；warm 全量复用且零重解析；内容哈希、backend、lane 一致；cold/warm 吞吐均为正且 warm 高于 cold。本次实测全部通过。
+- 新增吞吐测试后全量门禁为 237 passed、1 skipped、0 failed（34.21s）；`uv lock --check`、`uv sync --frozen` 与 `doctor --strict` 均以退出码 0 完成。
