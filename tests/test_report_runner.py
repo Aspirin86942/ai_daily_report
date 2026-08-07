@@ -13,6 +13,7 @@ from src.services.report_runner.outcomes import (
     ReportRunFailure,
     ReportRunSuccess,
 )
+from src.services.report_runner.model_port import LLMModelPort
 from src.services.report_runner.requests import DailyReportRunRequest
 
 
@@ -244,3 +245,132 @@ def test_daily_empty_input_fails_before_llm():
     assert isinstance(outcome, ReportRunFailure)
     assert outcome.error.error_code is ErrorCode.EMPTY_DAILY_INPUT
     assert model_port.calls == []
+
+
+def test_daily_full_path_writes_real_sqlite_and_markdown(tmp_path):
+    from src.services.report_gen import ReportGenerator
+    from src.services.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(db_path=tmp_path / "reports.sqlite3")
+    store.save_report(
+        DailyReportData(
+            date="2026-05-24",
+            completed_work="昨日工作",
+            work_summary="昨日小结",
+            next_plan="昨日延续计划",
+        )
+    )
+    renderer = ReportGenerator(reports_dir=tmp_path / "reports")
+
+    class RecordingClient:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def generate_report(
+            self, *, user_input: str, file_context: str, yesterday_plan: str
+        ) -> DailyReportData:
+            self.calls += 1
+            assert user_input == "今天工作"
+            assert file_context == "ctx"
+            assert yesterday_plan == "昨日延续计划"
+            return DailyReportData(
+                date="2026-05-25",
+                completed_work="完成日报",
+                work_summary="日报摘要",
+                next_plan="后续计划",
+            )
+
+    client = RecordingClient()
+    runner = _make_runner(
+        store=store,
+        renderer=renderer,
+        model_port=LLMModelPort(client_factory=lambda: client),
+    )
+
+    outcome = runner.run(
+        DailyReportRunRequest(
+            as_of_date=date(2026, 5, 25),
+            save=True,
+            user_input="今天工作",
+        )
+    )
+
+    assert isinstance(outcome, ReportRunSuccess)
+    assert store.get_report("2026-05-25") is not None
+    markdown_path = tmp_path / "reports" / "2026-05" / "2026-05-25.md"
+    assert markdown_path.is_file()
+    assert markdown_path.read_text(encoding="utf-8") == outcome.markdown
+    assert outcome.publication.sqlite_state == "committed"
+    assert outcome.publication.markdown_state == "written"
+    assert outcome.publication.markdown_path == markdown_path
+    assert client.calls == 1
+
+
+def test_daily_date_override_keeps_scan_window(tmp_path):
+    from src.services.report_gen import ReportGenerator
+    from src.services.sqlite_store import SQLiteStore
+
+    store = SQLiteStore(db_path=tmp_path / "reports.sqlite3")
+    renderer = ReportGenerator(reports_dir=tmp_path / "reports")
+
+    class RecordingClient:
+        def generate_report(
+            self, *, user_input: str, file_context: str, yesterday_plan: str
+        ) -> DailyReportData:
+            return DailyReportData(
+                date="2026-05-25",
+                completed_work="c",
+                work_summary="w",
+                next_plan="n",
+            )
+
+    scheduler = FakeScheduler(_context())
+    runner = _make_runner(
+        scheduler=scheduler,
+        store=store,
+        renderer=renderer,
+        model_port=LLMModelPort(client_factory=RecordingClient),
+    )
+
+    outcome = runner.run(
+        DailyReportRunRequest(
+            as_of_date=date(2026, 5, 25),
+            save=True,
+            user_input="x",
+            report_date_override="2026-05-20",
+        )
+    )
+
+    assert isinstance(outcome, ReportRunSuccess)
+    schedule = scheduler.calls[0]
+    assert schedule.start_date == date(2026, 5, 24)
+    assert schedule.end_date == date(2026, 5, 25)
+    assert outcome.report.date == "2026-05-20"
+    assert store.get_report("2026-05-20") is not None
+    assert (tmp_path / "reports" / "2026-05" / "2026-05-20.md").is_file()
+
+
+def test_daily_scanner_error_does_not_construct_llm_client():
+    factory_calls = 0
+
+    def client_factory():
+        nonlocal factory_calls
+        factory_calls += 1
+        raise AssertionError("scanner error 后不得构造 LLM client")
+
+    runner = _make_runner(
+        scheduler=FakeScheduler(_context(status="error")),
+        model_port=LLMModelPort(client_factory=client_factory),
+    )
+
+    outcome = runner.run(
+        DailyReportRunRequest(
+            as_of_date=date(2026, 5, 25),
+            save=False,
+            user_input="x",
+        )
+    )
+
+    assert isinstance(outcome, ReportRunFailure)
+    assert outcome.error.error_code is ErrorCode.SCANNER_FAILED
+    assert factory_calls == 0
