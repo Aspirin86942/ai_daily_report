@@ -65,6 +65,23 @@ Plan 3 拆分后的轻量入口按相同子进程计时口径各重复 3 次，�
   `build_default_report_runner()` 函数内；help/list/doctor 不导入报告命令模块。
   本轮未发现残留重 import，因此没有为制造性能 diff 再改代码。
 
+## 阶段 6：pytest-xdist 评估
+
+| 模式 | 结果 | pytest 内部耗时 | 相对单进程 |
+|---|---|---:|---:|
+| 默认单进程 `uv run pytest` | 269 passed、1 skipped | 35.48s | 100% |
+| 显式 `uv run pytest -n auto` | 269 passed、1 skipped | 19.82s | 55.9% |
+
+- xdist 在当前完整套件上全绿并缩短 15.66s（44.1%），低于计划规定的
+  单进程 70% 上限 24.84s，判定为可用。
+- `tests/test_windows_release_package.py --collect-only` 正常收集 16 项；
+  `rust_release_binaries` 是 session fixture，且只解析已有 release 二进制路径，
+  不在每条测试中重复构建 Rust workspace。
+- `pytest-xdist>=3.6,<4` 保留为 dev 依赖，便于显式并行运行；
+  `[tool.pytest.ini_options].addopts` 仍为 `-q --tb=short`，不默认加 `-n`。
+- 当前全绿证明固定测试集在本机可并行，不把它扩大解释为 SQLite/Rust
+  子进程共享资源已经完成深度隔离验证，因此日常与发布门禁仍使用默认单进程。
+
 ## Windows 环境风险收口
 
 | 检查项 | 调整前 | 调整后 |
