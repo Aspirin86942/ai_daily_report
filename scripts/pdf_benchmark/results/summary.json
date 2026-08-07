@@ -1,0 +1,40 @@
+{
+  "schema_version": "pdf_parser_gate_summary_v1",
+  "python": {
+    "engine": "pdfplumber",
+    "case_count": 6,
+    "success_count": 6,
+    "mean_gt_ratio": 1.0,
+    "mean_printable_ratio": 1.0,
+    "p50_duration_ms": 7.027,
+    "p90_duration_ms": 43.041,
+    "total_duration_ms": 112.084,
+    "throughput_files_per_second": 53.531
+  },
+  "rust": {
+    "engine": "pdf-extract",
+    "case_count": 6,
+    "success_count": 3,
+    "mean_gt_ratio": 0.5,
+    "mean_printable_ratio": 0.5,
+    "p50_duration_ms": 12.444,
+    "p90_duration_ms": 12.962,
+    "total_duration_ms": 73.646,
+    "throughput_files_per_second": 81.471
+  },
+  "thresholds": {
+    "rust_mean_gt_ratio_min": 0.95,
+    "rust_mean_printable_ratio_min": 0.98,
+    "rust_p50_duration_ms_max": 3.514
+  },
+  "comparison": {
+    "rust_gt_ratio_vs_python": 0.5,
+    "rust_p50_vs_python": 1.770884
+  },
+  "gate": {
+    "quality_pass": false,
+    "speed_pass": false,
+    "migration_candidate": false,
+    "decision": "keep_pdfplumber"
+  }
+}
