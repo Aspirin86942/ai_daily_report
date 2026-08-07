@@ -1,4 +1,7 @@
-"""私有 context engine 合同和最小应用结果。"""
+"""Context engine 合同和最小应用结果。
+
+分层：interface —— 应用 DTO 与公开 ``ContextEngine`` Protocol。
+"""
 
 from __future__ import annotations
 

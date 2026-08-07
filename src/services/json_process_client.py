@@ -1,4 +1,7 @@
-"""严格的 UTF-8 JSON 单请求/单响应子进程边界。"""
+"""严格的 UTF-8 JSON 单请求/单响应子进程边界。
+
+分层：adapter —— JSON 单请求/单响应子进程边界。
+"""
 
 from __future__ import annotations
 

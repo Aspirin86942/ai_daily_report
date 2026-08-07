@@ -1,4 +1,7 @@
-"""Office/PDF bounded 文档解析器。"""
+"""Office/PDF bounded 文档解析器。
+
+分层：adapter —— Python fallback 解析 worker。
+"""
 
 from __future__ import annotations
 

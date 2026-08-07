@@ -1,4 +1,7 @@
-"""报告生成服务"""
+"""报告生成服务。
+
+分层：orchestration —— Jinja 渲染与 Markdown 发布。
+"""
 
 from pathlib import Path
 from datetime import datetime

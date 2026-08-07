@@ -1,4 +1,7 @@
-"""ReportRunner：单一应用 seam 与 daily/period 私有 recipes。"""
+"""ReportRunner：单一应用 seam 与 daily/period 私有 recipes。
+
+分层：orchestration —— 报告运行配方与错误/发布结果编排。
+"""
 
 from __future__ import annotations
 

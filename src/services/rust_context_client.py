@@ -1,4 +1,7 @@
-"""`ai-daily-scanner` 的私有 Python 进程适配器。"""
+"""`ai-daily-scanner` 的私有 Python 进程适配器。
+
+分层：adapter —— Rust scanner 子进程适配。
+"""
 
 from __future__ import annotations
 

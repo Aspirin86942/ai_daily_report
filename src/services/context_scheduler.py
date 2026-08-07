@@ -1,4 +1,7 @@
-"""应用级 context 调度边界；每次运行只选择一个完整 engine。"""
+"""应用级 context 调度边界；每次运行只选择一个完整 engine。
+
+分层：orchestration —— 引擎选择与调度。
+"""
 
 from __future__ import annotations
 
