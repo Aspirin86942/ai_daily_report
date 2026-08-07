@@ -1,0 +1,72 @@
+{
+  "schema_version": "pdf_parser_gate_v1",
+  "engine": "pdf-extract",
+  "rows": [
+    {
+      "file": "case_01.pdf",
+      "text": "",
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "chars": 0,
+      "printable_ratio": 0.0,
+      "gt_ratio": 0.0,
+      "duration_ms": 12.284,
+      "exit_code": 101,
+      "stderr": "unsupported encoding UniGB-UCS2-H"
+    },
+    {
+      "file": "case_02.pdf",
+      "text": "\n\nQuarterly financial review: revenue reached $128,400, expenses $96,300, net margin\n\n25.1%. Vendor onboarding completed.",
+      "text_sha256": "3f81215cf00bd006a246904ecaed8a40262e20675a368b6a5e4eb4dab20b5867",
+      "chars": 121,
+      "printable_ratio": 1.0,
+      "gt_ratio": 1.0,
+      "duration_ms": 12.934,
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "file": "case_03.pdf",
+      "text": "",
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "chars": 0,
+      "printable_ratio": 0.0,
+      "gt_ratio": 0.0,
+      "duration_ms": 12.178,
+      "exit_code": 101,
+      "stderr": "unsupported encoding UniGB-UCS2-H"
+    },
+    {
+      "file": "case_04.pdf",
+      "text": "\n\nMeeting notes: integration status 80%, three blockers remain; acceptance report v2 due next\n\nweek.",
+      "text_sha256": "650014eebd24f4756c569d62d87c91706ec7296f1eead3349fa362a4a1b74681",
+      "chars": 100,
+      "printable_ratio": 1.0,
+      "gt_ratio": 1.0,
+      "duration_ms": 12.603,
+      "exit_code": 0,
+      "stderr": ""
+    },
+    {
+      "file": "case_05.pdf",
+      "text": "",
+      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "chars": 0,
+      "printable_ratio": 0.0,
+      "gt_ratio": 0.0,
+      "duration_ms": 12.991,
+      "exit_code": 101,
+      "stderr": "unsupported encoding UniGB-UCS2-H"
+    },
+    {
+      "file": "case_06.pdf",
+      "text": "\n\nMixed sample: keep identifiers like AUTH-2026-001, numbers 3.14159, and Chinese\n\npunctuation intact.",
+      "text_sha256": "70aec3869d1a3512b8cb78939925b89e99b66e4a5d5c9aed123c93b79cefe2fb",
+      "chars": 102,
+      "printable_ratio": 1.0,
+      "gt_ratio": 1.0,
+      "duration_ms": 10.656,
+      "exit_code": 0,
+      "stderr": ""
+    }
+  ]
+}

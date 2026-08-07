@@ -1,0 +1,11 @@
+[package]
+name = "pdf-extract-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+pdf-extract = "0.12"
+
+# 独立评估 crate：不加入生产 scanner workspace。
+[workspace]
