@@ -2,7 +2,7 @@
 
 import argparse
 import sys
-from datetime import date, timedelta
+from datetime import date
 
 # doctor 必须能在 Rich、业务依赖或文件日志不可用时先给出诊断。
 if sys.platform == "win32":
@@ -65,16 +65,11 @@ if (
 
 from rich.console import Console
 from rich.markdown import Markdown
-from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from src.core.healthcheck import collect_healthcheck
 from src.core.logger import setup_logger
 from src.core.llm import LLMClient
-from src.services.context_scheduler import (
-    ContextBuildResult,
-    ContextScheduleRequest,
-    ContextScheduler,
-)
+from src.services.context_scheduler import ContextScheduler
 from src.services.report_gen import ReportGenerator
 from src.services.report_runner import (
     DailyReportRunRequest,
@@ -92,7 +87,6 @@ from src.services.report_runner.outcomes import (
     ScanEvidence,
 )
 from src.services.sqlite_store import SQLiteStore
-from src.utils.text_tools import parse_week_label, get_month_date_range
 
 logger = setup_logger()
 console = Console()
@@ -152,47 +146,6 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.set_defaults(subcommand="doctor")
 
     return parser
-
-
-def _accept_context_result(context_result: ContextBuildResult) -> bool:
-    """显示 scanner 状态；error 必须在构造 LLM client 前终止。"""
-    summary = context_result.summary
-    console.print(
-        "[green]✓[/green] 扫描完成: "
-        f"{summary.success_count}/{summary.source_file_count} 个文件\n"
-    )
-    if context_result.status == "error":
-        message = (
-            context_result.error.message
-            if context_result.error is not None
-            else "context engine returned an invalid error result"
-        )
-        console.print(f"[red]✗ 文件上下文构建失败: {message}[/red]\n")
-        logger.error("文件上下文构建失败: %s", message)
-        return False
-    if context_result.status == "partial":
-        for warning in context_result.warnings:
-            console.print(f"[yellow]![/yellow] 文件上下文不完整: {warning.message}\n")
-            logger.warning("文件上下文不完整: %s", warning.message)
-    return True
-
-
-def get_user_input() -> str:
-    """获取用户交互输入"""
-    console.print("\n[bold cyan]请描述今日工作内容:[/bold cyan]")
-    console.print(
-        "[dim](输入完成后按 Ctrl+Z (Windows) 或 Ctrl+D (Linux/Mac) 结束)[/dim]\n"
-    )
-
-    lines = []
-    try:
-        while True:
-            line = input()
-            lines.append(line)
-    except EOFError:
-        pass
-
-    return "\n".join(lines).strip()
 
 
 def _build_report_runner() -> ReportRunner:
