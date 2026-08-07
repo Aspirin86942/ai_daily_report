@@ -9,48 +9,7 @@ if sys.platform == "win32":
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
-
-def _run_bootstrap_doctor(*, strict: bool = False) -> int:
-    """通过轻量导入运行 doctor，避免完整业务栈遮蔽部署错误。"""
-
-    print("\n===== 环境检查 =====\n")
-    try:
-        from src.core.healthcheck import collect_healthcheck as collect
-
-        result = collect(strict=True) if strict else collect()
-    except ModuleNotFoundError as exc:
-        missing_module = exc.name or "未知模块"
-        print("错误:")
-        print(f"  [X] doctor 启动依赖缺失: {missing_module}")
-        print("\n请先安装 requirements.lock（或 requirements.txt）后重试")
-        return 1
-    except Exception as exc:
-        print("错误:")
-        print(
-            f"  [X] doctor 无法启动 ({type(exc).__name__})；"
-            "请检查依赖与本机配置格式"
-        )
-        return 1
-
-    if result.info:
-        print("配置概览")
-        for label, value in result.info.items():
-            print(f"  - {label}: {value}")
-
-    if result.warnings:
-        print("\n警告:")
-        for message in result.warnings:
-            print(f"  [!] {message}")
-
-    if result.errors:
-        print("\n错误:")
-        for message in result.errors:
-            print(f"  [X] {message}")
-        print("\n环境检查失败，请修复上述问题")
-        return 1
-
-    print("\n所有检查通过，可以正常使用")
-    return 0
+from src.cli.doctor import run_bootstrap_doctor
 
 
 if (
@@ -59,13 +18,13 @@ if (
     and sys.argv[1] in {"doctor", "check-config"}
     and sys.argv[2:] in ([], ["--strict"])
 ):
-    raise SystemExit(
-        _run_bootstrap_doctor(strict="--strict" in sys.argv[2:])
-    )
+    raise SystemExit(run_bootstrap_doctor(strict="--strict" in sys.argv[2:]))
 
 from rich.console import Console
 from rich.markdown import Markdown
 
+from src.cli.doctor import run_doctor_cmd
+from src.cli.list_reports import list_reports
 from src.cli.parser import build_parser
 from src.core.healthcheck import collect_healthcheck
 from src.core.logger import setup_logger
@@ -198,61 +157,6 @@ def generate_monthly_report_cmd(args: argparse.Namespace) -> bool:
     return _present_report_outcome(outcome, "月报")
 
 
-def list_reports() -> None:
-    """列出已有日报"""
-    console.print("\n[bold green]===== 已有日报列表 =====[/bold green]\n")
-
-    store = SQLiteStore()
-    dates = store.list_all_reports()
-
-    if not dates:
-        console.print("[yellow]暂无日报数据[/yellow]")
-        return
-
-    # 按月分组
-    from collections import defaultdict
-
-    by_month: dict[str, list[str]] = defaultdict(list)
-    for date_str in dates:
-        month = date_str[:7]
-        by_month[month].append(date_str)
-
-    for month in sorted(by_month.keys(), reverse=True):
-        console.print(f"[bold cyan]{month}[/bold cyan]")
-        for date_str in sorted(by_month[month], reverse=True):
-            console.print(f"  - {date_str}")
-        console.print()
-
-    console.print(f"[green]共 {len(dates)} 份日报[/green]")
-
-
-def run_doctor_cmd(*, strict: bool = False) -> bool:
-    """检查运行环境和配置。"""
-    console.print("\n[bold green]===== 环境检查 =====[/bold green]\n")
-
-    result = collect_healthcheck(strict=strict)
-
-    if result.info:
-        console.print("[bold cyan]配置概览[/bold cyan]")
-        for label, value in result.info.items():
-            console.print(f"  - {label}: {value}")
-
-    if result.warnings:
-        console.print("\n[yellow]警告:[/yellow]")
-        for message in result.warnings:
-            console.print(f"  [!] {message}")
-
-    if result.errors:
-        console.print("\n[red]错误:[/red]")
-        for message in result.errors:
-            console.print(f"  [X] {message}")
-        console.print("\n[red]环境检查失败，请修复上述问题[/red]")
-        return False
-
-    console.print("\n[green]所有检查通过，可以正常使用[/green]")
-    return True
-
-
 def main() -> int:
     """主函数"""
     parser = build_parser()
@@ -271,10 +175,18 @@ def main() -> int:
             case "monthly":
                 return 0 if generate_monthly_report_cmd(args) else 1
             case "list":
-                list_reports()
+                list_reports(console, store=SQLiteStore())
                 return 0
             case "doctor":
-                return 0 if run_doctor_cmd(strict=args.strict) else 1
+                return (
+                    0
+                    if run_doctor_cmd(
+                        console=console,
+                        collect=collect_healthcheck,
+                        strict=args.strict,
+                    )
+                    else 1
+                )
 
     except KeyboardInterrupt:
         console.print("\n[yellow]操作已取消[/yellow]")

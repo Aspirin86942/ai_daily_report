@@ -254,7 +254,7 @@ def test_monthly_command_maps_namespace_to_report_runner_request(monkeypatch):
     assert any("月报预览" in text for text in printed)
 
 
-def test_list_reports_uses_sqlite_store(monkeypatch):
+def test_main_dispatches_list_with_sqlite_store(monkeypatch):
     calls: dict[str, int] = {"init": 0, "list_all_reports": 0}
 
     class StubSQLiteStore:
@@ -267,9 +267,11 @@ def test_list_reports_uses_sqlite_store(monkeypatch):
 
     printed = _patch_console(monkeypatch)
     monkeypatch.setattr(main, "SQLiteStore", StubSQLiteStore)
+    monkeypatch.setattr(sys, "argv", ["main.py", "list"])
 
-    main.list_reports()
+    status = main.main()
 
+    assert status == 0
     assert calls == {"init": 1, "list_all_reports": 1}
     assert any("已有日报列表" in text for text in printed)
     assert any("暂无日报数据" in text for text in printed)
@@ -299,7 +301,7 @@ def test_build_parser_accepts_report_doctor_and_alias_commands():
     assert alias_args.strict is False
 
 
-def test_run_doctor_cmd_uses_healthcheck(monkeypatch):
+def test_main_dispatches_strict_doctor(monkeypatch):
     printed = _patch_console(monkeypatch)
     strict_values: list[bool] = []
 
@@ -319,10 +321,11 @@ def test_run_doctor_cmd_uses_healthcheck(monkeypatch):
         )
 
     monkeypatch.setattr(main, "collect_healthcheck", collect)
+    monkeypatch.setattr(sys, "argv", ["main.py", "doctor", "--strict"])
 
-    success = main.run_doctor_cmd(strict=True)
+    status = main.main()
 
-    assert success is True
+    assert status == 0
     assert strict_values == [True]
     assert any("环境检查" in str(text) for text in printed)
     assert any("LLM Provider" in str(text) for text in printed)
@@ -436,10 +439,18 @@ def test_main_returns_zero_when_report_command_succeeds(
 
 def test_main_returns_doctor_status(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["main.py", "doctor"])
-    monkeypatch.setattr(main, "run_doctor_cmd", lambda *, strict=False: False)
+    monkeypatch.setattr(
+        main,
+        "run_doctor_cmd",
+        lambda *, console, collect, strict=False: False,
+    )
     assert main.main() == 1
 
-    monkeypatch.setattr(main, "run_doctor_cmd", lambda *, strict=False: True)
+    monkeypatch.setattr(
+        main,
+        "run_doctor_cmd",
+        lambda *, console, collect, strict=False: True,
+    )
     assert main.main() == 0
 
 
@@ -450,7 +461,7 @@ def test_main_returns_zero_without_subcommand(monkeypatch):
 
 
 def test_main_returns_one_for_unexpected_exception(monkeypatch):
-    def fail() -> None:
+    def fail(*args, **kwargs) -> None:
         raise RuntimeError("unexpected failure")
 
     printed = _patch_console(monkeypatch)
@@ -462,7 +473,7 @@ def test_main_returns_one_for_unexpected_exception(monkeypatch):
 
 
 def test_main_returns_130_for_keyboard_interrupt(monkeypatch):
-    def interrupt() -> None:
+    def interrupt(*args, **kwargs) -> None:
         raise KeyboardInterrupt
 
     printed = _patch_console(monkeypatch)

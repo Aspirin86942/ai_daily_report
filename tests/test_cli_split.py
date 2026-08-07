@@ -5,6 +5,8 @@ from __future__ import annotations
 import pytest
 
 from src.cli.parser import build_parser
+from src.cli.doctor import run_doctor_cmd
+from src.cli.list_reports import list_reports
 
 
 @pytest.mark.parametrize(
@@ -37,3 +39,45 @@ def test_parser_preserves_daily_flags() -> None:
 
     assert args.no_save is True
     assert args.date == "2026-02-05"
+
+
+def test_list_reports_shows_empty_hint() -> None:
+    printed: list[str] = []
+    console = type(
+        "Console",
+        (),
+        {"print": lambda self, *args, **kwargs: printed.append(args[0])},
+    )()
+    store = type("Store", (), {"list_all_reports": lambda self: []})()
+
+    list_reports(console, store=store)
+
+    assert any("暂无日报数据" in text for text in printed)
+
+
+def test_run_doctor_cmd_passes_strict() -> None:
+    printed: list[str] = []
+    console = type(
+        "Console",
+        (),
+        {"print": lambda self, *args, **kwargs: printed.append(args[0])},
+    )()
+    seen: list[bool] = []
+
+    def collect(*, strict: bool = False):
+        seen.append(strict)
+        return type(
+            "Result",
+            (),
+            {
+                "info": {"LLM Provider": "deepseek"},
+                "warnings": ["w"],
+                "errors": [],
+            },
+        )()
+
+    ok = run_doctor_cmd(console=console, collect=collect, strict=True)
+
+    assert ok is True
+    assert seen == [True]
+    assert any("所有检查通过" in text for text in printed)
