@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from argparse import Namespace
 from datetime import date
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
+import main
 from src.cli.daily import generate_daily_report
 from src.cli.common import present_report_outcome
 from src.cli.parser import build_parser
@@ -285,3 +290,39 @@ def test_common_preserves_generation_failure_message() -> None:
 
     assert ok is False
     assert any("生成失败: LLM unavailable" in text for text in printed)
+
+
+def test_help_path_does_not_import_rich_or_business_stack(tmp_path: Path) -> None:
+    """--help 在 argparse 退出前不得加载 UI、LLM、store 或报告 handler。"""
+    (tmp_path / "sitecustomize.py").write_text(
+        "\n".join(
+            [
+                "import builtins",
+                "real_import = builtins.__import__",
+                "def guarded_import(name, *args, **kwargs):",
+                "    blocked = ('rich', 'src.core.llm', 'src.services.sqlite_store', 'src.cli.daily', 'src.cli.weekly', 'src.cli.monthly')",
+                "    if any(name == item or name.startswith(item + '.') for item in blocked):",
+                "        raise RuntimeError(f'forbidden help import: {name}')",
+                "    return real_import(name, *args, **kwargs)",
+                "builtins.__import__ = guarded_import",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        filter(None, [str(tmp_path), env.get("PYTHONPATH", "")])
+    )
+
+    completed = subprocess.run(
+        [sys.executable, str(Path(main.__file__).resolve()), "--help"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=env,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert "usage:" in completed.stdout
+    assert "forbidden help import" not in completed.stdout + completed.stderr

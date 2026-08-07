@@ -7,18 +7,27 @@ import subprocess
 import sys
 
 import pytest
+import rich.console as rich_console_module
 
 import main
+from src.cli import daily as daily_cli
+from src.cli import doctor as doctor_cli
+from src.cli import list_reports as list_cli
+from src.cli import monthly as monthly_cli
+from src.cli import weekly as weekly_cli
 from src.core.healthcheck import HealthCheckResult
+from src.core import healthcheck as healthcheck_module
+from src.services import sqlite_store as sqlite_store_module
 
 
 def _patch_console(monkeypatch) -> list[str]:
     printed: list[str] = []
-    monkeypatch.setattr(
-        main.console,
-        "print",
-        lambda *args, **kwargs: printed.append(args[0] if args else ""),
-    )
+
+    class StubConsole:
+        def print(self, *args, **kwargs) -> None:
+            printed.append(args[0] if args else "")
+
+    monkeypatch.setattr(rich_console_module, "Console", StubConsole)
     return printed
 
 
@@ -34,7 +43,7 @@ def test_main_dispatches_list_with_sqlite_store(monkeypatch):
             return []
 
     printed = _patch_console(monkeypatch)
-    monkeypatch.setattr(main, "SQLiteStore", StubSQLiteStore)
+    monkeypatch.setattr(sqlite_store_module, "SQLiteStore", StubSQLiteStore)
     monkeypatch.setattr(sys, "argv", ["main.py", "list"])
 
     status = main.main()
@@ -45,11 +54,10 @@ def test_main_dispatches_list_with_sqlite_store(monkeypatch):
     assert any("暂无日报数据" in text for text in printed)
 
 
-def test_main_uses_shared_parser() -> None:
-    parser = main.build_parser()
-
-    assert parser.parse_args(["daily", "--input", "work"]).subcommand == "daily"
-    assert parser.parse_args(["check-config"]).subcommand == "doctor"
+def test_main_module_does_not_export_command_handlers() -> None:
+    assert not hasattr(main, "generate_daily_report")
+    assert not hasattr(main, "SQLiteStore")
+    assert not hasattr(main, "Console")
 
 
 def test_main_dispatches_strict_doctor(monkeypatch):
@@ -71,7 +79,7 @@ def test_main_dispatches_strict_doctor(monkeypatch):
             errors=[],
         )
 
-    monkeypatch.setattr(main, "collect_healthcheck", collect)
+    monkeypatch.setattr(healthcheck_module, "collect_healthcheck", collect)
     monkeypatch.setattr(sys, "argv", ["main.py", "doctor", "--strict"])
 
     status = main.main()
@@ -83,14 +91,16 @@ def test_main_dispatches_strict_doctor(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("handler_name", "argv"),
+    ("handler_module", "handler_name", "argv"),
     [
-        ("generate_daily_report", ["daily", "--input", "work"]),
+        (daily_cli, "generate_daily_report", ["daily", "--input", "work"]),
         (
+            weekly_cli,
             "generate_weekly_report_cmd",
             ["weekly", "2026-W01", "--source", "db"],
         ),
         (
+            monthly_cli,
             "generate_monthly_report_cmd",
             ["monthly", "2026-01", "--source", "db"],
         ),
@@ -98,24 +108,27 @@ def test_main_dispatches_strict_doctor(monkeypatch):
 )
 def test_main_returns_one_when_report_command_fails(
     monkeypatch,
+    handler_module,
     handler_name: str,
     argv: list[str],
 ):
-    monkeypatch.setattr(main, handler_name, lambda args, *, console: False)
+    monkeypatch.setattr(handler_module, handler_name, lambda args, *, console: False)
     monkeypatch.setattr(sys, "argv", ["main.py", *argv])
 
     assert main.main() == 1
 
 
 @pytest.mark.parametrize(
-    ("handler_name", "argv"),
+    ("handler_module", "handler_name", "argv"),
     [
-        ("generate_daily_report", ["daily", "--input", "work"]),
+        (daily_cli, "generate_daily_report", ["daily", "--input", "work"]),
         (
+            weekly_cli,
             "generate_weekly_report_cmd",
             ["weekly", "2026-W01", "--source", "db"],
         ),
         (
+            monthly_cli,
             "generate_monthly_report_cmd",
             ["monthly", "2026-01", "--source", "db"],
         ),
@@ -123,10 +136,11 @@ def test_main_returns_one_when_report_command_fails(
 )
 def test_main_returns_zero_when_report_command_succeeds(
     monkeypatch,
+    handler_module,
     handler_name: str,
     argv: list[str],
 ):
-    monkeypatch.setattr(main, handler_name, lambda args, *, console: True)
+    monkeypatch.setattr(handler_module, handler_name, lambda args, *, console: True)
     monkeypatch.setattr(sys, "argv", ["main.py", *argv])
 
     assert main.main() == 0
@@ -135,14 +149,14 @@ def test_main_returns_zero_when_report_command_succeeds(
 def test_main_returns_doctor_status(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["main.py", "doctor"])
     monkeypatch.setattr(
-        main,
+        doctor_cli,
         "run_doctor_cmd",
         lambda *, console, collect, strict=False: False,
     )
     assert main.main() == 1
 
     monkeypatch.setattr(
-        main,
+        doctor_cli,
         "run_doctor_cmd",
         lambda *, console, collect, strict=False: True,
     )
@@ -161,7 +175,7 @@ def test_main_returns_one_for_unexpected_exception(monkeypatch):
 
     printed = _patch_console(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["main.py", "list"])
-    monkeypatch.setattr(main, "list_reports", fail)
+    monkeypatch.setattr(list_cli, "list_reports", fail)
 
     assert main.main() == 1
     assert any("unexpected failure" in text for text in printed)
@@ -173,7 +187,7 @@ def test_main_returns_130_for_keyboard_interrupt(monkeypatch):
 
     printed = _patch_console(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["main.py", "list"])
-    monkeypatch.setattr(main, "list_reports", interrupt)
+    monkeypatch.setattr(list_cli, "list_reports", interrupt)
 
     assert main.main() == 130
     assert any("操作已取消" in text for text in printed)
