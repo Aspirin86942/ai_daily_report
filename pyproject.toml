@@ -26,6 +26,8 @@ dev = [
 
 [tool.uv]
 package = false
+cache-dir = ".uv/cache"
+link-mode = "hardlink"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

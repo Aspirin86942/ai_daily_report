@@ -44,3 +44,18 @@
 | 扫描基准测试 | 1.83s | 1.76s | 缩短 0.07s（3.8%）；两侧命令均未暴露真实扫描吞吐量 |
 
 阶段 0–2 的验收目标是工具链等价迁移，不把本次单机耗时波动解释为业务性能优化成果。后续启动与扫描性能阶段应继续以相同命令、固定语料和多次重复测量为准。
+
+## Windows 环境风险收口
+
+| 检查项 | 调整前 | 调整后 |
+|---|---|---|
+| Conda base | 新 PowerShell 自动激活，并注入无效的 `SSL_CERT_DIR` | 用户级 `auto_activate: false`；Miniforge 保留并按需显式激活 |
+| uv cache | `C:\Users\<user>\AppData\Local\uv\cache`，与 D 盘项目跨卷 | 项目内 `.uv/cache`，与 `.venv` 同盘 |
+| uv 安装方式 | hardlink 失败后回退复制 | `[tool.uv] link-mode = "hardlink"`；`fsutil hardlink list` 确认 cache 与 `.venv` 共享文件 |
+| Python 环境 | 迁移过程中复用既有 `.venv` | 使用 Miniforge CPython 3.13.13 清空重建，并按 `uv.lock` frozen 安装 58 个包 |
+| warm sync | 未形成同盘证据 | `uv sync --frozen` 外层实测 0.071s，uv 内部检查 58 个包耗时 6ms |
+
+- 修改前的系统级 Conda 配置已备份到 `%LOCALAPPDATA%\ai-daily-report\backups` 并核对 SHA-256；修改前用户级 `.condarc` 不存在。
+- 在退出旧的 Conda base 进程环境后，`SSL_CERT_DIR` / `SSL_CERT_FILE` 均不再注入，uv 同步、锁文件检查、pytest 与 CLI 全程无证书警告。
+- 当前已启动的 Codex/终端进程仍可能继承修改前的 `(base)` 环境；关闭后重新打开即可使用新的不自动激活设置。
+- 干净环境首次填充新 cache 用时约 2 分 45 秒，属于一次性下载与准备成本；随后使用 hardlink 安装 58 个包仅耗时 1.10s。

@@ -13,7 +13,9 @@
 
 ## Commands
 
-Python 依赖与测试统一走 uv；Rust 组件仍用 cargo。
+Python 依赖与测试统一走 uv；Rust 组件仍用 cargo。Windows 上由 Miniforge
+提供基础 Python，但不激活 Conda base；uv 使用项目独立的 `.venv`，并把缓存
+放在同盘的 `.uv/cache` 以使用 hardlink。
 
 ```bash
 # 安装依赖（uv）
