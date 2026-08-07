@@ -23,6 +23,7 @@ dev = [
     "pytest==8.4.2",
     "pytest-timeout>=2.3,<3",
     "pytest-xdist>=3.6,<4",
+    "reportlab>=4.0,<5",
 ]
 
 [tool.uv]

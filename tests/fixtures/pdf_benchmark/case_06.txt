@@ -1,0 +1,1 @@
+Mixed sample: keep identifiers like AUTH-2026-001, numbers 3.14159, and Chinese punctuation intact.
