@@ -117,3 +117,29 @@ Plan 3 拆分后的轻量入口按相同子进程计时口径各重复 3 次，�
 - backend 为 `rust_office_oxide_v1: 2`、`python_office_v1: 1`；lane 为 `rust_office_process: 2`、`python_document_process: 1`。
 - 门禁条件：两次均 `status=ok` 且零错误/超时；warm 全量复用且零重解析；内容哈希、backend、lane 一致；cold/warm 吞吐均为正且 warm 高于 cold。本次实测全部通过。
 - 新增吞吐测试后全量门禁为 237 passed、1 skipped、0 failed（34.21s）；`uv lock --check`、`uv sync --frozen` 与 `doctor --strict` 均以退出码 0 完成。
+
+## 阶段 6：扫描外层调用审查与复测
+
+使用同一固定脱敏语料、全新 scanner DB 和 2000-01-01 至 2100-01-01
+日期窗口再次执行 cold/warm；证据位于已忽略的
+`.uv/benchmarks/scanner-fixture-20260808-011131/`。
+
+| 指标 | cold | warm |
+|---|---:|---:|
+| status | ok | ok |
+| 发现/成功/错误/超时 | 3 / 3 / 0 / 0 | 3 / 3 / 0 / 0 |
+| reused / reparsed | 0 / 3 | 3 / 0 |
+| total_duration_ms | 805 | 49 |
+| files_per_second | 3.727 | 61.224 |
+
+- cold/warm 文件集合与内容 SHA-256 全部一致；backend 都是
+  `rust_office_oxide_v1: 2`、`python_office_v1: 1`，worker lane 都是
+  `rust_office_process: 2`、`python_document_process: 1`。
+- `tests/test_benchmark_scanner.py -v` 为 6 passed（1.77s）。
+- `ReportRunner._build_scan_context()` 每个 scan recipe 只调用一次
+  `scheduler.build_context()`；`ContextScheduler` 再只调用一次 engine；
+  `RustContextClient` 对应一次 `build-context` 子进程。
+- 周/月 `source=db` 分支直接读取报告存储；行为测试明确断言 scheduler
+  调用为零。周/月 scan 行为测试均断言 scheduler 调用恰好一次。
+- 未发现同周期重复扫描或额外 scanner 往返。900s 是进程级安全上限，
+  不是已观测到的耗时瓶颈；没有证据支持收紧它。本 Task 不修改生产代码。
