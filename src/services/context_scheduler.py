@@ -7,7 +7,7 @@ from datetime import date
 from typing import Any
 
 from ..core.config import config
-from .context_engine import ContextBuildResult, _ContextEngine
+from .context_engine import ContextBuildResult, ContextEngine
 from .rust_context_client import RustContextClient
 
 
@@ -30,7 +30,7 @@ class ContextScheduler:
     def __init__(
         self,
         *,
-        engine: _ContextEngine | None = None,
+        engine: ContextEngine | None = None,
         runtime_config: Any | None = None,
     ) -> None:
         self._engine = engine or self._engine_from_config(runtime_config or config)
@@ -52,7 +52,7 @@ class ContextScheduler:
             raise ValueError("start_date must be earlier than or equal to end_date")
 
     @staticmethod
-    def _engine_from_config(runtime_config: Any) -> _ContextEngine:
+    def _engine_from_config(runtime_config: Any) -> ContextEngine:
         engine_name = runtime_config.scanner_engine
         if engine_name != "rust_v2":
             raise ValueError(f"unsupported scanner engine: {engine_name!r}")

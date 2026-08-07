@@ -39,11 +39,11 @@ class ContextBuildResult:
         )
 
 
-class _ContextEngine(Protocol):
+class ContextEngine(Protocol):
     """仅供 ContextScheduler 注入的完整 engine adapter。"""
 
     def build_context(self, request: object) -> ContextEnvelope:
         ...
 
 
-__all__ = ["ContextBuildResult"]
+__all__ = ["ContextBuildResult", "ContextEngine"]
