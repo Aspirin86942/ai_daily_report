@@ -514,9 +514,12 @@ CREATE TABLE context_runs (
     reused_from_context_run_id INTEGER REFERENCES context_runs(context_run_id) ON DELETE SET NULL,
     snapshot_hit INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_hit IN (0, 1)),
     CHECK (
-        (snapshot_hit = 1 AND reused_from_context_run_id IS NOT NULL)
+        snapshot_hit = 1 OR reused_from_context_run_id IS NULL
+    ),
+    CHECK (
+        (status IN ('success', 'partial') AND artifact_id IS NOT NULL)
         OR
-        (snapshot_hit = 0 AND reused_from_context_run_id IS NULL)
+        (status = 'error' AND artifact_id IS NULL)
     )
 ) STRICT;
 
@@ -766,9 +769,12 @@ CREATE TABLE context_runs_v2 (
     reused_from_context_run_id INTEGER REFERENCES context_runs_v2(context_run_id) ON DELETE SET NULL,
     snapshot_hit INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_hit IN (0, 1)),
     CHECK (
-        (snapshot_hit = 1 AND reused_from_context_run_id IS NOT NULL)
+        snapshot_hit = 1 OR reused_from_context_run_id IS NULL
+    ),
+    CHECK (
+        (status IN ('success', 'partial') AND artifact_id IS NOT NULL)
         OR
-        (snapshot_hit = 0 AND reused_from_context_run_id IS NULL)
+        (status = 'error' AND artifact_id IS NULL)
     )
 ) STRICT;
 "#;
@@ -806,10 +812,12 @@ fn rebuild_context_runs(transaction: &rusqlite::Transaction<'_>) -> Result<(), S
 }
 
 /// True when the committed `context_runs` table already carries the snapshot
-/// relationship CHECK (the table definition includes the marker text).
+/// relationship + status⇔artifact CHECKs (spec Part 5.1). The strongest marker
+/// is the status⇔artifact_id CHECK; databases that predate it are rebuilt by the
+/// v2 amendment so migrated/legacy rows satisfy the new invariant (fail closed).
 fn context_runs_has_snapshot_check(connection: &Connection) -> rusqlite::Result<bool> {
     connection.query_row(
-        "SELECT instr(sql, 'snapshot_hit = 1 AND reused_from_context_run_id IS NOT NULL') > 0
+        "SELECT instr(sql, 'status IN (''success'', ''partial'') AND artifact_id IS NOT NULL') > 0
          FROM sqlite_schema WHERE type='table' AND name='context_runs'",
         [],
         |row| row.get(0),
@@ -1447,6 +1455,18 @@ mod tests {
                 )
                 .expect("scan_runs row");
         }
+        // Every success context_runs row must reference an artifact (spec Part
+        // 5.1 status⇔artifact_id CHECK); seed one ineligible payload artifact.
+        connection
+            .execute(
+                "INSERT INTO context_artifacts(
+                    snapshot_eligible, snapshot_key_sha256, snapshot_key_json,
+                    final_context, context_sha256, semantic_summary_json,
+                    artifact_size_bytes, created_at_ms, last_accessed_bucket
+                 ) VALUES (0, NULL, NULL, 'ctx', ?1, '{}', 3, 1, '2026-08-08')",
+                params!["1".repeat(64)],
+            )
+            .expect("payload artifact row");
         connection
             .execute(
                 "INSERT INTO context_runs(
@@ -1455,27 +1475,44 @@ mod tests {
                     timeout_count, included_file_count, omitted_file_count,
                     error_file_count, input_chars, output_chars, total_duration_ms,
                     discovery_duration_ms, parse_duration_ms, compression_duration_ms,
-                    created_at_ms, snapshot_hit
+                    created_at_ms, artifact_id, snapshot_hit
                  ) VALUES (1, 1, ?1, 'success', 'ctx', ?2, 1, 1, 0, 1, 0, 0,
-                           1, 1, 1, 0, 0, 0, 1, 0)",
+                           1, 1, 1, 0, 0, 0, 1, 1, 0)",
                 params!["0".repeat(64), "1".repeat(64)],
             )
             .expect("snapshot_hit=0 without reused_from must insert");
-        let orphan_hit = connection.execute(
+        // A snapshot-hit row whose source run was GC'd keeps snapshot_hit=1 with a
+        // NULL reused_from (ON DELETE SET NULL) — the relaxed CHECK allows it.
+        connection
+            .execute(
+                "INSERT INTO context_runs(
+                    context_run_id, scan_run_id, context_profile_hash, status,
+                    final_context, context_sha256, source_file_count, success_count,
+                    timeout_count, included_file_count, omitted_file_count,
+                    error_file_count, input_chars, output_chars, total_duration_ms,
+                    discovery_duration_ms, parse_duration_ms, compression_duration_ms,
+                    created_at_ms, artifact_id, snapshot_hit
+                 ) VALUES (2, 2, ?1, 'success', 'ctx', ?2, 1, 1, 0, 1, 0, 0,
+                           1, 1, 1, 0, 0, 0, 1, 1, 1)",
+                params!["0".repeat(64), "1".repeat(64)],
+            )
+            .expect("snapshot_hit=1 with a null reused_from (post-GC) must insert");
+        // snapshot_hit=0 with a non-null reused_from is invalid.
+        let orphan_non_hit = connection.execute(
             "INSERT INTO context_runs(
                 context_run_id, scan_run_id, context_profile_hash, status,
                 final_context, context_sha256, source_file_count, success_count,
                 timeout_count, included_file_count, omitted_file_count,
                 error_file_count, input_chars, output_chars, total_duration_ms,
                 discovery_duration_ms, parse_duration_ms, compression_duration_ms,
-                created_at_ms, snapshot_hit
-             ) VALUES (2, 2, ?1, 'success', 'ctx', ?2, 1, 1, 0, 1, 0, 0,
-                       1, 1, 1, 0, 0, 0, 1, 1)",
+                created_at_ms, artifact_id, snapshot_hit, reused_from_context_run_id
+             ) VALUES (3, 3, ?1, 'success', 'ctx', ?2, 1, 1, 0, 1, 0, 0,
+                       1, 1, 1, 0, 0, 0, 1, 1, 0, 1)",
             params!["0".repeat(64), "1".repeat(64)],
         );
         assert!(
-            orphan_hit.is_err(),
-            "snapshot_hit=1 without reused_from_context_run_id must be rejected"
+            orphan_non_hit.is_err(),
+            "snapshot_hit=0 with reused_from_context_run_id must be rejected"
         );
     }
 }

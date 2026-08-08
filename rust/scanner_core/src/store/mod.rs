@@ -6,9 +6,9 @@ pub mod schema;
 
 use ai_daily_discovery::normalize_contract_path_text;
 use ai_daily_scanner_contract::{
-    AutoVacuumMode, BuildContextRequest, ContextAction, ContextDecision, ContextEnvelope,
-    ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, ExtensionMetric,
-    MaintenanceDeletedV1, MaintenanceMode, MaintenancePostIntegrityCheck,
+    AutoVacuumMode, BuildContextRequest, ContextAction, ContextDecision,
+    ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode,
+    ExtensionMetric, MaintenanceDeletedV1, MaintenanceMode, MaintenancePostIntegrityCheck,
     MaintenancePreIntegrityCheck, MaintenanceRequestV1, MaintenanceResponseV1, MaintenanceSizeV1,
     MaintenanceStatus, MaintenanceVacuumStatus, MaintenanceVacuumV1, NormalizedScannerProfileV1,
     Nullable, ParseStatus, RunStatus, StageMetric, StageName, UpgradeDatabaseRequestV1,
@@ -21,6 +21,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+use crate::artifact::{ArtifactDraft, ArtifactFileRow, SnapshotKeyParts};
 
 pub use cache::{
     classifier_profile_hash, parse_profile_hash, sha256_hex, CacheAwarePlanEntry, CacheEntry,
@@ -62,6 +64,8 @@ pub enum StoreError {
     SchemaUpgradeRequired,
     #[error("scanner database schema is newer than this engine")]
     SchemaTooNew,
+    #[error("artifact is not dedup-compatible with the stored snapshot: {0}")]
+    ArtifactMismatch(String),
 }
 
 impl StoreError {
@@ -76,6 +80,7 @@ impl StoreError {
             Self::RunCorrupt(_) => ErrorCode::RunCorrupt,
             Self::RunNotFound => ErrorCode::RunNotFound,
             Self::SchemaUpgradeRequired | Self::SchemaTooNew => ErrorCode::SchemaUpgradeRequired,
+            Self::ArtifactMismatch(_) => ErrorCode::BudgetModelMismatch,
         }
     }
 
@@ -368,6 +373,31 @@ pub struct FinalizationBatch {
     pub stage_metrics: Vec<StageMetric>,
     pub extension_metrics: Vec<ExtensionMetric>,
     pub context: Option<ContextRunRecord>,
+    /// Success/Partial artifact draft to persist (spec Part 5.1). `None` for
+    /// Error runs, which carry no artifact.
+    pub artifact: Option<ArtifactDraft>,
+    /// Canonical snapshot-key parts for an eligible artifact (spec Part 5.4).
+    /// `Some` exactly when the artifact is `snapshot_eligible`.
+    pub snapshot_key: Option<SnapshotKeyParts>,
+    /// Snapshot-hit reference: when set, the current run reuses the referenced
+    /// artifact instead of writing a new one (`snapshot_hit=1` +
+    /// `reused_from_context_run_id` are recorded on the current `context_runs`).
+    pub snapshot_hit: Option<SnapshotHitRef>,
+}
+
+/// A snapshot lookup hit: the eligible artifact and the committed Success source
+/// run selected by `(finished_at_ms DESC, context_run_id DESC)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotHit {
+    pub artifact_id: i64,
+    pub source_context_run_id: i64,
+}
+
+/// The reference a snapshot-hit current run writes onto its `context_runs` row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotHitRef {
+    pub artifact_id: i64,
+    pub reused_from_context_run_id: i64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1035,6 +1065,7 @@ impl ScannerStore {
     ) -> Result<(), StoreError> {
         let envelope = validate_finalization(active, batch)?;
         let now_ms = checked_i64(now_ms, "finalization timestamp")?;
+        let metadata_json = envelope_metadata_json(&envelope)?;
         schema::require_durable_finalization(&self.connection)
             .map_err(|error| cache_write(error.to_string()))?;
         let transaction = self
@@ -1063,8 +1094,14 @@ impl ScannerStore {
             .map_err(cache_write)?;
         cache::write_success_cache(&transaction, now_ms, &batch.cache_writes)
             .map_err(cache_write)?;
-        inventory::insert_file_results(&transaction, active.scan_run_id, &batch.file_results)
-            .map_err(cache_write)?;
+        let snapshot_rows = batch.snapshot_hit.is_some();
+        inventory::insert_file_results(
+            &transaction,
+            active.scan_run_id,
+            &batch.file_results,
+            snapshot_rows,
+        )
+        .map_err(cache_write)?;
         insert_diagnostics(&transaction, active.scan_run_id, &batch.diagnostics)
             .map_err(cache_write)?;
         crate::metrics::insert_metrics(
@@ -1074,9 +1111,85 @@ impl ScannerStore {
             &batch.extension_metrics,
         )
         .map_err(cache_write)?;
+
+        // ---- artifact write / snapshot-hit reference + context_runs ----
+        // spec Part 4/5.2: establish the current `context_runs.artifact_id`
+        // reference and a temporary protected set BEFORE the retention/orphan
+        // sweep, so a just-hit artifact can never be reclaimed in the
+        // "old reference deleted, current reference not yet created" window.
+        let mut protected_runs: HashSet<i64> = HashSet::new();
+        protected_runs.insert(active.scan_run_id);
+        let mut protected_artifacts: HashSet<i64> = HashSet::new();
+        let mut artifact_for_rebuild: Option<ArtifactDraft> = None;
+
         if let Some(context) = &batch.context {
-            insert_context(&transaction, active.scan_run_id, context, now_ms)
-                .map_err(cache_write)?;
+            let artifact_id = if let Some(hit) = &batch.snapshot_hit {
+                let draft = load_artifact_from_connection(&transaction, hit.artifact_id)?;
+                protected_artifacts.insert(hit.artifact_id);
+                protected_runs.insert(hit.reused_from_context_run_id);
+                artifact_for_rebuild = Some(draft);
+                hit.artifact_id
+            } else {
+                let draft = batch.artifact.as_ref().ok_or_else(|| {
+                    StoreError::RunCorrupt(
+                        "success/partial run must carry an artifact draft".to_string(),
+                    )
+                })?;
+                if draft.snapshot_eligible != batch.snapshot_key.is_some() {
+                    return Err(StoreError::RunCorrupt(
+                        "artifact eligibility disagrees with the snapshot key".to_string(),
+                    ));
+                }
+                let artifact_id = if let Some(key) = &batch.snapshot_key {
+                    if let Some(existing) = dedup_artifact(&transaction, draft, key)? {
+                        existing
+                    } else {
+                        let size = artifact_size_bytes(draft, Some(key), &semantic_summary_json_for(draft)?)?;
+                        make_room_for_artifact(&transaction, &protected_artifacts, size)?;
+                        insert_artifact(&transaction, draft, Some(key), now_ms)?
+                    }
+                } else {
+                    let size = artifact_size_bytes(draft, None, &semantic_summary_json_for(draft)?)?;
+                    make_room_for_artifact(&transaction, &protected_artifacts, size)?;
+                    insert_artifact(&transaction, draft, None, now_ms)?
+                };
+                protected_artifacts.insert(artifact_id);
+                artifact_for_rebuild = Some(draft.clone());
+                artifact_id
+            };
+            insert_context(
+                &transaction,
+                active.scan_run_id,
+                context,
+                Some(artifact_id),
+                batch.snapshot_hit.is_some(),
+                batch
+                    .snapshot_hit
+                    .as_ref()
+                    .map(|hit| hit.reused_from_context_run_id),
+                now_ms,
+            )
+            .map_err(cache_write)?;
+            // spec Part 5.2: the artifact semantic summary must agree with the
+            // current summary (both derive from the same semantic decisions).
+            let semantic = &artifact_for_rebuild
+                .as_ref()
+                .expect("artifact set above")
+                .semantic_summary;
+            let summary = &context.summary;
+            if semantic.source_file_count != summary.source_file_count
+                || semantic.success_count != summary.success_count
+                || semantic.timeout_count != summary.timeout_count
+                || semantic.included_file_count != summary.included_file_count
+                || semantic.omitted_file_count != summary.omitted_file_count
+                || semantic.error_file_count != summary.error_file_count
+                || semantic.input_chars != summary.input_chars
+                || semantic.output_chars != summary.output_chars
+            {
+                return Err(StoreError::RunCorrupt(
+                    "artifact semantic summary disagrees with the current summary".to_string(),
+                ));
+            }
         }
 
         let status = terminal_status_text(batch.status)?;
@@ -1085,12 +1198,13 @@ impl ScannerStore {
             .execute(
                 "UPDATE scan_runs
                  SET status=?1, updated_at_ms=?2, finished_at_ms=?2, final_envelope_json=?3,
-                     audit_size_bytes=?4
-                 WHERE scan_run_id=?5 AND owner_id=?6 AND status='running'",
+                     final_envelope_metadata_json=?4, audit_size_bytes=?5
+                 WHERE scan_run_id=?6 AND owner_id=?7 AND status='running'",
                 params![
                     status,
                     now_ms,
                     batch.envelope_json,
+                    metadata_json,
                     audit_size,
                     active.scan_run_id,
                     active.owner_id,
@@ -1116,10 +1230,28 @@ impl ScannerStore {
         if attempt_updated != 1 {
             return Err(StoreError::LeaseLost);
         }
-        // spec Part 4 terminal run GC: make room for the current record inside
-        // the same terminal transaction. Protected set = the current run.
-        retention_gc_for_current_run(&transaction, active.scan_run_id, now_ms, audit_size)
+        // spec Part 4/5.2 terminal run GC: protected set = current run +
+        // snapshot-hit source run; the just-hit artifact is protected by the
+        // current context_runs reference.
+        retention_gc_for_current_run(&transaction, &protected_runs, now_ms, audit_size)
             .map_err(cache_write)?;
+        // spec Part 5.2: finalize validates current rows + current summary +
+        // artifact semantic summary + the rebuilt envelope all agree.
+        let metadata_value: serde_json::Value = serde_json::from_str(&metadata_json)
+            .map_err(|error| StoreError::RunCorrupt(error.to_string()))?;
+        let rebuilt = crate::artifact::rebuild_envelope(
+            &metadata_value,
+            &envelope.summary,
+            artifact_for_rebuild.as_ref(),
+        )
+        .map_err(|message| {
+            StoreError::RunCorrupt(format!("rebuilt envelope is invalid: {message}"))
+        })?;
+        if canonical_envelope_json(&rebuilt)? != batch.envelope_json {
+            return Err(StoreError::RunCorrupt(
+                "rebuilt envelope disagrees with the committed envelope".to_string(),
+            ));
+        }
         let lease_deleted = transaction
             .execute(
                 "DELETE FROM engine_lease WHERE lease_key=1 AND owner_id=?1",
@@ -1256,6 +1388,47 @@ impl ScannerStore {
                 run_status: Some(snapshot.run_status),
             })?;
         Ok(snapshot)
+    }
+
+    /// Spec Part 5.2/5.4 snapshot lookup. The SQL must select an eligible
+    /// artifact AND at least one committed Success `context_runs` row
+    /// referencing it; an orphan artifact (no source run) is NOT a hit. The
+    /// `snapshot_key_json` is compared byte-for-byte (never trusts the hash
+    /// alone). The source run is chosen by `(finished_at_ms DESC,
+    /// context_run_id DESC)` from BEFORE the current transaction.
+    pub fn snapshot_lookup(
+        &self,
+        key: &SnapshotKeyParts,
+    ) -> Result<Option<SnapshotHit>, StoreError> {
+        let row: Option<(i64, i64)> = self
+            .connection
+            .query_row(
+                "SELECT a.artifact_id, r.context_run_id
+                 FROM context_artifacts a
+                 JOIN context_runs r ON r.artifact_id = a.artifact_id
+                 JOIN scan_runs s ON s.scan_run_id = r.scan_run_id
+                 WHERE a.snapshot_eligible = 1
+                   AND a.snapshot_key_sha256 = ?1
+                   AND a.snapshot_key_json = ?2
+                   AND r.status = 'success'
+                   AND s.status = 'success'
+                 ORDER BY s.finished_at_ms DESC, r.context_run_id DESC
+                 LIMIT 1",
+                params![key.sha256, key.canonical_json],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(cache_open)?;
+        Ok(row.map(|(artifact_id, source_context_run_id)| SnapshotHit {
+            artifact_id,
+            source_context_run_id,
+        }))
+    }
+
+    /// Loads an artifact (parent + owned file/decision rows) for snapshot
+    /// current-row rebuild and dedup comparison (spec Part 5.1 replay check).
+    pub fn load_artifact(&self, artifact_id: i64) -> Result<ArtifactDraft, StoreError> {
+        load_artifact_from_connection(&self.connection, artifact_id)
     }
 }
 
@@ -2774,7 +2947,7 @@ fn compute_audit_size(batch: &FinalizationBatch) -> i64 {
 /// 若删尽未保护旧 run 后当前 record 自身仍超 cap → fail closed（不部分落 audit）。
 fn retention_gc_for_current_run(
     transaction: &rusqlite::Transaction<'_>,
-    current_run_id: i64,
+    protected_runs: &HashSet<i64>,
     now_ms: i64,
     audit_size: i64,
 ) -> Result<(), StoreError> {
@@ -2784,14 +2957,17 @@ fn retention_gc_for_current_run(
         ));
     }
     let cutoff_ms = now_ms.saturating_sub(cache::TERMINAL_RUN_MAX_AGE_DAYS * 86_400_000);
+    let clause = terminal_run_not_in_clause(protected_runs);
+    let sql = format!(
+        "DELETE FROM scan_runs
+         WHERE status IN ('success', 'partial', 'error', 'abandoned')
+           AND finished_at_ms IS NOT NULL AND finished_at_ms < ?1
+           {clause}"
+    );
+    let mut params = vec![cutoff_ms];
+    params.extend(protected_runs.iter().copied());
     transaction
-        .execute(
-            "DELETE FROM scan_runs
-             WHERE scan_run_id <> ?1
-               AND status IN ('success', 'partial', 'error', 'abandoned')
-               AND finished_at_ms IS NOT NULL AND finished_at_ms < ?2",
-            params![current_run_id, cutoff_ms],
-        )
+        .execute(&sql, rusqlite::params_from_iter(params.iter()))
         .map_err(cache_write)?;
     loop {
         let count: i64 = transaction
@@ -2813,17 +2989,20 @@ fn retention_gc_for_current_run(
         if count <= cache::TERMINAL_RUN_MAX_COUNT && total <= cache::TERMINAL_AUDIT_MAX_BYTES {
             return Ok(());
         }
+        let clause = terminal_run_not_in_clause(protected_runs);
+        let sql = format!(
+            "DELETE FROM scan_runs WHERE scan_run_id IN (
+                SELECT scan_run_id FROM scan_runs
+                WHERE status IN ('success', 'partial', 'error', 'abandoned')
+                  {clause}
+                ORDER BY finished_at_ms ASC, scan_run_id ASC
+                LIMIT 1
+             )"
+        );
+        let mut params: Vec<i64> = protected_runs.iter().copied().collect();
+        params.sort_unstable();
         let deleted = transaction
-            .execute(
-                "DELETE FROM scan_runs WHERE scan_run_id IN (
-                    SELECT scan_run_id FROM scan_runs
-                    WHERE status IN ('success', 'partial', 'error', 'abandoned')
-                      AND scan_run_id <> ?1
-                    ORDER BY finished_at_ms ASC, scan_run_id ASC
-                    LIMIT 1
-                 )",
-                params![current_run_id],
-            )
+            .execute(&sql, rusqlite::params_from_iter(params.iter()))
             .map_err(cache_write)?;
         if deleted == 0 {
             // 无未保护旧 run 可删，仍超 cap → fail closed。
@@ -2832,6 +3011,14 @@ fn retention_gc_for_current_run(
             ));
         }
     }
+}
+
+fn terminal_run_not_in_clause(protected_runs: &HashSet<i64>) -> String {
+    if protected_runs.is_empty() {
+        return String::new();
+    }
+    let placeholders = vec!["?"; protected_runs.len()].join(",");
+    format!(" AND scan_run_id NOT IN ({placeholders})")
 }
 
 fn run_incremental_vacuum(connection: &Connection) -> Result<u64, StoreError> {
@@ -3806,6 +3993,9 @@ fn insert_context(
     transaction: &rusqlite::Transaction<'_>,
     scan_run_id: i64,
     context: &ContextRunRecord,
+    artifact_id: Option<i64>,
+    snapshot_hit: bool,
+    reused_from_context_run_id: Option<i64>,
     now_ms: i64,
 ) -> rusqlite::Result<()> {
     let summary = &context.summary;
@@ -3816,10 +4006,10 @@ fn insert_context(
             timeout_count, included_file_count, omitted_file_count,
             error_file_count, input_chars, output_chars, total_duration_ms,
             discovery_duration_ms, parse_duration_ms, compression_duration_ms,
-            created_at_ms
+            created_at_ms, artifact_id, reused_from_context_run_id, snapshot_hit
          ) VALUES (
             ?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
-            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+            ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
          )",
         params![
             scan_run_id,
@@ -3840,6 +4030,9 @@ fn insert_context(
             summary.parse_duration_ms as i64,
             summary.compression_duration_ms as i64,
             now_ms,
+            artifact_id,
+            reused_from_context_run_id,
+            i64::from(snapshot_hit),
         ],
     )?;
     let mut statement = transaction.prepare_cached(
@@ -3871,6 +4064,490 @@ where
 {
     serde_json::from_value(serde_json::Value::String(value.to_string()))
         .map_err(|_| StoreError::RunCorrupt("persisted contract enum is invalid".to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// context artifact write path + snapshot finalization（spec Part 4/5.1/5.2）
+// ---------------------------------------------------------------------------
+
+/// `final_envelope_metadata_json`（spec Part 5.1）：只保存 request/engine/status/
+/// warnings/error 等小字段，`warnings` 恒为数组（绝不 null），`error` 可为 null；
+/// `file_context`/`summary` 不进入 metadata（正文在 artifact，summary 在
+/// `context_runs`）。形状必须与 `rebuild_envelope` 期望完全一致。
+fn envelope_metadata_json(envelope: &ContextEnvelope) -> Result<String, StoreError> {
+    let value = serde_json::json!({
+        "contract": envelope.contract,
+        "protocol_version": envelope.protocol_version,
+        "request_id": envelope.request_id,
+        "engine_version": envelope.engine_version,
+        "engine_build": envelope.engine_build,
+        "status": serde_json::to_value(&envelope.status)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?,
+        "scan_run_id": envelope.scan_run_id.0,
+        "context_run_id": envelope.context_run_id.0,
+        "warnings": envelope.warnings,
+        "error": envelope.error.0,
+    });
+    serde_json::to_string(&value).map_err(|error| StoreError::InvalidRequest(error.to_string()))
+}
+
+/// spec Part 4: artifact 的 exact logical bytes —— parent 的 UTF-8/canonical JSON
+/// （final_context + semantic_summary_json + context_sha256 + 可选 snapshot key 两字段）
+/// 加全部 owned file/decision row 的 text payload 字节。child 不重复计费。
+fn artifact_size_bytes(
+    draft: &ArtifactDraft,
+    snapshot_key: Option<&SnapshotKeyParts>,
+    semantic_summary_json: &str,
+) -> Result<i64, StoreError> {
+    let mut size = draft.final_context.len() as i64
+        + semantic_summary_json.len() as i64
+        + draft.context_sha256.len() as i64;
+    if let Some(key) = snapshot_key {
+        size += key.sha256.len() as i64 + key.canonical_json.len() as i64;
+    }
+    for row in &draft.file_rows {
+        size += row.file_identity.len() as i64
+            + row.relative_path.len() as i64
+            + row.legacy_source_version.len() as i64
+            + row.source_guard_kind.as_ref().map_or(0, |value| value.len() as i64)
+            + row.source_guard_sha256.as_ref().map_or(0, |value| value.len() as i64)
+            + row.parse_profile_hash.len() as i64
+            + row.parser_backend.len() as i64
+            + row.worker_lane.len() as i64
+            + row.content_sha256.len() as i64;
+        if let Some(classifier) = &row.classifier {
+            size += classifier.classifier_build.len() as i64
+                + classifier.classifier_profile_hash.len() as i64;
+        }
+    }
+    for row in &draft.decision_rows {
+        size += row.file_identity.len() as i64
+            + row.relative_path.len() as i64
+            + row.reason.len() as i64
+            + row.error_code.len() as i64;
+    }
+    Ok(size)
+}
+
+fn semantic_summary_json_for(draft: &ArtifactDraft) -> Result<String, StoreError> {
+    serde_json::to_string(&draft.semantic_summary)
+        .map_err(|error| StoreError::InvalidRequest(error.to_string()))
+}
+
+/// Persists an `ArtifactDraft` (parent + owned file/decision rows) and returns
+/// the new `artifact_id` (spec Part 5.1). Eligible artifacts carry the snapshot
+/// key fields plus per-source-file rows; ineligible payload artifacts carry
+/// neither.
+fn insert_artifact(
+    transaction: &rusqlite::Transaction<'_>,
+    draft: &ArtifactDraft,
+    snapshot_key: Option<&SnapshotKeyParts>,
+    now_ms: i64,
+) -> Result<i64, StoreError> {
+    let semantic_summary_json = serde_json::to_string(&draft.semantic_summary)
+        .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+    let artifact_size = artifact_size_bytes(draft, snapshot_key, &semantic_summary_json)?;
+    let (key_sha256, key_json) = match snapshot_key {
+        Some(key) => (Some(key.sha256.as_str()), Some(key.canonical_json.as_str())),
+        None => (None, None),
+    };
+    let bucket = cache::date_bucket_for_ms(now_ms);
+    transaction
+        .execute(
+            "INSERT INTO context_artifacts(
+                snapshot_eligible, snapshot_key_sha256, snapshot_key_json,
+                final_context, context_sha256, semantic_summary_json,
+                artifact_size_bytes, created_at_ms, last_accessed_bucket
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                i64::from(snapshot_key.is_some()),
+                key_sha256,
+                key_json,
+                draft.final_context,
+                draft.context_sha256,
+                semantic_summary_json,
+                artifact_size,
+                now_ms,
+                bucket,
+            ],
+        )
+        .map_err(cache_write)?;
+    let artifact_id = transaction.last_insert_rowid();
+    if draft.snapshot_eligible {
+        let mut file_stmt = transaction.prepare_cached(
+            "INSERT INTO context_artifact_files(
+                artifact_id, file_identity, relative_path, source_version,
+                source_guard_kind, source_guard_sha256, parse_profile_hash, parse_status,
+                parser_backend, worker_lane, truncated, content_sha256,
+                classifier_status, classifier_page_count, classifier_result_examined_pages,
+                classifier_nominal_charged_pages, classifier_build, classifier_profile_hash
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
+        )
+        .map_err(cache_write)?;
+        for row in &draft.file_rows {
+            file_stmt
+                .execute(params![
+                    artifact_id,
+                    row.file_identity,
+                    row.relative_path,
+                    row.legacy_source_version,
+                    row.source_guard_kind,
+                    row.source_guard_sha256,
+                    row.parse_profile_hash,
+                    inventory::parse_status_text(row.parse_status),
+                    row.parser_backend,
+                    row.worker_lane,
+                    i64::from(row.truncated),
+                    row.content_sha256,
+                    row.classifier
+                        .as_ref()
+                        .map(|classifier| inventory::enum_text(&classifier.status)),
+                    row.classifier
+                        .as_ref()
+                        .and_then(|classifier| classifier.page_count.map(|value| value as i64)),
+                    row.classifier
+                        .as_ref()
+                        .and_then(|classifier| classifier.result_examined_pages.map(|value| value as i64)),
+                    row.classifier
+                        .as_ref()
+                        .map(|classifier| classifier.nominal_charged_pages as i64),
+                    row.classifier
+                        .as_ref()
+                        .map(|classifier| classifier.classifier_build.clone()),
+                    row.classifier
+                        .as_ref()
+                        .map(|classifier| classifier.classifier_profile_hash.clone()),
+                ])
+                .map_err(cache_write)?;
+        }
+        let mut decision_stmt = transaction.prepare_cached(
+            "INSERT INTO context_artifact_decisions(
+                artifact_id, file_identity, relative_path, action, reason,
+                priority, input_chars, output_chars, truncated, error_code
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+        )
+        .map_err(cache_write)?;
+        for row in &draft.decision_rows {
+            decision_stmt
+                .execute(params![
+                    artifact_id,
+                    row.file_identity,
+                    row.relative_path,
+                    inventory::enum_text(&row.action),
+                    row.reason,
+                    row.priority as i64,
+                    row.input_chars as i64,
+                    row.output_chars as i64,
+                    i64::from(row.truncated),
+                    row.error_code,
+                ])
+                .map_err(cache_write)?;
+        }
+    }
+    Ok(artifact_id)
+}
+
+/// Reconstructs an `ArtifactDraft` from the persisted artifact rows
+/// (spec Part 5.1 replay direction). The context hash is re-verified.
+fn load_artifact_from_connection(
+    connection: &Connection,
+    artifact_id: i64,
+) -> Result<ArtifactDraft, StoreError> {
+    let row: Option<(i64, String, String, String)> = connection
+        .query_row(
+            "SELECT snapshot_eligible, final_context, context_sha256, semantic_summary_json
+             FROM context_artifacts WHERE artifact_id=?1",
+            [artifact_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(cache_open)?;
+    let Some((snapshot_eligible, final_context, context_sha256, semantic_summary_json)) = row else {
+        return Err(StoreError::RunNotFound);
+    };
+    let semantic_summary: crate::artifact::SemanticSummary =
+        serde_json::from_str(&semantic_summary_json).map_err(|error| {
+            StoreError::RunCorrupt(format!("artifact semantic summary is invalid: {error}"))
+        })?;
+
+    let mut file_stmt = connection
+        .prepare(
+            "SELECT file_identity, relative_path, source_version,
+                    source_guard_kind, source_guard_sha256, parse_profile_hash, parse_status,
+                    parser_backend, worker_lane, truncated, content_sha256,
+                    classifier_status, classifier_page_count, classifier_result_examined_pages,
+                    classifier_nominal_charged_pages, classifier_build, classifier_profile_hash
+             FROM context_artifact_files WHERE artifact_id=?1 ORDER BY file_identity",
+        )
+        .map_err(cache_open)?;
+    let file_query = file_stmt
+        .query_map([artifact_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, i64>(9)? != 0,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, Option<i64>>(12)?,
+                row.get::<_, Option<i64>>(13)?,
+                row.get::<_, Option<i64>>(14)?,
+                row.get::<_, Option<String>>(15)?,
+                row.get::<_, Option<String>>(16)?,
+            ))
+        })
+        .map_err(cache_open)?;
+    let mut file_rows = Vec::new();
+    for row in file_query {
+        let (
+            file_identity,
+            relative_path,
+            source_version,
+            source_guard_kind,
+            source_guard_sha256,
+            parse_profile_hash,
+            parse_status_text,
+            parser_backend,
+            worker_lane,
+            truncated,
+            content_sha256,
+            classifier_status,
+            classifier_page_count,
+            classifier_examined,
+            classifier_nominal,
+            classifier_build,
+            classifier_profile_hash,
+        ) = row.map_err(cache_open)?;
+        let parse_status: ParseStatus = parse_contract_enum(&parse_status_text)?;
+        let classifier = match (classifier_status, classifier_build, classifier_profile_hash) {
+            (Some(status_text), Some(build), Some(profile_hash)) => {
+                let status = parse_contract_enum(&status_text)?;
+                Some(crate::artifact::PdfClassificationProvenanceV1 {
+                    status,
+                    page_count: classifier_page_count.map(|value| value as u64),
+                    result_examined_pages: classifier_examined.map(|value| value as u64),
+                    nominal_charged_pages: classifier_nominal.unwrap_or(0) as u64,
+                    classifier_build: build,
+                    classifier_profile_hash: profile_hash,
+                })
+            }
+            _ => None,
+        };
+        file_rows.push(ArtifactFileRow {
+            file_identity,
+            relative_path,
+            legacy_source_version: source_version,
+            source_guard_kind,
+            source_guard_sha256,
+            parse_profile_hash,
+            parse_status,
+            parser_backend,
+            worker_lane,
+            truncated,
+            content_sha256,
+            classifier,
+        });
+    }
+
+    let mut decision_stmt = connection
+        .prepare(
+            "SELECT file_identity, relative_path, action, reason, priority,
+                    input_chars, output_chars, truncated, error_code
+             FROM context_artifact_decisions WHERE artifact_id=?1 ORDER BY file_identity",
+        )
+        .map_err(cache_open)?;
+    let decision_query = decision_stmt
+        .query_map([artifact_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+                row.get::<_, i64>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, i64>(7)? != 0,
+                row.get::<_, String>(8)?,
+            ))
+        })
+        .map_err(cache_open)?;
+    let mut decision_rows = Vec::new();
+    for row in decision_query {
+        let (
+            file_identity,
+            relative_path,
+            action_text,
+            reason,
+            priority,
+            input_chars,
+            output_chars,
+            truncated,
+            error_code,
+        ) = row.map_err(cache_open)?;
+        let action: ContextAction = parse_contract_enum(&action_text)?;
+        decision_rows.push(crate::artifact::ArtifactDecisionRow {
+            file_identity,
+            relative_path,
+            action,
+            reason,
+            priority: priority as u64,
+            input_chars: input_chars as u64,
+            output_chars: output_chars as u64,
+            truncated,
+            error_code,
+        });
+    }
+
+    if crate::artifact::sha256_hex(final_context.as_bytes()) != context_sha256 {
+        return Err(StoreError::RunCorrupt(
+            "artifact context hash is invalid".to_string(),
+        ));
+    }
+    Ok(ArtifactDraft {
+        snapshot_eligible: snapshot_eligible != 0,
+        final_context,
+        context_sha256,
+        semantic_summary,
+        file_rows,
+        decision_rows,
+    })
+}
+
+/// spec Part 5.1 eligible dedup: a recompute whose snapshot key already exists
+/// reuses the stored artifact ONLY when `snapshot_key_json` is byte-exact and
+/// the artifact is field-for-field identical; any difference is a non-retryable
+/// `BUDGET_MODEL_MISMATCH`/store invariant (never overwrites the old artifact).
+fn dedup_artifact(
+    transaction: &rusqlite::Transaction<'_>,
+    draft: &ArtifactDraft,
+    key: &SnapshotKeyParts,
+) -> Result<Option<i64>, StoreError> {
+    let existing_id: Option<i64> = transaction
+        .query_row(
+            "SELECT artifact_id FROM context_artifacts
+             WHERE snapshot_eligible = 1 AND snapshot_key_sha256 = ?1
+             LIMIT 1",
+            [&key.sha256],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(cache_write)?;
+    let Some(existing_id) = existing_id else {
+        return Ok(None);
+    };
+    let existing = load_artifact_from_connection(&*transaction, existing_id)?;
+    let existing_key_json: Option<String> = transaction
+        .query_row(
+            "SELECT snapshot_key_json FROM context_artifacts WHERE artifact_id=?1",
+            [existing_id],
+            |row| row.get(0),
+        )
+        .map_err(cache_write)?;
+    if existing_key_json.as_deref() == Some(key.canonical_json.as_str()) && existing == *draft {
+        Ok(Some(existing_id))
+    } else {
+        Err(StoreError::ArtifactMismatch(format!(
+            "snapshot key {} already exists with different artifact semantics",
+            key.sha256
+        )))
+    }
+}
+
+/// spec Part 4: 512 MiB context-artifact cap enforcement inside the terminal
+/// transaction. Deletes retention-allowed orphans first (zero `context_runs`
+/// references, not in the protected set), then the oldest terminal runs
+/// (cascading their context_runs so their artifacts become orphans for the next
+/// orphan sweep). If the current artifact itself exceeds the cap or no rows are
+/// deletable (pinned references), finalization fails closed.
+fn make_room_for_artifact(
+    transaction: &rusqlite::Transaction<'_>,
+    protected_artifacts: &HashSet<i64>,
+    new_size: i64,
+) -> Result<(), StoreError> {
+    if new_size > cache::CONTEXT_ARTIFACTS_MAX_BYTES {
+        return Err(StoreError::RunCorrupt(
+            "current artifact exceeds the 512 MiB context artifact cap".to_string(),
+        ));
+    }
+    let total_artifacts = || -> Result<i64, StoreError> {
+        transaction
+            .query_row(
+                "SELECT COALESCE(SUM(artifact_size_bytes), 0) FROM context_artifacts",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(cache_write)
+    };
+    let mut current = total_artifacts()?;
+    if current.saturating_add(new_size) <= cache::CONTEXT_ARTIFACTS_MAX_BYTES {
+        return Ok(());
+    }
+    loop {
+        // 1) delete orphan artifacts (zero context_runs references, not protected).
+        let clause = not_in_clause(protected_artifacts);
+        let sql = format!(
+            "DELETE FROM context_artifacts WHERE artifact_id IN (
+                SELECT artifact_id FROM context_artifacts
+                WHERE NOT EXISTS(
+                    SELECT 1 FROM context_runs WHERE context_runs.artifact_id = context_artifacts.artifact_id
+                )
+                  {clause}
+                ORDER BY created_at_ms ASC, artifact_id ASC
+                LIMIT 64
+             )"
+        );
+        let deleted = transaction
+            .execute(&sql, rusqlite::params_from_iter(protected_artifacts.iter()))
+            .map_err(cache_write)?;
+        if deleted > 0 {
+            current = total_artifacts()?;
+            if current.saturating_add(new_size) <= cache::CONTEXT_ARTIFACTS_MAX_BYTES {
+                return Ok(());
+            }
+            continue;
+        }
+        // 2) delete the oldest terminal runs. Their context_runs rows cascade
+        //    away (the referenced artifacts become orphans and are reclaimed by
+        //    the next orphan sweep). The current run is still 'running' and the
+        //    snapshot-hit source run is protected by the caller (make_room is
+        //    only reached on the new-artifact path).
+        let deleted = transaction
+            .execute(
+                "DELETE FROM scan_runs WHERE scan_run_id IN (
+                    SELECT scan_run_id FROM scan_runs
+                    WHERE status IN ('success', 'partial', 'error', 'abandoned')
+                    ORDER BY finished_at_ms ASC, scan_run_id ASC
+                    LIMIT 64
+                 )",
+                [],
+            )
+            .map_err(cache_write)?;
+        if deleted > 0 {
+            current = total_artifacts()?;
+            if current.saturating_add(new_size) <= cache::CONTEXT_ARTIFACTS_MAX_BYTES {
+                return Ok(());
+            }
+            continue;
+        }
+        // 3) no deletable rows → pinned references → fail closed.
+        return Err(StoreError::RunCorrupt(
+            "context artifact retention could not make room for the current artifact".to_string(),
+        ));
+    }
+}
+
+fn not_in_clause(ids: &HashSet<i64>) -> String {
+    if ids.is_empty() {
+        return String::new();
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    format!(" AND artifact_id NOT IN ({placeholders})")
 }
 
 #[cfg(test)]
@@ -4008,6 +4685,9 @@ mod tests {
             stage_metrics: Vec::new(),
             extension_metrics: Vec::new(),
             context: None,
+            artifact: None,
+            snapshot_key: None,
+            snapshot_hit: None,
         }
     }
 
@@ -4130,6 +4810,25 @@ mod tests {
             warnings: Vec::new(),
             error: Nullable(None),
         };
+        let artifact = crate::artifact::ArtifactDraft::new(
+            false,
+            content.to_string(),
+            crate::artifact::SemanticSummary {
+                source_file_count: 1,
+                success_count: 1,
+                timeout_count: 0,
+                included_file_count: 1,
+                omitted_file_count: 0,
+                error_file_count: 0,
+                input_chars: content.chars().count() as u64,
+                output_chars: content.chars().count() as u64,
+                reserved_chars: content.chars().count() as u64,
+                rendered_chars: content.chars().count() as u64,
+            },
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("ineligible payload artifact");
         FinalizationBatch {
             status: RunStatus::Success,
             envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
@@ -4197,6 +4896,9 @@ mod tests {
                     },
                 }],
             }),
+            artifact: Some(artifact),
+            snapshot_key: None,
+            snapshot_hit: None,
         }
     }
 
@@ -5533,7 +6235,8 @@ mod tests {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
         // 当前 run 已 terminal（由 finalize 先写）；此处直接调用 retention GC。
-        retention_gc_for_current_run(&transaction, 1, 1_000_000, 100)
+        let protected_runs = std::collections::HashSet::from([1]);
+        retention_gc_for_current_run(&transaction, &protected_runs, 1_000_000, 100)
             .expect("retention gc succeeds");
         let count: i64 = transaction
             .query_row(
@@ -5567,9 +6270,10 @@ mod tests {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
         // 当前 record 自身超 2 GiB → fail closed。
+        let protected_runs = std::collections::HashSet::from([1]);
         let error = retention_gc_for_current_run(
             &transaction,
-            1,
+            &protected_runs,
             1_000_000,
             cache::TERMINAL_AUDIT_MAX_BYTES + 1,
         )

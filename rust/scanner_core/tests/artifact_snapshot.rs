@@ -11,6 +11,7 @@ use ai_daily_scanner_contract::{
 use ai_daily_scanner_core::artifact::{
     rebuild_envelope, snapshot_key, snapshot_key_parts, ArtifactDecisionRow, ArtifactDraft,
     ArtifactFileRow, ClassifierIdentity, PdfClassificationProvenanceV1, SemanticSummary,
+    SnapshotKeyParts,
 };
 use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
 use ai_daily_scanner_core::scheduler::WorkerIdentities;
@@ -522,10 +523,10 @@ fn context_run_insert(context_run_id: i64, scan_run_id: i64, snapshot_hit: i64) 
             timeout_count, included_file_count, omitted_file_count,
             error_file_count, input_chars, output_chars, total_duration_ms,
             discovery_duration_ms, parse_duration_ms, compression_duration_ms,
-            created_at_ms, snapshot_hit
+            created_at_ms, artifact_id, snapshot_hit
          ) VALUES (
             {context_run_id}, {scan_run_id}, '{}', 'success', 'ctx', '{}',
-            1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, {snapshot_hit}
+            1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, {snapshot_hit}
          )",
         "0".repeat(64),
         "1".repeat(64)
@@ -560,34 +561,503 @@ fn fresh_v2_schema_enforces_snapshot_hit_reused_check() {
     configure_connection(&connection).expect("pragmas");
     migrate(&mut connection).expect("migration");
     seed_scan_runs(&connection, 3);
+    // Every success context_runs row must reference an artifact (spec Part 5.1
+    // status⇔artifact_id CHECK); seed one ineligible payload artifact.
+    connection
+        .execute(
+            "INSERT INTO context_artifacts(
+                snapshot_eligible, snapshot_key_sha256, snapshot_key_json,
+                final_context, context_sha256, semantic_summary_json,
+                artifact_size_bytes, created_at_ms, last_accessed_bucket
+             ) VALUES (0, NULL, NULL, 'ctx', ?1, '{}', 3, 1, '2026-08-08')",
+            rusqlite::params!["1".repeat(64)],
+        )
+        .expect("payload artifact row");
 
     // snapshot_hit=0 with a NULL reused_from row is valid.
     connection
         .execute(&context_run_insert(1, 1, 0), [])
         .expect("snapshot_hit=0 without reused_from must insert");
 
-    // snapshot_hit=1 requires a non-null reused_from_context_run_id.
-    let orphan_hit = connection.execute(&context_run_insert(2, 2, 1), []);
-    assert!(
-        orphan_hit.is_err(),
-        "snapshot_hit=1 without reused_from_context_run_id must be rejected"
-    );
+    // snapshot_hit=1 without reused_from is valid at the DB level: the source
+    // run may already be GC'd (ON DELETE SET NULL), so the relaxed CHECK allows
+    // the post-GC state. The store still writes reused_from on every hit.
+    connection
+        .execute(&context_run_insert(2, 2, 1), [])
+        .expect("snapshot_hit=1 without reused_from (post-GC) must insert");
 
-    // A valid hit row references the source context_runs row.
+    // snapshot_hit=0 with a non-null reused_from is invalid: a non-hit run
+    // never records provenance.
+    let orphan_non_hit = connection.execute(
+        "INSERT INTO context_runs(
+            context_run_id, scan_run_id, context_profile_hash, status,
+            final_context, context_sha256, source_file_count, success_count,
+            timeout_count, included_file_count, omitted_file_count,
+            error_file_count, input_chars, output_chars, total_duration_ms,
+            discovery_duration_ms, parse_duration_ms, compression_duration_ms,
+            created_at_ms, artifact_id, snapshot_hit, reused_from_context_run_id
+         ) VALUES (
+            3, 3, ?1, 'success', 'ctx', ?2,
+            1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1
+         )",
+        rusqlite::params!["0".repeat(64), "1".repeat(64)],
+    );
+    assert!(
+        orphan_non_hit.is_err(),
+        "snapshot_hit=0 with reused_from_context_run_id must be rejected"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// store-level snapshot hit finalization (spec Part 5.2/5.4)
+// ---------------------------------------------------------------------------
+
+use ai_daily_scanner_contract::{
+    AdapterPaths, AuditWorkerLane, CacheMissReason, CacheStatus, ContextDecision, ExtensionMetric,
+    RunStatus, StageMetric, StageName,
+};
+use ai_daily_scanner_core::config::normalize_scanner_profile_for_request;
+use ai_daily_scanner_core::store::{
+    canonical_envelope_json, ActiveRun, AttemptRuntime, BeginRunOutcome, CanonicalRequest,
+    ContextDecisionRecord, ContextRunRecord, FileResultRecord, FinalizationBatch,
+    InventoryRecord, ScannerStore, SnapshotHitRef, WorkerFingerprint, SCAN_DB_FILENAME,
+};
+
+const REQUEST_ID_R2: &str = "33333333-3333-4333-8333-333333333333";
+const FINAL_CONTEXT: &str = "# 文件证据上下文\n";
+const CONTEXT_PROFILE_HASH: &str = "c";
+
+fn snapshot_store_harness() -> (
+    tempfile::TempDir,
+    ScannerStore,
+    BuildContextRequest,
+    CanonicalRequest,
+    AttemptRuntime,
+    ai_daily_scanner_contract::NormalizedScannerProfileV1,
+) {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let file_path = directory.path().join("a.txt");
+    std::fs::write(&file_path, "hello").expect("fixture file");
+    let db_path = directory.path().join(SCAN_DB_FILENAME);
+    let mut request: BuildContextRequest = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/scanner_contract/v1/request.json"
+    ))
+    .expect("request fixture");
+    request.request_id = REQUEST_ID_A.to_string();
+    request.work_dir = directory.path().to_string_lossy().to_string();
+    request.scan_db_path = db_path.to_string_lossy().to_string();
+    request.adapters = AdapterPaths {
+        office_worker_path: directory
+            .path()
+            .join("office-worker.exe")
+            .to_string_lossy()
+            .to_string(),
+        python_executable: directory
+            .path()
+            .join("python.exe")
+            .to_string_lossy()
+            .to_string(),
+        python_module_root: directory.path().to_string_lossy().to_string(),
+        python_document_worker_module: "src.workers.document_parser_worker".to_string(),
+    };
+    let profile = normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode)
+        .expect("normalized v1 profile");
+    let canonical =
+        ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
+    let runtime =
+        AttemptRuntime::from_request(&request, &ai_daily_scanner_core::version_response()).unwrap();
+    let store = ScannerStore::open(&db_path).expect("scanner store");
+    (
+        directory,
+        store,
+        request,
+        canonical,
+        runtime,
+        profile,
+    )
+}
+
+fn snapshot_started(outcome: BeginRunOutcome) -> ActiveRun {
+    match outcome {
+        BeginRunOutcome::Started(active) => active,
+        BeginRunOutcome::Stored(_) => panic!("expected a new active run"),
+    }
+}
+
+fn record_snapshot_workers(store: &mut ScannerStore, active: &ActiveRun, now_ms: u64) {
+    let office = WorkerFingerprint {
+        contract: "ai_daily_worker_v1".to_string(),
+        version: "1.0".to_string(),
+        build: "office-a".to_string(),
+    };
+    let python = WorkerFingerprint {
+        contract: "ai_daily_worker_v1".to_string(),
+        version: "1.0".to_string(),
+        build: "python-a".to_string(),
+    };
+    store
+        .record_worker_fingerprints(active, Some(&office), Some(&python), now_ms)
+        .expect("worker fingerprints");
+}
+
+fn snapshot_discovery() -> DiscoveredFileOut {
+    DiscoveredFileOut {
+        file_identity: "fixture:a.txt".to_string(),
+        path: format!("C:\\work\\a.txt"),
+        extension: ".txt".to_string(),
+        modified_at: "2026-08-08T12:00:00.000000".to_string(),
+        size_bytes: 5,
+        source_version: "mtime_ns=1:size=5".to_string(),
+        source_guard_kind: Some("content_sha256_v1".to_string()),
+        source_guard_sha256: Some("0".repeat(64)),
+    }
+}
+
+fn snapshot_semantic_summary(parse_duration_ms: u64) -> SemanticSummary {
+    let _ = parse_duration_ms;
+    SemanticSummary {
+        source_file_count: 1,
+        success_count: 1,
+        timeout_count: 0,
+        included_file_count: 1,
+        omitted_file_count: 0,
+        error_file_count: 0,
+        input_chars: FINAL_CONTEXT.chars().count() as u64,
+        output_chars: FINAL_CONTEXT.chars().count() as u64,
+        reserved_chars: 512,
+        rendered_chars: FINAL_CONTEXT.chars().count() as u64,
+    }
+}
+
+fn snapshot_file_row() -> ArtifactFileRow {
+    ArtifactFileRow {
+        file_identity: "fixture:a.txt".to_string(),
+        relative_path: "a.txt".to_string(),
+        legacy_source_version: "mtime_ns=1:size=5".to_string(),
+        source_guard_kind: Some("content_sha256_v1".to_string()),
+        source_guard_sha256: Some("0".repeat(64)),
+        parse_profile_hash: "1".repeat(64),
+        parse_status: ParseStatus::Success,
+        parser_backend: "light_text_v1".to_string(),
+        worker_lane: "rust_core".to_string(),
+        truncated: false,
+        content_sha256: ai_daily_scanner_core::artifact::sha256_hex(FINAL_CONTEXT.as_bytes()),
+        classifier: None,
+    }
+}
+
+fn snapshot_decision_row() -> ArtifactDecisionRow {
+    ArtifactDecisionRow {
+        file_identity: "fixture:a.txt".to_string(),
+        relative_path: "a.txt".to_string(),
+        action: ContextAction::Keep,
+        reason: "small_file_keep".to_string(),
+        priority: 1,
+        input_chars: FINAL_CONTEXT.chars().count() as u64,
+        output_chars: FINAL_CONTEXT.chars().count() as u64,
+        truncated: false,
+        error_code: String::new(),
+    }
+}
+
+fn snapshot_context_summary(discovery_ms: u64, cache_ms: u64, parse_ms: u64, compression_ms: u64) -> ContextSummary {
+    ContextSummary {
+        source_file_count: 1,
+        success_count: 1,
+        timeout_count: 0,
+        included_file_count: 1,
+        omitted_file_count: 0,
+        error_file_count: 0,
+        input_chars: FINAL_CONTEXT.chars().count() as u64,
+        output_chars: FINAL_CONTEXT.chars().count() as u64,
+        total_duration_ms: discovery_ms + cache_ms + parse_ms + compression_ms,
+        discovery_duration_ms: discovery_ms,
+        parse_duration_ms: parse_ms,
+        compression_duration_ms: compression_ms,
+    }
+}
+
+fn snapshot_context_record(summary: ContextSummary) -> ContextRunRecord {
+    ContextRunRecord {
+        context_profile_hash: CONTEXT_PROFILE_HASH.repeat(64),
+        status: RunStatus::Success,
+        final_context: FINAL_CONTEXT.to_string(),
+        context_sha256: ai_daily_scanner_core::artifact::sha256_hex(FINAL_CONTEXT.as_bytes()),
+        summary,
+        decisions: vec![ContextDecisionRecord {
+            file_identity: "fixture:a.txt".to_string(),
+            decision: ContextDecision {
+                relative_path: "a.txt".to_string(),
+                action: ContextAction::Keep,
+                reason: "small_file_keep".to_string(),
+                priority: 1,
+                input_chars: FINAL_CONTEXT.chars().count() as u64,
+                output_chars: FINAL_CONTEXT.chars().count() as u64,
+                truncated: false,
+                error_code: String::new(),
+            },
+        }],
+    }
+}
+
+fn snapshot_inventory_record() -> InventoryRecord {
+    InventoryRecord {
+        file_identity: "fixture:a.txt".to_string(),
+        absolute_path: "C:\\work\\a.txt".to_string(),
+        relative_path: "a.txt".to_string(),
+        file_type: ".txt".to_string(),
+        source_version: "mtime_ns=1:size=5".to_string(),
+        size_bytes: 5,
+        mtime_ns: 1,
+        source_guard_kind: Some("content_sha256_v1".to_string()),
+        source_guard_sha256: Some("0".repeat(64)),
+    }
+}
+
+fn snapshot_file_result(parse_duration_ms: u64, snapshot: bool) -> FileResultRecord {
+    let (cache_status, cache_miss_reason) = if snapshot {
+        (CacheStatus::Fresh, CacheMissReason::None)
+    } else {
+        (CacheStatus::Miss, CacheMissReason::NewFile)
+    };
+    FileResultRecord {
+        file_identity: "fixture:a.txt".to_string(),
+        relative_path: "a.txt".to_string(),
+        source_version: "mtime_ns=1:size=5".to_string(),
+        parse_profile_hash: "1".repeat(64),
+        cache_status,
+        cache_miss_reason,
+        parse_status: ParseStatus::Success,
+        parser_backend: "light_text_v1".to_string(),
+        worker_lane: AuditWorkerLane::RustCore,
+        truncated: false,
+        content_sha256: ai_daily_scanner_core::artifact::sha256_hex(FINAL_CONTEXT.as_bytes()),
+        primary_duration_ms: parse_duration_ms,
+        fallback_duration_ms: 0,
+        parse_duration_ms,
+        failure_class: String::new(),
+        fallback_backend: String::new(),
+        fallback_reason_code: String::new(),
+        error: None,
+    }
+}
+
+fn snapshot_stage_metrics(discovery_ms: u64, cache_ms: u64, parse_ms: u64, compression_ms: u64) -> Vec<StageMetric> {
+    vec![
+        StageMetric { stage: StageName::Discovery, item_count: 1, duration_ms: discovery_ms },
+        StageMetric { stage: StageName::Cache, item_count: 1, duration_ms: cache_ms },
+        StageMetric { stage: StageName::Parse, item_count: 1, duration_ms: parse_ms },
+        StageMetric { stage: StageName::Context, item_count: 1, duration_ms: compression_ms },
+    ]
+}
+
+fn snapshot_extension_metrics(parse_duration_ms: u64) -> Vec<ExtensionMetric> {
+    vec![ExtensionMetric {
+        extension: ".txt".to_string(),
+        file_count: 1,
+        parse_duration_ms,
+        success_count: 1,
+        error_count: 0,
+        timeout_count: 0,
+    }]
+}
+
+fn snapshot_envelope(
+    active: &ActiveRun,
+    summary: ContextSummary,
+) -> ai_daily_scanner_contract::ContextEnvelope {
+    let version = ai_daily_scanner_core::version_response();
+    ai_daily_scanner_contract::ContextEnvelope {
+        contract: "ai_daily_context".to_string(),
+        protocol_version: 1,
+        request_id: active.request_id().to_string(),
+        engine_version: version.engine_version,
+        engine_build: version.engine_build,
+        status: EngineStatus::Ok,
+        file_context: FINAL_CONTEXT.to_string(),
+        summary,
+        scan_run_id: Nullable(Some(active.scan_run_id())),
+        context_run_id: Nullable(Some(active.context_run_id())),
+        warnings: Vec::new(),
+        error: Nullable(None),
+    }
+}
+
+fn snapshot_cold_batch(active: &ActiveRun, key: &SnapshotKeyParts) -> FinalizationBatch {
+    let summary = snapshot_context_summary(2, 1, 3, 1);
+    let draft = ArtifactDraft::new(
+        true,
+        FINAL_CONTEXT.to_string(),
+        snapshot_semantic_summary(3),
+        vec![snapshot_file_row()],
+        vec![snapshot_decision_row()],
+    )
+    .expect("eligible cold artifact");
+    let envelope = snapshot_envelope(active, summary.clone());
+    FinalizationBatch {
+        status: RunStatus::Success,
+        envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
+        inventory: vec![snapshot_inventory_record()],
+        cache_writes: Vec::new(),
+        file_results: vec![snapshot_file_result(3, false)],
+        diagnostics: Vec::new(),
+        stage_metrics: snapshot_stage_metrics(2, 1, 3, 1),
+        extension_metrics: snapshot_extension_metrics(3),
+        context: Some(snapshot_context_record(summary)),
+        artifact: Some(draft),
+        snapshot_key: Some(key.clone()),
+        snapshot_hit: None,
+    }
+}
+
+fn snapshot_hit_batch(active: &ActiveRun, hit: &ai_daily_scanner_core::store::SnapshotHit) -> FinalizationBatch {
+    let summary = snapshot_context_summary(2, 1, 0, 1);
+    let envelope = snapshot_envelope(active, summary.clone());
+    FinalizationBatch {
+        status: RunStatus::Success,
+        envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
+        inventory: vec![snapshot_inventory_record()],
+        cache_writes: Vec::new(),
+        file_results: vec![snapshot_file_result(0, true)],
+        diagnostics: Vec::new(),
+        stage_metrics: snapshot_stage_metrics(2, 1, 0, 1),
+        extension_metrics: snapshot_extension_metrics(0),
+        context: Some(snapshot_context_record(summary)),
+        artifact: None,
+        snapshot_key: None,
+        snapshot_hit: Some(SnapshotHitRef {
+            artifact_id: hit.artifact_id,
+            reused_from_context_run_id: hit.source_context_run_id,
+        }),
+    }
+}
+
+#[test]
+fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
+    let (_directory, mut store, request, canonical, runtime, profile) = snapshot_store_harness();
+
+    // 1) cold run R1 -> artifact A + source run R1
+    let active1 = snapshot_started(
+        store
+            .begin_run(&request.request_id, &canonical, &runtime, 1_000)
+            .expect("begin cold run"),
+    );
+    record_snapshot_workers(&mut store, &active1, 1_000);
+    let discovery = vec![snapshot_discovery()];
+    let worker_ids = workers("office-a", "python-a");
+    let classifier = classifier("classifier-a");
+    let v2_profile = v2_profile(ReportMode::Daily);
+    let key = snapshot_key_parts(
+        &request,
+        &discovery,
+        &[],
+        &v2_profile,
+        ENGINE_BUILD_A,
+        &worker_ids,
+        &classifier,
+    )
+    .expect("snapshot key parts");
+    store
+        .finalize(&active1, &snapshot_cold_batch(&active1, &key), 1_010)
+        .expect("cold finalize");
+    let reader = rusqlite::Connection::open(&_directory.path().join(SCAN_DB_FILENAME))
+        .expect("open db");
+    let artifact_id: i64 = reader
+        .query_row(
+            "SELECT artifact_id FROM context_artifacts WHERE snapshot_eligible=1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("eligible artifact row");
+    assert!(artifact_id > 0);
+
+    // 2) same key new run R2 -> snapshot_hit=true, reused_from=R1, R2 rows all
+    //    snapshot/0ms, current summary durations are R2's (not R1's old values)
+    let request2 = {
+        let mut changed = request.clone();
+        changed.request_id = REQUEST_ID_R2.to_string();
+        changed
+    };
+    let canonical2 =
+        ScannerStore::canonicalize_request(&request2, &profile).expect("canonical request R2");
+    let active2 = snapshot_started(
+        store
+            .begin_run(REQUEST_ID_R2, &canonical2, &runtime, 2_000)
+            .expect("begin snapshot run"),
+    );
+    record_snapshot_workers(&mut store, &active2, 2_000);
+    let hit = store
+        .snapshot_lookup(&key)
+        .expect("snapshot lookup")
+        .expect("same key must hit");
+    assert_eq!(hit.artifact_id, artifact_id);
+    assert_eq!(
+        hit.source_context_run_id,
+        active1.context_run_id() as i64,
+        "source run must be the committed Success R1"
+    );
+    store
+        .finalize(&active2, &snapshot_hit_batch(&active2, &hit), 2_010)
+        .expect("snapshot-hit finalize");
+
+    let connection = rusqlite::Connection::open(&_directory.path().join(SCAN_DB_FILENAME))
+        .expect("open db");
+    let (r2_artifact, r2_snapshot_hit, r2_reused): (i64, i64, Option<i64>) = connection
+        .query_row(
+            "SELECT artifact_id, snapshot_hit, reused_from_context_run_id
+             FROM context_runs WHERE context_run_id=?1",
+            [active2.context_run_id() as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("R2 context_runs row");
+    assert_eq!(r2_artifact, artifact_id, "R2 must reference artifact A");
+    assert_eq!(r2_snapshot_hit, 1, "R2 must be a snapshot hit");
+    assert_eq!(
+        r2_reused,
+        Some(active1.context_run_id() as i64),
+        "R2 reused_from must be R1"
+    );
+    let (parse_cache_status, parse_duration_ms, cache_miss_reason): (String, i64, String) =
+        connection
+            .query_row(
+                "SELECT parse_cache_status, parse_duration_ms, cache_miss_reason
+                 FROM scan_file_results WHERE scan_run_id=?1",
+                [active2.scan_run_id() as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("R2 file result");
+    assert_eq!(parse_cache_status, "snapshot", "current row must be snapshot");
+    assert_eq!(parse_duration_ms, 0, "current row must be 0ms");
+    assert_eq!(cache_miss_reason, "", "current row must carry an empty miss reason");
+    let (r2_parse_duration, r2_total_duration): (i64, i64) = connection
+        .query_row(
+            "SELECT parse_duration_ms, total_duration_ms
+             FROM context_runs WHERE context_run_id=?1",
+            [active2.context_run_id() as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("R2 summary");
+    assert_eq!(r2_parse_duration, 0, "R2 summary must not copy R1's parse time");
+    assert_eq!(r2_total_duration, 4, "R2 total must be R2's measured 2+1+0+1");
+
+    // 3) delete R1 -> R2 still references artifact A; reused_from SET NULL.
     connection
         .execute(
-            "INSERT INTO context_runs(
-                context_run_id, scan_run_id, context_profile_hash, status,
-                final_context, context_sha256, source_file_count, success_count,
-                timeout_count, included_file_count, omitted_file_count,
-                error_file_count, input_chars, output_chars, total_duration_ms,
-                discovery_duration_ms, parse_duration_ms, compression_duration_ms,
-                created_at_ms, snapshot_hit, reused_from_context_run_id
-             ) VALUES (
-                3, 3, ?1, 'success', 'ctx', ?2,
-                1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1
-             )",
-            rusqlite::params!["0".repeat(64), "1".repeat(64)],
+            "DELETE FROM scan_runs WHERE scan_run_id=?1",
+            [active1.scan_run_id() as i64],
         )
-        .expect("snapshot_hit=1 with reused_from_context_run_id must insert");
+        .expect("delete R1");
+    let (after_artifact, after_reused): (i64, Option<i64>) = connection
+        .query_row(
+            "SELECT artifact_id, reused_from_context_run_id
+             FROM context_runs WHERE context_run_id=?1",
+            [active2.context_run_id() as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("R2 context_runs after R1 deletion");
+    assert_eq!(
+        after_artifact, artifact_id,
+        "R2 must keep referencing artifact A via artifact-owned rows"
+    );
+    assert_eq!(after_reused, None, "deleting the source run must SET NULL reused_from");
 }

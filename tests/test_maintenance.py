@@ -136,8 +136,8 @@ def _seed_terminal_run(db: Path, *, finished_at_ms: int, status: str = "success"
         conn.close()
 
 
-def _seed_orphan_artifact(db: Path) -> None:
-    """插入一个不被任何 context_runs 引用的 artifact（orphan）。"""
+def _seed_orphan_artifact(db: Path) -> int:
+    """插入一个不被任何 context_runs 引用的 artifact（orphan），返回 artifact_id。"""
     conn = sqlite3.connect(db)
     try:
         conn.execute("PRAGMA foreign_keys = ON;")
@@ -152,6 +152,7 @@ def _seed_orphan_artifact(db: Path) -> None:
             (hashlib.sha256(b"orphan").hexdigest(),),
         )
         conn.commit()
+        return int(cur.lastrowid)
     finally:
         conn.close()
 
@@ -229,9 +230,10 @@ def test_maintenance_gc_deletes_old_runs_orphans_and_evicts_cache(tmp_path: Path
     db = tmp_path / "scan_index_v2.sqlite3"
     _fresh_v2_db(db, auto_vacuum="incremental")
 
-    _seed_orphan_artifact(db)
+    artifact_id = _seed_orphan_artifact(db)
     old_run = _seed_terminal_run(db, finished_at_ms=1_000)  # 远早于 90 天前
-    # 给 old_run 接一条 context_runs，使其成为被引用 run（可删除）
+    # 给 old_run 接一条 context_runs，使其成为被引用 run（可删除）。Success
+    # context_runs 必须引用 artifact（spec Part 5.1 status⇔artifact_id CHECK）。
     conn = sqlite3.connect(db)
     try:
         conn.execute("PRAGMA foreign_keys = ON;")
@@ -243,14 +245,15 @@ def test_maintenance_gc_deletes_old_runs_orphans_and_evicts_cache(tmp_path: Path
                 timeout_count, included_file_count, omitted_file_count,
                 error_file_count, input_chars, output_chars, total_duration_ms,
                 discovery_duration_ms, parse_duration_ms, compression_duration_ms,
-                created_at_ms
-            ) VALUES (?, ?, ?, 'success', 'ctx', ?, 1, 1, 0, 1, 0, 0, 3, 3, 1, 1, 1, 1, 1)
+                created_at_ms, artifact_id
+            ) VALUES (?, ?, ?, 'success', 'ctx', ?, 1, 1, 0, 1, 0, 0, 3, 3, 1, 1, 1, 1, 1, ?)
             """,
             (
                 old_run,
                 old_run,
                 "b" * 64,
                 hashlib.sha256(b"ctx").hexdigest(),
+                artifact_id,
             ),
         )
         conn.commit()

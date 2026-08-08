@@ -3,11 +3,13 @@ use ai_daily_discovery::{
     DiscoveryIssue, DiscoveryReport, DiscoveryRequest,
 };
 use ai_daily_scanner_contract::{
-    BuildContextRequest, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
-    DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest,
-    InspectRunResponse, InspectStatus, MaintenanceRequestV1, MaintenanceStatus, Nullable,
-    RunStatus, TransportErrorResponse, UpgradeDatabaseRequestV1, UpgradeStatus, Validate,
-    VersionResponse, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
+    AuditWorkerLane, BuildContextRequest, CacheMissReason, CacheStatus, ContextDecision,
+    ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck, DoctorCheckStatus,
+    DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest, InspectRunResponse,
+    InspectStatus, MaintenanceRequestV1, MaintenanceStatus, Nullable, ParseStatus, RunStatus,
+    StageMetric, StageName, TransportErrorResponse, UpgradeDatabaseRequestV1, UpgradeStatus,
+    Validate, VersionResponse, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
+    WorkerDiagnosticV1Stage,
 };
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
@@ -20,6 +22,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
+use crate::artifact::{
+    snapshot_key_parts, ArtifactDecisionRow, ArtifactDraft, ArtifactFileRow, ClassifierIdentity,
+    SemanticSummary, CLASSIFIER_CONTRACT_VERSION,
+};
 use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
 use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
 use crate::parsers::{
@@ -28,7 +34,8 @@ use crate::parsers::{
 };
 use crate::parsers::classifier::ClassifierPort;
 use crate::scheduler::{
-    BudgetedContextScheduler, RealClock, RealGuardVerifier, ScheduledRunInput, WorkerIdentities,
+    BudgetedContextScheduler, BudgetedScanOutcome, RealClock, RealGuardVerifier,
+    ScheduledRunInput, TerminalIntent, WorkerIdentities,
 };
 use crate::scheduler_adapter::{ProductionParser, StoreCachePort};
 use crate::source_guard::{
@@ -36,8 +43,10 @@ use crate::source_guard::{
 };
 use crate::store::{
     canonical_envelope_json, current_time_millis, ActiveRun, AttemptRuntime, BeginRunOutcome,
-    DiagnosticSeverity, FinalizationBatch, RouteStackFingerprint, RouteStackFingerprints,
-    RunDiagnosticRecord, ScannerStore, StoreError, WorkerFingerprint, HEARTBEAT_INTERVAL_MS,
+    ContextDecisionRecord, ContextRunRecord, DiagnosticSeverity, FileResultRecord,
+    FinalizationBatch, InventoryRecord, RouteStackFingerprint, RouteStackFingerprints,
+    RunDiagnosticRecord, ScannerStore, SnapshotHit, SnapshotHitRef, StoreError, WorkerFingerprint,
+    HEARTBEAT_INTERVAL_MS,
 };
 
 #[derive(Debug, Error)]
@@ -698,6 +707,99 @@ fn execute_active_build(
         python_build: Some(python_worker.identity.worker_build.clone()),
         classifier_build: Some(python_worker.identity.worker_build.clone()),
     };
+
+    // ---- snapshot fast path (spec Part 5.4) ----
+    // The live worker handshake is kept; a snapshot skips classification/parse
+    // lookup + execution, context recompute, and new artifact payload writes.
+    // A hit requires a byte-exact `snapshot_key_json` AND at least one committed
+    // Success source run referencing the artifact (orphan artifacts never hit).
+    let snapshot_lookup_started = Instant::now();
+    let classifier_identity = ClassifierIdentity {
+        contract: CLASSIFIER_CONTRACT_VERSION.to_string(),
+        build: worker_identities
+            .classifier_build
+            .clone()
+            .unwrap_or_else(|| "0".repeat(64)),
+        profile_hash: match crate::store::classifier_profile_hash(v2_profile) {
+            Ok(hash) => hash,
+            Err(message) => {
+                return finish_active_error(
+                    request,
+                    version,
+                    store,
+                    active,
+                    heartbeat,
+                    warnings,
+                    diagnostic(
+                        ErrorCode::InternalError,
+                        message,
+                        false,
+                        DiagnosticStage::Cache,
+                    ),
+                    elapsed_summary(started_at),
+                );
+            }
+        },
+    };
+    let key_parts = match snapshot_key_parts(
+        request,
+        &discovery.files,
+        &discovery.issues,
+        v2_profile,
+        &version.engine_build,
+        &worker_identities,
+        &classifier_identity,
+    ) {
+        Ok(parts) => parts,
+        Err(message) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Cache,
+                ),
+                elapsed_summary(started_at),
+            );
+        }
+    };
+    let snapshot_lookup_ms = elapsed_ms(snapshot_lookup_started);
+    if let Some(hit) = match store.snapshot_lookup(&key_parts) {
+        Ok(hit) => hit,
+        Err(error) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                error.diagnostic(DiagnosticStage::Cache),
+                elapsed_summary(started_at),
+            );
+        }
+    } {
+        return finalize_snapshot_hit(
+            request,
+            version,
+            store,
+            active,
+            heartbeat,
+            &discovery,
+            &context_profile_hash,
+            hit,
+            discovery_duration_ms,
+            snapshot_lookup_ms,
+            started_at,
+        );
+    }
+
     let input = match ScheduledRunInput::new(
         active.scan_run_id(),
         started_at_ms,
@@ -771,6 +873,31 @@ fn execute_active_build(
             );
         }
     };
+    // spec Part 5.1/5.4: every Success/Partial run persists an artifact
+    // (eligible → snapshot key + per-file semantic rows; otherwise a payload
+    // artifact with no rows). Built before the outcome is consumed by the batch.
+    let artifact_draft = match build_batch_artifact(&outcome) {
+        Ok(draft) => draft,
+        Err(message) => {
+            return persist_active_error_without_heartbeat(
+                request,
+                version,
+                store,
+                active,
+                warnings,
+                diagnostic(ErrorCode::InternalError, message, false, DiagnosticStage::Internal),
+                outcome
+                    .context
+                    .as_ref()
+                    .map(|context| context.summary.clone())
+                    .unwrap_or_else(empty_summary),
+            );
+        }
+    };
+    let snapshot_key_for_batch = artifact_draft
+        .as_ref()
+        .filter(|draft| draft.snapshot_eligible)
+        .map(|_| key_parts.clone());
     let batch = FinalizationBatch {
         status: run_status,
         envelope_json: envelope_json.clone(),
@@ -781,6 +908,9 @@ fn execute_active_build(
         stage_metrics: outcome.stage_metrics,
         extension_metrics: outcome.extension_metrics,
         context: outcome.context,
+        artifact: artifact_draft,
+        snapshot_key: snapshot_key_for_batch,
+        snapshot_hit: None,
     };
     heartbeat.stop();
     if let Some(error) = heartbeat.take_background_error() {
@@ -898,6 +1028,385 @@ fn scheduler_outcome_envelope(
     };
     (envelope, run_status)
 }
+
+/// Spec Part 5.4 snapshot-hit finalization: the current run reuses the selected
+/// artifact (reference + `snapshot_hit`/`reused_from` written by the store),
+/// current rows are rebuilt from artifact rows with `snapshot` semantics
+/// (`parse_cache_status=snapshot`, `cache_miss_reason=''`, `parse_duration_ms=0`),
+/// and the current summary durations are THIS run's measured values — never the
+/// source run's old timings.
+#[allow(clippy::too_many_arguments)]
+fn finalize_snapshot_hit(
+    request: &BuildContextRequest,
+    version: &VersionResponse,
+    store: &mut ScannerStore,
+    active: &ActiveRun,
+    heartbeat: &mut LeaseHeartbeat,
+    discovery: &DiscoveryReport,
+    context_profile_hash: &str,
+    hit: SnapshotHit,
+    discovery_duration_ms: u64,
+    snapshot_lookup_ms: u64,
+    started_at: Instant,
+) -> Result<CommandOutput, EngineShellError> {
+    let artifact = match store.load_artifact(hit.artifact_id) {
+        Ok(draft) => draft,
+        Err(error) => {
+            heartbeat.stop();
+            return build_error_output(
+                request,
+                version,
+                error.diagnostic(DiagnosticStage::Cache),
+                Vec::new(),
+                empty_summary(),
+                Some(active.scan_run_id()),
+            );
+        }
+    };
+    let inventory = match snapshot_inventory(&discovery.files, &request.work_dir) {
+        Ok(records) => records,
+        Err(message) => {
+            heartbeat.stop();
+            return build_error_output(
+                request,
+                version,
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Internal,
+                ),
+                Vec::new(),
+                empty_summary(),
+                Some(active.scan_run_id()),
+            );
+        }
+    };
+    let file_results = snapshot_file_results(&artifact);
+    let decisions: Vec<ContextDecisionRecord> = artifact
+        .decision_rows
+        .iter()
+        .map(|row| ContextDecisionRecord {
+            file_identity: row.file_identity.clone(),
+            decision: ContextDecision {
+                relative_path: row.relative_path.clone(),
+                action: row.action,
+                reason: row.reason.clone(),
+                priority: row.priority,
+                input_chars: row.input_chars,
+                output_chars: row.output_chars,
+                truncated: row.truncated,
+                error_code: row.error_code.clone(),
+            },
+        })
+        .collect();
+    let compression_duration_ms = snapshot_lookup_ms;
+    let summary = ContextSummary {
+        source_file_count: artifact.semantic_summary.source_file_count,
+        success_count: artifact.semantic_summary.success_count,
+        timeout_count: artifact.semantic_summary.timeout_count,
+        included_file_count: artifact.semantic_summary.included_file_count,
+        omitted_file_count: artifact.semantic_summary.omitted_file_count,
+        error_file_count: artifact.semantic_summary.error_file_count,
+        input_chars: artifact.semantic_summary.input_chars,
+        output_chars: artifact.semantic_summary.output_chars,
+        total_duration_ms: elapsed_ms(started_at),
+        discovery_duration_ms,
+        parse_duration_ms: 0,
+        compression_duration_ms,
+    };
+    let stage_metrics = vec![
+        StageMetric {
+            stage: StageName::Discovery,
+            item_count: discovery.files.len() as u64,
+            duration_ms: discovery_duration_ms,
+        },
+        StageMetric {
+            stage: StageName::Cache,
+            item_count: discovery.files.len() as u64,
+            duration_ms: snapshot_lookup_ms,
+        },
+        StageMetric {
+            stage: StageName::Parse,
+            item_count: 0,
+            duration_ms: 0,
+        },
+        StageMetric {
+            stage: StageName::Context,
+            item_count: decisions.len() as u64,
+            duration_ms: compression_duration_ms,
+        },
+    ];
+    let extension_metrics =
+        match crate::context_audit::extension_metrics(&inventory, &file_results) {
+            Ok(metrics) => metrics,
+            Err(message) => {
+                heartbeat.stop();
+                return build_error_output(
+                    request,
+                    version,
+                    diagnostic(
+                        ErrorCode::InternalError,
+                        message,
+                        false,
+                        DiagnosticStage::Internal,
+                    ),
+                    Vec::new(),
+                    empty_summary(),
+                    Some(active.scan_run_id()),
+                );
+            }
+        };
+    let envelope = ContextEnvelope {
+        contract: "ai_daily_context".to_string(),
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        engine_version: version.engine_version.clone(),
+        engine_build: version.engine_build.clone(),
+        status: EngineStatus::Ok,
+        file_context: artifact.final_context.clone(),
+        summary: summary.clone(),
+        scan_run_id: Nullable(Some(active.scan_run_id())),
+        context_run_id: Nullable(Some(active.context_run_id())),
+        warnings: Vec::new(),
+        error: Nullable(None),
+    };
+    let envelope_json = match canonical_envelope_json(&envelope) {
+        Ok(json) => json,
+        Err(error) => {
+            heartbeat.stop();
+            return build_error_output(
+                request,
+                version,
+                error.diagnostic(DiagnosticStage::Internal),
+                Vec::new(),
+                summary,
+                Some(active.scan_run_id()),
+            );
+        }
+    };
+    let context = ContextRunRecord {
+        context_profile_hash: context_profile_hash.to_string(),
+        status: RunStatus::Success,
+        final_context: artifact.final_context.clone(),
+        context_sha256: artifact.context_sha256.clone(),
+        summary,
+        decisions,
+    };
+    let batch = FinalizationBatch {
+        status: RunStatus::Success,
+        envelope_json: envelope_json.clone(),
+        inventory,
+        cache_writes: Vec::new(),
+        file_results,
+        diagnostics: Vec::new(),
+        stage_metrics,
+        extension_metrics,
+        context: Some(context),
+        artifact: None,
+        snapshot_key: None,
+        snapshot_hit: Some(SnapshotHitRef {
+            artifact_id: hit.artifact_id,
+            reused_from_context_run_id: hit.source_context_run_id,
+        }),
+    };
+    heartbeat.stop();
+    let finalize_now_ms = match current_time_millis() {
+        Ok(value) => value,
+        Err(error) => {
+            return build_error_output(
+                request,
+                version,
+                error.diagnostic(DiagnosticStage::Internal),
+                Vec::new(),
+                batch
+                    .context
+                    .as_ref()
+                    .map(|context| context.summary.clone())
+                    .unwrap_or_else(empty_summary),
+                Some(active.scan_run_id()),
+            );
+        }
+    };
+    match store.finalize(active, &batch, finalize_now_ms) {
+        Ok(()) => CommandOutput::canonical_json(envelope_json, 0),
+        Err(error) => build_error_output(
+            request,
+            version,
+            error.diagnostic(DiagnosticStage::Cache),
+            Vec::new(),
+            batch
+                .context
+                .as_ref()
+                .map(|context| context.summary.clone())
+                .unwrap_or_else(empty_summary),
+            Some(active.scan_run_id()),
+        ),
+    }
+}
+
+/// Builds the `ArtifactDraft` for a scheduler outcome (spec Part 5.1).
+/// `None` for Error runs; `Some` for Success/Partial. An eligible artifact
+/// (Ok + warnings-empty + no Error/Timeout) carries the snapshot key plus
+/// per-source-file rows; ineligible runs persist a payload artifact with no rows.
+fn build_batch_artifact(outcome: &BudgetedScanOutcome) -> Result<Option<ArtifactDraft>, String> {
+    let Some(context) = &outcome.context else {
+        return Ok(None);
+    };
+    let eligible = matches!(outcome.terminal_intent, TerminalIntent::Success)
+        && !outcome
+            .diagnostics
+            .iter()
+            .any(|record| record.severity == DiagnosticSeverity::Warning)
+        && outcome
+            .file_results
+            .iter()
+            .all(|record| !matches!(record.parse_status, ParseStatus::Error | ParseStatus::Timeout));
+    let semantic = SemanticSummary {
+        source_file_count: context.summary.source_file_count,
+        success_count: context.summary.success_count,
+        timeout_count: context.summary.timeout_count,
+        included_file_count: context.summary.included_file_count,
+        omitted_file_count: context.summary.omitted_file_count,
+        error_file_count: context.summary.error_file_count,
+        input_chars: context.summary.input_chars,
+        output_chars: context.summary.output_chars,
+        reserved_chars: outcome.execution_metrics.reserved_chars,
+        rendered_chars: outcome.execution_metrics.rendered_chars,
+    };
+    if eligible {
+        let file_rows = artifact_file_rows(outcome);
+        let decision_rows = artifact_decision_rows(&context.decisions);
+        ArtifactDraft::new(
+            true,
+            context.final_context.clone(),
+            semantic,
+            file_rows,
+            decision_rows,
+        )
+        .map(Some)
+    } else {
+        ArtifactDraft::new(
+            false,
+            context.final_context.clone(),
+            semantic,
+            Vec::new(),
+            Vec::new(),
+        )
+        .map(Some)
+    }
+}
+
+fn artifact_file_rows(outcome: &BudgetedScanOutcome) -> Vec<ArtifactFileRow> {
+    let result_by_identity: std::collections::HashMap<&str, &FileResultRecord> = outcome
+        .file_results
+        .iter()
+        .map(|record| (record.file_identity.as_str(), record))
+        .collect();
+    outcome
+        .inventory
+        .iter()
+        .map(|item| {
+            let result = result_by_identity.get(item.file_identity.as_str());
+            let empty_hash = crate::store::sha256_hex(b"");
+            ArtifactFileRow {
+                file_identity: item.file_identity.clone(),
+                relative_path: item.relative_path.clone(),
+                legacy_source_version: item.source_version.clone(),
+                source_guard_kind: item.source_guard_kind.clone(),
+                source_guard_sha256: item.source_guard_sha256.clone(),
+                parse_profile_hash: result
+                    .map(|record| record.parse_profile_hash.clone())
+                    .unwrap_or_else(|| "0".repeat(64)),
+                parse_status: result
+                    .map(|record| record.parse_status)
+                    .unwrap_or(ParseStatus::NotParsed),
+                parser_backend: result
+                    .map(|record| record.parser_backend.clone())
+                    .unwrap_or_else(|| "not_parsed".to_string()),
+                worker_lane: result
+                    .map(|record| crate::store::inventory::worker_lane_text(record.worker_lane).to_string())
+                    .unwrap_or_else(|| "not_parsed".to_string()),
+                truncated: result.map(|record| record.truncated).unwrap_or(false),
+                content_sha256: result
+                    .map(|record| record.content_sha256.clone())
+                    .unwrap_or(empty_hash),
+                classifier: None,
+            }
+        })
+        .collect()
+}
+
+fn artifact_decision_rows(decisions: &[ContextDecisionRecord]) -> Vec<ArtifactDecisionRow> {
+    decisions
+        .iter()
+        .map(|record| ArtifactDecisionRow {
+            file_identity: record.file_identity.clone(),
+            relative_path: record.decision.relative_path.clone(),
+            action: record.decision.action,
+            reason: record.decision.reason.clone(),
+            priority: record.decision.priority,
+            input_chars: record.decision.input_chars,
+            output_chars: record.decision.output_chars,
+            truncated: record.decision.truncated,
+            error_code: record.decision.error_code.clone(),
+        })
+        .collect()
+}
+
+fn snapshot_inventory(
+    files: &[DiscoveredFileOut],
+    work_dir: &str,
+) -> Result<Vec<InventoryRecord>, String> {
+    files
+        .iter()
+        .map(|file| {
+            let relative_path =
+                crate::context_audit::relative_contract_path(Path::new(work_dir), &file.path)?;
+            InventoryRecord::from_discovered(file, relative_path)
+        })
+        .collect()
+}
+
+/// Current-run rows for a snapshot hit (spec Part 5.2): `parse_cache_status`
+/// becomes `snapshot`, `cache_miss_reason=''`, durations/attempts 0 — never the
+/// source run's miss/hit or old timings.
+fn snapshot_file_results(artifact: &ArtifactDraft) -> Vec<FileResultRecord> {
+    artifact
+        .file_rows
+        .iter()
+        .map(|row| FileResultRecord {
+            file_identity: row.file_identity.clone(),
+            relative_path: row.relative_path.clone(),
+            source_version: row.legacy_source_version.clone(),
+            parse_profile_hash: row.parse_profile_hash.clone(),
+            cache_status: CacheStatus::Fresh,
+            cache_miss_reason: CacheMissReason::None,
+            parse_status: row.parse_status,
+            parser_backend: row.parser_backend.clone(),
+            worker_lane: snapshot_worker_lane(&row.worker_lane),
+            truncated: row.truncated,
+            content_sha256: row.content_sha256.clone(),
+            primary_duration_ms: 0,
+            fallback_duration_ms: 0,
+            parse_duration_ms: 0,
+            failure_class: String::new(),
+            fallback_backend: String::new(),
+            fallback_reason_code: String::new(),
+            error: None,
+        })
+        .collect()
+}
+
+fn snapshot_worker_lane(lane: &str) -> AuditWorkerLane {
+    match lane {
+        "rust_core" => AuditWorkerLane::RustCore,
+        "rust_office_process" => AuditWorkerLane::RustOfficeProcess,
+        "python_document_process" => AuditWorkerLane::PythonDocumentProcess,
+        _ => AuditWorkerLane::NotParsed,
+    }
+}
+
 fn validate_build_work_dir(work_dir: &str) -> Result<PathBuf, Diagnostic> {
     let path = Path::new(work_dir);
     let metadata = fs::metadata(path).map_err(|error| {
@@ -1179,6 +1688,9 @@ fn persist_active_error_without_heartbeat(
         stage_metrics: Vec::new(),
         extension_metrics: Vec::new(),
         context: None,
+        artifact: None,
+        snapshot_key: None,
+        snapshot_hit: None,
     };
     let now_ms = match current_time_millis() {
         Ok(value) => value,

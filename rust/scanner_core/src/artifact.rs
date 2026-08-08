@@ -123,6 +123,9 @@ pub struct ArtifactDecisionRow {
 /// `SHA-256(final_context)`; the store re-validates it again at replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArtifactDraft {
+    /// `true` when this artifact may serve as a snapshot source (spec Part 5.4):
+    /// it carries a snapshot key plus per-source-file semantic rows.
+    pub snapshot_eligible: bool,
     pub final_context: String,
     pub context_sha256: String,
     pub semantic_summary: SemanticSummary,
@@ -173,6 +176,7 @@ impl ArtifactDraft {
             );
         }
         Ok(ArtifactDraft {
+            snapshot_eligible,
             final_context,
             context_sha256,
             semantic_summary,

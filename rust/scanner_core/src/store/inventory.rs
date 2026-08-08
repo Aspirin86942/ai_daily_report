@@ -256,6 +256,7 @@ pub(crate) fn insert_file_results(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
     records: &[FileResultRecord],
+    snapshot_rows: bool,
 ) -> rusqlite::Result<()> {
     let mut statement = transaction.prepare_cached(
         "INSERT INTO scan_file_results(
@@ -265,10 +266,10 @@ pub(crate) fn insert_file_results(
             primary_duration_ms, fallback_duration_ms, parse_duration_ms,
             failure_class, fallback_backend, fallback_reason_code,
             error_code, error_message, error_retryable, error_stage,
-            error_file_path, error_backend
+            error_file_path, error_backend, parse_cache_status
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
-            ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
+            ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
          )",
     )?;
     for record in records {
@@ -290,6 +291,14 @@ pub(crate) fn insert_file_results(
             .error
             .as_ref()
             .and_then(|value| value.backend.0.as_deref());
+        // spec Part 5.2: a snapshot-hit current row is `snapshot`; otherwise the
+        // full_v2 `parse_cache_status` is derived from the record's own
+        // execution semantics (never copies a source run's miss/hit).
+        let parse_cache_status = if snapshot_rows {
+            "snapshot"
+        } else {
+            parse_cache_status_text(record)
+        };
         statement.execute(params![
             scan_run_id,
             record.file_identity,
@@ -315,9 +324,26 @@ pub(crate) fn insert_file_results(
             error_stage,
             error_file_path,
             error_backend,
+            parse_cache_status,
         ])?;
     }
     Ok(())
+}
+
+/// spec Part 5.2 current-run `parse_cache_status`: `fresh` for an exact
+/// parse-cache hit, `miss` for this round's body parse, `not_applicable` for
+/// rows where no body parser ran (policy/semantic/runtime NotParsed, classifier
+/// failure, pre-classification reject, no-text metadata-only).
+fn parse_cache_status_text(record: &FileResultRecord) -> &'static str {
+    match (record.parse_status, record.cache_status) {
+        (ParseStatus::Success, CacheStatus::Fresh) => "fresh",
+        (ParseStatus::Success, CacheStatus::Miss) => "miss",
+        (ParseStatus::Error | ParseStatus::Timeout, _) if record.parser_backend == "not_parsed" => {
+            "not_applicable"
+        }
+        (ParseStatus::Error | ParseStatus::Timeout, _) => "miss",
+        (ParseStatus::NotParsed, _) => "not_applicable",
+    }
 }
 
 pub(crate) fn parse_source_version(value: &str) -> Result<(u64, u64), String> {
