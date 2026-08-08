@@ -29,6 +29,7 @@ SCHEMA_FILES = {
     "scanner-profile-request-v1.schema.json",
     "transport-error-v1.schema.json",
     "version-response-v1.schema.json",
+    "worker-diagnostic-v1.schema.json",
     "worker-parse-request-v1.schema.json",
     "worker-parse-response-v1.schema.json",
     "worker-version-response-v1.schema.json",

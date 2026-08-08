@@ -20,6 +20,7 @@ from src.models.scanner_contract import (
     WORKER_DIAGNOSTIC_V1_ERROR_CODES,
     WORKER_DIAGNOSTIC_V1_STAGES,
     WorkerDiagnosticV1,
+    WorkerParseResponse,
 )
 from src.services.scanner_config import (
     SCANNER_PROFILE_V2_ONLY_FIELDS,
@@ -116,6 +117,57 @@ def test_worker_diagnostic_v1_rejects_scanner_side_codes() -> None:
                 "backend": None,
             }
         )
+
+
+def _worker_parse_response_payload(error_code: str, *, stage: str) -> dict:
+    return {
+        "contract": "ai_daily_worker",
+        "protocol_version": 1,
+        "request_id": "34444444-3444-4444-8444-344444444444",
+        "status": "error",
+        "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
+        "file_type": ".doc",
+        "content": "",
+        "parser_backend": "python_sharepoint_text_v1",
+        "worker_lane": "python_document_process",
+        "truncated": False,
+        "warnings": [],
+        "error": {
+            "error_code": error_code,
+            "message": "synthetic worker failure",
+            "retryable": False,
+            "stage": stage,
+            "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
+            "backend": "python_sharepoint_text_v1",
+        },
+        "duration_ms": 3,
+        "worker_contract_version": "ai_daily_worker_v1",
+        "worker_version": "0.1.0",
+        "worker_build": "fixture-python-worker-build-v1",
+        "observed_source_version": "mtime_ns=4000000001:size=1024",
+    }
+
+
+def test_worker_parse_response_rejects_scanner_side_error_code() -> None:
+    """WorkerParseResponse 必须使用 frozen WorkerDiagnosticV1：scanner-side code 拒绝。"""
+    with pytest.raises(ValueError, match="STAGE_DEADLINE_EXHAUSTED"):
+        WorkerParseResponse.model_validate(
+            _worker_parse_response_payload("STAGE_DEADLINE_EXHAUSTED", stage="parse")
+        )
+
+
+def test_worker_parse_response_round_trips_frozen_error_code() -> None:
+    """Frozen legit code 在 worker v1 wire 上往返并保留原值。"""
+    response = WorkerParseResponse.model_validate(
+        _worker_parse_response_payload("PARSER_TIMEOUT", stage="parse")
+    )
+    assert response.status == "error"
+    assert response.error is not None
+    assert response.error.error_code == "PARSER_TIMEOUT"
+    assert response.error.stage == "parse"
+    assert response.error.retryable is False
+    assert response.error.file_path == "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc"
+    assert response.error.backend == "python_sharepoint_text_v1"
 
 
 def test_scanner_diagnostic_accepts_the_new_codes_and_stage() -> None:

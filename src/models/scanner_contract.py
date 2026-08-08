@@ -976,8 +976,8 @@ class WorkerParseResponse(ContractModel):
     parser_backend: WorkerBackend
     worker_lane: Literal["rust_office_process", "python_document_process"]
     truncated: bool
-    warnings: Annotated[list[Diagnostic], Field(max_length=256)]
-    error: Diagnostic | None
+    warnings: Annotated[list[WorkerDiagnosticV1], Field(max_length=256)]
+    error: WorkerDiagnosticV1 | None
     duration_ms: NonNegativeInt
     worker_contract_version: NonEmpty1024
     worker_version: NonEmpty1024
@@ -1540,6 +1540,7 @@ SCHEMA_MODELS: dict[str, type[ContractModel]] = {
     "scanner-profile-request-v1.schema.json": RawScannerProfileV1,
     "transport-error-v1.schema.json": TransportErrorResponse,
     "version-response-v1.schema.json": VersionResponse,
+    "worker-diagnostic-v1.schema.json": WorkerDiagnosticV1,
     "worker-parse-request-v1.schema.json": WorkerParseRequest,
     "worker-parse-response-v1.schema.json": WorkerParseResponse,
     "worker-version-response-v1.schema.json": WorkerVersionResponse,

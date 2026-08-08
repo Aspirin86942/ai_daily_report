@@ -1,8 +1,8 @@
 use ai_daily_discovery::build_source_version;
 use ai_daily_scanner_contract::{
-    Diagnostic, DiagnosticStage, ErrorCode, Nullable, Validate, WorkerBackend, WorkerKind,
-    WorkerLane, WorkerParseRequest, WorkerParseResponse, WorkerParserLimits, WorkerStatus,
-    WorkerVersionResponse,
+    Nullable, Validate, WorkerBackend, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
+    WorkerDiagnosticV1Stage, WorkerKind, WorkerLane, WorkerParseRequest, WorkerParseResponse,
+    WorkerParserLimits, WorkerStatus, WorkerVersionResponse,
 };
 use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use serde::{Deserialize, Serialize};
@@ -153,7 +153,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
         return worker_error_response(
             request,
             &version,
-            ErrorCode::ParserInvalidPayload,
+            WorkerDiagnosticV1ErrorCode::ParserInvalidPayload,
             message,
             false,
             request.expected_source_version.clone(),
@@ -164,7 +164,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
         return worker_error_response(
             request,
             &version,
-            ErrorCode::ParserInvalidPayload,
+            WorkerDiagnosticV1ErrorCode::ParserInvalidPayload,
             "backend is not supported by the Office worker".to_string(),
             false,
             request.expected_source_version.clone(),
@@ -179,7 +179,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
             return worker_error_response(
                 request,
                 &version,
-                ErrorCode::ParserFailed,
+                WorkerDiagnosticV1ErrorCode::ParserFailed,
                 format!("file metadata is unavailable: {error}"),
                 false,
                 request.expected_source_version.clone(),
@@ -193,7 +193,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
             return worker_error_response(
                 request,
                 &version,
-                ErrorCode::ParserFailed,
+                WorkerDiagnosticV1ErrorCode::ParserFailed,
                 format!("file source version is unavailable: {error}"),
                 false,
                 request.expected_source_version.clone(),
@@ -205,7 +205,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
         return worker_error_response(
             request,
             &version,
-            ErrorCode::FileTooLarge,
+            WorkerDiagnosticV1ErrorCode::FileTooLarge,
             "file exceeds the configured size limit".to_string(),
             false,
             observed_before,
@@ -216,7 +216,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
         return worker_error_response(
             request,
             &version,
-            ErrorCode::SourceVersionChanged,
+            WorkerDiagnosticV1ErrorCode::SourceVersionChanged,
             "file source version changed before parsing".to_string(),
             false,
             observed_before,
@@ -232,7 +232,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
                 return worker_error_response(
                     request,
                     &version,
-                    ErrorCode::SourceVersionChanged,
+                    WorkerDiagnosticV1ErrorCode::SourceVersionChanged,
                     "file source version became unavailable during parsing".to_string(),
                     false,
                     observed_before,
@@ -244,7 +244,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
         return worker_error_response(
             request,
             &version,
-            ErrorCode::SourceVersionChanged,
+            WorkerDiagnosticV1ErrorCode::SourceVersionChanged,
             "file source version changed during parsing".to_string(),
             false,
             observed_after,
@@ -255,7 +255,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
         return worker_error_response(
             request,
             &version,
-            ErrorCode::ParserFailed,
+            WorkerDiagnosticV1ErrorCode::ParserFailed,
             "Office parser reported an error".to_string(),
             retryable,
             observed_after,
@@ -411,7 +411,7 @@ fn office_limits_map(limits: &WorkerParserLimits) -> BTreeMap<String, serde_json
 fn worker_error_response(
     request: &WorkerParseRequest,
     version: &WorkerVersionResponse,
-    error_code: ErrorCode,
+    error_code: WorkerDiagnosticV1ErrorCode,
     message: String,
     retryable: bool,
     observed_source_version: String,
@@ -430,7 +430,7 @@ fn worker_error_response(
         worker_lane: WorkerLane::RustOfficeProcess,
         truncated: false,
         warnings: Vec::new(),
-        error: Nullable(Some(Diagnostic {
+        error: Nullable(Some(WorkerDiagnosticV1 {
             error_code,
             message: if message.is_empty() {
                 "Office worker parse failed".to_string()
@@ -438,7 +438,7 @@ fn worker_error_response(
                 message
             },
             retryable,
-            stage: DiagnosticStage::Parse,
+            stage: WorkerDiagnosticV1Stage::Parse,
             file_path: Nullable(Some(request.file_path.clone())),
             backend: Nullable(Some(request.backend.as_str().to_string())),
         })),

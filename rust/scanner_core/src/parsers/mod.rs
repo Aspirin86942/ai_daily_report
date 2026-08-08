@@ -10,7 +10,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ai_daily_scanner_contract::{
     AdapterPaths, Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerProfileV1, Nullable,
-    Validate, WorkerBackend, WorkerKind, WorkerParseRequest, WorkerParseResponse,
+    Validate, WorkerBackend, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
+    WorkerDiagnosticV1Stage, WorkerKind, WorkerParseRequest, WorkerParseResponse,
     WorkerParserLimits, WorkerStatus, WorkerVersionResponse,
 };
 use rayon::prelude::*;
@@ -28,6 +29,62 @@ const MAX_DIAGNOSTIC_COUNT: u64 = 257;
 const MAX_DIAGNOSTIC_MESSAGE_CHARS: u64 = 4_096;
 const MAX_WORKER_IDENTITY_CHARS: u64 = 3 * 1_024;
 const RESPONSE_JSON_FIXED_ALLOWANCE: u64 = 64 * 1024;
+
+/// Adapter seam (spec Part 7.1): translate a frozen worker diagnostic to the
+/// scanner-side extended `Diagnostic`. Every path that reads a
+/// `WorkerDiagnosticV1` from the `ai_daily_worker_v1` / `ai_daily_transport`
+/// wires goes through here; the frozen code maps onto the extended enum so new
+/// scanner-side codes can never deserialize on the old worker wire.
+pub fn worker_diagnostic_to_scanner(worker: &WorkerDiagnosticV1) -> Diagnostic {
+    Diagnostic {
+        error_code: match worker.error_code {
+            WorkerDiagnosticV1ErrorCode::InvalidRequest => ErrorCode::InvalidRequest,
+            WorkerDiagnosticV1ErrorCode::ContractVersionMismatch => {
+                ErrorCode::ContractVersionMismatch
+            }
+            WorkerDiagnosticV1ErrorCode::WorkDirNotFound => ErrorCode::WorkDirNotFound,
+            WorkerDiagnosticV1ErrorCode::WorkDirNotDirectory => ErrorCode::WorkDirNotDirectory,
+            WorkerDiagnosticV1ErrorCode::DiscoveryEntryUnreadable => {
+                ErrorCode::DiscoveryEntryUnreadable
+            }
+            WorkerDiagnosticV1ErrorCode::FileTooLarge => ErrorCode::FileTooLarge,
+            WorkerDiagnosticV1ErrorCode::ParserStartFailed => ErrorCode::ParserStartFailed,
+            WorkerDiagnosticV1ErrorCode::ParserTimeout => ErrorCode::ParserTimeout,
+            WorkerDiagnosticV1ErrorCode::ParserInvalidPayload => ErrorCode::ParserInvalidPayload,
+            WorkerDiagnosticV1ErrorCode::ParserFailed => ErrorCode::ParserFailed,
+            WorkerDiagnosticV1ErrorCode::WorkerHandshakeFailed => ErrorCode::WorkerHandshakeFailed,
+            WorkerDiagnosticV1ErrorCode::WorkerVersionMismatch => ErrorCode::WorkerVersionMismatch,
+            WorkerDiagnosticV1ErrorCode::WorkerBuildChanged => ErrorCode::WorkerBuildChanged,
+            WorkerDiagnosticV1ErrorCode::SourceVersionChanged => ErrorCode::SourceVersionChanged,
+            WorkerDiagnosticV1ErrorCode::CacheOpenFailed => ErrorCode::CacheOpenFailed,
+            WorkerDiagnosticV1ErrorCode::CacheWriteFailed => ErrorCode::CacheWriteFailed,
+            WorkerDiagnosticV1ErrorCode::ScanAlreadyRunning => ErrorCode::ScanAlreadyRunning,
+            WorkerDiagnosticV1ErrorCode::RequestInProgress => ErrorCode::RequestInProgress,
+            WorkerDiagnosticV1ErrorCode::RequestIdConflict => ErrorCode::RequestIdConflict,
+            WorkerDiagnosticV1ErrorCode::RunNotFound => ErrorCode::RunNotFound,
+            WorkerDiagnosticV1ErrorCode::RunCorrupt => ErrorCode::RunCorrupt,
+            WorkerDiagnosticV1ErrorCode::ContextBudgetInvalid => ErrorCode::ContextBudgetInvalid,
+            WorkerDiagnosticV1ErrorCode::NotImplemented => ErrorCode::NotImplemented,
+            WorkerDiagnosticV1ErrorCode::RustCoreCrashed => ErrorCode::RustCoreCrashed,
+            WorkerDiagnosticV1ErrorCode::InternalError => ErrorCode::InternalError,
+        },
+        message: worker.message.clone(),
+        retryable: worker.retryable,
+        stage: match worker.stage {
+            WorkerDiagnosticV1Stage::Request => DiagnosticStage::Request,
+            WorkerDiagnosticV1Stage::Discovery => DiagnosticStage::Discovery,
+            WorkerDiagnosticV1Stage::Cache => DiagnosticStage::Cache,
+            WorkerDiagnosticV1Stage::Parse => DiagnosticStage::Parse,
+            WorkerDiagnosticV1Stage::Context => DiagnosticStage::Context,
+            WorkerDiagnosticV1Stage::Process => DiagnosticStage::Process,
+            WorkerDiagnosticV1Stage::Doctor => DiagnosticStage::Doctor,
+            WorkerDiagnosticV1Stage::Inspect => DiagnosticStage::Inspect,
+            WorkerDiagnosticV1Stage::Internal => DiagnosticStage::Internal,
+        },
+        file_path: worker.file_path.clone(),
+        backend: worker.backend.clone(),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkerCommand {
@@ -597,19 +654,20 @@ pub fn execute_worker_request(
 
     if let Some(error) = response.error.0.clone() {
         let class = match error.error_code {
-            ErrorCode::ParserInvalidPayload
-            | ErrorCode::WorkerVersionMismatch
-            | ErrorCode::WorkerBuildChanged => FailureClass::ContractFailure,
-            ErrorCode::ParserStartFailed => FailureClass::EnvironmentUnavailable,
-            ErrorCode::ParserTimeout
-            | ErrorCode::FileTooLarge
-            | ErrorCode::SourceVersionChanged => FailureClass::Deterministic,
+            WorkerDiagnosticV1ErrorCode::ParserInvalidPayload
+            | WorkerDiagnosticV1ErrorCode::WorkerVersionMismatch
+            | WorkerDiagnosticV1ErrorCode::WorkerBuildChanged => FailureClass::ContractFailure,
+            WorkerDiagnosticV1ErrorCode::ParserStartFailed => FailureClass::EnvironmentUnavailable,
+            WorkerDiagnosticV1ErrorCode::ParserTimeout
+            | WorkerDiagnosticV1ErrorCode::FileTooLarge
+            | WorkerDiagnosticV1ErrorCode::SourceVersionChanged => FailureClass::Deterministic,
             _ if error.retryable => FailureClass::RecoverableParserFailure,
             _ => FailureClass::Deterministic,
         };
         return Err(ParseFailure {
             class,
-            diagnostic: error,
+            // Adapter seam (spec Part 7.1): frozen worker diagnostic -> scanner Diagnostic.
+            diagnostic: worker_diagnostic_to_scanner(&error),
         });
     }
     Ok(response)
@@ -631,14 +689,16 @@ fn validate_response_identity(
             .error
             .0
             .as_ref()
-            .is_some_and(|error| error.error_code == ErrorCode::SourceVersionChanged);
+            .is_some_and(|error| {
+                error.error_code == WorkerDiagnosticV1ErrorCode::SourceVersionChanged
+            });
     let error_identity_matches = response.error.0.as_ref().is_none_or(|error| {
-        error.stage == DiagnosticStage::Parse
+        error.stage == WorkerDiagnosticV1Stage::Parse
             && error.file_path.0.as_deref() == Some(request.file_path.as_str())
             && error.backend.0.as_deref() == Some(request.backend.as_str())
     });
     let warnings_match = response.warnings.iter().all(|warning| {
-        warning.stage == DiagnosticStage::Parse
+        warning.stage == WorkerDiagnosticV1Stage::Parse
             && warning
                 .file_path
                 .0

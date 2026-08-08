@@ -1,7 +1,7 @@
 use ai_daily_office_parser::parse_worker_request;
 use ai_daily_scanner_contract::{
-    ErrorCode, Nullable, WorkerBackend, WorkerLane, WorkerParseRequest, WorkerParserLimits,
-    WorkerStatus,
+    Nullable, WorkerBackend, WorkerDiagnosticV1ErrorCode, WorkerLane, WorkerParseRequest,
+    WorkerParserLimits, WorkerStatus,
 };
 use std::fs::{self, File};
 use std::io::Write;
@@ -70,7 +70,7 @@ fn corrupt_xlsx_is_a_non_retryable_structured_failure() {
 
     assert_eq!(response.status, WorkerStatus::Error);
     let error = response.error.0.expect("error response needs a diagnostic");
-    assert_eq!(error.error_code, ErrorCode::ParserFailed);
+    assert_eq!(error.error_code, WorkerDiagnosticV1ErrorCode::ParserFailed);
     assert!(!error.retryable);
 }
 
@@ -90,7 +90,10 @@ fn corrupt_docx_and_pptx_are_non_retryable_structured_failures() {
 
         assert_eq!(response.status, WorkerStatus::Error);
         let error = response.error.0.expect("error response needs a diagnostic");
-        assert_eq!(error.error_code, ErrorCode::ParserFailed);
+        assert_eq!(
+            error.error_code,
+            WorkerDiagnosticV1ErrorCode::ParserFailed
+        );
         assert!(!error.retryable, "{extension}");
     }
 }
@@ -105,7 +108,7 @@ fn worker_size_guard_runs_before_office_parser() {
     let response = parse_worker_request(&request);
 
     let error = response.error.0.expect("size rejection needs a diagnostic");
-    assert_eq!(error.error_code, ErrorCode::FileTooLarge);
+    assert_eq!(error.error_code, WorkerDiagnosticV1ErrorCode::FileTooLarge);
 }
 
 #[test]
@@ -121,7 +124,10 @@ fn worker_rejects_a_stale_expected_source_version() {
         .error
         .0
         .expect("source-version rejection needs a diagnostic");
-    assert_eq!(error.error_code, ErrorCode::SourceVersionChanged);
+    assert_eq!(
+        error.error_code,
+        WorkerDiagnosticV1ErrorCode::SourceVersionChanged
+    );
     assert_eq!(response.observed_source_version, source_version(&path));
 }
 

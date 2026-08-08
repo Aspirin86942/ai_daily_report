@@ -12,6 +12,7 @@ from typing import Any
 from src.models.scanner_contract import (
     Diagnostic,
     TransportErrorResponse,
+    WorkerDiagnosticV1,
     WorkerParseRequest,
     WorkerParseResponse,
     WorkerVersionResponse,
@@ -367,7 +368,7 @@ def _error_response(
         worker_lane="python_document_process",
         truncated=False,
         warnings=[],
-        error=Diagnostic(
+        error=WorkerDiagnosticV1(
             error_code=error_code,
             message=safe_message,
             retryable=retryable,

@@ -2406,9 +2406,11 @@ pub struct WorkerParseResponse {
     pub parser_backend: WorkerBackend,
     pub worker_lane: WorkerLane,
     pub truncated: bool,
-    pub warnings: Vec<Diagnostic>,
+    // Frozen worker-v1 diagnostics only: scanner-side new ErrorCode/stage must
+    // never deserialize on the ai_daily_worker_v1 parse wire (spec Part 7.1).
+    pub warnings: Vec<WorkerDiagnosticV1>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub error: Nullable<Diagnostic>,
+    pub error: Nullable<WorkerDiagnosticV1>,
     pub duration_ms: u64,
     pub worker_contract_version: String,
     pub worker_version: String,
@@ -3582,6 +3584,7 @@ enum ContractPayload {
     BuildContextRequest(Box<BuildContextRequest>),
     ContextEnvelope(ContextEnvelope),
     Diagnostic(Diagnostic),
+    WorkerDiagnosticV1(WorkerDiagnosticV1),
     DoctorRequest(DoctorRequest),
     DoctorResponse(DoctorResponse),
     InspectRunRequest(InspectRunRequest),
@@ -3613,6 +3616,9 @@ fn parse_contract_payload(schema: &str, value: &Value) -> Result<ContractPayload
             Ok(ContractPayload::ContextEnvelope(parse_typed(value)?))
         }
         "diagnostic-v1.schema.json" => Ok(ContractPayload::Diagnostic(parse_typed(value)?)),
+        "worker-diagnostic-v1.schema.json" => {
+            Ok(ContractPayload::WorkerDiagnosticV1(parse_typed(value)?))
+        }
         "doctor-request-v1.schema.json" => Ok(ContractPayload::DoctorRequest(parse_typed(value)?)),
         "doctor-response-v1.schema.json" => {
             Ok(ContractPayload::DoctorResponse(parse_typed(value)?))
@@ -3659,6 +3665,7 @@ impl ContractPayload {
             Self::BuildContextRequest(payload) => serialize!(payload),
             Self::ContextEnvelope(payload) => serialize!(payload),
             Self::Diagnostic(payload) => serialize!(payload),
+            Self::WorkerDiagnosticV1(payload) => serialize!(payload),
             Self::DoctorRequest(payload) => serialize!(payload),
             Self::DoctorResponse(payload) => serialize!(payload),
             Self::InspectRunRequest(payload) => serialize!(payload),
@@ -3813,5 +3820,66 @@ mod tests {
     #[test]
     fn absolute_paths_reject_embedded_nul() {
         assert!(require_absolute_path("C:\\evidence\0hidden.xlsx", "file_path").is_err());
+    }
+
+    #[test]
+    fn worker_diagnostic_v1_rejects_scanner_only_codes_and_stages() {
+        for (error_code, stage) in [
+            ("STAGE_DEADLINE_EXHAUSTED", "parse"),
+            ("BUDGET_MODEL_MISMATCH", "parse"),
+            ("PARSER_FAILED", "maintenance"),
+        ] {
+            let payload = serde_json::json!({
+                "error_code": error_code,
+                "message": "scanner-only value must not enter worker v1",
+                "retryable": true,
+                "stage": stage,
+                "file_path": null,
+                "backend": null,
+            });
+            let result =
+                validate_contract_payload("worker-diagnostic-v1.schema.json", &payload, &[]);
+            assert!(
+                result.is_err(),
+                "{error_code}/{stage} unexpectedly passed frozen worker v1 validation"
+            );
+        }
+    }
+
+    #[test]
+    fn worker_parse_response_rejects_scanner_side_diagnostic_on_the_wire() {
+        // spec Part 7.1 split: a scanner-only ErrorCode must never deserialize on
+        // the ai_daily_worker_v1 parse wire, even though it is legal scanner-side.
+        let payload = serde_json::json!({
+            "contract": "ai_daily_worker",
+            "protocol_version": 1,
+            "request_id": "34444444-3444-4444-8444-344444444444",
+            "status": "error",
+            "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
+            "file_type": ".doc",
+            "content": "",
+            "parser_backend": "python_sharepoint_text_v1",
+            "worker_lane": "python_document_process",
+            "truncated": false,
+            "warnings": [],
+            "error": {
+                "error_code": "STAGE_DEADLINE_EXHAUSTED",
+                "message": "scanner-only code must not enter the worker v1 wire",
+                "retryable": true,
+                "stage": "parse",
+                "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
+                "backend": "python_sharepoint_text_v1"
+            },
+            "duration_ms": 3,
+            "worker_contract_version": "ai_daily_worker_v1",
+            "worker_version": "0.1.0",
+            "worker_build": "fixture-python-worker-build-v1",
+            "observed_source_version": "mtime_ns=4000000001:size=1024"
+        });
+        let result = validate_contract_payload("worker-parse-response-v1.schema.json", &payload, &[]);
+        assert!(
+            result.is_err(),
+            "scanner-side error code must be rejected on the worker wire"
+        );
     }
 }

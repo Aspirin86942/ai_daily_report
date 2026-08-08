@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::classifier::ClassificationError;
 use crate::decision::ContextFileEvidence;
-use crate::parsers::{ParsedPayload, ScheduledFileParse};
+use crate::parsers::{worker_diagnostic_to_scanner, ParsedPayload, ScheduledFileParse};
 use crate::planner::PlanAction;
 use crate::store::{
     sha256_hex, CacheAwarePlanEntry, CacheLookup, CacheWriteRecord, FileResultRecord,
@@ -266,7 +266,12 @@ fn normalize_parser_result(
             )
         }
         Some(ParsedPayload::Worker(payload)) => {
-            diagnostics.extend(payload.warnings.clone());
+            diagnostics.extend(
+                payload
+                    .warnings
+                    .iter()
+                    .map(worker_diagnostic_to_scanner),
+            );
             let content_hash = sha256_hex(payload.content.as_bytes());
             (
                 payload.content,
