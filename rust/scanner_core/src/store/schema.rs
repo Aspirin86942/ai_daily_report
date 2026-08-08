@@ -238,6 +238,49 @@ CREATE INDEX idx_context_decisions_file ON context_decisions(file_identity);
 /// Full v2 schema applied to a fresh (user_version 0) database in one transaction.
 /// A fresh database must set `PRAGMA auto_vacuum=INCREMENTAL` before the first
 /// table is created (spec Part 4/8.2); that pragma is applied by `migrate`.
+/// `scan_execution_metrics` per-run authoritative metrics (spec Part 5.3).
+/// Used by the v2 amendment; fresh and upgraded databases get the table from
+/// `V2_DDL` / `V2_UPGRADE_DDL`.
+const EXECUTION_METRICS_DDL: &str = r#"
+CREATE TABLE scan_execution_metrics (
+    scan_run_id INTEGER NOT NULL REFERENCES scan_runs(scan_run_id) ON DELETE CASCADE,
+    discovery_observed_file_count INTEGER NOT NULL CHECK (discovery_observed_file_count >= 0),
+    source_guard_content_hash_file_count INTEGER NOT NULL CHECK (source_guard_content_hash_file_count >= 0),
+    source_guard_unavailable_count INTEGER NOT NULL CHECK (source_guard_unavailable_count >= 0),
+    source_guard_bytes_read INTEGER NOT NULL CHECK (source_guard_bytes_read >= 0),
+    candidate_file_count INTEGER NOT NULL CHECK (candidate_file_count >= 0),
+    admitted_file_count INTEGER NOT NULL CHECK (admitted_file_count >= 0),
+    classification_slot_count INTEGER NOT NULL CHECK (classification_slot_count >= 0),
+    confirmed_run_inspected_pages_total INTEGER NOT NULL CHECK (confirmed_run_inspected_pages_total >= 0),
+    unobserved_classification_attempt_count INTEGER NOT NULL CHECK (unobserved_classification_attempt_count >= 0),
+    nominal_charged_pages_total INTEGER NOT NULL CHECK (nominal_charged_pages_total >= 0),
+    extraction_slot_count INTEGER NOT NULL CHECK (extraction_slot_count >= 0),
+    pdfplumber_invocations INTEGER NOT NULL CHECK (pdfplumber_invocations >= 0),
+    snapshot_hit INTEGER NOT NULL CHECK (snapshot_hit IN (0, 1)),
+    parse_cache_lookup_count INTEGER NOT NULL CHECK (parse_cache_lookup_count >= 0),
+    classification_cache_lookup_count INTEGER NOT NULL CHECK (classification_cache_lookup_count >= 0),
+    parse_cache_all_hit INTEGER CHECK (parse_cache_all_hit IN (0, 1) OR parse_cache_all_hit IS NULL),
+    classification_cache_all_hit INTEGER CHECK (classification_cache_all_hit IN (0, 1) OR classification_cache_all_hit IS NULL),
+    stage_deadline_exhausted_count INTEGER NOT NULL CHECK (stage_deadline_exhausted_count IN (0, 1)),
+    session_restart_count INTEGER NOT NULL CHECK (session_restart_count >= 0),
+    session_fallback_count INTEGER NOT NULL CHECK (session_fallback_count >= 0),
+    classify_attempt_count INTEGER NOT NULL CHECK (classify_attempt_count >= 0),
+    parse_attempt_count INTEGER NOT NULL CHECK (parse_attempt_count >= 0),
+    reserved_chars INTEGER NOT NULL CHECK (reserved_chars >= 0),
+    rendered_chars INTEGER NOT NULL CHECK (rendered_chars >= 0),
+    worker_handshake_ms INTEGER NOT NULL CHECK (worker_handshake_ms >= 0),
+    discovery_ms INTEGER NOT NULL CHECK (discovery_ms >= 0),
+    snapshot_lookup_ms INTEGER NOT NULL CHECK (snapshot_lookup_ms >= 0),
+    current_run_audit_write_ms INTEGER NOT NULL CHECK (current_run_audit_write_ms >= 0),
+    terminal_precommit_ms INTEGER NOT NULL CHECK (terminal_precommit_ms >= 0),
+    deadline_precommit_elapsed_ms INTEGER NOT NULL CHECK (deadline_precommit_elapsed_ms >= 0),
+    envelope_rebuild_ms INTEGER NOT NULL CHECK (envelope_rebuild_ms >= 0),
+    terminal_rows_written INTEGER NOT NULL CHECK (terminal_rows_written >= 0),
+    peak_worker_rss_bytes INTEGER CHECK (peak_worker_rss_bytes IS NULL OR peak_worker_rss_bytes >= 0),
+    PRIMARY KEY (scan_run_id)
+) STRICT;
+"#;
+
 pub const V2_DDL: &str = r#"
 CREATE TABLE scan_runs (
     scan_run_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -537,6 +580,44 @@ CREATE TABLE context_decisions (
     PRIMARY KEY (context_run_id, file_identity)
 ) STRICT;
 
+CREATE TABLE scan_execution_metrics (
+    scan_run_id INTEGER NOT NULL REFERENCES scan_runs(scan_run_id) ON DELETE CASCADE,
+    discovery_observed_file_count INTEGER NOT NULL CHECK (discovery_observed_file_count >= 0),
+    source_guard_content_hash_file_count INTEGER NOT NULL CHECK (source_guard_content_hash_file_count >= 0),
+    source_guard_unavailable_count INTEGER NOT NULL CHECK (source_guard_unavailable_count >= 0),
+    source_guard_bytes_read INTEGER NOT NULL CHECK (source_guard_bytes_read >= 0),
+    candidate_file_count INTEGER NOT NULL CHECK (candidate_file_count >= 0),
+    admitted_file_count INTEGER NOT NULL CHECK (admitted_file_count >= 0),
+    classification_slot_count INTEGER NOT NULL CHECK (classification_slot_count >= 0),
+    confirmed_run_inspected_pages_total INTEGER NOT NULL CHECK (confirmed_run_inspected_pages_total >= 0),
+    unobserved_classification_attempt_count INTEGER NOT NULL CHECK (unobserved_classification_attempt_count >= 0),
+    nominal_charged_pages_total INTEGER NOT NULL CHECK (nominal_charged_pages_total >= 0),
+    extraction_slot_count INTEGER NOT NULL CHECK (extraction_slot_count >= 0),
+    pdfplumber_invocations INTEGER NOT NULL CHECK (pdfplumber_invocations >= 0),
+    snapshot_hit INTEGER NOT NULL CHECK (snapshot_hit IN (0, 1)),
+    parse_cache_lookup_count INTEGER NOT NULL CHECK (parse_cache_lookup_count >= 0),
+    classification_cache_lookup_count INTEGER NOT NULL CHECK (classification_cache_lookup_count >= 0),
+    parse_cache_all_hit INTEGER CHECK (parse_cache_all_hit IN (0, 1) OR parse_cache_all_hit IS NULL),
+    classification_cache_all_hit INTEGER CHECK (classification_cache_all_hit IN (0, 1) OR classification_cache_all_hit IS NULL),
+    stage_deadline_exhausted_count INTEGER NOT NULL CHECK (stage_deadline_exhausted_count IN (0, 1)),
+    session_restart_count INTEGER NOT NULL CHECK (session_restart_count >= 0),
+    session_fallback_count INTEGER NOT NULL CHECK (session_fallback_count >= 0),
+    classify_attempt_count INTEGER NOT NULL CHECK (classify_attempt_count >= 0),
+    parse_attempt_count INTEGER NOT NULL CHECK (parse_attempt_count >= 0),
+    reserved_chars INTEGER NOT NULL CHECK (reserved_chars >= 0),
+    rendered_chars INTEGER NOT NULL CHECK (rendered_chars >= 0),
+    worker_handshake_ms INTEGER NOT NULL CHECK (worker_handshake_ms >= 0),
+    discovery_ms INTEGER NOT NULL CHECK (discovery_ms >= 0),
+    snapshot_lookup_ms INTEGER NOT NULL CHECK (snapshot_lookup_ms >= 0),
+    current_run_audit_write_ms INTEGER NOT NULL CHECK (current_run_audit_write_ms >= 0),
+    terminal_precommit_ms INTEGER NOT NULL CHECK (terminal_precommit_ms >= 0),
+    deadline_precommit_elapsed_ms INTEGER NOT NULL CHECK (deadline_precommit_elapsed_ms >= 0),
+    envelope_rebuild_ms INTEGER NOT NULL CHECK (envelope_rebuild_ms >= 0),
+    terminal_rows_written INTEGER NOT NULL CHECK (terminal_rows_written >= 0),
+    peak_worker_rss_bytes INTEGER CHECK (peak_worker_rss_bytes IS NULL OR peak_worker_rss_bytes >= 0),
+    PRIMARY KEY (scan_run_id)
+) STRICT;
+
 CREATE TABLE schema_migration_history (
     user_version INTEGER PRIMARY KEY CHECK (user_version >= 1),
     origin TEXT NOT NULL CHECK (origin IN ('created_empty', 'upgraded_v1')),
@@ -642,6 +723,44 @@ CREATE TABLE context_artifact_decisions (
     error_code TEXT NOT NULL,
     PRIMARY KEY (artifact_id, file_identity),
     FOREIGN KEY (artifact_id, file_identity) REFERENCES context_artifact_files(artifact_id, file_identity) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE scan_execution_metrics (
+    scan_run_id INTEGER NOT NULL REFERENCES scan_runs(scan_run_id) ON DELETE CASCADE,
+    discovery_observed_file_count INTEGER NOT NULL CHECK (discovery_observed_file_count >= 0),
+    source_guard_content_hash_file_count INTEGER NOT NULL CHECK (source_guard_content_hash_file_count >= 0),
+    source_guard_unavailable_count INTEGER NOT NULL CHECK (source_guard_unavailable_count >= 0),
+    source_guard_bytes_read INTEGER NOT NULL CHECK (source_guard_bytes_read >= 0),
+    candidate_file_count INTEGER NOT NULL CHECK (candidate_file_count >= 0),
+    admitted_file_count INTEGER NOT NULL CHECK (admitted_file_count >= 0),
+    classification_slot_count INTEGER NOT NULL CHECK (classification_slot_count >= 0),
+    confirmed_run_inspected_pages_total INTEGER NOT NULL CHECK (confirmed_run_inspected_pages_total >= 0),
+    unobserved_classification_attempt_count INTEGER NOT NULL CHECK (unobserved_classification_attempt_count >= 0),
+    nominal_charged_pages_total INTEGER NOT NULL CHECK (nominal_charged_pages_total >= 0),
+    extraction_slot_count INTEGER NOT NULL CHECK (extraction_slot_count >= 0),
+    pdfplumber_invocations INTEGER NOT NULL CHECK (pdfplumber_invocations >= 0),
+    snapshot_hit INTEGER NOT NULL CHECK (snapshot_hit IN (0, 1)),
+    parse_cache_lookup_count INTEGER NOT NULL CHECK (parse_cache_lookup_count >= 0),
+    classification_cache_lookup_count INTEGER NOT NULL CHECK (classification_cache_lookup_count >= 0),
+    parse_cache_all_hit INTEGER CHECK (parse_cache_all_hit IN (0, 1) OR parse_cache_all_hit IS NULL),
+    classification_cache_all_hit INTEGER CHECK (classification_cache_all_hit IN (0, 1) OR classification_cache_all_hit IS NULL),
+    stage_deadline_exhausted_count INTEGER NOT NULL CHECK (stage_deadline_exhausted_count IN (0, 1)),
+    session_restart_count INTEGER NOT NULL CHECK (session_restart_count >= 0),
+    session_fallback_count INTEGER NOT NULL CHECK (session_fallback_count >= 0),
+    classify_attempt_count INTEGER NOT NULL CHECK (classify_attempt_count >= 0),
+    parse_attempt_count INTEGER NOT NULL CHECK (parse_attempt_count >= 0),
+    reserved_chars INTEGER NOT NULL CHECK (reserved_chars >= 0),
+    rendered_chars INTEGER NOT NULL CHECK (rendered_chars >= 0),
+    worker_handshake_ms INTEGER NOT NULL CHECK (worker_handshake_ms >= 0),
+    discovery_ms INTEGER NOT NULL CHECK (discovery_ms >= 0),
+    snapshot_lookup_ms INTEGER NOT NULL CHECK (snapshot_lookup_ms >= 0),
+    current_run_audit_write_ms INTEGER NOT NULL CHECK (current_run_audit_write_ms >= 0),
+    terminal_precommit_ms INTEGER NOT NULL CHECK (terminal_precommit_ms >= 0),
+    deadline_precommit_elapsed_ms INTEGER NOT NULL CHECK (deadline_precommit_elapsed_ms >= 0),
+    envelope_rebuild_ms INTEGER NOT NULL CHECK (envelope_rebuild_ms >= 0),
+    terminal_rows_written INTEGER NOT NULL CHECK (terminal_rows_written >= 0),
+    peak_worker_rss_bytes INTEGER CHECK (peak_worker_rss_bytes IS NULL OR peak_worker_rss_bytes >= 0),
+    PRIMARY KEY (scan_run_id)
 ) STRICT;
 
 CREATE TABLE schema_migration_history (
@@ -910,6 +1029,23 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
             })();
             connection.pragma_update(None, "foreign_keys", true)?;
             migration?;
+        }
+        // spec Part 5.3: databases committed before the `scan_execution_metrics`
+        // table existed are amended in place. Migrated v1 runs carry no row
+        // (they fail closed on v2 inspect); full_v2 finalize inserts one row.
+        let has_execution_metrics: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type='table' AND name='scan_execution_metrics'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_execution_metrics {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(EXECUTION_METRICS_DDL)?;
+            transaction.commit()?;
         }
     }
     Ok(())
@@ -1240,6 +1376,7 @@ mod tests {
                 "file_inventory",
                 "parse_cache",
                 "run_diagnostics",
+                "scan_execution_metrics",
                 "scan_extension_metrics",
                 "scan_file_results",
                 "scan_run_attempts",

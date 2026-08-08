@@ -907,6 +907,7 @@ fn snapshot_cold_batch(active: &ActiveRun, key: &SnapshotKeyParts) -> Finalizati
         artifact: Some(draft),
         snapshot_key: Some(key.clone()),
         snapshot_hit: None,
+        execution_metrics: None,
     }
 }
 
@@ -929,6 +930,7 @@ fn snapshot_hit_batch(active: &ActiveRun, hit: &ai_daily_scanner_core::store::Sn
             artifact_id: hit.artifact_id,
             reused_from_context_run_id: hit.source_context_run_id,
         }),
+        execution_metrics: None,
     }
 }
 

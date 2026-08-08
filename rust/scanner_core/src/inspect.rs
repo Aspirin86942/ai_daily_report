@@ -96,7 +96,12 @@ pub fn assemble_inspect_v2(
         file.validate()
             .map_err(|message| format!("file audit v2 is invalid: {message}"))?;
     }
-    let execution_metrics = assemble_execution_metrics_v2(snapshot);
+    let execution_metrics = match snapshot.execution_metrics.as_ref() {
+        Some(metrics) => metrics.clone(),
+        // Engine-error runs with no scheduler outcome have no persisted row;
+        // the derive reconstructs the mostly-zero object from the empty rows.
+        None => assemble_execution_metrics_v2(snapshot),
+    };
     execution_metrics.validate().map_err(|message| {
         format!("execution metrics are invalid: {message}")
     })?;
@@ -254,9 +259,16 @@ fn assemble_file_audit_v2(
         }
         _ => 0,
     };
+    // spec Part 5.3/Part 3: the immutable artifact provenance only maps to a
+    // snapshot audit when THIS current row is actually a snapshot row. A cold
+    // run's own inspect must never stamp snapshot identity onto real execution
+    // (its run pages/duration are not persisted), so `pdf_classification` is
+    // null for miss/not_applicable rows.
     let pdf_classification = match row.classifier.as_ref() {
-        Some(provenance) => assemble_snapshot_classification(provenance),
-        None => assemble_not_classified(row, run_classifier_identity),
+        Some(provenance) if row.parse_cache_status.as_deref() == Some("snapshot") => {
+            assemble_snapshot_classification(provenance)
+        }
+        _ => assemble_not_classified(row, run_classifier_identity),
     };
     if let Some(classification) = &pdf_classification {
         classification.validate().map_err(|message| {

@@ -552,6 +552,10 @@ pub struct InspectSnapshot {
     /// Full_v2 per-file rows (v1 FileAudit + SourceGuardV2 + classifier
     /// provenance). Empty for migrated_v1/nonterminal rows.
     pub files_v2: Vec<FileAuditV2Source>,
+    /// Authoritative `execution_metrics` persisted at finalize (spec Part 5.3).
+    /// `None` for migrated_v1/nonterminal rows and engine-error runs that had no
+    /// scheduler outcome.
+    pub execution_metrics: Option<ExecutionMetricsV2>,
 }
 
 /// `scan_runs.audit_provenance_version` (spec Part 8.2).
@@ -1063,6 +1067,8 @@ pub(crate) fn load_inspect_snapshot(
     };
     let stage_deadline_exhausted = load_stage_deadline_exhausted(transaction, scan_run_id)
         .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+    let execution_metrics = load_execution_metrics(transaction, scan_run_id)
+        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
 
     Ok(InspectSnapshot {
         context_run_id,
@@ -1081,7 +1087,168 @@ pub(crate) fn load_inspect_snapshot(
         rendered_chars,
         stage_deadline_exhausted,
         files_v2,
+        execution_metrics,
     })
+}
+
+/// Loads the authoritative `execution_metrics` row persisted at finalize
+/// (spec Part 5.3). Migrated v1 / nonterminal / engine-error runs have none.
+fn load_execution_metrics(
+    transaction: &Transaction<'_>,
+    scan_run_id: i64,
+) -> Result<Option<ExecutionMetricsV2>, InspectAuditError> {
+    #[allow(clippy::type_complexity)]
+    let row: Option<(
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<i64>,
+    )> = transaction
+        .query_row(
+            "SELECT discovery_observed_file_count,
+                    source_guard_content_hash_file_count, source_guard_unavailable_count,
+                    source_guard_bytes_read, candidate_file_count, admitted_file_count,
+                    classification_slot_count, confirmed_run_inspected_pages_total,
+                    unobserved_classification_attempt_count, nominal_charged_pages_total,
+                    extraction_slot_count, pdfplumber_invocations, snapshot_hit,
+                    parse_cache_lookup_count, classification_cache_lookup_count,
+                    parse_cache_all_hit, classification_cache_all_hit,
+                    stage_deadline_exhausted_count, session_restart_count,
+                    session_fallback_count, classify_attempt_count, parse_attempt_count,
+                    reserved_chars, rendered_chars, worker_handshake_ms, discovery_ms,
+                    snapshot_lookup_ms, current_run_audit_write_ms, terminal_precommit_ms,
+                    deadline_precommit_elapsed_ms, envelope_rebuild_ms,
+                    terminal_rows_written, peak_worker_rss_bytes
+             FROM scan_execution_metrics WHERE scan_run_id=?1",
+            [scan_run_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                    row.get(13)?,
+                    row.get(14)?,
+                    row.get(15)?,
+                    row.get(16)?,
+                    row.get(17)?,
+                    row.get(18)?,
+                    row.get(19)?,
+                    row.get(20)?,
+                    row.get(21)?,
+                    row.get(22)?,
+                    row.get(23)?,
+                    row.get(24)?,
+                    row.get(25)?,
+                    row.get(26)?,
+                    row.get(27)?,
+                    row.get(28)?,
+                    row.get(29)?,
+                    row.get(30)?,
+                    row.get(31)?,
+                    row.get(32)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(InspectAuditError::Sql)?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let parse_bool = |value: i64| match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(InspectAuditError::RunCorrupt("persisted metric bool is invalid".to_string())),
+    };
+    let metrics = ExecutionMetricsV2 {
+        discovery_observed_file_count: to_u64(row.0, "discovery_observed_file_count")?,
+        source_guard_content_hash_file_count: to_u64(
+            row.1,
+            "source_guard_content_hash_file_count",
+        )?,
+        source_guard_unavailable_count: to_u64(row.2, "source_guard_unavailable_count")?,
+        source_guard_bytes_read: to_u64(row.3, "source_guard_bytes_read")?,
+        candidate_file_count: to_u64(row.4, "candidate_file_count")?,
+        admitted_file_count: to_u64(row.5, "admitted_file_count")?,
+        classification_slot_count: to_u64(row.6, "classification_slot_count")?,
+        confirmed_run_inspected_pages_total: to_u64(
+            row.7,
+            "confirmed_run_inspected_pages_total",
+        )?,
+        unobserved_classification_attempt_count: to_u64(
+            row.8,
+            "unobserved_classification_attempt_count",
+        )?,
+        nominal_charged_pages_total: to_u64(row.9, "nominal_charged_pages_total")?,
+        extraction_slot_count: to_u64(row.10, "extraction_slot_count")?,
+        pdfplumber_invocations: to_u64(row.11, "pdfplumber_invocations")?,
+        snapshot_hit: parse_bool(row.12)?,
+        parse_cache_lookup_count: to_u64(row.13, "parse_cache_lookup_count")?,
+        classification_cache_lookup_count: to_u64(
+            row.14,
+            "classification_cache_lookup_count",
+        )?,
+        parse_cache_all_hit: Nullable(row.15.map(parse_bool).transpose()?),
+        classification_cache_all_hit: Nullable(row.16.map(parse_bool).transpose()?),
+        stage_deadline_exhausted_count: to_u64(row.17, "stage_deadline_exhausted_count")?,
+        session_restart_count: to_u64(row.18, "session_restart_count")?,
+        session_fallback_count: to_u64(row.19, "session_fallback_count")?,
+        classify_attempt_count: to_u64(row.20, "classify_attempt_count")?,
+        parse_attempt_count: to_u64(row.21, "parse_attempt_count")?,
+        reserved_chars: to_u64(row.22, "reserved_chars")?,
+        rendered_chars: to_u64(row.23, "rendered_chars")?,
+        worker_handshake_ms: to_u64(row.24, "worker_handshake_ms")?,
+        discovery_ms: to_u64(row.25, "discovery_ms")?,
+        snapshot_lookup_ms: to_u64(row.26, "snapshot_lookup_ms")?,
+        current_run_audit_write_ms: to_u64(row.27, "current_run_audit_write_ms")?,
+        terminal_precommit_ms: to_u64(row.28, "terminal_precommit_ms")?,
+        deadline_precommit_elapsed_ms: to_u64(row.29, "deadline_precommit_elapsed_ms")?,
+        envelope_rebuild_ms: to_u64(row.30, "envelope_rebuild_ms")?,
+        terminal_rows_written: to_u64(row.31, "terminal_rows_written")?,
+        peak_worker_rss_bytes: Nullable(row.32.map(|value| to_u64(value, "peak_worker_rss_bytes")).transpose()?),
+    };
+    metrics
+        .validate()
+        .map_err(|message| InspectAuditError::RunCorrupt(message.to_string()))?;
+    Ok(Some(metrics))
 }
 
 /// `stage_deadline_exhausted_count` is 0 or 1 (spec Part 5.3): true exactly

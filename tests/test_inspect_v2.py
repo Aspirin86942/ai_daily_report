@@ -119,6 +119,44 @@ def test_inspect_v2_reports_snapshot_reuse(tmp_path: Path) -> None:
     )
 
 
+def test_inspect_v2_cold_run_reports_real_metrics(tmp_path: Path) -> None:
+    """冷 run 的 v2 execution_metrics 必须来自 finalize 持久化的真实测量，
+    不得用 0 冒充已知值（spec Part 5.3「未知值不得用 0 代替」）。"""
+    work_dir = tmp_path / "冷 指标 目录"
+    work_dir.mkdir()
+    (work_dir / "证据.txt").write_text("cold real metrics evidence", encoding="utf-8")
+    scan_db_path = tmp_path / "state" / "scan_index_v2.sqlite3"
+    scan_db_path.parent.mkdir()
+    cfg = _runtime_config(tmp_path, work_dir, scan_db_path)
+    client = RustContextClient(
+        config=cfg,
+        project_root=PROJECT_ROOT,
+        scanner_binary=SCANNER_BIN,
+        scan_db_path=scan_db_path,
+        office_worker_path=OFFICE_BIN,
+        timeout_seconds=60,
+    )
+
+    cold = client.build_context(_schedule_request())
+    assert cold.scan_run_id is not None
+    audit = client.inspect_run_v2(cold.scan_run_id)
+    assert audit.status == "ok"
+    m = audit.execution_metrics
+    # 真实测量：live worker handshake 与 terminal 逻辑行数。
+    assert m.worker_handshake_ms > 0
+    assert m.terminal_rows_written > 0
+    assert m.discovery_observed_file_count == 1
+    assert m.snapshot_hit is False
+    assert m.parse_cache_lookup_count == 1
+    assert m.parse_cache_all_hit is False
+    # 冷 run 本轮真实执行 parse：不把 snapshot 身份安到 pdf_classification。
+    assert len(audit.files) == 1
+    assert audit.files[0].parse_cache_status == "miss"
+    assert audit.files[0].parse_transport == "rust_in_process"
+    assert audit.files[0].parse_attempt_count == 1
+    assert audit.files[0].pdf_classification is None
+
+
 def test_inspect_v1_projects_snapshot_as_fresh_with_warning(tmp_path: Path) -> None:
     work_dir = tmp_path / "投影 合成目录"
     work_dir.mkdir()

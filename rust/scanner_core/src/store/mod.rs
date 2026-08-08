@@ -8,18 +8,19 @@ use ai_daily_discovery::normalize_contract_path_text;
 use ai_daily_scanner_contract::{
     AutoVacuumMode, BuildContextRequest, ContextAction, ContextDecision,
     ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode,
-    ExtensionMetric, MaintenanceDeletedV1, MaintenanceMode, MaintenancePostIntegrityCheck,
-    MaintenancePreIntegrityCheck, MaintenanceRequestV1, MaintenanceResponseV1, MaintenanceSizeV1,
-    MaintenanceStatus, MaintenanceVacuumStatus, MaintenanceVacuumV1, NormalizedScannerProfileV1,
-    Nullable, ParseStatus, RunStatus, StageMetric, StageName, UpgradeDatabaseRequestV1,
-    UpgradeDatabaseResponseV1, UpgradeIntegrityCheck, UpgradeStatus, Validate, VersionResponse,
+    ExecutionMetricsV2, ExtensionMetric, MaintenanceDeletedV1, MaintenanceMode,
+    MaintenancePostIntegrityCheck, MaintenancePreIntegrityCheck, MaintenanceRequestV1,
+    MaintenanceResponseV1, MaintenanceSizeV1, MaintenanceStatus, MaintenanceVacuumStatus,
+    MaintenanceVacuumV1, NormalizedScannerProfileV1, Nullable, ParseStatus, RunStatus, StageMetric,
+    StageName, UpgradeDatabaseRequestV1, UpgradeDatabaseResponseV1, UpgradeIntegrityCheck,
+    UpgradeStatus, Validate, VersionResponse,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::artifact::{ArtifactDecisionRow, ArtifactDraft, ArtifactFileRow, SnapshotKeyParts};
@@ -383,6 +384,19 @@ pub struct FinalizationBatch {
     /// artifact instead of writing a new one (`snapshot_hit=1` +
     /// `reused_from_context_run_id` are recorded on the current `context_runs`).
     pub snapshot_hit: Option<SnapshotHitRef>,
+    /// Authoritative `execution_metrics` (spec Part 5.3), written at finalize and
+    /// read back by inspect v2. `None` only for non-production test batches.
+    pub execution_metrics: Option<ExecutionMetricsV2>,
+}
+
+/// Sub-span wall timings and logical row count captured inside the terminal
+/// transaction (spec Part 5.3 `execution_metrics`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TerminalAuditTimings {
+    pub current_run_audit_write_ms: u64,
+    pub terminal_precommit_ms: u64,
+    pub envelope_rebuild_ms: u64,
+    pub terminal_rows_written: u64,
 }
 
 /// A snapshot lookup hit: the eligible artifact and the committed Success source
@@ -1064,7 +1078,7 @@ impl ScannerStore {
         active: &ActiveRun,
         batch: &FinalizationBatch,
         now_ms: u64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<TerminalAuditTimings, StoreError> {
         let envelope = validate_finalization(active, batch)?;
         let now_ms = checked_i64(now_ms, "finalization timestamp")?;
         let metadata_json = envelope_metadata_json(&envelope)?;
@@ -1074,6 +1088,7 @@ impl ScannerStore {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(cache_write)?;
+        let transaction_started = Instant::now();
         heartbeat_in_transaction(&transaction, active, now_ms)?;
         ensure_engine_fingerprint(&transaction, active, &envelope)?;
         let handshake_failed = batch.diagnostics.iter().any(|record| {
@@ -1092,6 +1107,7 @@ impl ScannerStore {
             ensure_worker_fingerprints(&transaction, active)?;
         }
 
+        let audit_write_started = Instant::now();
         inventory::upsert_inventory(&transaction, active.scan_run_id, now_ms, &batch.inventory)
             .map_err(cache_write)?;
         cache::write_success_cache(&transaction, now_ms, &batch.cache_writes)
@@ -1113,6 +1129,7 @@ impl ScannerStore {
             &batch.extension_metrics,
         )
         .map_err(cache_write)?;
+        let current_run_audit_write_ms = elapsed_ms(audit_write_started);
 
         // ---- artifact write / snapshot-hit reference + context_runs ----
         // spec Part 4/5.2: establish the current `context_runs.artifact_id`
@@ -1256,8 +1273,13 @@ impl ScannerStore {
         // current context_runs reference.
         retention_gc_for_current_run(&transaction, &protected_runs, now_ms, audit_size)
             .map_err(cache_write)?;
-        // spec Part 5.2: finalize validates current rows + current summary +
-        // artifact semantic summary + the rebuilt envelope all agree.
+        // spec Part 5.3: the authoritative `execution_metrics` row is bound at
+        // the precommit checkpoint. `terminal_precommit_ms` runs from transaction
+        // begin to just before the metrics write; `envelope_rebuild_ms` covers the
+        // metadata+summary+artifact rebuild and validation.
+        let terminal_precommit_ms = elapsed_ms(transaction_started);
+        let terminal_rows_written = compute_terminal_rows_written(batch);
+        let rebuild_started = Instant::now();
         let metadata_value: serde_json::Value = serde_json::from_str(&metadata_json)
             .map_err(|error| StoreError::RunCorrupt(error.to_string()))?;
         let rebuilt = crate::artifact::rebuild_envelope(
@@ -1273,6 +1295,18 @@ impl ScannerStore {
                 "rebuilt envelope disagrees with the committed envelope".to_string(),
             ));
         }
+        let envelope_rebuild_ms = elapsed_ms(rebuild_started);
+        if let Some(metrics) = &batch.execution_metrics {
+            let mut metrics = metrics.clone();
+            metrics.current_run_audit_write_ms = current_run_audit_write_ms;
+            metrics.terminal_precommit_ms = terminal_precommit_ms;
+            metrics.terminal_rows_written = terminal_rows_written;
+            metrics.envelope_rebuild_ms = envelope_rebuild_ms;
+            metrics.validate().map_err(|message| {
+                StoreError::RunCorrupt(format!("execution metrics are invalid: {message}"))
+            })?;
+            insert_execution_metrics(&transaction, active.scan_run_id, &metrics)?;
+        }
         let lease_deleted = transaction
             .execute(
                 "DELETE FROM engine_lease WHERE lease_key=1 AND owner_id=?1",
@@ -1286,7 +1320,12 @@ impl ScannerStore {
 
         // The exact bytes committed above must still parse as the validated object.
         debug_assert_eq!(envelope.request_id, active.request_id);
-        Ok(())
+        Ok(TerminalAuditTimings {
+            current_run_audit_write_ms,
+            terminal_precommit_ms,
+            envelope_rebuild_ms,
+            terminal_rows_written,
+        })
     }
 
     pub fn load_terminal_envelope(&self, scan_run_id: u64) -> Result<StoredEnvelope, StoreError> {
@@ -2941,6 +2980,37 @@ fn gc_orphan_artifacts(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
 /// envelope/attempt/diagnostic/current file/decision/stage/extension/context-run
 /// 元数据；不含其引用的 artifact、全局 inventory 或 cache。Store 在 insert 时
 /// 计算，不接受 wire 输入。
+/// Logical INSERT/UPDATE row count of the terminal transaction (spec Part 5.3
+/// `terminal_rows_written`): current run/artifact/context/metric rows only;
+/// retention DELETE, cache-transaction and maintenance rows are excluded.
+fn compute_terminal_rows_written(batch: &FinalizationBatch) -> u64 {
+    let mut rows = 0_u64;
+    rows = rows.saturating_add(batch.inventory.len() as u64);
+    rows = rows.saturating_add(batch.cache_writes.len() as u64);
+    rows = rows.saturating_add(batch.file_results.len() as u64);
+    rows = rows.saturating_add(batch.diagnostics.len() as u64);
+    rows = rows.saturating_add(batch.stage_metrics.len() as u64);
+    rows = rows.saturating_add(batch.extension_metrics.len() as u64);
+    if let Some(context) = &batch.context {
+        rows = rows.saturating_add(1); // context_runs row
+        rows = rows.saturating_add(context.decisions.len() as u64);
+        if batch.snapshot_hit.is_none() {
+            if let Some(artifact) = &batch.artifact {
+                rows = rows.saturating_add(1); // artifact parent
+                rows = rows.saturating_add(artifact.file_rows.len() as u64);
+                rows = rows.saturating_add(artifact.decision_rows.len() as u64);
+            }
+        }
+    }
+    rows = rows.saturating_add(2); // scan_runs + scan_run_attempts UPDATE
+    rows = rows.saturating_add(1); // execution_metrics row
+    rows
+}
+
+fn elapsed_ms(started_at: Instant) -> u64 {
+    started_at.elapsed().as_millis() as u64
+}
+
 fn compute_audit_size(batch: &FinalizationBatch) -> i64 {
     let mut total = batch.envelope_json.len() as i64;
     total += batch.inventory.len() as i64 * 256;
@@ -4059,6 +4129,78 @@ fn insert_diagnostics(
     Ok(())
 }
 
+/// Persists the authoritative `execution_metrics` row (spec Part 5.3). Migrated
+/// v1 runs have no row; every full_v2 terminal run writes exactly one.
+fn insert_execution_metrics(
+    transaction: &rusqlite::Transaction<'_>,
+    scan_run_id: i64,
+    metrics: &ExecutionMetricsV2,
+) -> Result<(), StoreError> {
+    let all_hit = |value: &Option<bool>| value.map(i64::from);
+    let c = |value: u64, field: &str| -> Result<i64, StoreError> {
+        checked_i64(value, field)
+    };
+    transaction
+        .execute(
+            "INSERT INTO scan_execution_metrics(
+                scan_run_id,
+                discovery_observed_file_count, source_guard_content_hash_file_count,
+                source_guard_unavailable_count, source_guard_bytes_read,
+                candidate_file_count, admitted_file_count, classification_slot_count,
+                confirmed_run_inspected_pages_total, unobserved_classification_attempt_count,
+                nominal_charged_pages_total, extraction_slot_count, pdfplumber_invocations,
+                snapshot_hit, parse_cache_lookup_count, classification_cache_lookup_count,
+                parse_cache_all_hit, classification_cache_all_hit,
+                stage_deadline_exhausted_count, session_restart_count, session_fallback_count,
+                classify_attempt_count, parse_attempt_count, reserved_chars, rendered_chars,
+                worker_handshake_ms, discovery_ms, snapshot_lookup_ms,
+                current_run_audit_write_ms, terminal_precommit_ms,
+                deadline_precommit_elapsed_ms, envelope_rebuild_ms,
+                terminal_rows_written, peak_worker_rss_bytes
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14,
+                       ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26,
+                       ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
+            params![
+                scan_run_id,
+                c(metrics.discovery_observed_file_count, "discovery_observed_file_count")?,
+                c(metrics.source_guard_content_hash_file_count, "source_guard_content_hash_file_count")?,
+                c(metrics.source_guard_unavailable_count, "source_guard_unavailable_count")?,
+                c(metrics.source_guard_bytes_read, "source_guard_bytes_read")?,
+                c(metrics.candidate_file_count, "candidate_file_count")?,
+                c(metrics.admitted_file_count, "admitted_file_count")?,
+                c(metrics.classification_slot_count, "classification_slot_count")?,
+                c(metrics.confirmed_run_inspected_pages_total, "confirmed_run_inspected_pages_total")?,
+                c(metrics.unobserved_classification_attempt_count, "unobserved_classification_attempt_count")?,
+                c(metrics.nominal_charged_pages_total, "nominal_charged_pages_total")?,
+                c(metrics.extraction_slot_count, "extraction_slot_count")?,
+                c(metrics.pdfplumber_invocations, "pdfplumber_invocations")?,
+                i64::from(metrics.snapshot_hit),
+                c(metrics.parse_cache_lookup_count, "parse_cache_lookup_count")?,
+                c(metrics.classification_cache_lookup_count, "classification_cache_lookup_count")?,
+                all_hit(&metrics.parse_cache_all_hit.0),
+                all_hit(&metrics.classification_cache_all_hit.0),
+                c(metrics.stage_deadline_exhausted_count, "stage_deadline_exhausted_count")?,
+                c(metrics.session_restart_count, "session_restart_count")?,
+                c(metrics.session_fallback_count, "session_fallback_count")?,
+                c(metrics.classify_attempt_count, "classify_attempt_count")?,
+                c(metrics.parse_attempt_count, "parse_attempt_count")?,
+                c(metrics.reserved_chars, "reserved_chars")?,
+                c(metrics.rendered_chars, "rendered_chars")?,
+                c(metrics.worker_handshake_ms, "worker_handshake_ms")?,
+                c(metrics.discovery_ms, "discovery_ms")?,
+                c(metrics.snapshot_lookup_ms, "snapshot_lookup_ms")?,
+                c(metrics.current_run_audit_write_ms, "current_run_audit_write_ms")?,
+                c(metrics.terminal_precommit_ms, "terminal_precommit_ms")?,
+                c(metrics.deadline_precommit_elapsed_ms, "deadline_precommit_elapsed_ms")?,
+                c(metrics.envelope_rebuild_ms, "envelope_rebuild_ms")?,
+                c(metrics.terminal_rows_written, "terminal_rows_written")?,
+                metrics.peak_worker_rss_bytes.0.map(|value| value as i64),
+            ],
+        )
+        .map_err(cache_write)?;
+    Ok(())
+}
+
 fn insert_context(
     transaction: &rusqlite::Transaction<'_>,
     scan_run_id: i64,
@@ -4790,6 +4932,7 @@ mod tests {
             artifact: None,
             snapshot_key: None,
             snapshot_hit: None,
+            execution_metrics: None,
         }
     }
 
@@ -5001,6 +5144,7 @@ mod tests {
             artifact: Some(artifact),
             snapshot_key: None,
             snapshot_hit: None,
+            execution_metrics: None,
         }
     }
 

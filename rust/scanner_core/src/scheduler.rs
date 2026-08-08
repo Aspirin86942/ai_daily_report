@@ -327,6 +327,11 @@ pub struct ExecutionMetrics {
     pub reserved_chars: u64,
     pub rendered_chars: u64,
     pub deadline_precommit_elapsed_ms: u64,
+    // spec Part 5.3: page/nominal/pdfplumber counts owned by the scheduler.
+    pub confirmed_run_inspected_pages_total: u64,
+    pub unobserved_classification_attempt_count: u64,
+    pub nominal_charged_pages_total: u64,
+    pub pdfplumber_invocations: u64,
 }
 
 /// Complete outcome of a scheduled run (spec Solution). Callers convert this to
@@ -520,6 +525,15 @@ impl BudgetedContextScheduler {
             .iter()
             .filter(|plan| matches!(plan.pdf_classification, crate::admission::PdfClassificationPlan::Classify { .. }))
             .count() as u64;
+        metrics.nominal_charged_pages_total = classified
+            .iter()
+            .filter_map(|plan| match plan.pdf_classification {
+                crate::admission::PdfClassificationPlan::Classify { charged_pages } => {
+                    Some(charged_pages)
+                }
+                _ => None,
+            })
+            .fold(0_u64, u64::saturating_add);
 
         // ---- Execute the selected PDF classifications ----
         let classifier_profile_hash = crate::store::classifier_profile_hash(&profile)
@@ -824,7 +838,7 @@ struct ParseOutputs {
     parse_fresh_hits: Vec<String>,
 }
 
-fn source_guard_metrics(discovery: &[DiscoveredFileOut]) -> ExecutionMetrics {
+pub(crate) fn source_guard_metrics(discovery: &[DiscoveredFileOut]) -> ExecutionMetrics {
     let mut metrics = ExecutionMetrics {
         discovery_observed_file_count: discovery.len() as u64,
         ..ExecutionMetrics::default()
@@ -1199,11 +1213,23 @@ impl BudgetedContextScheduler {
                                 error_code: Some("SOURCE_VERSION_CHANGED".to_string()),
                             },
                         );
+                        // spec Part 5.3: a discarded classifier attempt has no
+                        // confirmed inspected pages.
+                        metrics.unobserved_classification_attempt_count += 1;
                         continue;
                     }
                     let status = classification.status;
                     let page_count = classification.page_count;
                     let result_examined_pages = classification.result_examined_pages;
+                    // spec Part 5.3: sum confirmed run-inspected pages; any
+                    // attempt that cannot report pages is unobserved.
+                    match result_examined_pages {
+                        Some(pages) => {
+                            metrics.confirmed_run_inspected_pages_total =
+                                metrics.confirmed_run_inspected_pages_total.saturating_add(pages)
+                        }
+                        None => metrics.unobserved_classification_attempt_count += 1,
+                    }
                     results.insert(plan.file_identity.clone(), classification);
                     // Success-only classification cache write while remaining > 0.
                     if self.clock.now_ms() < work_deadline {
@@ -1380,6 +1406,10 @@ impl BudgetedContextScheduler {
                         let remaining = work_deadline.saturating_sub(self.clock.now_ms());
                         let timeout_ms = route_timeout_ms(*route, profile).min(remaining);
                         metrics.parse_attempt_count += 1;
+                        // spec Part 5.3: a PDF body-parse attempt invokes pdfplumber.
+                        if *route == RouteKind::Pdf {
+                            metrics.pdfplumber_invocations += 1;
+                        }
                         admitted.push((
                             (*file).clone(),
                             *route,

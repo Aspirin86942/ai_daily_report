@@ -614,10 +614,14 @@ fn execute_active_build(
     started_at: Instant,
 ) -> Result<CommandOutput, EngineShellError> {
     // ---- bounded parallel worker handshakes (spec Solution run.rs order) ----
+    // spec Part 5.3: `worker_handshake_ms` is the whole-batch parallel preflight
+    // wall span from one monotonic clock.
+    let handshake_started = Instant::now();
     let office_command = office::worker_command(&request.adapters);
     let python_command = document::worker_command(&request.adapters);
     let (office_result, python_result) =
         register_worker_pair(&office_command, &python_command, WORKER_HANDSHAKE_TIMEOUT);
+    let worker_handshake_ms = elapsed_ms(handshake_started);
     let (office_worker, office_error) = split_handshake(office_result, "rust_office_oxide_v1");
     let (python_worker, python_error) = split_handshake(python_result, "python_office_v1");
     let office_fingerprint = office_worker.as_ref().map(worker_fingerprint);
@@ -873,8 +877,9 @@ fn execute_active_build(
             );
         }
     };
-    let snapshot_lookup_ms = elapsed_ms(snapshot_lookup_started);
-    if let Some(hit) = match store.snapshot_lookup(&key_parts) {
+    // spec Part 5.3: `snapshot_lookup_ms` is the whole lookup/strict-guard span
+    // (key building + the SQL hit selection), measured from one monotonic clock.
+    let hit = match store.snapshot_lookup(&key_parts) {
         Ok(hit) => hit,
         Err(error) => {
             return finish_active_error(
@@ -888,7 +893,9 @@ fn execute_active_build(
                 elapsed_summary(started_at),
             );
         }
-    } {
+    };
+    let snapshot_lookup_ms = elapsed_ms(snapshot_lookup_started);
+    if let Some(hit) = hit {
         return finalize_snapshot_hit(
             request,
             version,
@@ -900,6 +907,7 @@ fn execute_active_build(
             hit,
             discovery_duration_ms,
             snapshot_lookup_ms,
+            worker_handshake_ms,
             started_at,
         );
     }
@@ -1020,6 +1028,12 @@ fn execute_active_build(
         artifact: artifact_draft,
         snapshot_key: snapshot_key_for_batch,
         snapshot_hit: None,
+        execution_metrics: Some(assemble_scheduler_execution_metrics(
+            &outcome.execution_metrics,
+            worker_handshake_ms,
+            discovery_duration_ms,
+            snapshot_lookup_ms,
+        )),
     };
     heartbeat.stop();
     if let Some(error) = heartbeat.take_background_error() {
@@ -1049,7 +1063,7 @@ fn execute_active_build(
     };
     let exit_code = i32::from(run_status == RunStatus::Error);
     match store.finalize(active, &batch, finalize_now_ms) {
-        Ok(()) => {
+        Ok(_timings) => {
             // spec Part 4 opportunistic GC: only when >=10ms remain to the
             // absolute deadline. It runs in an independent zero-wait transaction,
             // forms a freelist only, and never rewrites the committed terminal
@@ -1138,6 +1152,105 @@ fn scheduler_outcome_envelope(
     (envelope, run_status)
 }
 
+/// Assembles the strict `execution_metrics` for the scheduler path (spec
+/// Part 5.3). The scheduler owns the plan/execution counts; the run shell owns
+/// the wall timings. `current_run_audit_write_ms`/`terminal_precommit_ms`/
+/// `envelope_rebuild_ms`/`terminal_rows_written` are filled by `store.finalize`.
+fn assemble_scheduler_execution_metrics(
+    metrics: &crate::scheduler::ExecutionMetrics,
+    worker_handshake_ms: u64,
+    discovery_ms: u64,
+    snapshot_lookup_ms: u64,
+) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
+    ai_daily_scanner_contract::ExecutionMetricsV2 {
+        discovery_observed_file_count: metrics.discovery_observed_file_count,
+        source_guard_content_hash_file_count: metrics.source_guard_content_hash_file_count,
+        source_guard_unavailable_count: metrics.source_guard_unavailable_count,
+        source_guard_bytes_read: metrics.source_guard_bytes_read,
+        candidate_file_count: metrics.candidate_file_count,
+        admitted_file_count: metrics.admitted_file_count,
+        classification_slot_count: metrics.classification_slot_count,
+        confirmed_run_inspected_pages_total: metrics.confirmed_run_inspected_pages_total,
+        unobserved_classification_attempt_count: metrics.unobserved_classification_attempt_count,
+        nominal_charged_pages_total: metrics.nominal_charged_pages_total,
+        extraction_slot_count: metrics.extraction_slot_count,
+        pdfplumber_invocations: metrics.pdfplumber_invocations,
+        snapshot_hit: false,
+        parse_cache_lookup_count: metrics.parse_cache_lookup_count,
+        classification_cache_lookup_count: metrics.classification_cache_lookup_count,
+        parse_cache_all_hit: Nullable(metrics.parse_cache_all_hit),
+        classification_cache_all_hit: Nullable(metrics.classification_cache_all_hit),
+        stage_deadline_exhausted_count: metrics.stage_deadline_exhausted_count,
+        session_restart_count: 0,
+        session_fallback_count: 0,
+        classify_attempt_count: metrics.classify_attempt_count,
+        parse_attempt_count: metrics.parse_attempt_count,
+        reserved_chars: metrics.reserved_chars,
+        rendered_chars: metrics.rendered_chars,
+        worker_handshake_ms,
+        discovery_ms,
+        snapshot_lookup_ms,
+        current_run_audit_write_ms: 0,
+        terminal_precommit_ms: 0,
+        deadline_precommit_elapsed_ms: metrics.deadline_precommit_elapsed_ms,
+        envelope_rebuild_ms: 0,
+        terminal_rows_written: 0,
+        peak_worker_rss_bytes: Nullable(None),
+    }
+}
+
+/// Assembles the strict `execution_metrics` for a snapshot-hit current run
+/// (spec Part 5.4): the scheduler did not run, so every plan/execution count is
+/// 0; discovery/source-guard counts and the live-handshake/lookup/terminal wall
+/// spans are this run's real measured values.
+#[allow(clippy::too_many_arguments)]
+fn assemble_snapshot_execution_metrics(
+    discovery: &[DiscoveredFileOut],
+    reserved_chars: u64,
+    rendered_chars: u64,
+    worker_handshake_ms: u64,
+    discovery_ms: u64,
+    snapshot_lookup_ms: u64,
+    deadline_precommit_elapsed_ms: u64,
+) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
+    let guards = crate::scheduler::source_guard_metrics(discovery);
+    ai_daily_scanner_contract::ExecutionMetricsV2 {
+        discovery_observed_file_count: guards.discovery_observed_file_count,
+        source_guard_content_hash_file_count: guards.source_guard_content_hash_file_count,
+        source_guard_unavailable_count: guards.source_guard_unavailable_count,
+        source_guard_bytes_read: guards.source_guard_bytes_read,
+        candidate_file_count: 0,
+        admitted_file_count: 0,
+        classification_slot_count: 0,
+        confirmed_run_inspected_pages_total: 0,
+        unobserved_classification_attempt_count: 0,
+        nominal_charged_pages_total: 0,
+        extraction_slot_count: 0,
+        pdfplumber_invocations: 0,
+        snapshot_hit: true,
+        parse_cache_lookup_count: 0,
+        classification_cache_lookup_count: 0,
+        parse_cache_all_hit: Nullable(None),
+        classification_cache_all_hit: Nullable(None),
+        stage_deadline_exhausted_count: 0,
+        session_restart_count: 0,
+        session_fallback_count: 0,
+        classify_attempt_count: 0,
+        parse_attempt_count: 0,
+        reserved_chars,
+        rendered_chars,
+        worker_handshake_ms,
+        discovery_ms,
+        snapshot_lookup_ms,
+        current_run_audit_write_ms: 0,
+        terminal_precommit_ms: 0,
+        deadline_precommit_elapsed_ms,
+        envelope_rebuild_ms: 0,
+        terminal_rows_written: 0,
+        peak_worker_rss_bytes: Nullable(None),
+    }
+}
+
 /// Spec Part 5.4 snapshot-hit finalization: the current run reuses the selected
 /// artifact (reference + `snapshot_hit`/`reused_from` written by the store),
 /// current rows are rebuilt from artifact rows with `snapshot` semantics
@@ -1156,6 +1269,7 @@ fn finalize_snapshot_hit(
     hit: SnapshotHit,
     discovery_duration_ms: u64,
     snapshot_lookup_ms: u64,
+    worker_handshake_ms: u64,
     started_at: Instant,
 ) -> Result<CommandOutput, EngineShellError> {
     let artifact = match store.load_artifact(hit.artifact_id) {
@@ -1318,6 +1432,15 @@ fn finalize_snapshot_hit(
             artifact_id: hit.artifact_id,
             reused_from_context_run_id: hit.source_context_run_id,
         }),
+        execution_metrics: Some(assemble_snapshot_execution_metrics(
+            &discovery.files,
+            artifact.semantic_summary.reserved_chars,
+            artifact.semantic_summary.rendered_chars,
+            worker_handshake_ms,
+            discovery_duration_ms,
+            snapshot_lookup_ms,
+            elapsed_ms(started_at),
+        )),
     };
     heartbeat.stop();
     let finalize_now_ms = match current_time_millis() {
@@ -1338,7 +1461,7 @@ fn finalize_snapshot_hit(
         }
     };
     match store.finalize(active, &batch, finalize_now_ms) {
-        Ok(()) => CommandOutput::canonical_json(envelope_json, 0),
+        Ok(_timings) => CommandOutput::canonical_json(envelope_json, 0),
         Err(error) => build_error_output(
             request,
             version,
@@ -1836,6 +1959,9 @@ fn persist_active_error_without_heartbeat(
         artifact: None,
         snapshot_key: None,
         snapshot_hit: None,
+        // Engine-error runs have no scheduler outcome; inspect v2 derives the
+        // (mostly-zero) metrics object from the empty persisted rows.
+        execution_metrics: None,
     };
     let now_ms = match current_time_millis() {
         Ok(value) => value,
@@ -1851,7 +1977,7 @@ fn persist_active_error_without_heartbeat(
         }
     };
     match store.finalize(active, &batch, now_ms) {
-        Ok(()) => CommandOutput::canonical_json(envelope_json, 1),
+        Ok(_timings) => CommandOutput::canonical_json(envelope_json, 1),
         Err(write_error) => build_error_output(
             request,
             version,
