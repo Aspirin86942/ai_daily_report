@@ -22,7 +22,7 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-use crate::artifact::{ArtifactDraft, ArtifactFileRow, SnapshotKeyParts};
+use crate::artifact::{ArtifactDecisionRow, ArtifactDraft, ArtifactFileRow, SnapshotKeyParts};
 
 pub use cache::{
     classifier_profile_hash, parse_profile_hash, sha256_hex, CacheAwarePlanEntry, CacheEntry,
@@ -432,7 +432,9 @@ struct ExistingRun {
     canonical_request_json: String,
     request_hash: String,
     status: PersistedRunStatus,
-    final_envelope_json: Option<String>,
+    /// Body-free `final_envelope_metadata_json` (spec Part 5.1): the full
+    /// `ContextEnvelope` is rebuilt from metadata + summary + artifact.
+    final_envelope_metadata_json: Option<String>,
 }
 
 #[derive(Debug)]
@@ -679,7 +681,7 @@ impl ScannerStore {
         if let Some(existing) = query_existing_run(&self.connection, request_id)? {
             ensure_request_hash(&existing, canonical)?;
             if existing.status.is_terminal() {
-                return load_stored_envelope(existing, request_id);
+                return load_stored_envelope(&self.connection, existing, request_id);
             }
         }
 
@@ -692,7 +694,7 @@ impl ScannerStore {
         if let Some(value) = &existing {
             ensure_request_hash(value, canonical)?;
             if value.status.is_terminal() {
-                let stored = load_stored_envelope_ref(value, request_id)?;
+                let stored = load_stored_envelope_ref(&transaction, value, request_id)?;
                 transaction.commit().map_err(cache_write)?;
                 return Ok(BeginRunOutcome::Stored(Box::new(stored)));
             }
@@ -1140,16 +1142,31 @@ impl ScannerStore {
                         "artifact eligibility disagrees with the snapshot key".to_string(),
                     ));
                 }
+                let semantic_json = semantic_summary_json_for(draft)?;
                 let artifact_id = if let Some(key) = &batch.snapshot_key {
                     if let Some(existing) = dedup_artifact(&transaction, draft, key)? {
                         existing
                     } else {
-                        let size = artifact_size_bytes(draft, Some(key), &semantic_summary_json_for(draft)?)?;
+                        let size = artifact_size_bytes(
+                            &draft.final_context,
+                            &draft.context_sha256,
+                            &semantic_json,
+                            Some(key),
+                            &draft.file_rows,
+                            &draft.decision_rows,
+                        );
                         make_room_for_artifact(&transaction, &protected_artifacts, size)?;
                         insert_artifact(&transaction, draft, Some(key), now_ms)?
                     }
                 } else {
-                    let size = artifact_size_bytes(draft, None, &semantic_summary_json_for(draft)?)?;
+                    let size = artifact_size_bytes(
+                        &draft.final_context,
+                        &draft.context_sha256,
+                        &semantic_json,
+                        None,
+                        &draft.file_rows,
+                        &draft.decision_rows,
+                    );
                     make_room_for_artifact(&transaction, &protected_artifacts, size)?;
                     insert_artifact(&transaction, draft, None, now_ms)?
                 };
@@ -1203,7 +1220,11 @@ impl ScannerStore {
                 params![
                     status,
                     now_ms,
-                    batch.envelope_json,
+                    // spec Part 5.1: the body is stored ONCE in the artifact; the
+                    // persisted scan_runs JSON is the body-free metadata, and
+                    // idempotent replay rebuilds the full ContextEnvelope from
+                    // metadata + summary + artifact.
+                    metadata_json,
                     metadata_json,
                     audit_size,
                     active.scan_run_id,
@@ -1273,7 +1294,8 @@ impl ScannerStore {
         let row: (String, String, String, String, Option<String>) = self
             .connection
             .query_row(
-                "SELECT request_id, canonical_request_json, request_hash, status, final_envelope_json
+                "SELECT request_id, canonical_request_json, request_hash, status,
+                        final_envelope_metadata_json
                  FROM scan_runs WHERE scan_run_id=?1",
                 [scan_run_id],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
@@ -1286,9 +1308,9 @@ impl ScannerStore {
             canonical_request_json: row.1,
             request_hash: row.2,
             status: PersistedRunStatus::parse(&row.3)?,
-            final_envelope_json: row.4,
+            final_envelope_metadata_json: row.4,
         };
-        load_stored_envelope_ref(&existing, &row.0)
+        load_stored_envelope_ref(&self.connection, &existing, &row.0)
     }
 
     pub fn load_diagnostics(
@@ -3213,7 +3235,8 @@ fn query_existing_run(
 ) -> Result<Option<ExistingRun>, StoreError> {
     let row: Option<(i64, String, String, String, Option<String>)> = connection
         .query_row(
-            "SELECT scan_run_id, canonical_request_json, request_hash, status, final_envelope_json
+            "SELECT scan_run_id, canonical_request_json, request_hash, status,
+                    final_envelope_metadata_json
              FROM scan_runs WHERE request_id=?1",
             [request_id],
             |row| {
@@ -3234,7 +3257,7 @@ fn query_existing_run(
             canonical_request_json: row.1,
             request_hash: row.2,
             status: PersistedRunStatus::parse(&row.3)?,
-            final_envelope_json: row.4,
+            final_envelope_metadata_json: row.4,
         })
     })
     .transpose()
@@ -3259,15 +3282,21 @@ fn ensure_request_hash(
 }
 
 fn load_stored_envelope(
+    connection: &Connection,
     existing: ExistingRun,
     request_id: &str,
 ) -> Result<BeginRunOutcome, StoreError> {
-    load_stored_envelope_ref(&existing, request_id)
+    load_stored_envelope_ref(connection, &existing, request_id)
         .map(Box::new)
         .map(BeginRunOutcome::Stored)
 }
 
+/// Spec Part 5.1 idempotent replay: the full `ContextEnvelope v1` is REBUILT
+/// from the body-free `final_envelope_metadata_json` + the stored summary +
+/// the artifact's `final_context` (Success/Partial), never read from a
+/// body-carrying scan_runs JSON. `final_context` is stored exactly once.
 fn load_stored_envelope_ref(
+    connection: &Connection,
     existing: &ExistingRun,
     request_id: &str,
 ) -> Result<StoredEnvelope, StoreError> {
@@ -3283,26 +3312,18 @@ fn load_stored_envelope_ref(
             "nonterminal run has no reusable envelope".to_string(),
         ));
     }
-    let envelope_json = existing
-        .final_envelope_json
+    let metadata_json = existing
+        .final_envelope_metadata_json
         .clone()
-        .ok_or_else(|| StoreError::RunCorrupt("terminal run has no final envelope".to_string()))?;
-    let envelope: ContextEnvelope = serde_json::from_str(&envelope_json)
-        .map_err(|_| StoreError::RunCorrupt("final envelope JSON is invalid".to_string()))?;
-    envelope
-        .validate()
-        .map_err(|_| StoreError::RunCorrupt("final envelope violates the contract".to_string()))?;
-    if canonical_envelope_json(&envelope).as_deref() != Ok(envelope_json.as_str()) {
-        return Err(StoreError::RunCorrupt(
-            "final envelope JSON is not canonical".to_string(),
-        ));
-    }
+        .ok_or_else(|| StoreError::RunCorrupt("terminal run has no envelope metadata".to_string()))?;
+    let envelope = rebuild_envelope_from_metadata(connection, existing.scan_run_id, &metadata_json)?;
+    let envelope_json = canonical_envelope_json(&envelope)?;
     if envelope.request_id != request_id
         || envelope.scan_run_id.0 != Some(existing.scan_run_id as u64)
         || !envelope_status_matches(existing.status, envelope.status)
     {
         return Err(StoreError::RunCorrupt(
-            "final envelope does not match its run".to_string(),
+            "rebuilt envelope does not match its run".to_string(),
         ));
     }
     Ok(StoredEnvelope {
@@ -3310,6 +3331,55 @@ fn load_stored_envelope_ref(
         envelope_json,
         envelope,
     })
+}
+
+/// Shared spec Part 5.1 envelope rebuild for both idempotent replay and
+/// inspect: parse the body-free `final_envelope_metadata_json`, read the stored
+/// summary, load the referenced artifact, and rebuild + re-validate the full
+/// `ContextEnvelope v1`. `final_context` is never read from scan_runs.
+pub(crate) fn rebuild_envelope_from_metadata(
+    connection: &Connection,
+    scan_run_id: i64,
+    metadata_json: &str,
+) -> Result<ContextEnvelope, StoreError> {
+    let metadata: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|_| StoreError::RunCorrupt("envelope metadata JSON is invalid".to_string()))?;
+    let summary: ContextSummary = serde_json::from_value(
+        metadata
+            .get("summary")
+            .cloned()
+            .ok_or_else(|| StoreError::RunCorrupt("envelope metadata missing summary".to_string()))?,
+    )
+    .map_err(|_| StoreError::RunCorrupt("envelope metadata summary is invalid".to_string()))?;
+    let artifact = load_artifact_for_replay(connection, scan_run_id)?;
+    let envelope = crate::artifact::rebuild_envelope(&metadata, &summary, artifact.as_ref())
+        .map_err(|message| {
+            StoreError::RunCorrupt(format!("rebuilt envelope is invalid: {message}"))
+        })?;
+    envelope
+        .validate()
+        .map_err(|_| StoreError::RunCorrupt("rebuilt envelope violates the contract".to_string()))?;
+    Ok(envelope)
+}
+
+/// Loads the artifact referenced by a run's `context_runs` row for replay
+/// (spec Part 5.1). Error runs and runs without an artifact return `None`.
+fn load_artifact_for_replay(
+    connection: &Connection,
+    scan_run_id: i64,
+) -> Result<Option<ArtifactDraft>, StoreError> {
+    let artifact_id: Option<i64> = connection
+        .query_row(
+            "SELECT artifact_id FROM context_runs WHERE scan_run_id=?1",
+            [scan_run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(cache_open)?;
+    match artifact_id {
+        Some(id) => Ok(Some(load_artifact_from_connection(connection, id)?)),
+        None => Ok(None),
+    }
 }
 
 fn envelope_status_matches(run_status: PersistedRunStatus, engine_status: EngineStatus) -> bool {
@@ -4071,9 +4141,10 @@ where
 // ---------------------------------------------------------------------------
 
 /// `final_envelope_metadata_json`（spec Part 5.1）：只保存 request/engine/status/
-/// warnings/error 等小字段，`warnings` 恒为数组（绝不 null），`error` 可为 null；
-/// `file_context`/`summary` 不进入 metadata（正文在 artifact，summary 在
-/// `context_runs`）。形状必须与 `rebuild_envelope` 期望完全一致。
+/// warnings/error 等小字段 + summary（供幂等重放从 metadata+summary+artifact 重建
+/// 完整 Envelope），`warnings` 恒为数组（绝不 null），`error` 可为 null；
+/// `file_context` 不进入 metadata（正文在 artifact 只存一次）。形状必须与
+/// `rebuild_envelope` 期望完全一致。
 fn envelope_metadata_json(envelope: &ContextEnvelope) -> Result<String, StoreError> {
     let value = serde_json::json!({
         "contract": envelope.contract,
@@ -4087,46 +4158,70 @@ fn envelope_metadata_json(envelope: &ContextEnvelope) -> Result<String, StoreErr
         "context_run_id": envelope.context_run_id.0,
         "warnings": envelope.warnings,
         "error": envelope.error.0,
+        "summary": envelope.summary,
     });
     serde_json::to_string(&value).map_err(|error| StoreError::InvalidRequest(error.to_string()))
 }
 
-/// spec Part 4: artifact 的 exact logical bytes —— parent 的 UTF-8/canonical JSON
-/// （final_context + semantic_summary_json + context_sha256 + 可选 snapshot key 两字段）
-/// 加全部 owned file/decision row 的 text payload 字节。child 不重复计费。
-fn artifact_size_bytes(
-    draft: &ArtifactDraft,
-    snapshot_key: Option<&SnapshotKeyParts>,
+/// spec Part 4: artifact 的 exact logical bytes —— 一次精确覆盖 parent
+/// `context_artifacts` 的全部 UTF-8/canonical JSON/BLOB 列（final_context +
+/// semantic_summary_json + context_sha256 + snapshot_eligible + created_at_ms +
+/// last_accessed_bucket + 可选 snapshot key 两字段）与全部 owned file/decision row
+/// 的每个 text 列（含 enum text）与 i64 列。child 不重复计费。写路径与 v1→v2
+/// 迁移共用这一个 helper（store/schema.rs 的迁移也调用本函数）。
+pub(crate) fn artifact_size_bytes(
+    final_context: &str,
+    context_sha256: &str,
     semantic_summary_json: &str,
-) -> Result<i64, StoreError> {
-    let mut size = draft.final_context.len() as i64
+    snapshot_key: Option<&SnapshotKeyParts>,
+    file_rows: &[ArtifactFileRow],
+    decision_rows: &[ArtifactDecisionRow],
+) -> i64 {
+    // parent context_artifacts columns
+    let mut size = 8  // snapshot_eligible (i64)
+        + final_context.len() as i64
+        + context_sha256.len() as i64
         + semantic_summary_json.len() as i64
-        + draft.context_sha256.len() as i64;
+        + 8  // created_at_ms (i64)
+        + 10; // last_accessed_bucket TEXT（YYYY-MM-DD，固定 10 字节）
     if let Some(key) = snapshot_key {
         size += key.sha256.len() as i64 + key.canonical_json.len() as i64;
     }
-    for row in &draft.file_rows {
-        size += row.file_identity.len() as i64
-            + row.relative_path.len() as i64
-            + row.legacy_source_version.len() as i64
-            + row.source_guard_kind.as_ref().map_or(0, |value| value.len() as i64)
-            + row.source_guard_sha256.as_ref().map_or(0, |value| value.len() as i64)
-            + row.parse_profile_hash.len() as i64
-            + row.parser_backend.len() as i64
-            + row.worker_lane.len() as i64
-            + row.content_sha256.len() as i64;
+    for row in file_rows {
+        size += 8; // artifact_id (i64)
+        size += row.file_identity.len() as i64;
+        size += row.relative_path.len() as i64;
+        size += row.legacy_source_version.len() as i64;
+        size += row.source_guard_kind.as_ref().map_or(0, |value| value.len() as i64);
+        size += row.source_guard_sha256.as_ref().map_or(0, |value| value.len() as i64);
+        size += row.parse_profile_hash.len() as i64;
+        size += inventory::enum_text(&row.parse_status).len() as i64; // parse_status TEXT
+        size += row.parser_backend.len() as i64;
+        size += row.worker_lane.len() as i64;
+        size += 8; // truncated (i64)
+        size += row.content_sha256.len() as i64;
         if let Some(classifier) = &row.classifier {
-            size += classifier.classifier_build.len() as i64
-                + classifier.classifier_profile_hash.len() as i64;
+            size += inventory::enum_text(&classifier.status).len() as i64; // classifier_status TEXT
+            size += classifier.page_count.map_or(0, |_| 8);       // nullable i64
+            size += classifier.result_examined_pages.map_or(0, |_| 8); // nullable i64
+            size += 8; // classifier_nominal_charged_pages (i64, NOT NULL)
+            size += classifier.classifier_build.len() as i64;
+            size += classifier.classifier_profile_hash.len() as i64;
         }
     }
-    for row in &draft.decision_rows {
-        size += row.file_identity.len() as i64
-            + row.relative_path.len() as i64
-            + row.reason.len() as i64
-            + row.error_code.len() as i64;
+    for row in decision_rows {
+        size += 8; // artifact_id (i64)
+        size += row.file_identity.len() as i64;
+        size += row.relative_path.len() as i64;
+        size += inventory::enum_text(&row.action).len() as i64; // action TEXT
+        size += row.reason.len() as i64;
+        size += 8; // priority (i64)
+        size += 8; // input_chars (i64)
+        size += 8; // output_chars (i64)
+        size += 8; // truncated (i64)
+        size += row.error_code.len() as i64;
     }
-    Ok(size)
+    size
 }
 
 fn semantic_summary_json_for(draft: &ArtifactDraft) -> Result<String, StoreError> {
@@ -4146,7 +4241,14 @@ fn insert_artifact(
 ) -> Result<i64, StoreError> {
     let semantic_summary_json = serde_json::to_string(&draft.semantic_summary)
         .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
-    let artifact_size = artifact_size_bytes(draft, snapshot_key, &semantic_summary_json)?;
+    let artifact_size = artifact_size_bytes(
+        &draft.final_context,
+        &draft.context_sha256,
+        &semantic_summary_json,
+        snapshot_key,
+        &draft.file_rows,
+        &draft.decision_rows,
+    );
     let (key_sha256, key_json) = match snapshot_key {
         Some(key) => (Some(key.sha256.as_str()), Some(key.canonical_json.as_str())),
         None => (None, None),
@@ -5220,6 +5322,78 @@ mod tests {
                 )
                 .unwrap_err(),
             StoreError::RequestIdConflict
+        );
+    }
+
+    #[test]
+    fn replay_rebuilds_success_envelope_from_metadata_and_artifact() {
+        // spec Part 5.1: final_context is stored ONCE in the artifact; the
+        // persisted scan_runs JSON is body-free, and idempotent replay rebuilds
+        // the full ContextEnvelope from metadata + summary + artifact.
+        let mut harness = harness("00000000-0000-4000-8000-000000000023");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        record_both_workers(&mut harness.store, &active, 1);
+        let batch = success_batch(
+            &active,
+            "file-a",
+            "mtime_ns=100:size=5",
+            &"a".repeat(64),
+            "hello",
+        );
+        let expected = batch.envelope_json.clone();
+        assert!(expected.contains("hello"), "original envelope carries the body");
+        harness.store.finalize(&active, &batch, 2).unwrap();
+
+        let stored_json: String = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT final_envelope_json FROM scan_runs WHERE scan_run_id=?1",
+                [active.scan_run_id() as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !stored_json.contains("hello"),
+            "scan_runs JSON must not duplicate the body"
+        );
+        let value: serde_json::Value = serde_json::from_str(&stored_json).unwrap();
+        assert!(
+            value.get("file_context").is_none(),
+            "body-free metadata must not carry file_context"
+        );
+
+        // Idempotent replay rebuilds the full envelope byte-for-byte.
+        let stored = harness
+            .store
+            .begin_run(
+                &harness.request.request_id,
+                &harness.canonical,
+                &harness.runtime,
+                3,
+            )
+            .unwrap();
+        let BeginRunOutcome::Stored(stored) = stored else {
+            panic!("terminal retry must return stored bytes")
+        };
+        assert_eq!(
+            stored.envelope_json.as_bytes(),
+            expected.as_bytes(),
+            "rebuilt envelope must match the original byte-for-byte"
+        );
+        assert!(
+            stored.envelope.file_context.contains("hello"),
+            "rebuilt envelope must recover the body from the artifact"
         );
     }
 

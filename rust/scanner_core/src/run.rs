@@ -24,7 +24,7 @@ use thiserror::Error;
 
 use crate::artifact::{
     snapshot_key_parts, ArtifactDecisionRow, ArtifactDraft, ArtifactFileRow, ClassifierIdentity,
-    SemanticSummary, CLASSIFIER_CONTRACT_VERSION,
+    PdfClassificationProvenanceV1, SemanticSummary, CLASSIFIER_CONTRACT_VERSION,
 };
 use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
 use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
@@ -807,7 +807,7 @@ fn execute_active_build(
         discovery.files,
         discovery.issues,
         v2_profile.clone(),
-        worker_identities,
+        worker_identities.clone(),
         version.engine_version.clone(),
         version.engine_build.clone(),
         context_profile_hash,
@@ -876,7 +876,12 @@ fn execute_active_build(
     // spec Part 5.1/5.4: every Success/Partial run persists an artifact
     // (eligible → snapshot key + per-file semantic rows; otherwise a payload
     // artifact with no rows). Built before the outcome is consumed by the batch.
-    let artifact_draft = match build_batch_artifact(&outcome) {
+    let artifact_draft = match build_batch_artifact(
+        &outcome,
+        v2_profile,
+        &worker_identities,
+        &classifier_identity.profile_hash,
+    ) {
         Ok(draft) => draft,
         Err(message) => {
             return persist_active_error_without_heartbeat(
@@ -1249,7 +1254,13 @@ fn finalize_snapshot_hit(
 /// `None` for Error runs; `Some` for Success/Partial. An eligible artifact
 /// (Ok + warnings-empty + no Error/Timeout) carries the snapshot key plus
 /// per-source-file rows; ineligible runs persist a payload artifact with no rows.
-fn build_batch_artifact(outcome: &BudgetedScanOutcome) -> Result<Option<ArtifactDraft>, String> {
+#[allow(clippy::too_many_arguments)]
+fn build_batch_artifact(
+    outcome: &BudgetedScanOutcome,
+    v2_profile: &ai_daily_scanner_contract::NormalizedScannerProfileV2,
+    worker_identities: &WorkerIdentities,
+    classifier_profile_hash: &str,
+) -> Result<Option<ArtifactDraft>, String> {
     let Some(context) = &outcome.context else {
         return Ok(None);
     };
@@ -1275,7 +1286,12 @@ fn build_batch_artifact(outcome: &BudgetedScanOutcome) -> Result<Option<Artifact
         rendered_chars: outcome.execution_metrics.rendered_chars,
     };
     if eligible {
-        let file_rows = artifact_file_rows(outcome);
+        let file_rows = artifact_file_rows(
+            outcome,
+            v2_profile,
+            worker_identities,
+            classifier_profile_hash,
+        );
         let decision_rows = artifact_decision_rows(&context.decisions);
         ArtifactDraft::new(
             true,
@@ -1297,18 +1313,43 @@ fn build_batch_artifact(outcome: &BudgetedScanOutcome) -> Result<Option<Artifact
     }
 }
 
-fn artifact_file_rows(outcome: &BudgetedScanOutcome) -> Vec<ArtifactFileRow> {
+#[allow(clippy::too_many_arguments)]
+fn artifact_file_rows(
+    outcome: &BudgetedScanOutcome,
+    v2_profile: &ai_daily_scanner_contract::NormalizedScannerProfileV2,
+    worker_identities: &WorkerIdentities,
+    classifier_profile_hash: &str,
+) -> Vec<ArtifactFileRow> {
     let result_by_identity: std::collections::HashMap<&str, &FileResultRecord> = outcome
         .file_results
         .iter()
         .map(|record| (record.file_identity.as_str(), record))
         .collect();
+    let classifier_build = worker_identities
+        .classifier_build
+        .clone()
+        .unwrap_or_else(|| "0".repeat(64));
     outcome
         .inventory
         .iter()
         .map(|item| {
             let result = result_by_identity.get(item.file_identity.as_str());
             let empty_hash = crate::store::sha256_hex(b"");
+            // spec Part 3.2: the artifact stores only the immutable classifier
+            // provenance subset (status/page/result/nominal/build/profile-hash);
+            // cache status / miss reason / run pages / duration / transport /
+            // attempt are current-run execution fields and never reused.
+            let classifier = outcome
+                .classifications
+                .get(&item.file_identity)
+                .map(|classification| PdfClassificationProvenanceV1 {
+                    status: classification.status,
+                    page_count: classification.page_count,
+                    result_examined_pages: classification.result_examined_pages,
+                    nominal_charged_pages: v2_profile.parse.pdf.max_pages,
+                    classifier_build: classifier_build.clone(),
+                    classifier_profile_hash: classifier_profile_hash.to_string(),
+                });
             ArtifactFileRow {
                 file_identity: item.file_identity.clone(),
                 relative_path: item.relative_path.clone(),
@@ -1331,7 +1372,7 @@ fn artifact_file_rows(outcome: &BudgetedScanOutcome) -> Vec<ArtifactFileRow> {
                 content_sha256: result
                     .map(|record| record.content_sha256.clone())
                     .unwrap_or(empty_hash),
-                classifier: None,
+                classifier,
             }
         })
         .collect()

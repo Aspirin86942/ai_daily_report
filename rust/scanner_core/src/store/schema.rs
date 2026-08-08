@@ -1093,15 +1093,40 @@ fn migrate_terminal_envelopes(transaction: &rusqlite::Transaction<'_>) -> Result
         if matches!(envelope.status, EngineStatus::Ok | EngineStatus::Partial) {
             let final_context = envelope.file_context.clone();
             let context_sha256 = sha256_hex(final_context.as_bytes());
-            let semantic_summary_json = serde_json::to_string(&envelope.summary).map_err(|error| {
+            // `semantic_summary_json` stores the immutable SemanticSummary shape
+            // (spec Part 5.1); migrated rows have no reserved/rendered tracking,
+            // so both fall back to the rendered output char count. This keeps the
+            // migrated artifact loadable by the store's replay/artifact readers.
+            let semantic_summary = crate::artifact::SemanticSummary {
+                source_file_count: envelope.summary.source_file_count,
+                success_count: envelope.summary.success_count,
+                timeout_count: envelope.summary.timeout_count,
+                included_file_count: envelope.summary.included_file_count,
+                omitted_file_count: envelope.summary.omitted_file_count,
+                error_file_count: envelope.summary.error_file_count,
+                input_chars: envelope.summary.input_chars,
+                output_chars: envelope.summary.output_chars,
+                reserved_chars: envelope.summary.output_chars,
+                rendered_chars: envelope.summary.output_chars,
+            };
+            let semantic_summary_json = serde_json::to_string(&semantic_summary).map_err(|error| {
                 SchemaError::MigrationFailed(format!(
                     "scan_run {scan_run_id}: context summary could not be serialized: {error}"
                 ))
             })?;
-            // Parent + owned semantic rows only. The summary is serialized once
-            // into semantic_summary_json; metadata_json is a separate copy and is
-            // not part of the artifact payload.
-            let artifact_size_bytes = (final_context.len() + semantic_summary_json.len()) as i64;
+            // Parent + owned semantic rows only (spec Part 4 exact logical
+            // bytes). The size definition is SHARED with the write path
+            // (store/mod.rs artifact_size_bytes), so migrated payload artifacts
+            // and new artifacts use the same accounting. Migrated artifacts are
+            // ineligible: no snapshot key, no owned file/decision rows.
+            let artifact_size_bytes = super::artifact_size_bytes(
+                &final_context,
+                &context_sha256,
+                &semantic_summary_json,
+                None,
+                &[],
+                &[],
+            );
             transaction.execute(
                 "INSERT INTO context_artifacts(
                     snapshot_eligible, snapshot_key_sha256, snapshot_key_json,

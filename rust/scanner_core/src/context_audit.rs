@@ -1,7 +1,7 @@
 //! Scanner evidence normalization, persistence DTO assembly, and inspect snapshots.
 
 use ai_daily_scanner_contract::{
-    AuditWorkerLane, CacheMissReason, CacheStatus, ContextAction, ContextDecision, ContextEnvelope,
+    AuditWorkerLane, CacheMissReason, CacheStatus, ContextAction, ContextDecision,
     ContextProfile, ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode,
     ExtensionMetric, FileAudit, NormalizedScannerProfileV1, Nullable, ParseStatus, RunStatus,
     StageMetric, StageName, Validate,
@@ -578,7 +578,8 @@ pub(crate) fn load_inspect_snapshot(
 ) -> Result<InspectSnapshot, InspectLoadError> {
     let run_row: Option<(String, String, String, String, Option<String>)> = transaction
         .query_row(
-            "SELECT request_id, canonical_request_json, request_hash, status, final_envelope_json
+            "SELECT request_id, canonical_request_json, request_hash, status,
+                    final_envelope_metadata_json
              FROM scan_runs WHERE scan_run_id=?1",
             [scan_run_id],
             |row| {
@@ -593,7 +594,7 @@ pub(crate) fn load_inspect_snapshot(
         )
         .optional()
         .map_err(|error| InspectLoadError::before_status(InspectAuditError::Sql(error)))?;
-    let (stored_request_id, canonical_request_json, request_hash, run_status_text, envelope_json) =
+    let (stored_request_id, canonical_request_json, request_hash, run_status_text, envelope_metadata_json) =
         run_row.ok_or_else(|| InspectLoadError::before_status(InspectAuditError::RunNotFound))?;
     if crate::store::cache::domain_hash(b"request-v1\0", canonical_request_json.as_bytes())
         != request_hash
@@ -620,13 +621,59 @@ pub(crate) fn load_inspect_snapshot(
         }
     }
 
-    let envelope = load_and_validate_envelope(
-        scan_run_id,
-        &stored_request_id,
-        run_status,
-        envelope_json.as_deref(),
-    )
-    .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+    // spec Part 5.1: the full ContextEnvelope is REBUILT from the body-free
+    // final_envelope_metadata_json + summary + artifact (never from a
+    // body-carrying scan_runs JSON).
+    let envelope = match (run_status, envelope_metadata_json) {
+        (RunStatus::Running | RunStatus::Abandoned, None) => None,
+        (RunStatus::Running | RunStatus::Abandoned, Some(_)) => {
+            return Err(InspectLoadError::after_status(
+                InspectAuditError::RunCorrupt(
+                    "nonterminal run has a final envelope".to_string(),
+                ),
+                run_status,
+            ));
+        }
+        (_, None) => {
+            return Err(InspectLoadError::after_status(
+                InspectAuditError::RunCorrupt(
+                    "terminal run has no final envelope metadata".to_string(),
+                ),
+                run_status,
+            ));
+        }
+        (_, Some(metadata_json)) => {
+            let rebuilt = crate::store::rebuild_envelope_from_metadata(
+                transaction,
+                scan_run_id,
+                &metadata_json,
+            )
+            .map_err(|error| {
+                InspectLoadError::after_status(
+                    InspectAuditError::RunCorrupt(error.to_string()),
+                    run_status,
+                )
+            })?;
+            let status_matches = matches!(
+                (run_status, rebuilt.status),
+                (RunStatus::Success, EngineStatus::Ok)
+                    | (RunStatus::Partial, EngineStatus::Partial)
+                    | (RunStatus::Error, EngineStatus::Error)
+            );
+            if !status_matches
+                || rebuilt.request_id != stored_request_id
+                || rebuilt.scan_run_id.0 != Some(scan_run_id as u64)
+            {
+                return Err(InspectLoadError::after_status(
+                    InspectAuditError::RunCorrupt(
+                        "rebuilt envelope does not match its run".to_string(),
+                    ),
+                    run_status,
+                ));
+            }
+            Some(rebuilt)
+        }
+    };
     let context = load_context_row(transaction, scan_run_id)
         .map_err(|error| InspectLoadError::after_status(error, run_status))?;
     let stage_metrics = load_stage_metrics(transaction, scan_run_id)
@@ -743,50 +790,6 @@ struct PersistedContext {
 struct PersistedDecision {
     file_identity: String,
     decision: ContextDecision,
-}
-
-fn load_and_validate_envelope(
-    scan_run_id: i64,
-    stored_request_id: &str,
-    run_status: RunStatus,
-    envelope_json: Option<&str>,
-) -> Result<Option<ContextEnvelope>, InspectAuditError> {
-    if matches!(run_status, RunStatus::Running | RunStatus::Abandoned) {
-        return if envelope_json.is_none() {
-            Ok(None)
-        } else {
-            Err(InspectAuditError::RunCorrupt(
-                "nonterminal run has a final envelope".to_string(),
-            ))
-        };
-    }
-    let json = envelope_json.ok_or_else(|| {
-        InspectAuditError::RunCorrupt("terminal run has no final envelope".to_string())
-    })?;
-    let envelope: ContextEnvelope = serde_json::from_str(json)
-        .map_err(|_| InspectAuditError::RunCorrupt("final envelope JSON is invalid".to_string()))?;
-    envelope.validate().map_err(|_| {
-        InspectAuditError::RunCorrupt("final envelope violates the contract".to_string())
-    })?;
-    let canonical = serde_json::to_string(&envelope).map_err(|_| {
-        InspectAuditError::RunCorrupt("final envelope could not be canonicalized".to_string())
-    })?;
-    let status_matches = matches!(
-        (run_status, envelope.status),
-        (RunStatus::Success, EngineStatus::Ok)
-            | (RunStatus::Partial, EngineStatus::Partial)
-            | (RunStatus::Error, EngineStatus::Error)
-    );
-    if canonical != json
-        || envelope.request_id != stored_request_id
-        || envelope.scan_run_id.0 != Some(scan_run_id as u64)
-        || !status_matches
-    {
-        return Err(InspectAuditError::RunCorrupt(
-            "final envelope does not match its run".to_string(),
-        ));
-    }
-    Ok(Some(envelope))
 }
 
 fn load_context_row(

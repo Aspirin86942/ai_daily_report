@@ -351,6 +351,20 @@ fn migrated_v1_rows_are_audited_as_migrated_and_caches_invalidated() {
         artifact_id.is_some(),
         "context_runs must link the migrated payload artifact"
     );
+    // The migrated artifact's semantic_summary_json must be SemanticSummary-shaped
+    // (spec Part 5.1), so the store's replay/artifact reader can load it.
+    let semantic_summary_json: String = conn
+        .query_row(
+            "SELECT semantic_summary_json FROM context_artifacts WHERE artifact_id=?1",
+            [artifact_id.unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let migrated_summary: ai_daily_scanner_core::artifact::SemanticSummary =
+        serde_json::from_str(&semantic_summary_json)
+            .expect("migrated semantic summary must deserialize as SemanticSummary");
+    assert_eq!(migrated_summary.source_file_count, 1);
+    assert_eq!(migrated_summary.success_count, 1);
 
     // Payload artifacts (snapshot_eligible=0) never carry semantic rows; the
     // body lives only in the artifact's final_context.

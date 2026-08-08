@@ -341,6 +341,12 @@ pub struct BudgetedScanOutcome {
     pub parse_cache_receipts: Vec<CacheWriteRecord>,
     /// Committed successful classification-cache receipts.
     pub classification_cache_receipts: Vec<ClassificationCacheWriteRecord>,
+    /// Per-file PDF classification results (spec Part 3.2). Only PDFs that
+    /// reached the classifier (text/no-text/unknown/error) have an entry; files
+    /// rejected pre-classification, `not_classified_by_budget`, and non-PDFs
+    /// are absent. Consumed by the artifact write path to persist the immutable
+    /// `PdfClassificationProvenanceV1` subset.
+    pub classifications: std::collections::BTreeMap<String, crate::admission::PdfClassificationResult>,
     pub diagnostics: Vec<RunDiagnosticRecord>,
     pub stage_metrics: Vec<StageMetric>,
     pub extension_metrics: Vec<ExtensionMetric>,
@@ -456,6 +462,7 @@ impl BudgetedContextScheduler {
                 file_results: Vec::new(),
                 parse_cache_receipts: Vec::new(),
                 classification_cache_receipts: Vec::new(),
+                classifications: std::collections::BTreeMap::new(),
                 diagnostics: vec![RunDiagnosticRecord {
                     severity: DiagnosticSeverity::Error,
                     diagnostic: Diagnostic {
@@ -782,6 +789,7 @@ impl BudgetedContextScheduler {
             file_results,
             parse_cache_receipts: parse_outputs.parse_cache_receipts,
             classification_cache_receipts: parse_outputs.classification_cache_receipts,
+            classifications,
             diagnostics,
             stage_metrics,
             extension_metrics,
@@ -1927,6 +1935,7 @@ fn internal_error_outcome(
         file_results: Vec::new(),
         parse_cache_receipts: parse_outputs.parse_cache_receipts,
         classification_cache_receipts: parse_outputs.classification_cache_receipts,
+        classifications: std::collections::BTreeMap::new(),
         diagnostics,
         stage_metrics: Vec::new(),
         extension_metrics: Vec::new(),
