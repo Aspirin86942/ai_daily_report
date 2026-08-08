@@ -11,6 +11,7 @@ pub mod parsers;
 pub mod planner;
 pub mod process;
 mod run;
+pub mod source_guard;
 pub mod store;
 
 #[cfg(windows)]

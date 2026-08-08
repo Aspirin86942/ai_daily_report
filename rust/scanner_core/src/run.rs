@@ -1,6 +1,6 @@
 use ai_daily_discovery::{
-    discover_files_with_diagnostics, normalize_contract_path_text, DiscoveryIssue, DiscoveryReport,
-    DiscoveryRequest,
+    discover_files_with_diagnostics, normalize_contract_path_text, DiscoveredFileOut,
+    DiscoveryIssue, DiscoveryReport, DiscoveryRequest,
 };
 use ai_daily_scanner_contract::{
     BuildContextRequest, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
@@ -31,6 +31,9 @@ use crate::parsers::{
     WorkerCommand, WorkerRegistry, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
 };
 use crate::planner::{plan_candidates, PlanAction};
+use crate::source_guard::{
+    compute_source_guard, source_guard_kind_text, SourceGuardKind, SourceGuardV2,
+};
 use crate::store::{
     canonical_envelope_json, current_time_millis, ActiveRun, AttemptRuntime, BeginRunOutcome,
     CacheLookup, ContextDecisionRecord, ContextRunRecord, DiagnosticSeverity, FinalizationBatch,
@@ -552,7 +555,7 @@ fn execute_active_build(
         };
 
     let discovery_started = Instant::now();
-    let discovery = match discover_with_timeout(work_dir, request, profile) {
+    let mut discovery = match discover_with_timeout(work_dir, request, profile) {
         Ok(report) => report,
         Err(error) => {
             let mut summary = elapsed_summary(started_at);
@@ -576,6 +579,12 @@ fn execute_active_build(
         .iter()
         .map(discovery_issue_diagnostic)
         .collect();
+
+    // Engine-owned SourceGuardV2: every discovered file gets its content
+    // identity here, before cache/snapshot identity is consumed. An I/O hard
+    // failure on a just-discovered file stays unavailable so the scheduler
+    // fails that file closed with SOURCE_GUARD_UNAVAILABLE instead of guessing.
+    attach_source_guards(&mut discovery.files);
 
     let planned = plan_candidates(discovery.files, profile);
     let cache_started = Instant::now();
@@ -984,6 +993,21 @@ fn route_stack_fingerprints(
             &python_worker.identity.worker_build,
         )?,
     })
+}
+
+/// Computes the engine-owned SourceGuardV2 for every discovered file and
+/// carries it on the discovery output so cache/snapshot identity can consume
+/// it. A hard guard I/O error leaves the file unavailable (fail closed), never
+/// an invented metadata identity.
+fn attach_source_guards(files: &mut [DiscoveredFileOut]) {
+    for file in files {
+        let guard = compute_source_guard(Path::new(&file.path)).unwrap_or(SourceGuardV2 {
+            kind: SourceGuardKind::Unavailable,
+            guard_sha256: None,
+        });
+        file.source_guard_kind = Some(source_guard_kind_text(guard.kind).to_string());
+        file.source_guard_sha256 = guard.guard_sha256;
+    }
 }
 
 fn discover_with_timeout(
@@ -1443,5 +1467,46 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    #[test]
+    fn discovery_produces_a_source_guard_for_every_file() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let path = directory.path().join("evidence.txt");
+        std::fs::write(&path, "AAAA").expect("fixture file should be written");
+        let mut files = vec![DiscoveredFileOut {
+            file_identity: "bootstrap:evidence".to_string(),
+            path: path.to_string_lossy().into_owned(),
+            extension: ".txt".to_string(),
+            modified_at: "2026-07-16T00:00:00+08:00".to_string(),
+            size_bytes: 4,
+            source_version: "mtime_ns=1:size=4".to_string(),
+            source_guard_kind: None,
+            source_guard_sha256: None,
+        }];
+
+        attach_source_guards(&mut files);
+
+        // Every discovered file must carry a guard. Unavailable stays fail-closed
+        // with a null hash; any other kind must carry a 64-char sha256.
+        let kind = files[0]
+            .source_guard_kind
+            .as_deref()
+            .expect("discovery must produce a guard kind");
+        match kind {
+            "unavailable" => {
+                assert!(files[0].source_guard_sha256.is_none());
+            }
+            _ => {
+                let hash = files[0]
+                    .source_guard_sha256
+                    .as_deref()
+                    .expect("guard kind requires a hash");
+                assert_eq!(hash.len(), 64);
+                assert!(hash
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
+            }
+        }
     }
 }

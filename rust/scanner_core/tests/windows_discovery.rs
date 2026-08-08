@@ -312,6 +312,8 @@ fn synthetic_file(path: &str, extension: &str, size_bytes: u64) -> DiscoveredFil
         modified_at: "2026-07-15T12:00:00.000000".to_string(),
         size_bytes,
         source_version: format!("mtime_ns=1:size={size_bytes}"),
+        source_guard_kind: None,
+        source_guard_sha256: None,
     }
 }
 

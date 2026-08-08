@@ -27,6 +27,16 @@ pub struct DiscoveredFileOut {
     pub modified_at: String,
     pub size_bytes: u64,
     pub source_version: String,
+    /// Engine-owned SourceGuardV2 wire kind, filled by the scanner core right
+    /// after discovery (the discovery crate cannot depend on the core guard
+    /// module). `windows_file_id_change_time_v1 | unix_inode_ctime_v1 |
+    /// content_sha256_v1 | unavailable`; null means the guard is not produced
+    /// yet (pre-wiring) and never for a full-v2 discovery file.
+    #[serde(default)]
+    pub source_guard_kind: Option<String>,
+    /// Engine-owned SourceGuardV2 SHA-256; null when the kind is unavailable.
+    #[serde(default)]
+    pub source_guard_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -176,6 +186,8 @@ fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryRepo
             modified_at: modified_naive.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
             size_bytes,
             source_version: build_source_version(mtime_ns, size_bytes),
+            source_guard_kind: None,
+            source_guard_sha256: None,
         });
     }
 

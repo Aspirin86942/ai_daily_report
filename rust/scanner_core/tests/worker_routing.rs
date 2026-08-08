@@ -751,6 +751,8 @@ fn discovered_file(
         modified_at: "2026-07-16T00:00:00+08:00".to_string(),
         size_bytes: metadata.len(),
         source_version,
+        source_guard_kind: None,
+        source_guard_sha256: None,
     }
 }
 
@@ -766,6 +768,8 @@ fn discovered_file_with_extension(
         modified_at: "2026-07-16T00:00:00+08:00".to_string(),
         size_bytes: metadata.len(),
         source_version: source_version(path),
+        source_guard_kind: None,
+        source_guard_sha256: None,
     }
 }
 

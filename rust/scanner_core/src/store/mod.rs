@@ -2770,6 +2770,8 @@ mod tests {
             source_version: source_version.to_string(),
             size_bytes,
             mtime_ns,
+            source_guard_kind: None,
+            source_guard_sha256: None,
         }
     }
 
@@ -2993,6 +2995,8 @@ mod tests {
             modified_at: "2026-07-16T00:00:00+08:00".to_string(),
             size_bytes: 5,
             source_version: "mtime_ns=100:size=5".to_string(),
+            source_guard_kind: None,
+            source_guard_sha256: None,
         };
         let stacks = RouteStackFingerprints {
             text_like: RouteStackFingerprint::text("engine-build").unwrap(),
@@ -3461,6 +3465,78 @@ mod tests {
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::ErrorCache)
         );
+    }
+
+    #[test]
+    fn finalize_persists_inventory_source_guard_columns() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000021");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        record_both_workers(&mut harness.store, &active, 1);
+        let source = "mtime_ns=100:size=5";
+        let mut batch = error_batch(&active);
+        let mut record = inventory_record("file-a", source);
+        record.source_guard_kind = Some("content_sha256_v1".to_string());
+        record.source_guard_sha256 = Some("a".repeat(64));
+        batch.inventory = vec![record];
+        harness.store.finalize(&active, &batch, 2).unwrap();
+
+        let connection = rusqlite::Connection::open(&harness.db_path).unwrap();
+        let (kind, hash): (Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT source_guard_kind, source_guard_sha256
+                 FROM file_inventory WHERE file_identity=?1",
+                ["file-a"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind.as_deref(), Some("content_sha256_v1"));
+        assert_eq!(hash.as_deref(), Some("a".repeat(64).as_str()));
+    }
+
+    #[test]
+    fn finalize_persists_unavailable_inventory_guard_with_null_hash() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000022");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        record_both_workers(&mut harness.store, &active, 1);
+        let source = "mtime_ns=100:size=5";
+        let mut batch = error_batch(&active);
+        let mut record = inventory_record("file-b", source);
+        record.source_guard_kind = Some("unavailable".to_string());
+        record.source_guard_sha256 = None;
+        batch.inventory = vec![record];
+        harness.store.finalize(&active, &batch, 2).unwrap();
+
+        let connection = rusqlite::Connection::open(&harness.db_path).unwrap();
+        let (kind, hash): (Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT source_guard_kind, source_guard_sha256
+                 FROM file_inventory WHERE file_identity=?1",
+                ["file-b"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(kind.as_deref(), Some("unavailable"));
+        assert_eq!(hash, None, "unavailable guard must persist a null hash");
     }
 
     #[test]

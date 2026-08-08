@@ -6,6 +6,8 @@ use ai_daily_scanner_contract::{
 };
 use rusqlite::{params, Transaction};
 
+use crate::source_guard::{source_guard_kind_from_text, SourceGuardKind};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryRecord {
     pub file_identity: String,
@@ -15,6 +17,10 @@ pub struct InventoryRecord {
     pub source_version: String,
     pub size_bytes: u64,
     pub mtime_ns: u64,
+    /// Engine-owned SourceGuardV2 wire kind; null only for pre-v2 inventory.
+    pub source_guard_kind: Option<String>,
+    /// Engine-owned SourceGuardV2 SHA-256; must be null when kind=unavailable.
+    pub source_guard_sha256: Option<String>,
 }
 
 impl InventoryRecord {
@@ -29,6 +35,9 @@ impl InventoryRecord {
         if relative_path.is_empty() {
             return Err("inventory relative path must not be empty".to_string());
         }
+        if !valid_inventory_guard(&file.source_guard_kind, &file.source_guard_sha256) {
+            return Err("discovery source guard violates the inventory invariant".to_string());
+        }
         Ok(Self {
             file_identity: file.file_identity.clone(),
             absolute_path: file.path.clone(),
@@ -37,6 +46,8 @@ impl InventoryRecord {
             source_version: file.source_version.clone(),
             size_bytes: file.size_bytes,
             mtime_ns,
+            source_guard_kind: file.source_guard_kind.clone(),
+            source_guard_sha256: file.source_guard_sha256.clone(),
         })
     }
 
@@ -56,7 +67,34 @@ impl InventoryRecord {
         if mtime_ns != self.mtime_ns || size_bytes != self.size_bytes {
             return Err("inventory source version is inconsistent".to_string());
         }
+        if !valid_inventory_guard(&self.source_guard_kind, &self.source_guard_sha256) {
+            return Err("inventory source guard violates the invariant".to_string());
+        }
         Ok(())
+    }
+}
+
+/// Enforces the Plan 1 `file_inventory` CHECK: both null, or
+/// kind=unavailable with a null hash, or an available kind with a 64-char
+/// lowercase-hex SHA-256. Anything else fails closed.
+fn valid_inventory_guard(kind: &Option<String>, hash: &Option<String>) -> bool {
+    match (kind, hash) {
+        (None, None) => true,
+        (Some(kind), None) => {
+            source_guard_kind_from_text(kind) == Some(SourceGuardKind::Unavailable)
+        }
+        (Some(kind), Some(hash)) => {
+            is_sha256(hash)
+                && matches!(
+                    source_guard_kind_from_text(kind),
+                    Some(
+                        SourceGuardKind::WindowsFileIdChangeTimeV1
+                            | SourceGuardKind::UnixInodeCtimeV1
+                            | SourceGuardKind::ContentSha256V1
+                    )
+                )
+        }
+        _ => false,
     }
 }
 
@@ -181,8 +219,9 @@ pub(crate) fn upsert_inventory(
     let mut statement = transaction.prepare_cached(
         "INSERT INTO file_inventory(
             file_identity, absolute_path, relative_path, file_type, source_version,
-            size_bytes, mtime_ns, last_seen_run_id, last_seen_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            size_bytes, mtime_ns, last_seen_run_id, last_seen_at_ms,
+            source_guard_kind, source_guard_sha256
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
          ON CONFLICT(file_identity) DO UPDATE SET
             absolute_path=excluded.absolute_path,
             relative_path=excluded.relative_path,
@@ -191,7 +230,9 @@ pub(crate) fn upsert_inventory(
             size_bytes=excluded.size_bytes,
             mtime_ns=excluded.mtime_ns,
             last_seen_run_id=excluded.last_seen_run_id,
-            last_seen_at_ms=excluded.last_seen_at_ms",
+            last_seen_at_ms=excluded.last_seen_at_ms,
+            source_guard_kind=excluded.source_guard_kind,
+            source_guard_sha256=excluded.source_guard_sha256",
     )?;
     for record in records {
         statement.execute(params![
@@ -204,6 +245,8 @@ pub(crate) fn upsert_inventory(
             record.mtime_ns as i64,
             scan_run_id,
             seen_at_ms,
+            record.source_guard_kind,
+            record.source_guard_sha256,
         ])?;
     }
     Ok(())
@@ -355,8 +398,71 @@ mod tests {
             modified_at: "2026-07-16T00:00:00+08:00".to_string(),
             size_bytes: 8,
             source_version: "mtime_ns=123:size=9".to_string(),
+            source_guard_kind: None,
+            source_guard_sha256: None,
         };
 
         assert!(InventoryRecord::from_discovered(&file, "file.txt".to_string()).is_err());
+    }
+
+    #[test]
+    fn discovered_inventory_carries_source_guard() {
+        let file = DiscoveredFileOut {
+            file_identity: "identity".to_string(),
+            path: "C:\\work\\file.txt".to_string(),
+            extension: ".txt".to_string(),
+            modified_at: "2026-07-16T00:00:00+08:00".to_string(),
+            size_bytes: 8,
+            source_version: "mtime_ns=123:size=8".to_string(),
+            source_guard_kind: Some("content_sha256_v1".to_string()),
+            source_guard_sha256: Some("a".repeat(64)),
+        };
+
+        let record = InventoryRecord::from_discovered(&file, "file.txt".to_string())
+            .expect("guard-carrying discovery must build an inventory record");
+        assert_eq!(
+            record.source_guard_kind.as_deref(),
+            Some("content_sha256_v1")
+        );
+        assert_eq!(
+            record.source_guard_sha256.as_deref(),
+            Some("a".repeat(64).as_str())
+        );
+        record
+            .validate()
+            .expect("record must satisfy the guard invariant");
+    }
+
+    #[test]
+    fn discovered_inventory_rejects_invalid_source_guard() {
+        let mut file = DiscoveredFileOut {
+            file_identity: "identity".to_string(),
+            path: "C:\\work\\file.txt".to_string(),
+            extension: ".txt".to_string(),
+            modified_at: "2026-07-16T00:00:00+08:00".to_string(),
+            size_bytes: 8,
+            source_version: "mtime_ns=123:size=8".to_string(),
+            source_guard_kind: Some("content_sha256_v1".to_string()),
+            source_guard_sha256: None,
+        };
+        assert!(
+            InventoryRecord::from_discovered(&file, "file.txt".to_string()).is_err(),
+            "available kind without a hash must be rejected"
+        );
+
+        file.source_guard_kind = Some("unavailable".to_string());
+        file.source_guard_sha256 = Some("a".repeat(64));
+        assert!(
+            InventoryRecord::from_discovered(&file, "file.txt".to_string()).is_err(),
+            "unavailable kind with a hash must be rejected"
+        );
+
+        file.source_guard_kind = Some("unavailable".to_string());
+        file.source_guard_sha256 = None;
+        let record = InventoryRecord::from_discovered(&file, "file.txt".to_string())
+            .expect("unavailable guard with a null hash is valid");
+        record
+            .validate()
+            .expect("record must satisfy the guard invariant");
     }
 }
