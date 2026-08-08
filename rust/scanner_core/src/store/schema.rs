@@ -512,7 +512,12 @@ CREATE TABLE context_runs (
     created_at_ms INTEGER NOT NULL,
     artifact_id INTEGER REFERENCES context_artifacts(artifact_id) ON DELETE RESTRICT,
     reused_from_context_run_id INTEGER REFERENCES context_runs(context_run_id) ON DELETE SET NULL,
-    snapshot_hit INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_hit IN (0, 1))
+    snapshot_hit INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_hit IN (0, 1)),
+    CHECK (
+        (snapshot_hit = 1 AND reused_from_context_run_id IS NOT NULL)
+        OR
+        (snapshot_hit = 0 AND reused_from_context_run_id IS NULL)
+    )
 ) STRICT;
 
 CREATE TABLE context_decisions (
@@ -729,6 +734,88 @@ ALTER TABLE parse_cache_v2 RENAME TO parse_cache;
 CREATE INDEX idx_cache_created ON parse_cache(cached_at_ms);
 "#;
 
+/// `context_runs` with the snapshot relationship CHECK (spec Part 5.1):
+/// `reused_from_context_run_id` is required exactly when `snapshot_hit=1`.
+/// SQLite cannot add a CHECK to an existing table in place, so the table is
+/// rebuilt by create-new/copy/drop/rename (like `file_inventory_v2`). The
+/// caller must disable FK enforcement for the rebuild transaction. The
+/// self-reference is written against `context_runs_v2`; SQLite rewrites it to
+/// `context_runs` on the rename.
+const CONTEXT_RUNS_V2_DDL: &str = r#"
+CREATE TABLE context_runs_v2 (
+    context_run_id INTEGER PRIMARY KEY,
+    scan_run_id INTEGER NOT NULL UNIQUE REFERENCES scan_runs(scan_run_id) ON DELETE CASCADE,
+    context_profile_hash TEXT NOT NULL CHECK (length(context_profile_hash) = 64),
+    status TEXT NOT NULL CHECK (status IN ('success', 'partial', 'error')),
+    final_context TEXT NOT NULL,
+    context_sha256 TEXT NOT NULL CHECK (length(context_sha256) = 64),
+    source_file_count INTEGER NOT NULL CHECK (source_file_count >= 0),
+    success_count INTEGER NOT NULL CHECK (success_count >= 0),
+    timeout_count INTEGER NOT NULL CHECK (timeout_count >= 0),
+    included_file_count INTEGER NOT NULL CHECK (included_file_count >= 0),
+    omitted_file_count INTEGER NOT NULL CHECK (omitted_file_count >= 0),
+    error_file_count INTEGER NOT NULL CHECK (error_file_count >= 0),
+    input_chars INTEGER NOT NULL CHECK (input_chars >= 0),
+    output_chars INTEGER NOT NULL CHECK (output_chars >= 0),
+    total_duration_ms INTEGER NOT NULL CHECK (total_duration_ms >= 0),
+    discovery_duration_ms INTEGER NOT NULL CHECK (discovery_duration_ms >= 0),
+    parse_duration_ms INTEGER NOT NULL CHECK (parse_duration_ms >= 0),
+    compression_duration_ms INTEGER NOT NULL CHECK (compression_duration_ms >= 0),
+    created_at_ms INTEGER NOT NULL,
+    artifact_id INTEGER REFERENCES context_artifacts(artifact_id) ON DELETE RESTRICT,
+    reused_from_context_run_id INTEGER REFERENCES context_runs_v2(context_run_id) ON DELETE SET NULL,
+    snapshot_hit INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_hit IN (0, 1)),
+    CHECK (
+        (snapshot_hit = 1 AND reused_from_context_run_id IS NOT NULL)
+        OR
+        (snapshot_hit = 0 AND reused_from_context_run_id IS NULL)
+    )
+) STRICT;
+"#;
+
+/// Rebuilds `context_runs` with the snapshot relationship CHECK. Used by the
+/// v1→v2 upgrade (after the migrated artifacts are linked) and by the v2
+/// amendment for databases committed before the CHECK existed. The caller has
+/// disabled FK enforcement for the duration of the enclosing transaction.
+fn rebuild_context_runs(transaction: &rusqlite::Transaction<'_>) -> Result<(), SchemaError> {
+    transaction.execute_batch(CONTEXT_RUNS_V2_DDL)?;
+    transaction.execute(
+        "INSERT INTO context_runs_v2(
+            context_run_id, scan_run_id, context_profile_hash, status,
+            final_context, context_sha256, source_file_count, success_count,
+            timeout_count, included_file_count, omitted_file_count,
+            error_file_count, input_chars, output_chars, total_duration_ms,
+            discovery_duration_ms, parse_duration_ms, compression_duration_ms,
+            created_at_ms, artifact_id, reused_from_context_run_id, snapshot_hit
+         ) SELECT context_run_id, scan_run_id, context_profile_hash, status,
+             final_context, context_sha256, source_file_count, success_count,
+             timeout_count, included_file_count, omitted_file_count,
+             error_file_count, input_chars, output_chars, total_duration_ms,
+             discovery_duration_ms, parse_duration_ms, compression_duration_ms,
+             created_at_ms, artifact_id, reused_from_context_run_id, snapshot_hit
+           FROM context_runs",
+        [],
+    )?;
+    transaction.execute_batch(
+        "DROP TABLE context_runs;
+         ALTER TABLE context_runs_v2 RENAME TO context_runs;
+         CREATE INDEX idx_context_runs_artifact ON context_runs(artifact_id);
+         CREATE INDEX idx_context_runs_reused ON context_runs(reused_from_context_run_id);",
+    )?;
+    Ok(())
+}
+
+/// True when the committed `context_runs` table already carries the snapshot
+/// relationship CHECK (the table definition includes the marker text).
+fn context_runs_has_snapshot_check(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT instr(sql, 'snapshot_hit = 1 AND reused_from_context_run_id IS NOT NULL') > 0
+         FROM sqlite_schema WHERE type='table' AND name='context_runs'",
+        [],
+        |row| row.get(0),
+    )
+}
+
 pub fn configure_connection(connection: &Connection) -> Result<(), SchemaError> {
     connection.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
     connection.pragma_update(None, "foreign_keys", true)?;
@@ -799,6 +886,23 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
             transaction.execute_batch(PARSE_CACHE_GUARD_DDL)?;
             transaction.commit()?;
         }
+        // context_runs snapshot relationship CHECK (spec Part 5.1): databases
+        // committed before the CHECK existed are rebuilt with it. FK
+        // enforcement is disabled for the rebuild so dropping the parent does
+        // not cascade context_decisions; data violating the invariant fails
+        // the migration (fail closed) rather than being silently accepted.
+        if !context_runs_has_snapshot_check(connection)? {
+            connection.pragma_update(None, "foreign_keys", false)?;
+            let migration = (|| -> Result<(), SchemaError> {
+                let transaction =
+                    connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                rebuild_context_runs(&transaction)?;
+                transaction.commit()?;
+                Ok(())
+            })();
+            connection.pragma_update(None, "foreign_keys", true)?;
+            migration?;
+        }
     }
     Ok(())
 }
@@ -848,6 +952,9 @@ fn migrate_v1_to_v2(
     transaction.execute_batch(V2_UPGRADE_DDL)?;
     migrate_file_result_legacy_cache(transaction)?;
     migrate_terminal_envelopes(transaction)?;
+    // Rebuild context_runs with the snapshot relationship CHECK after the
+    // migrated artifacts are linked, so the copied rows satisfy the invariant.
+    rebuild_context_runs(transaction)?;
 
     // Rows that predate the upgrade (running/abandoned) carry no envelope; they
     // are still audited as migrated_v1 rather than being mislabeled full_v2.
@@ -1256,5 +1363,119 @@ mod tests {
         assert_eq!(version, 0);
         assert_eq!(engine_lease_count, 0);
         assert_eq!(scan_runs_count, 0);
+    }
+
+    /// `context_runs` as committed before the snapshot relationship CHECK
+    /// (spec Part 5.1) existed; used to seed the v2 amendment fixture.
+    const OLD_CONTEXT_RUNS_DDL: &str = r#"
+    CREATE TABLE context_runs (
+        context_run_id INTEGER PRIMARY KEY,
+        scan_run_id INTEGER NOT NULL UNIQUE REFERENCES scan_runs(scan_run_id) ON DELETE CASCADE,
+        context_profile_hash TEXT NOT NULL CHECK (length(context_profile_hash) = 64),
+        status TEXT NOT NULL CHECK (status IN ('success', 'partial', 'error')),
+        final_context TEXT NOT NULL,
+        context_sha256 TEXT NOT NULL CHECK (length(context_sha256) = 64),
+        source_file_count INTEGER NOT NULL CHECK (source_file_count >= 0),
+        success_count INTEGER NOT NULL CHECK (success_count >= 0),
+        timeout_count INTEGER NOT NULL CHECK (timeout_count >= 0),
+        included_file_count INTEGER NOT NULL CHECK (included_file_count >= 0),
+        omitted_file_count INTEGER NOT NULL CHECK (omitted_file_count >= 0),
+        error_file_count INTEGER NOT NULL CHECK (error_file_count >= 0),
+        input_chars INTEGER NOT NULL CHECK (input_chars >= 0),
+        output_chars INTEGER NOT NULL CHECK (output_chars >= 0),
+        total_duration_ms INTEGER NOT NULL CHECK (total_duration_ms >= 0),
+        discovery_duration_ms INTEGER NOT NULL CHECK (discovery_duration_ms >= 0),
+        parse_duration_ms INTEGER NOT NULL CHECK (parse_duration_ms >= 0),
+        compression_duration_ms INTEGER NOT NULL CHECK (compression_duration_ms >= 0),
+        created_at_ms INTEGER NOT NULL,
+        artifact_id INTEGER REFERENCES context_artifacts(artifact_id) ON DELETE RESTRICT,
+        reused_from_context_run_id INTEGER REFERENCES context_runs(context_run_id) ON DELETE SET NULL,
+        snapshot_hit INTEGER NOT NULL DEFAULT 0 CHECK (snapshot_hit IN (0, 1))
+    ) STRICT;
+    "#;
+
+    #[test]
+    fn v2_amendment_rebuilds_context_runs_with_snapshot_check() {
+        let (_directory, mut connection) = open_database("context-runs-amendment.sqlite3");
+        configure_connection(&connection).expect("pragmas");
+        migrate(&mut connection).expect("fresh migration");
+
+        // Simulate a v2 database committed before the snapshot CHECK existed:
+        // replace context_runs with the pre-CHECK shape.
+        connection
+            .pragma_update(None, "foreign_keys", false)
+            .expect("disable foreign keys for the fixture rebuild");
+        connection
+            .execute_batch("DROP TABLE context_runs;")
+            .expect("drop context_runs");
+        connection
+            .execute_batch(OLD_CONTEXT_RUNS_DDL)
+            .expect("pre-CHECK context_runs");
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .expect("re-enable foreign keys");
+        assert!(
+            !context_runs_has_snapshot_check(&connection).expect("check probe"),
+            "fixture must start without the snapshot CHECK"
+        );
+
+        migrate(&mut connection).expect("v2 amendment migration");
+        assert!(
+            context_runs_has_snapshot_check(&connection).expect("check probe"),
+            "v2 amendment must rebuild context_runs with the snapshot CHECK"
+        );
+    }
+
+    #[test]
+    fn fresh_v2_context_runs_rejects_snapshot_hit_without_reused_from() {
+        let (_directory, mut connection) = open_database("context-runs-snapshot-check.sqlite3");
+        configure_connection(&connection).expect("pragmas");
+        migrate(&mut connection).expect("fresh migration");
+        for index in 1..=2_i64 {
+            connection
+                .execute(
+                    "INSERT INTO scan_runs(
+                        request_id, canonical_request_json, request_hash_algorithm,
+                        request_hash, owner_id, status, created_at_ms, started_at_ms,
+                        updated_at_ms, finished_at_ms, final_envelope_json
+                     ) VALUES (?1, '{}', 'sha256-request-v1', ?2, 'owner', 'success',
+                       1, 1, 1, 2, '{}')",
+                    params![
+                        format!("00000000-0000-4000-8000-{index:012}"),
+                        "0".repeat(64),
+                    ],
+                )
+                .expect("scan_runs row");
+        }
+        connection
+            .execute(
+                "INSERT INTO context_runs(
+                    context_run_id, scan_run_id, context_profile_hash, status,
+                    final_context, context_sha256, source_file_count, success_count,
+                    timeout_count, included_file_count, omitted_file_count,
+                    error_file_count, input_chars, output_chars, total_duration_ms,
+                    discovery_duration_ms, parse_duration_ms, compression_duration_ms,
+                    created_at_ms, snapshot_hit
+                 ) VALUES (1, 1, ?1, 'success', 'ctx', ?2, 1, 1, 0, 1, 0, 0,
+                           1, 1, 1, 0, 0, 0, 1, 0)",
+                params!["0".repeat(64), "1".repeat(64)],
+            )
+            .expect("snapshot_hit=0 without reused_from must insert");
+        let orphan_hit = connection.execute(
+            "INSERT INTO context_runs(
+                context_run_id, scan_run_id, context_profile_hash, status,
+                final_context, context_sha256, source_file_count, success_count,
+                timeout_count, included_file_count, omitted_file_count,
+                error_file_count, input_chars, output_chars, total_duration_ms,
+                discovery_duration_ms, parse_duration_ms, compression_duration_ms,
+                created_at_ms, snapshot_hit
+             ) VALUES (2, 2, ?1, 'success', 'ctx', ?2, 1, 1, 0, 1, 0, 0,
+                       1, 1, 1, 0, 0, 0, 1, 1)",
+            params!["0".repeat(64), "1".repeat(64)],
+        );
+        assert!(
+            orphan_hit.is_err(),
+            "snapshot_hit=1 without reused_from_context_run_id must be rejected"
+        );
     }
 }

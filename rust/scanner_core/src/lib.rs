@@ -1,6 +1,7 @@
 //! Windows-first scanner engine process shell.
 
 pub mod admission;
+pub mod artifact;
 pub mod budget_model;
 pub mod classifier;
 pub mod compressor;
