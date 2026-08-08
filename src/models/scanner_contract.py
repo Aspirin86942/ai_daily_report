@@ -1242,6 +1242,10 @@ class FileAuditV2(ContractModel):
             raise ValueError("parse cache miss requires a miss reason")
         if self.parse_cache_status != "miss" and self.cache_miss_reason:
             raise ValueError("non-miss parse cache must have an empty miss reason")
+        if self.parse_status in {"error", "timeout"} and self.final_diagnostic is None:
+            raise ValueError("error/timeout file audit requires a final diagnostic")
+        if self.parse_status in {"success", "not_parsed"} and self.final_diagnostic is not None:
+            raise ValueError("success/not_parsed file audit must not carry a final diagnostic")
         return self
 
 
@@ -1296,6 +1300,47 @@ class ExecutionMetricsV2(ContractModel):
             )
         return self
 
+    def is_error_sentinel(self) -> bool:
+        """Inspect v2 `status=error` 的固定 sentinel（spec Part 5.3）。"""
+        numerics = [
+            self.discovery_observed_file_count,
+            self.source_guard_content_hash_file_count,
+            self.source_guard_unavailable_count,
+            self.source_guard_bytes_read,
+            self.candidate_file_count,
+            self.admitted_file_count,
+            self.classification_slot_count,
+            self.confirmed_run_inspected_pages_total,
+            self.unobserved_classification_attempt_count,
+            self.nominal_charged_pages_total,
+            self.extraction_slot_count,
+            self.pdfplumber_invocations,
+            self.parse_cache_lookup_count,
+            self.classification_cache_lookup_count,
+            self.stage_deadline_exhausted_count,
+            self.session_restart_count,
+            self.session_fallback_count,
+            self.classify_attempt_count,
+            self.parse_attempt_count,
+            self.reserved_chars,
+            self.rendered_chars,
+            self.worker_handshake_ms,
+            self.discovery_ms,
+            self.snapshot_lookup_ms,
+            self.current_run_audit_write_ms,
+            self.terminal_precommit_ms,
+            self.deadline_precommit_elapsed_ms,
+            self.envelope_rebuild_ms,
+            self.terminal_rows_written,
+        ]
+        return (
+            not self.snapshot_hit
+            and all(value == 0 for value in numerics)
+            and self.parse_cache_all_hit is None
+            and self.classification_cache_all_hit is None
+            and self.peak_worker_rss_bytes is None
+        )
+
 
 class InspectRunResponseV2(ContractModel):
     contract: Literal["ai_daily_context"]
@@ -1326,8 +1371,13 @@ class InspectRunResponseV2(ContractModel):
 
     @model_validator(mode="after")
     def validate_status_and_reuse(self) -> "InspectRunResponseV2":
-        if self.status == "ok" and (self.run_status is None or self.error):
-            raise ValueError("successful inspection requires run status and no error")
+        if self.status == "ok":
+            if self.run_status is None or self.error:
+                raise ValueError("successful inspection requires run status and no error")
+            if self.run_status in {"success", "partial"} and self.artifact_id is None:
+                raise ValueError("successful inspect v2 run requires artifact_id")
+            if self.run_status == "error" and self.artifact_id is not None:
+                raise ValueError("error run inspect v2 response must have a null artifact_id")
         if self.status == "error":
             if self.error is None:
                 raise ValueError("failed inspection requires a diagnostic")
@@ -1337,12 +1387,23 @@ class InspectRunResponseV2(ContractModel):
                 or self.reuse_kind != "none"
                 or self.files
                 or self.decisions
+                or not self.execution_metrics.is_error_sentinel()
             ):
                 raise ValueError("error inspection must carry the empty sentinel shape")
         if self.reuse_kind == "context_snapshot" and self.reused_from_context_run_id is None:
             raise ValueError("context_snapshot reuse requires reused_from_context_run_id")
+        if self.reuse_kind == "context_snapshot" and not self.execution_metrics.snapshot_hit:
+            raise ValueError("context_snapshot reuse requires snapshot_hit")
         if self.reuse_kind != "context_snapshot" and self.reused_from_context_run_id is not None:
             raise ValueError("reused_from_context_run_id is only allowed for context_snapshot reuse")
+        if self.reuse_kind == "parse_cache" and (
+            self.execution_metrics.parse_cache_lookup_count == 0
+            or self.execution_metrics.parse_cache_all_hit is not True
+            or self.execution_metrics.snapshot_hit
+        ):
+            raise ValueError(
+                "parse_cache reuse requires a parse lookup all-hit and no snapshot"
+            )
         return self
 
 
@@ -1409,8 +1470,15 @@ class MaintenanceResponseV1(ContractModel):
 
     @model_validator(mode="after")
     def validate_status(self) -> "MaintenanceResponseV1":
-        if self.status == "ok" and self.error:
-            raise ValueError("ok maintenance response cannot contain an error")
+        if self.status == "ok":
+            if (
+                self.error
+                or self.pre_integrity_check != "ok"
+                or self.post_integrity_check == "failed"
+                or self.vacuum.status == "error"
+                or not self.after_complete
+            ):
+                raise ValueError("ok maintenance response violates status invariants")
         if self.status == "error" and self.error is None:
             raise ValueError("error maintenance response requires a diagnostic")
         return self

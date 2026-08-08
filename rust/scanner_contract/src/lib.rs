@@ -2926,6 +2926,23 @@ impl Validate for FileAuditV2 {
         } else if !self.cache_miss_reason.is_empty() {
             return Err("non-miss parse cache must have an empty miss reason".to_string());
         }
+        match self.parse_status {
+            ParseStatus::Error | ParseStatus::Timeout => {
+                if self.final_diagnostic.0.is_none() {
+                    return Err(
+                        "error/timeout file audit requires a final diagnostic".to_string(),
+                    );
+                }
+            }
+            ParseStatus::Success | ParseStatus::NotParsed => {
+                if self.final_diagnostic.0.is_some() {
+                    return Err(
+                        "success/not_parsed file audit must not carry a final diagnostic"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         if let Some(diagnostic) = &self.final_diagnostic.0 {
             diagnostic.validate()?;
         }
@@ -3019,6 +3036,46 @@ impl Validate for ExecutionMetricsV2 {
     }
 }
 
+impl ExecutionMetricsV2 {
+    /// Inspect v2 `status=error` 的固定 sentinel：所有 non-nullable numeric=0、
+    /// 三个 nullable 字段均为 null、`snapshot_hit=false`（spec Part 5.3）。
+    pub fn is_error_sentinel(&self) -> bool {
+        self.discovery_observed_file_count == 0
+            && self.source_guard_content_hash_file_count == 0
+            && self.source_guard_unavailable_count == 0
+            && self.source_guard_bytes_read == 0
+            && self.candidate_file_count == 0
+            && self.admitted_file_count == 0
+            && self.classification_slot_count == 0
+            && self.confirmed_run_inspected_pages_total == 0
+            && self.unobserved_classification_attempt_count == 0
+            && self.nominal_charged_pages_total == 0
+            && self.extraction_slot_count == 0
+            && self.pdfplumber_invocations == 0
+            && !self.snapshot_hit
+            && self.parse_cache_lookup_count == 0
+            && self.classification_cache_lookup_count == 0
+            && self.parse_cache_all_hit.0.is_none()
+            && self.classification_cache_all_hit.0.is_none()
+            && self.stage_deadline_exhausted_count == 0
+            && self.session_restart_count == 0
+            && self.session_fallback_count == 0
+            && self.classify_attempt_count == 0
+            && self.parse_attempt_count == 0
+            && self.reserved_chars == 0
+            && self.rendered_chars == 0
+            && self.worker_handshake_ms == 0
+            && self.discovery_ms == 0
+            && self.snapshot_lookup_ms == 0
+            && self.current_run_audit_write_ms == 0
+            && self.terminal_precommit_ms == 0
+            && self.deadline_precommit_elapsed_ms == 0
+            && self.envelope_rebuild_ms == 0
+            && self.terminal_rows_written == 0
+            && self.peak_worker_rss_bytes.0.is_none()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InspectRunResponseV2 {
@@ -3097,6 +3154,24 @@ impl Validate for InspectRunResponseV2 {
                 if self.run_status.0.is_none() || self.error.0.is_some() {
                     return Err("ok inspect v2 response requires run status and no error".to_string());
                 }
+                match self.run_status.0 {
+                    Some(RunStatus::Success | RunStatus::Partial) => {
+                        if self.artifact_id.0.is_none() {
+                            return Err(
+                                "successful inspect v2 run requires artifact_id".to_string(),
+                            );
+                        }
+                    }
+                    Some(RunStatus::Error) => {
+                        if self.artifact_id.0.is_some() {
+                            return Err(
+                                "error run inspect v2 response must have a null artifact_id"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
             }
             InspectStatus::Error => {
                 if self.error.0.is_none() {
@@ -3107,6 +3182,7 @@ impl Validate for InspectRunResponseV2 {
                     || self.reuse_kind != ReuseKind::None
                     || !self.files.is_empty()
                     || !self.decisions.is_empty()
+                    || !self.execution_metrics.is_error_sentinel()
                 {
                     return Err(
                         "error inspect v2 response must carry the empty sentinel shape".to_string(),
@@ -3119,11 +3195,23 @@ impl Validate for InspectRunResponseV2 {
         {
             return Err("context_snapshot reuse requires reused_from_context_run_id".to_string());
         }
+        if self.reuse_kind == ReuseKind::ContextSnapshot && !self.execution_metrics.snapshot_hit {
+            return Err("context_snapshot reuse requires snapshot_hit".to_string());
+        }
         if self.reuse_kind != ReuseKind::ContextSnapshot
             && self.reused_from_context_run_id.0.is_some()
         {
             return Err(
                 "reused_from_context_run_id is only allowed for context_snapshot reuse".to_string(),
+            );
+        }
+        if self.reuse_kind == ReuseKind::ParseCache
+            && (self.execution_metrics.parse_cache_lookup_count == 0
+                || self.execution_metrics.parse_cache_all_hit.0 != Some(true)
+                || self.execution_metrics.snapshot_hit)
+        {
+            return Err(
+                "parse_cache reuse requires a parse lookup all-hit and no snapshot".to_string(),
             );
         }
         Ok(())
@@ -3300,9 +3388,9 @@ impl Validate for MaintenanceResponseV1 {
             MaintenanceStatus::Ok => {
                 if self.error.0.is_some()
                     || self.pre_integrity_check != MaintenancePreIntegrityCheck::Ok
-                    || (self.after_complete
-                        && self.post_integrity_check != MaintenancePostIntegrityCheck::Ok)
+                    || self.post_integrity_check == MaintenancePostIntegrityCheck::Failed
                     || self.vacuum.status == MaintenanceVacuumStatus::Error
+                    || !self.after_complete
                 {
                     return Err("ok maintenance response violates status invariants".to_string());
                 }

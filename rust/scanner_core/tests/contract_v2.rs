@@ -209,3 +209,380 @@ fn normalize_v2_keeps_report_mode_pdf_page_defaults() {
         "monthly keeps summary_pdf_max_pages=2"
     );
 }
+
+fn inspect_v2_ok_json() -> serde_json::Value {
+    serde_json::from_str(
+        r#"{
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "response_version": 2,
+        "request_id": "123e4567-e89b-42d3-a456-426614174000",
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "status": "ok",
+        "run_status": "success",
+        "summary": {
+            "source_file_count": 1, "success_count": 1, "timeout_count": 0,
+            "included_file_count": 1, "omitted_file_count": 0, "error_file_count": 0,
+            "input_chars": 1, "output_chars": 1, "total_duration_ms": 1,
+            "discovery_duration_ms": 0, "parse_duration_ms": 0, "compression_duration_ms": 0
+        },
+        "stage_metrics": [], "extension_metrics": [], "files": [], "decisions": [],
+        "warnings": [], "error": null,
+        "artifact_id": 1,
+        "reused_from_context_run_id": null,
+        "reuse_kind": "none",
+        "execution_metrics": {
+            "discovery_observed_file_count": 0,
+            "source_guard_content_hash_file_count": 0,
+            "source_guard_unavailable_count": 0,
+            "source_guard_bytes_read": 0,
+            "candidate_file_count": 0,
+            "admitted_file_count": 0,
+            "classification_slot_count": 0,
+            "confirmed_run_inspected_pages_total": 0,
+            "unobserved_classification_attempt_count": 0,
+            "nominal_charged_pages_total": 0,
+            "extraction_slot_count": 0,
+            "pdfplumber_invocations": 0,
+            "snapshot_hit": false,
+            "parse_cache_lookup_count": 0,
+            "classification_cache_lookup_count": 0,
+            "parse_cache_all_hit": null,
+            "classification_cache_all_hit": null,
+            "stage_deadline_exhausted_count": 0,
+            "session_restart_count": 0,
+            "session_fallback_count": 0,
+            "classify_attempt_count": 0,
+            "parse_attempt_count": 0,
+            "reserved_chars": 0,
+            "rendered_chars": 0,
+            "worker_handshake_ms": 0,
+            "discovery_ms": 0,
+            "snapshot_lookup_ms": 0,
+            "current_run_audit_write_ms": 0,
+            "terminal_precommit_ms": 0,
+            "deadline_precommit_elapsed_ms": 0,
+            "envelope_rebuild_ms": 0,
+            "terminal_rows_written": 0,
+            "peak_worker_rss_bytes": null
+        }
+    }"#,
+    )
+    .expect("base inspect v2 fixture should parse")
+}
+
+fn maintenance_response_v1_json() -> serde_json::Value {
+    serde_json::from_str(
+        r#"{
+        "contract": "ai_daily_scanner_maintenance",
+        "protocol_version": 1,
+        "request_id": "123e4567-e89b-42d3-a456-426614174000",
+        "status": "ok",
+        "cache_retention_policy": {
+            "policy_version": "cache_retention_v1",
+            "parse_cache_max_bytes": 1073741824,
+            "classification_cache_max_bytes": 134217728,
+            "context_artifacts_max_bytes": 536870912,
+            "terminal_audit_max_bytes": 2147483648,
+            "terminal_run_max_count": 500,
+            "terminal_run_max_age_days": 90,
+            "opportunistic_gc_budget_ms": 10
+        },
+        "before": {
+            "parse_cache_logical_bytes": 1, "classification_cache_logical_bytes": 2,
+            "context_artifacts_logical_bytes": 3, "terminal_audit_logical_bytes": 4,
+            "database_file_bytes": 5, "wal_file_bytes": 6, "shm_file_bytes": 7,
+            "total_physical_bytes": 8, "freelist_bytes": 9, "auto_vacuum_mode": "incremental"
+        },
+        "after": {
+            "parse_cache_logical_bytes": 1, "classification_cache_logical_bytes": 2,
+            "context_artifacts_logical_bytes": 3, "terminal_audit_logical_bytes": 4,
+            "database_file_bytes": 5, "wal_file_bytes": 6, "shm_file_bytes": 7,
+            "total_physical_bytes": 8, "freelist_bytes": 9, "auto_vacuum_mode": "incremental"
+        },
+        "after_complete": true,
+        "deleted": {
+            "parse_cache_rows": 0, "classification_cache_rows": 0,
+            "context_artifacts_rows": 0, "context_artifact_files_rows": 0,
+            "context_artifact_decisions_rows": 0, "scan_runs_rows": 0,
+            "scan_run_attempts_rows": 0, "run_diagnostics_rows": 0,
+            "scan_file_results_rows": 0, "scan_stage_metrics_rows": 0,
+            "scan_extension_metrics_rows": 0, "context_runs_rows": 0,
+            "context_decisions_rows": 0, "file_inventory_rows": 0
+        },
+        "pre_integrity_check": "ok",
+        "post_integrity_check": "not_run",
+        "vacuum": { "mode": "gc", "status": "skipped_dry_run", "pages_changed": 0 },
+        "warnings": [],
+        "error": null
+    }"#,
+    )
+    .expect("base maintenance fixture should parse")
+}
+
+#[test]
+fn maintenance_response_v1_dry_run_ok_round_trips() {
+    let value = maintenance_response_v1_json();
+    let response = serde_json::from_value::<ai_daily_scanner_contract::MaintenanceResponseV1>(value)
+        .expect("dry-run ok maintenance response should decode");
+    response
+        .validate()
+        .expect("dry-run ok maintenance response must validate (post=not_run, after_complete=true)");
+}
+
+#[test]
+fn maintenance_response_v1_ok_rejects_invalid_post_or_missing_complete() {
+    let value = maintenance_response_v1_json();
+    let mut failed_post = value.as_object().unwrap().clone();
+    failed_post.insert(
+        "post_integrity_check".to_string(),
+        serde_json::Value::String("failed".to_string()),
+    );
+    let response =
+        serde_json::from_value::<ai_daily_scanner_contract::MaintenanceResponseV1>(
+            serde_json::Value::Object(failed_post),
+        )
+        .expect("failed post should still decode");
+    assert!(response.validate().is_err());
+
+    let mut incomplete = value.as_object().unwrap().clone();
+    incomplete.insert(
+        "after_complete".to_string(),
+        serde_json::Value::Bool(false),
+    );
+    let response =
+        serde_json::from_value::<ai_daily_scanner_contract::MaintenanceResponseV1>(
+            serde_json::Value::Object(incomplete),
+        )
+        .expect("missing after_complete should still decode");
+    assert!(response.validate().is_err());
+}
+
+#[test]
+fn inspect_run_response_v2_ok_success_requires_artifact_id() {
+    let value = inspect_v2_ok_json();
+    let parsed = serde_json::from_value::<ai_daily_scanner_contract::InspectRunResponseV2>(value)
+        .expect("ok success fixture should decode");
+    parsed
+        .validate()
+        .expect("ok success with artifact_id must validate");
+
+    let mut missing = inspect_v2_ok_json().as_object().unwrap().clone();
+    missing.insert("artifact_id".to_string(), serde_json::Value::Null);
+    let parsed = serde_json::from_value::<ai_daily_scanner_contract::InspectRunResponseV2>(
+        serde_json::Value::Object(missing),
+    )
+    .expect("missing artifact_id should still decode");
+    assert!(
+        parsed.validate().is_err(),
+        "success/partial inspect v2 run requires artifact_id"
+    );
+}
+
+#[test]
+fn inspect_run_response_v2_error_sentinel_is_enforced() {
+    let mut value = inspect_v2_ok_json().as_object().unwrap().clone();
+    value.insert("status".to_string(), serde_json::Value::String("error".to_string()));
+    value.insert("run_status".to_string(), serde_json::Value::Null);
+    value.insert("context_run_id".to_string(), serde_json::Value::Null);
+    value.insert("artifact_id".to_string(), serde_json::Value::Null);
+    value.insert(
+        "error".to_string(),
+        serde_json::json!({
+            "error_code": "INSPECT_V2_PROVENANCE_UNAVAILABLE",
+            "message": "migrated v1 run lacks v2 provenance",
+            "retryable": false,
+            "stage": "inspect",
+            "file_path": null,
+            "backend": null
+        }),
+    );
+    let parsed = serde_json::from_value::<ai_daily_scanner_contract::InspectRunResponseV2>(
+        serde_json::Value::Object(value),
+    )
+    .expect("error sentinel fixture should decode");
+    parsed
+        .validate()
+        .expect("error sentinel shape with zero metrics must validate");
+
+    let mut nonzero = inspect_v2_ok_json().as_object().unwrap().clone();
+    nonzero.insert("status".to_string(), serde_json::Value::String("error".to_string()));
+    nonzero.insert("run_status".to_string(), serde_json::Value::Null);
+    nonzero.insert("context_run_id".to_string(), serde_json::Value::Null);
+    nonzero.insert("artifact_id".to_string(), serde_json::Value::Null);
+    nonzero.insert(
+        "error".to_string(),
+        serde_json::json!({
+            "error_code": "INSPECT_V2_PROVENANCE_UNAVAILABLE",
+            "message": "migrated v1 run lacks v2 provenance",
+            "retryable": false,
+            "stage": "inspect",
+            "file_path": null,
+            "backend": null
+        }),
+    );
+    let metrics = nonzero
+        .get_mut("execution_metrics")
+        .and_then(|value| value.as_object_mut())
+        .expect("execution_metrics must be an object");
+    metrics.insert(
+        "discovery_observed_file_count".to_string(),
+        serde_json::Value::from(1_u64),
+    );
+    let parsed = serde_json::from_value::<ai_daily_scanner_contract::InspectRunResponseV2>(
+        serde_json::Value::Object(nonzero),
+    )
+    .expect("nonzero error metrics should still decode");
+    assert!(
+        parsed.validate().is_err(),
+        "error inspect v2 requires the fixed zero sentinel metrics"
+    );
+}
+
+#[test]
+fn inspect_run_response_v2_parse_cache_reuse_requires_all_hit() {
+    let mut value = inspect_v2_ok_json().as_object().unwrap().clone();
+    value.insert(
+        "reuse_kind".to_string(),
+        serde_json::Value::String("parse_cache".to_string()),
+    );
+    let metrics = value
+        .get_mut("execution_metrics")
+        .and_then(|value| value.as_object_mut())
+        .expect("execution_metrics must be an object");
+    metrics.insert(
+        "parse_cache_lookup_count".to_string(),
+        serde_json::Value::from(1_u64),
+    );
+    metrics.insert(
+        "parse_cache_all_hit".to_string(),
+        serde_json::Value::Bool(true),
+    );
+    let parsed = serde_json::from_value::<ai_daily_scanner_contract::InspectRunResponseV2>(
+        serde_json::Value::Object(value),
+    )
+    .expect("parse_cache reuse fixture should decode");
+    parsed
+        .validate()
+        .expect("parse_cache reuse with lookup all-hit must validate");
+
+    let mut partial = inspect_v2_ok_json().as_object().unwrap().clone();
+    partial.insert(
+        "reuse_kind".to_string(),
+        serde_json::Value::String("parse_cache".to_string()),
+    );
+    let metrics = partial
+        .get_mut("execution_metrics")
+        .and_then(|value| value.as_object_mut())
+        .expect("execution_metrics must be an object");
+    metrics.insert(
+        "parse_cache_lookup_count".to_string(),
+        serde_json::Value::from(1_u64),
+    );
+    metrics.insert(
+        "parse_cache_all_hit".to_string(),
+        serde_json::Value::Bool(false),
+    );
+    let parsed = serde_json::from_value::<ai_daily_scanner_contract::InspectRunResponseV2>(
+        serde_json::Value::Object(partial),
+    )
+    .expect("partial parse_cache reuse should still decode");
+    assert!(
+        parsed.validate().is_err(),
+        "parse_cache reuse requires parse_cache_all_hit=true"
+    );
+}
+
+#[test]
+fn file_audit_v2_final_diagnostic_nullability_is_enforced() {
+    let base = serde_json::json!({
+        "relative_path": "evidence.pdf",
+        "file_identity": "C:\\evidence\\evidence.pdf",
+        "source_version": "mtime_ns=1:size=1",
+        "source_guard_kind": "content_sha256_v1",
+        "source_guard_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parser_backend": "pdf_text_v1",
+        "worker_lane": "python_document_process",
+        "parse_cache_status": "miss",
+        "cache_miss_reason": "new_file",
+        "truncated": false,
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parse_duration_ms": 1,
+        "failure_class": "",
+        "fallback_backend": "",
+        "fallback_reason_code": "",
+        "parse_transport": "one_shot",
+        "parse_attempt_count": 1
+    });
+    let diagnostic = serde_json::json!({
+        "error_code": "PARSER_FAILED",
+        "message": "synthetic failure",
+        "retryable": false,
+        "stage": "parse",
+        "file_path": null,
+        "backend": null
+    });
+
+    let mut error_null = base.as_object().unwrap().clone();
+    error_null.insert(
+        "parse_status".to_string(),
+        serde_json::Value::String("error".to_string()),
+    );
+    error_null.insert(
+        "final_diagnostic".to_string(),
+        serde_json::Value::Null,
+    );
+    error_null.insert(
+        "pdf_classification".to_string(),
+        serde_json::Value::Null,
+    );
+    let parsed =
+        serde_json::from_value::<ai_daily_scanner_contract::FileAuditV2>(serde_json::Value::Object(
+            error_null,
+        ))
+        .expect("error file audit with null diagnostic should decode");
+    assert!(
+        parsed.validate().is_err(),
+        "error/timeout file audit requires a final diagnostic"
+    );
+
+    let mut success_with_diag = base.as_object().unwrap().clone();
+    success_with_diag.insert(
+        "parse_status".to_string(),
+        serde_json::Value::String("success".to_string()),
+    );
+    success_with_diag.insert("final_diagnostic".to_string(), diagnostic.clone());
+    success_with_diag.insert(
+        "pdf_classification".to_string(),
+        serde_json::Value::Null,
+    );
+    let parsed =
+        serde_json::from_value::<ai_daily_scanner_contract::FileAuditV2>(serde_json::Value::Object(
+            success_with_diag,
+        ))
+        .expect("success file audit with diagnostic should decode");
+    assert!(
+        parsed.validate().is_err(),
+        "success/not_parsed file audit must not carry a final diagnostic"
+    );
+
+    let mut error_with_diag = base.as_object().unwrap().clone();
+    error_with_diag.insert(
+        "parse_status".to_string(),
+        serde_json::Value::String("error".to_string()),
+    );
+    error_with_diag.insert("final_diagnostic".to_string(), diagnostic);
+    error_with_diag.insert(
+        "pdf_classification".to_string(),
+        serde_json::Value::Null,
+    );
+    let parsed =
+        serde_json::from_value::<ai_daily_scanner_contract::FileAuditV2>(serde_json::Value::Object(
+            error_with_diag,
+        ))
+        .expect("error file audit with diagnostic should decode");
+    parsed
+        .validate()
+        .expect("error file audit with a final diagnostic must validate");
+}

@@ -8,6 +8,7 @@ import pytest
 
 from src.models.scanner_contract import (
     Diagnostic,
+    FileAuditV2,
     InspectRunResponseV2,
     MaintenanceRequestV1,
     MaintenanceResponseV1,
@@ -372,3 +373,241 @@ def test_inspect_run_response_v2_error_sentinel_is_strict() -> None:
         },
     }
     InspectRunResponseV2.model_validate(payload)
+
+
+def _ok_inspect_v2_payload() -> dict:
+    return {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "response_version": 2,
+        "request_id": "123e4567-e89b-42d3-a456-426614174000",
+        "scan_run_id": 1,
+        "context_run_id": 1,
+        "status": "ok",
+        "run_status": "success",
+        "summary": {
+            "source_file_count": 1,
+            "success_count": 1,
+            "timeout_count": 0,
+            "included_file_count": 1,
+            "omitted_file_count": 0,
+            "error_file_count": 0,
+            "input_chars": 1,
+            "output_chars": 1,
+            "total_duration_ms": 1,
+            "discovery_duration_ms": 0,
+            "parse_duration_ms": 0,
+            "compression_duration_ms": 0,
+        },
+        "stage_metrics": [],
+        "extension_metrics": [],
+        "files": [],
+        "decisions": [],
+        "warnings": [],
+        "error": None,
+        "artifact_id": 1,
+        "reused_from_context_run_id": None,
+        "reuse_kind": "none",
+        "execution_metrics": {
+            "discovery_observed_file_count": 0,
+            "source_guard_content_hash_file_count": 0,
+            "source_guard_unavailable_count": 0,
+            "source_guard_bytes_read": 0,
+            "candidate_file_count": 0,
+            "admitted_file_count": 0,
+            "classification_slot_count": 0,
+            "confirmed_run_inspected_pages_total": 0,
+            "unobserved_classification_attempt_count": 0,
+            "nominal_charged_pages_total": 0,
+            "extraction_slot_count": 0,
+            "pdfplumber_invocations": 0,
+            "snapshot_hit": False,
+            "parse_cache_lookup_count": 0,
+            "classification_cache_lookup_count": 0,
+            "parse_cache_all_hit": None,
+            "classification_cache_all_hit": None,
+            "stage_deadline_exhausted_count": 0,
+            "session_restart_count": 0,
+            "session_fallback_count": 0,
+            "classify_attempt_count": 0,
+            "parse_attempt_count": 0,
+            "reserved_chars": 0,
+            "rendered_chars": 0,
+            "worker_handshake_ms": 0,
+            "discovery_ms": 0,
+            "snapshot_lookup_ms": 0,
+            "current_run_audit_write_ms": 0,
+            "terminal_precommit_ms": 0,
+            "deadline_precommit_elapsed_ms": 0,
+            "envelope_rebuild_ms": 0,
+            "terminal_rows_written": 0,
+            "peak_worker_rss_bytes": None,
+        },
+    }
+
+
+def test_inspect_run_response_v2_ok_success_requires_artifact_id() -> None:
+    InspectRunResponseV2.model_validate(_ok_inspect_v2_payload())
+    payload = _ok_inspect_v2_payload()
+    payload["artifact_id"] = None
+    with pytest.raises(ValueError, match="artifact_id"):
+        InspectRunResponseV2.model_validate(payload)
+
+
+def test_inspect_run_response_v2_error_sentinel_rejects_nonzero_metrics() -> None:
+    payload = _ok_inspect_v2_payload()
+    payload["status"] = "error"
+    payload["run_status"] = None
+    payload["context_run_id"] = None
+    payload["artifact_id"] = None
+    payload["error"] = {
+        "error_code": "INSPECT_V2_PROVENANCE_UNAVAILABLE",
+        "message": "migrated v1 run lacks v2 provenance",
+        "retryable": False,
+        "stage": "inspect",
+        "file_path": None,
+        "backend": None,
+    }
+    InspectRunResponseV2.model_validate(payload)
+    payload["execution_metrics"]["discovery_observed_file_count"] = 1
+    with pytest.raises(ValueError, match="sentinel"):
+        InspectRunResponseV2.model_validate(payload)
+
+
+def test_inspect_run_response_v2_parse_cache_reuse_requires_all_hit() -> None:
+    payload = _ok_inspect_v2_payload()
+    payload["reuse_kind"] = "parse_cache"
+    payload["execution_metrics"]["parse_cache_lookup_count"] = 1
+    payload["execution_metrics"]["parse_cache_all_hit"] = True
+    InspectRunResponseV2.model_validate(payload)
+    payload["execution_metrics"]["parse_cache_all_hit"] = False
+    with pytest.raises(ValueError, match="all-hit"):
+        InspectRunResponseV2.model_validate(payload)
+
+
+def _file_audit_v2_payload() -> dict:
+    return {
+        "relative_path": "evidence.pdf",
+        "file_identity": "C:\\evidence\\evidence.pdf",
+        "source_version": "mtime_ns=1:size=1",
+        "source_guard_kind": "content_sha256_v1",
+        "source_guard_sha256": "a" * 64,
+        "parse_status": "error",
+        "parser_backend": "pdf_text_v1",
+        "worker_lane": "python_document_process",
+        "parse_cache_status": "miss",
+        "cache_miss_reason": "new_file",
+        "truncated": False,
+        "content_sha256": "a" * 64,
+        "parse_duration_ms": 1,
+        "failure_class": "",
+        "fallback_backend": "",
+        "fallback_reason_code": "",
+        "parse_transport": "one_shot",
+        "parse_attempt_count": 1,
+        "final_diagnostic": None,
+        "pdf_classification": None,
+    }
+
+
+def test_file_audit_v2_final_diagnostic_nullability_is_enforced() -> None:
+    payload = _file_audit_v2_payload()
+    with pytest.raises(ValueError, match="final diagnostic"):
+        FileAuditV2.model_validate(payload)
+
+    payload["final_diagnostic"] = {
+        "error_code": "PARSER_FAILED",
+        "message": "synthetic failure",
+        "retryable": False,
+        "stage": "parse",
+        "file_path": None,
+        "backend": None,
+    }
+    FileAuditV2.model_validate(payload)
+
+    payload["parse_status"] = "success"
+    payload["final_diagnostic"] = None
+    FileAuditV2.model_validate(payload)
+    payload["final_diagnostic"] = {
+        "error_code": "PARSER_FAILED",
+        "message": "synthetic failure",
+        "retryable": False,
+        "stage": "parse",
+        "file_path": None,
+        "backend": None,
+    }
+    with pytest.raises(ValueError, match="final diagnostic"):
+        FileAuditV2.model_validate(payload)
+
+
+def test_maintenance_response_v1_ok_rejects_invalid_post() -> None:
+    payload = {
+        "contract": "ai_daily_scanner_maintenance",
+        "protocol_version": 1,
+        "request_id": "123e4567-e89b-42d3-a456-426614174000",
+        "status": "ok",
+        "cache_retention_policy": {
+            "policy_version": "cache_retention_v1",
+            "parse_cache_max_bytes": 1073741824,
+            "classification_cache_max_bytes": 134217728,
+            "context_artifacts_max_bytes": 536870912,
+            "terminal_audit_max_bytes": 2147483648,
+            "terminal_run_max_count": 500,
+            "terminal_run_max_age_days": 90,
+            "opportunistic_gc_budget_ms": 10,
+        },
+        "before": {
+            "parse_cache_logical_bytes": 1,
+            "classification_cache_logical_bytes": 2,
+            "context_artifacts_logical_bytes": 3,
+            "terminal_audit_logical_bytes": 4,
+            "database_file_bytes": 5,
+            "wal_file_bytes": 6,
+            "shm_file_bytes": 7,
+            "total_physical_bytes": 8,
+            "freelist_bytes": 9,
+            "auto_vacuum_mode": "incremental",
+        },
+        "after": {
+            "parse_cache_logical_bytes": 1,
+            "classification_cache_logical_bytes": 2,
+            "context_artifacts_logical_bytes": 3,
+            "terminal_audit_logical_bytes": 4,
+            "database_file_bytes": 5,
+            "wal_file_bytes": 6,
+            "shm_file_bytes": 7,
+            "total_physical_bytes": 8,
+            "freelist_bytes": 9,
+            "auto_vacuum_mode": "incremental",
+        },
+        "after_complete": True,
+        "deleted": {
+            "parse_cache_rows": 0,
+            "classification_cache_rows": 0,
+            "context_artifacts_rows": 0,
+            "context_artifact_files_rows": 0,
+            "context_artifact_decisions_rows": 0,
+            "scan_runs_rows": 0,
+            "scan_run_attempts_rows": 0,
+            "run_diagnostics_rows": 0,
+            "scan_file_results_rows": 0,
+            "scan_stage_metrics_rows": 0,
+            "scan_extension_metrics_rows": 0,
+            "context_runs_rows": 0,
+            "context_decisions_rows": 0,
+            "file_inventory_rows": 0,
+        },
+        "pre_integrity_check": "ok",
+        "post_integrity_check": "not_run",
+        "vacuum": {"mode": "gc", "status": "skipped_dry_run", "pages_changed": 0},
+        "warnings": [],
+        "error": None,
+    }
+    MaintenanceResponseV1.model_validate(payload)
+    payload["post_integrity_check"] = "failed"
+    with pytest.raises(ValueError, match="status invariants"):
+        MaintenanceResponseV1.model_validate(payload)
+    payload["post_integrity_check"] = "not_run"
+    payload["after_complete"] = False
+    with pytest.raises(ValueError, match="status invariants"):
+        MaintenanceResponseV1.model_validate(payload)
