@@ -1231,7 +1231,46 @@ fn upgrade_error_response(
     }
 }
 
+fn sqlite_sidecar_path(path: &Path, kind: &str) -> PathBuf {
+    let name = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    path.with_file_name(format!("{name}-{kind}"))
+}
+
 fn upgrade_database_audit(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabaseResponseV1 {
+    let path = Path::new(&request.scan_db_path);
+    let shm_path = sqlite_sidecar_path(path, "shm");
+    let wal_path = sqlite_sidecar_path(path, "wal");
+    let shm_existed = shm_path.is_file();
+    let wal_existed = wal_path.is_file();
+
+    let response = upgrade_audit_inner(request);
+
+    // Opening a WAL-mode database with a read-only connection can make SQLite
+    // reconstruct the `-shm`/`-wal` index files even though nothing is written.
+    // Restore the pre-audit directory state so the audit stays zero-sidecar
+    // against real (WAL-mode) v1 databases. The `-shm` is only an index and is
+    // always reconstructible; a `-wal` is removed only when empty so a
+    // concurrent writer's frames are never destroyed. The audit is intended to
+    // run on a quiescent database (no active scanner).
+    if !shm_existed {
+        let _ = std::fs::remove_file(&shm_path);
+    }
+    if !wal_existed && wal_path.is_file() {
+        let empty = std::fs::metadata(&wal_path)
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(false);
+        if empty {
+            let _ = std::fs::remove_file(&wal_path);
+        }
+    }
+    response
+}
+
+fn upgrade_audit_inner(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabaseResponseV1 {
     let path = Path::new(&request.scan_db_path);
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = match Connection::open_with_flags(path, flags) {
@@ -1668,6 +1707,12 @@ fn release_upgrade_lease(connection: &Connection) -> Result<(), StoreError> {
 }
 
 fn convert_auto_vacuum(connection: &Connection) -> Result<bool, StoreError> {
+    #[cfg(test)]
+    if TEST_FORCE_AUTO_VACUUM_FAILURE.with(|flag| flag.get()) {
+        // Test seam: simulate the post-migration vacuum failing so the
+        // `partial`/`auto_vacuum_converted=false` response shape is exercised.
+        return Ok(false);
+    }
     connection
         .execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")
         .map_err(cache_write)?;
@@ -1675,6 +1720,12 @@ fn convert_auto_vacuum(connection: &Connection) -> Result<bool, StoreError> {
         .pragma_query_value(None, "auto_vacuum", |row| row.get(0))
         .map_err(cache_write)?;
     Ok(auto_vacuum == 2)
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FORCE_AUTO_VACUUM_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
 }
 
 fn checked_i64(value: u64, field: &str) -> Result<i64, StoreError> {
@@ -3849,5 +3900,42 @@ mod tests {
             .query_row("SELECT count(*) FROM parse_cache", [], |row| row.get(0))
             .unwrap();
         assert_eq!(cache_count, 0);
+    }
+
+    #[test]
+    fn upgrade_database_apply_reports_partial_when_vacuum_conversion_fails() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = v1_upgrade_fixture(&directory);
+        TEST_FORCE_AUTO_VACUUM_FAILURE.with(|flag| flag.set(true));
+
+        let response = ScannerStore::upgrade_database(&upgrade_request(&db_path, true));
+        TEST_FORCE_AUTO_VACUUM_FAILURE.with(|flag| flag.set(false));
+        response.validate().expect("partial response must validate");
+
+        assert_eq!(response.status, UpgradeStatus::Partial);
+        assert_eq!(response.apply, true);
+        assert_eq!(response.source_user_version.0, Some(1));
+        assert_eq!(response.schema_migrated, true);
+        assert_eq!(response.auto_vacuum_converted, false);
+        assert_eq!(response.legacy_parse_cache_rows_detected, 1);
+        assert_eq!(response.invalidated_parse_cache_rows, 1);
+        assert_eq!(response.post_integrity_check, UpgradeIntegrityCheck::Ok);
+        assert!(response.error.0.is_none(), "partial must not carry an error");
+        assert!(
+            !response.warnings.is_empty(),
+            "partial must carry a maintenance warning"
+        );
+        assert_eq!(
+            response.warnings[0].error_code,
+            ErrorCode::MaintenanceModeUnavailable
+        );
+        assert_eq!(response.warnings[0].stage, DiagnosticStage::Maintenance);
+
+        // The v2 business schema is still valid and committed.
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let version: i32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
     }
 }

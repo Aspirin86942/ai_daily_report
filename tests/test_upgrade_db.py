@@ -128,6 +128,22 @@ def _v1_db(path: Path, *, bad_envelope: bool = False) -> None:
         conn.close()
 
 
+def _v1_db_wal(path: Path) -> None:
+    """WAL-mode v1 fixture: build the rollback-journal v1 DB, switch to WAL,
+    checkpoint, and close so no `-wal`/`-shm` sidecar remains (the real-world
+    state after a cleanly-closed scanner process)."""
+    _v1_db(path)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+        conn.commit()
+    finally:
+        conn.close()
+    assert not path.with_name(path.name + "-shm").exists()
+    assert not path.with_name(path.name + "-wal").exists()
+
+
 def _run_upgrade(request: UpgradeDatabaseRequestV1) -> subprocess.CompletedProcess:
     return subprocess.run(
         [str(SCANNER_BIN), "upgrade-db"],
@@ -170,6 +186,35 @@ def test_upgrade_audit_is_read_only(tmp_path: Path) -> None:
     assert payload["error"] is None
 
     assert db.read_bytes() == before
+    assert not list(tmp_path.glob("*.sidecar"))
+
+
+def test_upgrade_audit_is_read_only_on_wal_database(tmp_path: Path) -> None:
+    db = tmp_path / "scan.sqlite3"
+    _v1_db_wal(db)
+    before = db.read_bytes()
+    shm = db.with_name(db.name + "-shm")
+    wal = db.with_name(db.name + "-wal")
+    assert not shm.exists() and not wal.exists()
+
+    out = _run_upgrade(_upgrade_request(db, apply=False, request_id=UPGRADE_REQUEST_ID))
+    assert out.returncode == 0, out.stderr.decode(errors="replace")
+    payload = json.loads(out.stdout.decode("utf-8"))
+
+    assert payload["status"] == "ok"
+    assert payload["apply"] is False
+    assert payload["source_user_version"] == 1
+    assert payload["schema_migrated"] is False
+    assert payload["auto_vacuum_converted"] is False
+    assert payload["legacy_parse_cache_rows_detected"] == 1
+    assert payload["invalidated_parse_cache_rows"] == 0
+    assert payload["pre_integrity_check"] == "ok"
+    assert payload["post_integrity_check"] == "not_run"
+    assert payload["error"] is None
+
+    assert db.read_bytes() == before
+    assert not shm.exists(), "audit must not leave a WAL -shm sidecar"
+    assert not wal.exists(), "audit must not leave a WAL -wal sidecar"
     assert not list(tmp_path.glob("*.sidecar"))
 
 
