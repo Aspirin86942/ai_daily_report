@@ -359,7 +359,10 @@ pub(crate) fn lookup_cache(
         |row| row.get(0),
     )?;
     if same_source_and_guard {
-        return Ok(CacheLookup::Miss(CacheMissReason::ParserProfileChanged));
+        // spec Part 4: exact key absent but another identity row with the same
+        // source + guard exists → `parser_identity_changed` (v2). The v1 inspect
+        // projects it losslessly to `parser_profile_changed`.
+        return Ok(CacheLookup::Miss(CacheMissReason::ParserIdentityChanged));
     }
 
     let same_identity: bool = connection.query_row(
@@ -374,9 +377,10 @@ pub(crate) fn lookup_cache(
     }
 
     if inventory_existed_before {
-        // v1 lossy projection of the v2 `entry_absent_or_evicted` reason
-        // (spec Part 5: entry_absent_or_evicted can only project as new_file).
-        Ok(CacheLookup::Miss(CacheMissReason::NewFile))
+        // spec Part 4 step 4: inventory existed before this round but the exact
+        // entry is absent/evicted → `entry_absent_or_evicted` (v2). The v1
+        // inspect projects it to `new_file` + `CACHE_MISS_REASON_PROJECTED_AS_NEW_FILE`.
+        Ok(CacheLookup::Miss(CacheMissReason::EntryAbsentOrEvicted))
     } else {
         Ok(CacheLookup::Miss(CacheMissReason::NewFile))
     }

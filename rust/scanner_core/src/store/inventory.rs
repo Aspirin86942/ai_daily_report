@@ -136,6 +136,8 @@ impl FileResultRecord {
                 | (CacheStatus::Miss, CacheMissReason::ErrorCache)
                 | (CacheStatus::Miss, CacheMissReason::SourceVersionChanged)
                 | (CacheStatus::Miss, CacheMissReason::ParserProfileChanged)
+                | (CacheStatus::Miss, CacheMissReason::ParserIdentityChanged)
+                | (CacheStatus::Miss, CacheMissReason::EntryAbsentOrEvicted)
         );
         let error_consistent = match self.parse_status {
             ParseStatus::Success => self.error.is_none(),
@@ -401,6 +403,8 @@ pub(crate) fn cache_miss_reason_text(value: CacheMissReason) -> &'static str {
         CacheMissReason::ErrorCache => "error_cache",
         CacheMissReason::SourceVersionChanged => "source_version_changed",
         CacheMissReason::ParserProfileChanged => "parser_profile_changed",
+        CacheMissReason::ParserIdentityChanged => "parser_identity_changed",
+        CacheMissReason::EntryAbsentOrEvicted => "entry_absent_or_evicted",
     }
 }
 

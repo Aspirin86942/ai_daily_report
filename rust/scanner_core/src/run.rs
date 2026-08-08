@@ -3,13 +3,13 @@ use ai_daily_discovery::{
     DiscoveryIssue, DiscoveryReport, DiscoveryRequest,
 };
 use ai_daily_scanner_contract::{
-    AuditWorkerLane, BuildContextRequest, CacheMissReason, CacheStatus, ContextDecision,
-    ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck, DoctorCheckStatus,
-    DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest, InspectRunResponse,
-    InspectStatus, MaintenanceRequestV1, MaintenanceStatus, Nullable, ParseStatus, RunStatus,
-    StageMetric, StageName, TransportErrorResponse, UpgradeDatabaseRequestV1, UpgradeStatus,
-    Validate, VersionResponse, VersionResponseV2, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
-    WorkerDiagnosticV1Stage,
+    AuditWorkerLane, BuildContextRequest, CacheMissReason, CacheStatus, ContextAction,
+    ContextDecision, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
+    DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest,
+    InspectRunResponse, InspectStatus, MaintenanceRequestV1, MaintenanceStatus, Nullable,
+    ParseStatus, RunStatus, StageMetric, StageName, TransportErrorResponse, UpgradeDatabaseRequestV1,
+    UpgradeStatus, Validate, VersionResponse, VersionResponseV2, WorkerDiagnosticV1,
+    WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
 };
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
@@ -668,7 +668,7 @@ fn execute_active_build(
             heartbeat,
             handshake_errors,
             error,
-            elapsed_summary(started_at),
+            elapsed_summary(started_at), worker_handshake_ms
         );
     }
     let (Some(office_worker), Some(python_worker)) = (office_worker, python_worker) else {
@@ -685,7 +685,7 @@ fn execute_active_build(
                 false,
                 DiagnosticStage::Process,
             ),
-            elapsed_summary(started_at),
+            elapsed_summary(started_at), worker_handshake_ms
         );
     };
     let registry = WorkerRegistry {
@@ -709,7 +709,7 @@ fn execute_active_build(
                     false,
                     DiagnosticStage::Cache,
                 ),
-                elapsed_summary(started_at),
+                elapsed_summary(started_at), worker_handshake_ms
             );
         }
     };
@@ -729,7 +729,7 @@ fn execute_active_build(
                 heartbeat,
                 Vec::new(),
                 error,
-                summary,
+                summary, worker_handshake_ms
             );
         }
     };
@@ -767,7 +767,7 @@ fn execute_active_build(
                     false,
                     DiagnosticStage::Context,
                 ),
-                elapsed_summary(started_at),
+                elapsed_summary(started_at), worker_handshake_ms
             );
         }
     };
@@ -787,7 +787,7 @@ fn execute_active_build(
                     false,
                     DiagnosticStage::Cache,
                 ),
-                elapsed_summary(started_at),
+                elapsed_summary(started_at), worker_handshake_ms
             );
         }
     };
@@ -802,7 +802,7 @@ fn execute_active_build(
                 heartbeat,
                 warnings,
                 error.diagnostic(DiagnosticStage::Internal),
-                elapsed_summary(started_at),
+                elapsed_summary(started_at), worker_handshake_ms
             );
         }
     };
@@ -844,7 +844,7 @@ fn execute_active_build(
                         false,
                         DiagnosticStage::Cache,
                     ),
-                    elapsed_summary(started_at),
+                    elapsed_summary(started_at), worker_handshake_ms
                 );
             }
         },
@@ -873,7 +873,7 @@ fn execute_active_build(
                     false,
                     DiagnosticStage::Cache,
                 ),
-                elapsed_summary(started_at),
+                elapsed_summary(started_at), worker_handshake_ms
             );
         }
     };
@@ -890,7 +890,7 @@ fn execute_active_build(
                 heartbeat,
                 warnings,
                 error.diagnostic(DiagnosticStage::Cache),
-                elapsed_summary(started_at),
+                elapsed_summary(started_at), worker_handshake_ms
             );
         }
     };
@@ -922,7 +922,7 @@ fn execute_active_build(
         worker_identities.clone(),
         version.engine_version.clone(),
         version.engine_build.clone(),
-        context_profile_hash,
+        context_profile_hash.clone(),
         rejected_profile_hash,
         discovery_duration_ms,
         &clock,
@@ -937,7 +937,7 @@ fn execute_active_build(
                 heartbeat,
                 warnings,
                 failure.diagnostic,
-                elapsed_summary(started_at),
+                elapsed_summary(started_at), worker_handshake_ms
             );
         }
     };
@@ -960,13 +960,27 @@ fn execute_active_build(
                 heartbeat,
                 warnings,
                 failure.diagnostic,
-                elapsed_summary(started_at),
+                elapsed_summary(started_at), worker_handshake_ms
             );
         }
     };
 
     // ---- terminal finalization (the ONLY linearization point) ----
-    let (envelope, run_status) = scheduler_outcome_envelope(request, version, active, &outcome);
+    // spec Part 2.3: a committed Error run MUST carry a context_runs row
+    // (artifact_id=NULL). The scheduler outcome has no context for Error, so a
+    // reconciling context is derived from the persisted file/decision rows.
+    let derived_error_context = if matches!(outcome.terminal_intent, TerminalIntent::Error) {
+        Some(build_error_context_record(
+            &outcome.file_results,
+            &outcome.inventory,
+            &outcome.stage_metrics,
+            &context_profile_hash,
+        ))
+    } else {
+        None
+    };
+    let (envelope, run_status) =
+        scheduler_outcome_envelope(request, version, active, &outcome, derived_error_context.as_ref());
     let envelope_json = match canonical_envelope_json(&envelope) {
         Ok(value) => value,
         Err(error) => {
@@ -982,6 +996,8 @@ fn execute_active_build(
                     .as_ref()
                     .map(|context| context.summary.clone())
                     .unwrap_or_else(empty_summary),
+                worker_handshake_ms,
+                discovery_duration_ms,
             );
         }
     };
@@ -1008,6 +1024,8 @@ fn execute_active_build(
                     .as_ref()
                     .map(|context| context.summary.clone())
                     .unwrap_or_else(empty_summary),
+                worker_handshake_ms,
+                discovery_duration_ms,
             );
         }
     };
@@ -1015,6 +1033,10 @@ fn execute_active_build(
         .as_ref()
         .filter(|draft| draft.snapshot_eligible)
         .map(|_| key_parts.clone());
+    let batch_context = match derived_error_context {
+        Some(record) => Some(record),
+        None => outcome.context,
+    };
     let batch = FinalizationBatch {
         status: run_status,
         envelope_json: envelope_json.clone(),
@@ -1024,7 +1046,7 @@ fn execute_active_build(
         diagnostics: outcome.diagnostics,
         stage_metrics: outcome.stage_metrics,
         extension_metrics: outcome.extension_metrics,
-        context: outcome.context,
+        context: batch_context,
         artifact: artifact_draft,
         snapshot_key: snapshot_key_for_batch,
         snapshot_hit: None,
@@ -1102,6 +1124,7 @@ fn scheduler_outcome_envelope(
     version: &VersionResponse,
     active: &ActiveRun,
     outcome: &crate::scheduler::BudgetedScanOutcome,
+    error_context: Option<&ContextRunRecord>,
 ) -> (ContextEnvelope, RunStatus) {
     let run_status = match outcome.terminal_intent {
         crate::scheduler::TerminalIntent::Success => RunStatus::Success,
@@ -1127,10 +1150,20 @@ fn scheduler_outcome_envelope(
         .filter(|record| record.severity == DiagnosticSeverity::Error)
         .map(|record| record.diagnostic.clone())
         .next();
+    // spec Part 2.3: every committed terminal run (Success/Partial/Error) returns
+    // `context_run_id = scan_run_id`. An Error run's summary is the derived
+    // reconciling summary (empty file_context), never a fabricated zero object.
     let (file_context, summary, context_run_id) = match &outcome.context {
         Some(context) => (
             context.final_context.clone(),
             context.summary.clone(),
+            Some(active.context_run_id()),
+        ),
+        None if run_status == RunStatus::Error => (
+            String::new(),
+            error_context
+                .map(|context| context.summary.clone())
+                .unwrap_or_else(empty_summary),
             Some(active.context_run_id()),
         ),
         None => (String::new(), empty_summary(), None),
@@ -1150,6 +1183,111 @@ fn scheduler_outcome_envelope(
         error: Nullable(error),
     };
     (envelope, run_status)
+}
+
+/// Derives the minimal `context_runs` record for an Error outcome (spec
+/// Part 2.3 + Part 2.2 count equations): one decision per file result
+/// (Error/Timeout → Error, NotParsed → Omit, Success → Keep), an empty
+/// `file_context`, and a summary that reconciles with the persisted
+/// file/decision/stage rows. Durations come from the stage metrics so the
+/// relational summary validation passes; never copies a Success/Partial render.
+fn build_error_context_record(
+    file_results: &[FileResultRecord],
+    inventory: &[InventoryRecord],
+    stage_metrics: &[StageMetric],
+    context_profile_hash: &str,
+) -> ContextRunRecord {
+    let size_by_identity: std::collections::HashMap<&str, u64> = inventory
+        .iter()
+        .map(|item| (item.file_identity.as_str(), item.size_bytes))
+        .collect();
+    let decisions: Vec<ContextDecisionRecord> = file_results
+        .iter()
+        .map(|result| {
+            let action = match result.parse_status {
+                ParseStatus::Success => ContextAction::Keep,
+                ParseStatus::Error | ParseStatus::Timeout => ContextAction::Error,
+                ParseStatus::NotParsed => ContextAction::Omit,
+            };
+            let reason = match action {
+                ContextAction::Error => "parse_error".to_string(),
+                ContextAction::Omit => "not_parsed".to_string(),
+                _ => "small_file_keep".to_string(),
+            };
+            ContextDecisionRecord {
+                file_identity: result.file_identity.clone(),
+                decision: ContextDecision {
+                    relative_path: result.relative_path.clone(),
+                    action,
+                    reason,
+                    priority: 0,
+                    input_chars: size_by_identity
+                        .get(result.file_identity.as_str())
+                        .copied()
+                        .unwrap_or(0),
+                    output_chars: 0,
+                    truncated: result.truncated,
+                    error_code: result
+                        .error
+                        .as_ref()
+                        .map(|diagnostic| {
+                            crate::store::inventory::enum_text(&diagnostic.error_code)
+                        })
+                        .unwrap_or_default(),
+                },
+            }
+        })
+        .collect();
+    let success_count = file_results
+        .iter()
+        .filter(|result| result.parse_status == ParseStatus::Success)
+        .count() as u64;
+    let timeout_count = file_results
+        .iter()
+        .filter(|result| result.parse_status == ParseStatus::Timeout)
+        .count() as u64;
+    let error_count = file_results
+        .iter()
+        .filter(|result| result.parse_status == ParseStatus::Error)
+        .count() as u64;
+    let source_file_count = file_results.len() as u64;
+    let not_parsed_count = source_file_count
+        .saturating_sub(success_count)
+        .saturating_sub(timeout_count)
+        .saturating_sub(error_count);
+    let stage_by_name: std::collections::HashMap<StageName, &StageMetric> =
+        stage_metrics.iter().map(|metric| (metric.stage, metric)).collect();
+    let summary = ContextSummary {
+        source_file_count,
+        success_count,
+        timeout_count,
+        included_file_count: success_count,
+        omitted_file_count: not_parsed_count,
+        error_file_count: error_count,
+        input_chars: decisions.iter().map(|record| record.decision.input_chars).sum(),
+        output_chars: 0,
+        total_duration_ms: stage_metrics.iter().fold(0_u64, |acc, metric| acc + metric.duration_ms),
+        discovery_duration_ms: stage_by_name
+            .get(&StageName::Discovery)
+            .map(|metric| metric.duration_ms)
+            .unwrap_or(0),
+        parse_duration_ms: stage_by_name
+            .get(&StageName::Parse)
+            .map(|metric| metric.duration_ms)
+            .unwrap_or(0),
+        compression_duration_ms: stage_by_name
+            .get(&StageName::Context)
+            .map(|metric| metric.duration_ms)
+            .unwrap_or(0),
+    };
+    ContextRunRecord {
+        context_profile_hash: context_profile_hash.to_string(),
+        status: RunStatus::Error,
+        final_context: String::new(),
+        context_sha256: crate::store::sha256_hex(b""),
+        summary,
+        decisions,
+    }
 }
 
 /// Assembles the strict `execution_metrics` for the scheduler path (spec
@@ -1245,6 +1383,52 @@ fn assemble_snapshot_execution_metrics(
         current_run_audit_write_ms: 0,
         terminal_precommit_ms: 0,
         deadline_precommit_elapsed_ms,
+        envelope_rebuild_ms: 0,
+        terminal_rows_written: 0,
+        peak_worker_rss_bytes: Nullable(None),
+    }
+}
+
+/// Assembles the strict `execution_metrics` for the engine-error path (spec
+/// Part 5.3): the scheduler did not complete, so every plan/execution count is
+/// 0; the worker handshake and discovery wall spans that genuinely ran are the
+/// measured values (never fabricated zeros).
+fn assemble_engine_error_execution_metrics(
+    worker_handshake_ms: u64,
+    discovery_ms: u64,
+    discovery_observed_file_count: u64,
+) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
+    ai_daily_scanner_contract::ExecutionMetricsV2 {
+        discovery_observed_file_count,
+        source_guard_content_hash_file_count: 0,
+        source_guard_unavailable_count: 0,
+        source_guard_bytes_read: 0,
+        candidate_file_count: 0,
+        admitted_file_count: 0,
+        classification_slot_count: 0,
+        confirmed_run_inspected_pages_total: 0,
+        unobserved_classification_attempt_count: 0,
+        nominal_charged_pages_total: 0,
+        extraction_slot_count: 0,
+        pdfplumber_invocations: 0,
+        snapshot_hit: false,
+        parse_cache_lookup_count: 0,
+        classification_cache_lookup_count: 0,
+        parse_cache_all_hit: Nullable(None),
+        classification_cache_all_hit: Nullable(None),
+        stage_deadline_exhausted_count: 0,
+        session_restart_count: 0,
+        session_fallback_count: 0,
+        classify_attempt_count: 0,
+        parse_attempt_count: 0,
+        reserved_chars: 0,
+        rendered_chars: 0,
+        worker_handshake_ms,
+        discovery_ms,
+        snapshot_lookup_ms: 0,
+        current_run_audit_write_ms: 0,
+        terminal_precommit_ms: 0,
+        deadline_precommit_elapsed_ms: 0,
         envelope_rebuild_ms: 0,
         terminal_rows_written: 0,
         peak_worker_rss_bytes: Nullable(None),
@@ -1881,6 +2065,7 @@ fn finish_active_error(
     mut warnings: Vec<Diagnostic>,
     error: Diagnostic,
     summary: ContextSummary,
+    worker_handshake_ms: u64,
 ) -> Result<CommandOutput, EngineShellError> {
     heartbeat.stop();
     if let Some(background_error) = heartbeat.take_background_error() {
@@ -1891,8 +2076,17 @@ fn finish_active_error(
             DiagnosticStage::Cache,
         ));
     }
+    let discovery_ms = summary.discovery_duration_ms;
     persist_active_error_without_heartbeat(
-        request, version, store, active, warnings, error, summary,
+        request,
+        version,
+        store,
+        active,
+        warnings,
+        error,
+        summary,
+        worker_handshake_ms,
+        discovery_ms,
     )
 }
 
@@ -1905,6 +2099,8 @@ fn persist_active_error_without_heartbeat(
     mut warnings: Vec<Diagnostic>,
     error: Diagnostic,
     summary: ContextSummary,
+    worker_handshake_ms: u64,
+    discovery_ms: u64,
 ) -> Result<CommandOutput, EngineShellError> {
     warnings.truncate(100_000);
     let envelope = ContextEnvelope {
@@ -1929,7 +2125,7 @@ fn persist_active_error_without_heartbeat(
                 version,
                 serialization_error.diagnostic(DiagnosticStage::Internal),
                 warnings,
-                summary,
+                summary.clone(),
                 Some(active.scan_run_id()),
             );
         }
@@ -1959,9 +2155,14 @@ fn persist_active_error_without_heartbeat(
         artifact: None,
         snapshot_key: None,
         snapshot_hit: None,
-        // Engine-error runs have no scheduler outcome; inspect v2 derives the
-        // (mostly-zero) metrics object from the empty persisted rows.
-        execution_metrics: None,
+        // spec Part 5.3: engine-error runs persist an authoritative metrics row
+        // with the wall spans that genuinely ran (handshake + discovery), never
+        // a fabricated-zero derive.
+        execution_metrics: Some(assemble_engine_error_execution_metrics(
+            worker_handshake_ms,
+            discovery_ms,
+            summary.source_file_count,
+        )),
     };
     let now_ms = match current_time_millis() {
         Ok(value) => value,

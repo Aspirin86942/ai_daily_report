@@ -916,7 +916,10 @@ pub(crate) fn load_inspect_snapshot(
                 || envelope.file_context != context.final_context
                 || envelope.summary != context.summary
                 || warnings != envelope.warnings
-                || persisted_error.is_some()
+                // spec Part 2.3: an Error run legitimately carries an error
+                // diagnostic (envelope.error == persisted Error row); any other
+                // mismatch is corrupt.
+                || persisted_error != envelope.error.0
             {
                 return Err(InspectLoadError::after_status(
                     InspectAuditError::RunCorrupt(
@@ -1800,6 +1803,16 @@ fn load_file_audits(
         .map_err(InspectAuditError::Sql)?;
     raw.into_iter()
         .map(|row| {
+            // spec Part 5.3 v1 lossy projection: v2-only miss reasons are
+            // remapped to the frozen v1 values (`parser_identity_changed` is a
+            // lossless projection to `parser_profile_changed`;
+            // `entry_absent_or_evicted` projects as `new_file` and the caller
+            // adds the `CACHE_MISS_REASON_PROJECTED_AS_NEW_FILE` warning).
+            let miss_reason = match row.7.as_str() {
+                "parser_identity_changed" => "parser_profile_changed".to_string(),
+                "entry_absent_or_evicted" => "new_file".to_string(),
+                other => other.to_string(),
+            };
             let file = FileAudit {
                 relative_path: row.0,
                 file_identity: row.1,
@@ -1808,7 +1821,7 @@ fn load_file_audits(
                 parser_backend: row.4,
                 worker_lane: parse_enum(&row.5, "file worker_lane")?,
                 cache_status: parse_enum(&row.6, "file cache_status")?,
-                cache_miss_reason: parse_enum(&row.7, "file cache_miss_reason")?,
+                cache_miss_reason: parse_enum(&miss_reason, "file cache_miss_reason")?,
                 truncated: parse_bool(row.8, "file truncated")?,
                 content_sha256: row.9,
                 parse_duration_ms: to_u64(row.10, "file parse_duration_ms")?,

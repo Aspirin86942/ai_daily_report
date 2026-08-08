@@ -1142,6 +1142,20 @@ impl ScannerStore {
         let mut artifact_for_rebuild: Option<ArtifactDraft> = None;
 
         if let Some(context) = &batch.context {
+            if batch.status == RunStatus::Error {
+                // spec Part 2.3: a committed Error run MUST write a context_runs
+                // row with artifact_id=NULL (no artifact, no snapshot, no reuse).
+                insert_context(
+                    &transaction,
+                    active.scan_run_id,
+                    context,
+                    None,
+                    false,
+                    None,
+                    now_ms,
+                )
+                .map_err(cache_write)?;
+            } else {
             let artifact_id = if let Some(hit) = &batch.snapshot_hit {
                 let draft = load_artifact_from_connection(&transaction, hit.artifact_id)?;
                 protected_artifacts.insert(hit.artifact_id);
@@ -1223,6 +1237,7 @@ impl ScannerStore {
                 return Err(StoreError::RunCorrupt(
                     "artifact semantic summary disagrees with the current summary".to_string(),
                 ));
+            }
             }
         }
 
@@ -3438,7 +3453,7 @@ fn load_artifact_for_replay(
     connection: &Connection,
     scan_run_id: i64,
 ) -> Result<Option<ArtifactDraft>, StoreError> {
-    let artifact_id: Option<i64> = connection
+    let artifact_id: Option<Option<i64>> = connection
         .query_row(
             "SELECT artifact_id FROM context_runs WHERE scan_run_id=?1",
             [scan_run_id],
@@ -3447,11 +3462,10 @@ fn load_artifact_for_replay(
         .optional()
         .map_err(cache_open)?;
     match artifact_id {
-        Some(id) => Ok(Some(load_artifact_from_connection(connection, id)?)),
-        None => Ok(None),
+        Some(Some(id)) => Ok(Some(load_artifact_from_connection(connection, id)?)),
+        _ => Ok(None),
     }
 }
-
 fn envelope_status_matches(run_status: PersistedRunStatus, engine_status: EngineStatus) -> bool {
     matches!(
         (run_status, engine_status),
@@ -5542,6 +5556,218 @@ mod tests {
     }
 
     #[test]
+    fn error_run_with_file_rows_inspects_cleanly_v1_and_v2() {
+        // spec Part 2.3: a committed Error run with file rows must carry a
+        // context_runs row (artifact_id=NULL) whose summary reconciles with the
+        // persisted file/decision/stage rows, so v1 AND v2 inspect both succeed
+        // (previously: "error envelope has unexpected context rows" RUN_CORRUPT).
+        let mut harness = harness("00000000-0000-4000-8000-000000000024");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        record_both_workers(&mut harness.store, &active, 1);
+        let source = "mtime_ns=100:size=5";
+        let profile_hash = "a".repeat(64);
+        let file_error = Diagnostic {
+            error_code: ErrorCode::ParserFailed,
+            message: "parse failed".to_string(),
+            retryable: false,
+            stage: DiagnosticStage::Parse,
+            file_path: Nullable(Some("C:\\fixture\\evidence.txt".to_string())),
+            backend: Nullable(Some("light_text_v1".to_string())),
+        };
+        let summary = ContextSummary {
+            source_file_count: 1,
+            success_count: 0,
+            timeout_count: 0,
+            included_file_count: 0,
+            omitted_file_count: 0,
+            error_file_count: 1,
+            input_chars: 5,
+            output_chars: 0,
+            total_duration_ms: 3,
+            discovery_duration_ms: 2,
+            parse_duration_ms: 1,
+            compression_duration_ms: 0,
+        };
+        let context = ContextRunRecord {
+            context_profile_hash: "0".repeat(64),
+            status: RunStatus::Error,
+            final_context: String::new(),
+            context_sha256: sha256_hex(b""),
+            summary: summary.clone(),
+            decisions: vec![ContextDecisionRecord {
+                file_identity: "file-a".to_string(),
+                decision: ContextDecision {
+                    relative_path: "evidence.txt".to_string(),
+                    action: ContextAction::Error,
+                    reason: "parse_error".to_string(),
+                    priority: 0,
+                    input_chars: 5,
+                    output_chars: 0,
+                    truncated: false,
+                    error_code: "PARSER_FAILED".to_string(),
+                },
+            }],
+        };
+        let version = crate::version_response();
+        let envelope = ContextEnvelope {
+            contract: "ai_daily_context".to_string(),
+            protocol_version: 1,
+            request_id: active.request_id().to_string(),
+            engine_version: version.engine_version,
+            engine_build: version.engine_build,
+            status: EngineStatus::Error,
+            file_context: String::new(),
+            summary: summary.clone(),
+            scan_run_id: Nullable(Some(active.scan_run_id())),
+            context_run_id: Nullable(Some(active.context_run_id())),
+            warnings: Vec::new(),
+            error: Nullable(Some(file_error.clone())),
+        };
+        let mut inventory = inventory_record("file-a", source);
+        inventory.source_guard_kind = Some("content_sha256_v1".to_string());
+        inventory.source_guard_sha256 = Some("a".repeat(64));
+        let batch = FinalizationBatch {
+            status: RunStatus::Error,
+            envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
+            inventory: vec![inventory],
+            cache_writes: Vec::new(),
+            file_results: vec![FileResultRecord {
+                file_identity: "file-a".to_string(),
+                relative_path: "evidence.txt".to_string(),
+                source_version: source.to_string(),
+                parse_profile_hash: profile_hash,
+                cache_status: CacheStatus::Miss,
+                cache_miss_reason: CacheMissReason::NewFile,
+                parse_status: ParseStatus::Error,
+                parser_backend: "light_text_v1".to_string(),
+                worker_lane: AuditWorkerLane::RustCore,
+                truncated: false,
+                content_sha256: sha256_hex(b""),
+                primary_duration_ms: 1,
+                fallback_duration_ms: 0,
+                parse_duration_ms: 1,
+                failure_class: "parser_failed".to_string(),
+                fallback_backend: String::new(),
+                fallback_reason_code: String::new(),
+                error: Some(file_error),
+            }],
+            diagnostics: vec![RunDiagnosticRecord {
+                severity: DiagnosticSeverity::Error,
+                diagnostic: Diagnostic {
+                    error_code: ErrorCode::ParserFailed,
+                    message: "parse failed".to_string(),
+                    retryable: false,
+                    stage: DiagnosticStage::Parse,
+                    file_path: Nullable(Some("C:\\fixture\\evidence.txt".to_string())),
+                    backend: Nullable(Some("light_text_v1".to_string())),
+                },
+            }],
+            stage_metrics: vec![
+                StageMetric { stage: StageName::Discovery, item_count: 1, duration_ms: 2 },
+                StageMetric { stage: StageName::Cache, item_count: 1, duration_ms: 0 },
+                StageMetric { stage: StageName::Parse, item_count: 1, duration_ms: 1 },
+                StageMetric { stage: StageName::Context, item_count: 1, duration_ms: 0 },
+            ],
+            extension_metrics: vec![ExtensionMetric {
+                extension: ".txt".to_string(),
+                file_count: 1,
+                parse_duration_ms: 1,
+                success_count: 0,
+                error_count: 1,
+                timeout_count: 0,
+            }],
+            context: Some(context),
+            artifact: None,
+            snapshot_key: None,
+            snapshot_hit: None,
+            execution_metrics: Some(ai_daily_scanner_contract::ExecutionMetricsV2 {
+                discovery_observed_file_count: 1,
+                source_guard_content_hash_file_count: 0,
+                source_guard_unavailable_count: 0,
+                source_guard_bytes_read: 0,
+                candidate_file_count: 0,
+                admitted_file_count: 0,
+                classification_slot_count: 0,
+                confirmed_run_inspected_pages_total: 0,
+                unobserved_classification_attempt_count: 0,
+                nominal_charged_pages_total: 0,
+                extraction_slot_count: 0,
+                pdfplumber_invocations: 0,
+                snapshot_hit: false,
+                parse_cache_lookup_count: 0,
+                classification_cache_lookup_count: 0,
+                parse_cache_all_hit: Nullable(None),
+                classification_cache_all_hit: Nullable(None),
+                stage_deadline_exhausted_count: 0,
+                session_restart_count: 0,
+                session_fallback_count: 0,
+                classify_attempt_count: 0,
+                parse_attempt_count: 0,
+                reserved_chars: 0,
+                rendered_chars: 0,
+                worker_handshake_ms: 5,
+                discovery_ms: 2,
+                snapshot_lookup_ms: 0,
+                current_run_audit_write_ms: 0,
+                terminal_precommit_ms: 0,
+                deadline_precommit_elapsed_ms: 0,
+                envelope_rebuild_ms: 0,
+                terminal_rows_written: 0,
+                peak_worker_rss_bytes: Nullable(None),
+            }),
+        };
+        harness.store.finalize(&active, &batch, 2).expect("error finalize");
+
+        // The context_runs row must exist with artifact_id=NULL and status=error.
+        let (context_run_id, status, artifact_id): (i64, String, Option<i64>) = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT context_run_id, status, artifact_id
+                 FROM context_runs WHERE scan_run_id=?1",
+                [active.scan_run_id() as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(context_run_id, active.context_run_id() as i64);
+        assert_eq!(status, "error");
+        assert!(artifact_id.is_none(), "error run must reference no artifact");
+
+        // v1 inspect succeeds.
+        let snapshot = harness
+            .store
+            .inspect_run(active.scan_run_id(), false)
+            .expect("v1 inspect must succeed for an error run with file rows");
+        assert_eq!(snapshot.run_status, RunStatus::Error);
+
+        // v2 inspect succeeds (full_v2 provenance with a reconciling summary).
+        let request = ai_daily_scanner_contract::InspectRunRequest {
+            contract: "ai_daily_context".to_string(),
+            protocol_version: 1,
+            request_id: "00000000-0000-4000-8000-000000000024".to_string(),
+            scan_db_path: harness.db_path.to_string_lossy().to_string(),
+            scan_run_id: active.scan_run_id(),
+            include_content: false,
+        };
+        let v2 = crate::inspect::assemble_inspect_v2(&request, &snapshot)
+            .expect("v2 inspect must succeed for an error run with file rows");
+        assert_eq!(v2.status, ai_daily_scanner_contract::InspectStatus::Ok);
+        assert_eq!(v2.artifact_id.0, None, "error run has no artifact");
+        assert_eq!(v2.execution_metrics.worker_handshake_ms, 5);
+        assert_eq!(v2.execution_metrics.discovery_ms, 2);
+    }
+
+    #[test]
     fn cache_miss_hit_source_profile_and_build_invalidation_are_explicit() {
         let mut harness = harness("00000000-0000-4000-8000-000000000010");
         let source = "mtime_ns=100:size=5";
@@ -5610,7 +5836,7 @@ mod tests {
                 .store
                 .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &changed_hash, false)
                 .unwrap(),
-            CacheLookup::Miss(CacheMissReason::ParserProfileChanged)
+            CacheLookup::Miss(CacheMissReason::ParserIdentityChanged)
         );
     }
 

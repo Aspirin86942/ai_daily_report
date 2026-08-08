@@ -435,7 +435,7 @@ CREATE TABLE scan_file_results (
     source_version TEXT NOT NULL,
     parse_profile_hash TEXT NOT NULL CHECK (length(parse_profile_hash) = 64),
     cache_status TEXT NOT NULL CHECK (cache_status IN ('fresh', 'miss')),
-    cache_miss_reason TEXT NOT NULL CHECK (cache_miss_reason IN ('', 'new_file', 'error_cache', 'source_version_changed', 'parser_profile_changed')),
+    cache_miss_reason TEXT NOT NULL CHECK (cache_miss_reason IN ('', 'new_file', 'error_cache', 'source_version_changed', 'parser_profile_changed', 'parser_identity_changed', 'entry_absent_or_evicted')),
     parse_status TEXT NOT NULL CHECK (parse_status IN ('success', 'error', 'timeout', 'not_parsed')),
     parser_backend TEXT NOT NULL,
     worker_lane TEXT NOT NULL,
@@ -943,6 +943,87 @@ fn context_runs_has_snapshot_check(connection: &Connection) -> rusqlite::Result<
     )
 }
 
+/// `scan_file_results` with the full v2 miss-reason CHECK (spec Part 4/5.2:
+/// `parser_identity_changed` / `entry_absent_or_evicted` in addition to the v1
+/// set). SQLite cannot add a CHECK to an existing table in place, so the table
+/// is rebuilt by create-new/copy/drop/rename for the v1→v2 upgrade and the v2
+/// amendment. All v1 + v2 columns are carried over verbatim.
+const SCAN_FILE_RESULTS_V2_DDL: &str = r#"
+CREATE TABLE scan_file_results_v2 (
+    scan_run_id INTEGER NOT NULL REFERENCES scan_runs(scan_run_id) ON DELETE CASCADE,
+    file_identity TEXT NOT NULL REFERENCES file_inventory(file_identity),
+    relative_path TEXT NOT NULL,
+    source_version TEXT NOT NULL,
+    parse_profile_hash TEXT NOT NULL CHECK (length(parse_profile_hash) = 64),
+    cache_status TEXT NOT NULL CHECK (cache_status IN ('fresh', 'miss')),
+    cache_miss_reason TEXT NOT NULL CHECK (cache_miss_reason IN ('', 'new_file', 'error_cache', 'source_version_changed', 'parser_profile_changed', 'parser_identity_changed', 'entry_absent_or_evicted')),
+    parse_status TEXT NOT NULL CHECK (parse_status IN ('success', 'error', 'timeout', 'not_parsed')),
+    parser_backend TEXT NOT NULL,
+    worker_lane TEXT NOT NULL,
+    truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    primary_duration_ms INTEGER NOT NULL CHECK (primary_duration_ms >= 0),
+    fallback_duration_ms INTEGER NOT NULL CHECK (fallback_duration_ms >= 0),
+    parse_duration_ms INTEGER NOT NULL CHECK (parse_duration_ms >= 0),
+    failure_class TEXT NOT NULL,
+    fallback_backend TEXT NOT NULL,
+    fallback_reason_code TEXT NOT NULL,
+    error_code TEXT,
+    error_message TEXT,
+    error_retryable INTEGER CHECK (error_retryable IN (0, 1)),
+    error_stage TEXT,
+    error_file_path TEXT,
+    error_backend TEXT,
+    legacy_cache_status TEXT,
+    legacy_cache_miss_reason TEXT,
+    parse_cache_status TEXT CHECK (parse_cache_status IN ('fresh', 'miss', 'snapshot', 'not_applicable')),
+    PRIMARY KEY (scan_run_id, file_identity)
+) STRICT;
+"#;
+
+fn rebuild_scan_file_results(transaction: &rusqlite::Transaction<'_>) -> Result<(), SchemaError> {
+    transaction.execute_batch(SCAN_FILE_RESULTS_V2_DDL)?;
+    transaction.execute(
+        "INSERT INTO scan_file_results_v2(
+            scan_run_id, file_identity, relative_path, source_version,
+            parse_profile_hash, cache_status, cache_miss_reason, parse_status,
+            parser_backend, worker_lane, truncated, content_sha256,
+            primary_duration_ms, fallback_duration_ms, parse_duration_ms,
+            failure_class, fallback_backend, fallback_reason_code,
+            error_code, error_message, error_retryable, error_stage,
+            error_file_path, error_backend, legacy_cache_status,
+            legacy_cache_miss_reason, parse_cache_status
+         ) SELECT scan_run_id, file_identity, relative_path, source_version,
+             parse_profile_hash, cache_status, cache_miss_reason, parse_status,
+             parser_backend, worker_lane, truncated, content_sha256,
+             primary_duration_ms, fallback_duration_ms, parse_duration_ms,
+             failure_class, fallback_backend, fallback_reason_code,
+             error_code, error_message, error_retryable, error_stage,
+             error_file_path, error_backend, legacy_cache_status,
+             legacy_cache_miss_reason, parse_cache_status
+           FROM scan_file_results",
+        [],
+    )?;
+    transaction.execute_batch(
+        "DROP TABLE scan_file_results;
+         ALTER TABLE scan_file_results_v2 RENAME TO scan_file_results;
+         CREATE INDEX idx_file_results_identity ON scan_file_results(file_identity);
+         CREATE INDEX idx_file_results_status ON scan_file_results(parse_status);",
+    )?;
+    Ok(())
+}
+
+/// True when the committed `scan_file_results` already carries the full v2
+/// miss-reason CHECK (the `parser_identity_changed` marker text).
+fn scan_file_results_has_v2_miss_reason_check(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT instr(sql, 'parser_identity_changed') > 0
+         FROM sqlite_schema WHERE type='table' AND name='scan_file_results'",
+        [],
+        |row| row.get(0),
+    )
+}
+
 pub fn configure_connection(connection: &Connection) -> Result<(), SchemaError> {
     connection.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
     connection.pragma_update(None, "foreign_keys", true)?;
@@ -1047,6 +1128,13 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
             transaction.execute_batch(EXECUTION_METRICS_DDL)?;
             transaction.commit()?;
         }
+        // spec Part 4/5.2: databases whose `scan_file_results.cache_miss_reason`
+        // CHECK predates the v2 reason set are rebuilt with the full set.
+        if !scan_file_results_has_v2_miss_reason_check(connection)? {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            rebuild_scan_file_results(&transaction)?;
+            transaction.commit()?;
+        }
     }
     Ok(())
 }
@@ -1095,6 +1183,10 @@ fn migrate_v1_to_v2(
     rebuild_file_inventory(transaction)?;
     transaction.execute_batch(V2_UPGRADE_DDL)?;
     migrate_file_result_legacy_cache(transaction)?;
+    // Rebuild scan_file_results with the full v2 miss-reason CHECK (spec Part
+    // 4/5.2) AFTER the legacy cache columns are populated, so the copy carries
+    // both the v1 and v2 audit columns.
+    rebuild_scan_file_results(transaction)?;
     migrate_terminal_envelopes(transaction)?;
     // Rebuild context_runs with the snapshot relationship CHECK after the
     // migrated artifacts are linked, so the copied rows satisfy the invariant.

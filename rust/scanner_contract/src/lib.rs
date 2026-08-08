@@ -2570,6 +2570,16 @@ pub enum CacheMissReason {
     SourceVersionChanged,
     #[serde(rename = "parser_profile_changed")]
     ParserProfileChanged,
+    /// v2-only reason (spec Part 4): exact key absent but another identity row
+    /// for the same source exists. Projected losslessly to `parser_profile_changed`
+    /// in the v1 inspect (spec Part 5.3).
+    #[serde(rename = "parser_identity_changed")]
+    ParserIdentityChanged,
+    /// v2-only reason (spec Part 4): inventory existed before this round but the
+    /// exact cache entry is absent/evicted. Projected to `new_file` + warning in
+    /// the v1 inspect (spec Part 5.3).
+    #[serde(rename = "entry_absent_or_evicted")]
+    EntryAbsentOrEvicted,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
