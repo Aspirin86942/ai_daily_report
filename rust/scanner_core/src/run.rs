@@ -5,8 +5,8 @@ use ai_daily_discovery::{
 use ai_daily_scanner_contract::{
     BuildContextRequest, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
     DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest,
-    InspectRunResponse, InspectStatus, Nullable, RunStatus, TransportErrorResponse, Validate,
-    VersionResponse,
+    InspectRunResponse, InspectStatus, Nullable, RunStatus, TransportErrorResponse,
+    UpgradeDatabaseRequestV1, UpgradeStatus, Validate, VersionResponse,
 };
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
@@ -94,8 +94,31 @@ pub fn dispatch(command: &str, input: &[u8]) -> Result<CommandOutput, EngineShel
             };
             inspect_run_command(&request)
         }
+        "upgrade-db" => {
+            let request = match decode_request::<UpgradeDatabaseRequestV1>(input) {
+                Ok(request) => request,
+                Err(_) => return invalid_request_output(),
+            };
+            upgrade_database_command(&request)
+        }
         _ => invalid_request_output(),
     }
+}
+
+fn upgrade_database_command(
+    request: &UpgradeDatabaseRequestV1,
+) -> Result<CommandOutput, EngineShellError> {
+    let response = ScannerStore::upgrade_database(request);
+    debug_assert!(
+        response.validate().is_ok(),
+        "upgrade-db response violates the wire contract"
+    );
+    let exit_code = if response.status == UpgradeStatus::Error {
+        1
+    } else {
+        0
+    };
+    CommandOutput::with_exit(&response, exit_code)
 }
 
 fn doctor(request: &DoctorRequest) -> Result<CommandOutput, EngineShellError> {

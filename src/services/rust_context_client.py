@@ -23,6 +23,8 @@ from src.models.scanner_contract import (
     DoctorResponse,
     InspectRunRequest,
     InspectRunResponse,
+    UpgradeDatabaseRequestV1,
+    UpgradeDatabaseResponseV1,
     VersionResponse,
     build_rust_core_crashed_envelope,
 )
@@ -266,6 +268,23 @@ class RustContextClient:
         )
         if result.response is None:
             raise RuntimeError("Rust inspect-run did not return a trusted response")
+        return result.response
+
+    def upgrade_database(
+        self,
+        request: UpgradeDatabaseRequestV1,
+    ) -> UpgradeDatabaseResponseV1:
+        """执行 `upgrade-db`（audit/apply）；不内置备份，回滚由运维承担。"""
+        result = run_json_process(
+            command=[str(self._scanner_binary), "upgrade-db"],
+            request_payload=request.model_dump(mode="json"),
+            response_model=UpgradeDatabaseResponseV1,
+            timeout_seconds=self._timeout_seconds,
+            expected_request_id=request.request_id,
+            cwd=self._project_root,
+        )
+        if result.response is None:
+            raise self._probe_error("upgrade-db", result)
         return result.response
 
     def _resolve_path(self, value: str | Path) -> Path:

@@ -8,14 +8,15 @@ use ai_daily_discovery::normalize_contract_path_text;
 use ai_daily_scanner_contract::{
     BuildContextRequest, ContextAction, ContextDecision, ContextEnvelope, ContextSummary,
     Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, ExtensionMetric,
-    NormalizedScannerProfileV1, Nullable, ParseStatus, RunStatus, StageMetric, StageName, Validate,
-    VersionResponse,
+    NormalizedScannerProfileV1, Nullable, ParseStatus, RunStatus, StageMetric, StageName,
+    UpgradeDatabaseRequestV1, UpgradeDatabaseResponseV1, UpgradeIntegrityCheck, UpgradeStatus,
+    Validate, VersionResponse,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 pub use cache::{
@@ -52,6 +53,10 @@ pub enum StoreError {
     RunNotFound,
     #[error("scanner run lease ownership was lost")]
     LeaseLost,
+    #[error("scanner database schema requires an explicit upgrade")]
+    SchemaUpgradeRequired,
+    #[error("scanner database schema is newer than this engine")]
+    SchemaTooNew,
 }
 
 impl StoreError {
@@ -65,6 +70,7 @@ impl StoreError {
             Self::RequestIdConflict => ErrorCode::RequestIdConflict,
             Self::RunCorrupt(_) => ErrorCode::RunCorrupt,
             Self::RunNotFound => ErrorCode::RunNotFound,
+            Self::SchemaUpgradeRequired | Self::SchemaTooNew => ErrorCode::SchemaUpgradeRequired,
         }
     }
 
@@ -420,6 +426,9 @@ impl ScannerStore {
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let mut connection = Connection::open_with_flags(path, flags).map_err(cache_open)?;
         schema::configure_connection(&connection).map_err(|error| cache_open(error.to_string()))?;
+        // A committed v1 database must not be auto-migrated by a business open;
+        // only the separately-authorized `upgrade-db apply=true` may migrate it.
+        ensure_schema_openable(&connection)?;
         schema::migrate(&mut connection).map_err(|error| cache_open(error.to_string()))?;
         Ok(Self {
             connection,
@@ -432,11 +441,23 @@ impl ScannerStore {
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let mut connection = Connection::open_with_flags(path, flags).map_err(cache_open)?;
         schema::configure_connection(&connection).map_err(|error| cache_open(error.to_string()))?;
+        ensure_schema_openable(&connection)?;
         schema::migrate(&mut connection).map_err(|error| cache_open(error.to_string()))?;
         Ok(Self {
             connection,
             path: path.to_path_buf(),
         })
+    }
+
+    /// Executes the `upgrade-db` command: a read-only audit (`apply=false`) or
+    /// the only production upgrade entry (`apply=true`). No backup is created;
+    /// rollback is operator-managed from a pre-upgrade copy (spec Part 8.3).
+    pub fn upgrade_database(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabaseResponseV1 {
+        if request.apply {
+            upgrade_database_apply(request)
+        } else {
+            upgrade_database_audit(request)
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -1009,6 +1030,651 @@ fn validate_database_path(path: &Path) -> Result<(), StoreError> {
         )));
     }
     Ok(())
+}
+
+/// Business opens fail closed on a committed v1 database (`SCHEMA_UPGRADE_REQUIRED`,
+/// non-retryable) and on a database newer than this engine (`TooNew`). Only the
+/// separately-authorized `upgrade-db apply=true` migrates a v1 database.
+fn ensure_schema_openable(connection: &Connection) -> Result<(), StoreError> {
+    let version: i32 = connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(cache_open)?;
+    if version == 1 {
+        return Err(StoreError::SchemaUpgradeRequired);
+    }
+    if version > LATEST_USER_VERSION {
+        return Err(StoreError::SchemaTooNew);
+    }
+    Ok(())
+}
+
+/// Read-only audit path (`apply=false`): a read-only connection cannot switch
+/// journal_mode to WAL, so this configures only the pragmas that are safe on a
+/// read-only connection. `PRAGMA auto_vacuum=INCREMENTAL` on an existing database
+/// is a no-op and does not touch the file.
+fn configure_readonly_connection(connection: &Connection) -> Result<(), StoreError> {
+    connection
+        .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+        .map_err(cache_open)?;
+    connection
+        .pragma_update(None, "foreign_keys", true)
+        .map_err(cache_open)?;
+    connection
+        .execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
+        .map_err(cache_open)
+}
+
+const V1_SCHEMA_TABLES: &[&str] = &[
+    "scan_runs",
+    "engine_lease",
+    "scan_run_attempts",
+    "run_diagnostics",
+    "file_inventory",
+    "parse_cache",
+    "scan_file_results",
+    "scan_stage_metrics",
+    "scan_extension_metrics",
+    "context_runs",
+    "context_decisions",
+];
+
+fn verify_v1_schema(connection: &Connection) -> Result<(), String> {
+    for table in V1_SCHEMA_TABLES {
+        let present: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1
+                 )",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !present {
+            return Err(format!("v1 table {table} is missing"));
+        }
+    }
+    Ok(())
+}
+
+fn read_user_version(connection: &Connection) -> Result<i32, StoreError> {
+    connection
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(cache_open)
+}
+
+fn run_integrity(connection: &Connection) -> UpgradeIntegrityCheck {
+    match connection.query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0)) {
+        Ok(value) if value == "ok" => UpgradeIntegrityCheck::Ok,
+        _ => UpgradeIntegrityCheck::Failed,
+    }
+}
+
+fn count_parse_cache(connection: &Connection) -> Result<u64, StoreError> {
+    connection
+        .query_row("SELECT count(*) FROM parse_cache", [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(cache_open)
+        .map(|count| count as u64)
+}
+
+/// Configures the connection and re-verifies that it is a committed v1 database.
+/// It deliberately never calls `migrate`: normal opens fail closed on v1 and this
+/// gate exists only for the separately-authorized upgrade entry.
+fn open_for_upgrade(connection: &mut Connection) -> Result<(), StoreError> {
+    schema::configure_connection(connection).map_err(|error| cache_open(error.to_string()))?;
+    let version = read_user_version(connection)?;
+    if version != 1 {
+        return Err(StoreError::SchemaUpgradeRequired);
+    }
+    verify_v1_schema(connection).map_err(|_| StoreError::SchemaUpgradeRequired)
+}
+
+fn upgrade_diagnostic(error_code: ErrorCode, message: String, retryable: bool) -> Diagnostic {
+    Diagnostic {
+        error_code,
+        message: message.chars().take(4_096).collect(),
+        retryable,
+        stage: DiagnosticStage::Maintenance,
+        file_path: Nullable(None),
+        backend: Nullable(None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upgrade_ok_response(
+    request: &UpgradeDatabaseRequestV1,
+    source_user_version: u64,
+    pre: UpgradeIntegrityCheck,
+    post: UpgradeIntegrityCheck,
+    schema_migrated: bool,
+    auto_vacuum_converted: bool,
+    detected: u64,
+    invalidated: u64,
+) -> UpgradeDatabaseResponseV1 {
+    UpgradeDatabaseResponseV1 {
+        contract: "ai_daily_scanner_upgrade".to_string(),
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        status: UpgradeStatus::Ok,
+        source_user_version: Nullable(Some(source_user_version)),
+        target_user_version: 2,
+        apply: request.apply,
+        schema_migrated,
+        auto_vacuum_converted,
+        legacy_parse_cache_rows_detected: detected,
+        invalidated_parse_cache_rows: invalidated,
+        pre_integrity_check: pre,
+        post_integrity_check: post,
+        warnings: Vec::new(),
+        error: Nullable(None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upgrade_partial_response(
+    request: &UpgradeDatabaseRequestV1,
+    source_user_version: u64,
+    pre: UpgradeIntegrityCheck,
+    post: UpgradeIntegrityCheck,
+    schema_migrated: bool,
+    auto_vacuum_converted: bool,
+    detected: u64,
+    invalidated: u64,
+    warnings: Vec<Diagnostic>,
+) -> UpgradeDatabaseResponseV1 {
+    UpgradeDatabaseResponseV1 {
+        contract: "ai_daily_scanner_upgrade".to_string(),
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        status: UpgradeStatus::Partial,
+        source_user_version: Nullable(Some(source_user_version)),
+        target_user_version: 2,
+        apply: request.apply,
+        schema_migrated,
+        auto_vacuum_converted,
+        legacy_parse_cache_rows_detected: detected,
+        invalidated_parse_cache_rows: invalidated,
+        pre_integrity_check: pre,
+        post_integrity_check: post,
+        warnings,
+        error: Nullable(None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn upgrade_error_response(
+    request: &UpgradeDatabaseRequestV1,
+    source_user_version: Option<u64>,
+    pre: UpgradeIntegrityCheck,
+    post: UpgradeIntegrityCheck,
+    schema_migrated: bool,
+    detected: u64,
+    error: Diagnostic,
+) -> UpgradeDatabaseResponseV1 {
+    UpgradeDatabaseResponseV1 {
+        contract: "ai_daily_scanner_upgrade".to_string(),
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        status: UpgradeStatus::Error,
+        source_user_version: Nullable(source_user_version),
+        target_user_version: 2,
+        apply: request.apply,
+        schema_migrated,
+        auto_vacuum_converted: false,
+        legacy_parse_cache_rows_detected: detected,
+        invalidated_parse_cache_rows: if schema_migrated { detected } else { 0 },
+        pre_integrity_check: pre,
+        post_integrity_check: post,
+        warnings: Vec::new(),
+        error: Nullable(Some(error)),
+    }
+}
+
+fn upgrade_database_audit(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabaseResponseV1 {
+    let path = Path::new(&request.scan_db_path);
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let connection = match Connection::open_with_flags(path, flags) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return upgrade_error_response(
+                request,
+                None,
+                UpgradeIntegrityCheck::NotRun,
+                UpgradeIntegrityCheck::NotRun,
+                false,
+                0,
+                upgrade_diagnostic(
+                    ErrorCode::CacheOpenFailed,
+                    format!("scan database could not be opened read-only: {error}"),
+                    true,
+                ),
+            );
+        }
+    };
+    if let Err(error) = configure_readonly_connection(&connection) {
+        return upgrade_error_response(
+            request,
+            None,
+            UpgradeIntegrityCheck::NotRun,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            0,
+            upgrade_diagnostic(
+                ErrorCode::CacheOpenFailed,
+                format!("read-only connection could not be configured: {error}"),
+                true,
+            ),
+        );
+    }
+    let version = match read_user_version(&connection) {
+        Ok(version) => version,
+        Err(error) => {
+            return upgrade_error_response(
+                request,
+                None,
+                UpgradeIntegrityCheck::NotRun,
+                UpgradeIntegrityCheck::NotRun,
+                false,
+                0,
+                upgrade_diagnostic(
+                    ErrorCode::CacheOpenFailed,
+                    format!("database user_version could not be read: {error}"),
+                    true,
+                ),
+            );
+        }
+    };
+    let pre = run_integrity(&connection);
+    if version > LATEST_USER_VERSION {
+        return upgrade_error_response(
+            request,
+            Some(version as u64),
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            0,
+            upgrade_diagnostic(
+                ErrorCode::SchemaUpgradeRequired,
+                format!(
+                    "scanner database user_version={version} is newer than this engine ({LATEST_USER_VERSION}); this release cannot open it"
+                ),
+                false,
+            ),
+        );
+    }
+    if version == 2 {
+        return upgrade_ok_response(
+            request,
+            2,
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            false,
+            0,
+            0,
+        );
+    }
+    if version != 1 {
+        return upgrade_error_response(
+            request,
+            None,
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            0,
+            upgrade_diagnostic(
+                ErrorCode::SchemaUpgradeRequired,
+                format!(
+                    "scanner database user_version={version} is not a committed v1 database; upgrade-db audits v1 databases only"
+                ),
+                false,
+            ),
+        );
+    }
+    if let Err(message) = verify_v1_schema(&connection) {
+        return upgrade_error_response(
+            request,
+            Some(1),
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            0,
+            upgrade_diagnostic(
+                ErrorCode::SchemaMigrationFailed,
+                format!("v1 schema verification failed: {message}"),
+                false,
+            ),
+        );
+    }
+    let now_ms = match current_time_millis() {
+        Ok(now_ms) => now_ms as i64,
+        Err(_) => {
+            return upgrade_error_response(
+                request,
+                Some(1),
+                pre,
+                UpgradeIntegrityCheck::NotRun,
+                false,
+                0,
+                upgrade_diagnostic(ErrorCode::InternalError, "system clock is invalid".to_string(), false),
+            );
+        }
+    };
+    let live_lease = match query_lease(&connection) {
+        Ok(Some(lease)) if lease_is_live(&lease, now_ms) => true,
+        Ok(_) => false,
+        Err(_) => false,
+    };
+    if live_lease {
+        return upgrade_error_response(
+            request,
+            Some(1),
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            0,
+            upgrade_diagnostic(
+                ErrorCode::ScanAlreadyRunning,
+                "another scanner run owns the database lease; upgrade is blocked".to_string(),
+                true,
+            ),
+        );
+    }
+    let detected = count_parse_cache(&connection).unwrap_or(0);
+    upgrade_ok_response(
+        request,
+        1,
+        pre,
+        UpgradeIntegrityCheck::NotRun,
+        false,
+        false,
+        detected,
+        0,
+    )
+}
+
+fn upgrade_database_apply(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabaseResponseV1 {
+    let path = Path::new(&request.scan_db_path);
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mut connection = match Connection::open_with_flags(path, flags) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return upgrade_error_response(
+                request,
+                None,
+                UpgradeIntegrityCheck::NotRun,
+                UpgradeIntegrityCheck::NotRun,
+                false,
+                0,
+                upgrade_diagnostic(
+                    ErrorCode::CacheOpenFailed,
+                    format!("scan database could not be opened read-write: {error}"),
+                    true,
+                ),
+            );
+        }
+    };
+    if let Err(error) = schema::configure_connection(&connection) {
+        return upgrade_error_response(
+            request,
+            None,
+            UpgradeIntegrityCheck::NotRun,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            0,
+            upgrade_diagnostic(
+                ErrorCode::CacheOpenFailed,
+                format!("database connection could not be configured: {error}"),
+                true,
+            ),
+        );
+    }
+    let version = match read_user_version(&connection) {
+        Ok(version) => version,
+        Err(error) => {
+            return upgrade_error_response(
+                request,
+                None,
+                UpgradeIntegrityCheck::NotRun,
+                UpgradeIntegrityCheck::NotRun,
+                false,
+                0,
+                upgrade_diagnostic(
+                    ErrorCode::CacheOpenFailed,
+                    format!("database user_version could not be read: {error}"),
+                    true,
+                ),
+            );
+        }
+    };
+    let pre = run_integrity(&connection);
+    if version > LATEST_USER_VERSION {
+        return upgrade_error_response(
+            request,
+            Some(version as u64),
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            0,
+            upgrade_diagnostic(
+                ErrorCode::SchemaUpgradeRequired,
+                format!(
+                    "scanner database user_version={version} is newer than this engine ({LATEST_USER_VERSION}); fail closed"
+                ),
+                false,
+            ),
+        );
+    }
+    if version == 2 {
+        return upgrade_ok_response(
+            request,
+            2,
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            false,
+            0,
+            0,
+        );
+    }
+    if version != 1 {
+        return upgrade_error_response(
+            request,
+            None,
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            0,
+            upgrade_diagnostic(
+                ErrorCode::SchemaUpgradeRequired,
+                format!(
+                    "scanner database user_version={version} is not a committed v1 database; upgrade-db upgrades v1 databases only"
+                ),
+                false,
+            ),
+        );
+    }
+    if let Err(message) = verify_v1_schema(&connection) {
+        return upgrade_error_response(
+            request,
+            Some(1),
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            0,
+            upgrade_diagnostic(
+                ErrorCode::SchemaMigrationFailed,
+                format!("v1 schema verification failed: {message}"),
+                false,
+            ),
+        );
+    }
+    let detected = count_parse_cache(&connection).unwrap_or(0);
+    if pre == UpgradeIntegrityCheck::Failed {
+        return upgrade_error_response(
+            request,
+            Some(1),
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            detected,
+            upgrade_diagnostic(
+                ErrorCode::SchemaMigrationFailed,
+                "pre-integrity check failed before the v1 migration".to_string(),
+                false,
+            ),
+        );
+    }
+    let now_ms = match current_time_millis() {
+        Ok(now_ms) => now_ms as i64,
+        Err(error) => {
+            return upgrade_error_response(
+                request,
+                Some(1),
+                pre,
+                UpgradeIntegrityCheck::NotRun,
+                false,
+                detected,
+                error.diagnostic(DiagnosticStage::Maintenance),
+            );
+        }
+    };
+    if let Err(error) = acquire_upgrade_lease(&mut connection, now_ms) {
+        return upgrade_error_response(
+            request,
+            Some(1),
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            detected,
+            error.diagnostic(DiagnosticStage::Maintenance),
+        );
+    }
+    if let Err(error) = open_for_upgrade(&mut connection) {
+        let _ = release_upgrade_lease(&connection);
+        return upgrade_error_response(
+            request,
+            Some(1),
+            pre,
+            UpgradeIntegrityCheck::NotRun,
+            false,
+            detected,
+            error.diagnostic(DiagnosticStage::Maintenance),
+        );
+    }
+    let invalidated = match schema::upgrade_v1_to_v2(&mut connection, &request.request_id) {
+        Ok(invalidated) => invalidated,
+        Err(error) => {
+            let _ = release_upgrade_lease(&connection);
+            return upgrade_error_response(
+                request,
+                Some(1),
+                pre,
+                UpgradeIntegrityCheck::NotRun,
+                false,
+                detected,
+                upgrade_diagnostic(
+                    ErrorCode::SchemaMigrationFailed,
+                    format!("v1 to v2 migration failed and was rolled back: {error}"),
+                    false,
+                ),
+            );
+        }
+    };
+    let post = run_integrity(&connection);
+    if post == UpgradeIntegrityCheck::Failed {
+        let _ = release_upgrade_lease(&connection);
+        return upgrade_error_response(
+            request,
+            Some(1),
+            pre,
+            post,
+            true,
+            detected,
+            upgrade_diagnostic(
+                ErrorCode::SchemaMigrationFailed,
+                "post-migration integrity check failed".to_string(),
+                false,
+            ),
+        );
+    }
+    // Independent physical conversion; never part of the migration transaction.
+    let auto_vacuum_converted = convert_auto_vacuum(&connection).unwrap_or(false);
+    let _ = release_upgrade_lease(&connection);
+    if auto_vacuum_converted {
+        upgrade_ok_response(
+            request,
+            1,
+            pre,
+            post,
+            true,
+            true,
+            detected,
+            invalidated,
+        )
+    } else {
+        upgrade_partial_response(
+            request,
+            1,
+            pre,
+            post,
+            true,
+            false,
+            detected,
+            invalidated,
+            vec![upgrade_diagnostic(
+                ErrorCode::MaintenanceModeUnavailable,
+                "auto_vacuum=INCREMENTAL conversion failed; the v2 schema is committed but incremental maintenance is unavailable".to_string(),
+                false,
+            )],
+        )
+    }
+}
+
+fn acquire_upgrade_lease(connection: &mut Connection, now_ms: i64) -> Result<(), StoreError> {
+    if let Some(lease) = query_lease(connection)? {
+        if lease_is_live(&lease, now_ms) {
+            return Err(StoreError::ScanAlreadyRunning);
+        }
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(cache_write)?;
+        reclaim_expired_lease(&transaction, &lease, now_ms)?;
+        transaction.commit().map_err(cache_write)?;
+    }
+    let owner_id = random_owner_id(connection)?;
+    connection
+        .execute(
+            "INSERT INTO engine_lease(
+                lease_key, owner_id, owner_pid, acquired_at_ms, heartbeat_at_ms, expires_at_ms
+             ) VALUES (1, ?1, ?2, ?3, ?3, ?4)",
+            params![
+                owner_id,
+                i64::from(std::process::id()),
+                now_ms,
+                lease_expiry(now_ms)?,
+            ],
+        )
+        .map_err(cache_write)?;
+    Ok(())
+}
+
+fn release_upgrade_lease(connection: &Connection) -> Result<(), StoreError> {
+    connection
+        .execute("DELETE FROM engine_lease WHERE lease_key=1", [])
+        .map_err(cache_write)?;
+    Ok(())
+}
+
+fn convert_auto_vacuum(connection: &Connection) -> Result<bool, StoreError> {
+    connection
+        .execute_batch("PRAGMA auto_vacuum = INCREMENTAL; VACUUM;")
+        .map_err(cache_write)?;
+    let auto_vacuum: i64 = connection
+        .pragma_query_value(None, "auto_vacuum", |row| row.get(0))
+        .map_err(cache_write)?;
+    Ok(auto_vacuum == 2)
 }
 
 fn checked_i64(value: u64, field: &str) -> Result<i64, StoreError> {
@@ -3004,5 +3670,184 @@ mod tests {
         }))
         .unwrap();
         assert!(normalize_scanner_profile(&raw, ReportMode::Daily).is_ok());
+    }
+
+    const UPGRADE_TEST_REQUEST_ID: &str = "123e4567-e89b-42d3-a456-426614174000";
+    const UPGRADE_TEST_RUN_REQUEST_ID: &str = "323e4567-e89b-42d3-a456-426614174002";
+
+    /// A valid v1 error envelope: `file_context` empty, `error` present, and the
+    /// request id matching the scan_runs row seeded by `v1_upgrade_fixture`.
+    const UPGRADE_TEST_ERROR_ENVELOPE: &str = r#"{
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "323e4567-e89b-42d3-a456-426614174002",
+        "engine_version": "test",
+        "engine_build": "test-build",
+        "status": "error",
+        "file_context": "",
+        "summary": {
+            "source_file_count": 0, "success_count": 0, "timeout_count": 0,
+            "included_file_count": 0, "omitted_file_count": 0, "error_file_count": 0,
+            "input_chars": 0, "output_chars": 0, "total_duration_ms": 1,
+            "discovery_duration_ms": 0, "parse_duration_ms": 0, "compression_duration_ms": 0
+        },
+        "scan_run_id": 1,
+        "context_run_id": null,
+        "warnings": [],
+        "error": {
+            "error_code": "PARSER_FAILED",
+            "message": "scanner could not start",
+            "retryable": false,
+            "stage": "parse",
+            "file_path": null,
+            "backend": null
+        }
+    }"#;
+
+    fn v1_upgrade_fixture(directory: &TempDir) -> PathBuf {
+        let db_path = directory.path().join(SCAN_DB_FILENAME);
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection.execute_batch(schema::V1_DDL).unwrap();
+        connection.pragma_update(None, "user_version", 1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO scan_runs(
+                    request_id, canonical_request_json, request_hash_algorithm, request_hash,
+                    owner_id, status, created_at_ms, started_at_ms, updated_at_ms,
+                    finished_at_ms, final_envelope_json
+                 ) VALUES (?1, '{}', 'sha256-request-v1', ?2, 'owner', 'error', 1, 1, 1, 1, ?3)",
+                params![
+                    UPGRADE_TEST_RUN_REQUEST_ID,
+                    "0".repeat(64),
+                    UPGRADE_TEST_ERROR_ENVELOPE,
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO file_inventory(
+                    file_identity, absolute_path, relative_path, file_type, source_version,
+                    size_bytes, mtime_ns, last_seen_run_id, last_seen_at_ms
+                 ) VALUES (
+                    'C:\\work\\a.txt', 'C:\\work\\a.txt', 'a.txt', '.txt',
+                    'mtime_ns=1:size=5', 5, 1, 1, 1
+                 )",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO parse_cache(
+                    file_identity, source_version, parse_profile_hash, content, content_sha256,
+                    parser_backend, worker_lane, truncated, worker_contract_version,
+                    worker_version, worker_build, cached_at_ms
+                 ) VALUES (
+                    'C:\\work\\a.txt', 'mtime_ns=1:size=5', ?1, 'hello', ?2,
+                    'pdf_text_v1', 'python_document_process', 0,
+                    'ai_daily_worker_v1', '1.0', 'legacy-build', 1
+                 )",
+                params!["0".repeat(64), "1".repeat(64)],
+            )
+            .unwrap();
+        drop(connection);
+        db_path
+    }
+
+    fn upgrade_request(path: &Path, apply: bool) -> ai_daily_scanner_contract::UpgradeDatabaseRequestV1 {
+        ai_daily_scanner_contract::UpgradeDatabaseRequestV1 {
+            contract: "ai_daily_scanner_upgrade".to_string(),
+            protocol_version: 1,
+            request_id: UPGRADE_TEST_REQUEST_ID.to_string(),
+            scan_db_path: path.to_string_lossy().to_string(),
+            apply,
+        }
+    }
+
+    #[test]
+    fn business_open_fails_closed_on_committed_v1_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = v1_upgrade_fixture(&directory);
+
+        assert_eq!(
+            ScannerStore::open(&db_path).unwrap_err(),
+            StoreError::SchemaUpgradeRequired
+        );
+        assert_eq!(
+            ScannerStore::open_existing(&db_path).unwrap_err(),
+            StoreError::SchemaUpgradeRequired
+        );
+    }
+
+    #[test]
+    fn business_open_fails_closed_on_too_new_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join(SCAN_DB_FILENAME);
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection.execute_batch(schema::V1_DDL).unwrap();
+        connection.pragma_update(None, "user_version", 3).unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            ScannerStore::open(&db_path),
+            Err(StoreError::SchemaTooNew)
+        ));
+    }
+
+    #[test]
+    fn upgrade_database_audit_reports_legacy_cache_without_mutating() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = v1_upgrade_fixture(&directory);
+        let before = std::fs::read(&db_path).unwrap();
+
+        let response = ScannerStore::upgrade_database(&upgrade_request(&db_path, false));
+        response.validate().expect("audit response must validate");
+
+        assert_eq!(response.status, UpgradeStatus::Ok);
+        assert_eq!(response.apply, false);
+        assert_eq!(response.source_user_version.0, Some(1));
+        assert_eq!(response.schema_migrated, false);
+        assert_eq!(response.auto_vacuum_converted, false);
+        assert_eq!(response.legacy_parse_cache_rows_detected, 1);
+        assert_eq!(response.invalidated_parse_cache_rows, 0);
+        assert_eq!(response.post_integrity_check, UpgradeIntegrityCheck::NotRun);
+        assert!(response.error.0.is_none());
+        assert_eq!(std::fs::read(&db_path).unwrap(), before);
+    }
+
+    #[test]
+    fn upgrade_database_apply_migrates_and_invalidates_legacy_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = v1_upgrade_fixture(&directory);
+
+        let response = ScannerStore::upgrade_database(&upgrade_request(&db_path, true));
+        response.validate().expect("apply response must validate");
+
+        assert_eq!(response.status, UpgradeStatus::Ok);
+        assert_eq!(response.apply, true);
+        assert_eq!(response.source_user_version.0, Some(1));
+        assert_eq!(response.schema_migrated, true);
+        assert_eq!(response.auto_vacuum_converted, true);
+        assert_eq!(response.legacy_parse_cache_rows_detected, 1);
+        assert_eq!(response.invalidated_parse_cache_rows, 1);
+        assert_eq!(response.post_integrity_check, UpgradeIntegrityCheck::Ok);
+        assert!(response.error.0.is_none());
+
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        let version: i32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        let origin: String = connection
+            .query_row(
+                "SELECT origin FROM schema_migration_history WHERE user_version=2",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(origin, "upgraded_v1");
+        let cache_count: i64 = connection
+            .query_row("SELECT count(*) FROM parse_cache", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cache_count, 0);
     }
 }

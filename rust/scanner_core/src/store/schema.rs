@@ -738,7 +738,7 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
         connection.pragma_update(None, "foreign_keys", false)?;
         let migration = (|| -> Result<(), SchemaError> {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            migrate_v1_to_v2(&transaction)?;
+            migrate_v1_to_v2(&transaction, AUTO_UPGRADE_REQUEST_ID)?;
             transaction.pragma_update(None, "user_version", LATEST_USER_VERSION)?;
             transaction.commit()?;
             Ok(())
@@ -747,6 +747,26 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
         migration?;
     }
     Ok(())
+}
+
+/// Upgrades a committed v1 database to v2 outside the automatic `migrate` path,
+/// recording the caller's request id in the migration history. The upgrade-db
+/// command is the only production caller; normal `ScannerStore::open` fails
+/// closed on v1 with `SCHEMA_UPGRADE_REQUIRED` instead of routing here.
+///
+/// The returned count is the number of legacy parse-cache rows invalidated by
+/// the committed migration (`invalidated == detected` after COMMIT).
+pub fn upgrade_v1_to_v2(connection: &mut Connection, request_id: &str) -> Result<u64, SchemaError> {
+    connection.pragma_update(None, "foreign_keys", false)?;
+    let migration = (|| -> Result<u64, SchemaError> {
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let invalidated = migrate_v1_to_v2(&transaction, request_id)?;
+        transaction.pragma_update(None, "user_version", LATEST_USER_VERSION)?;
+        transaction.commit()?;
+        Ok(invalidated)
+    })();
+    connection.pragma_update(None, "foreign_keys", true)?;
+    migration
 }
 
 fn insert_created_empty_history(transaction: &rusqlite::Transaction<'_>) -> Result<(), SchemaError> {
@@ -765,8 +785,11 @@ fn insert_created_empty_history(transaction: &rusqlite::Transaction<'_>) -> Resu
 /// step; the caller has disabled FK enforcement for the duration of this
 /// transaction and re-enables it after COMMIT. Every legacy terminal envelope is
 /// parsed and validated; any single failure aborts the whole migration and keeps
-/// user_version 1.
-fn migrate_v1_to_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), SchemaError> {
+/// user_version 1. Returns the number of legacy parse-cache rows deleted.
+fn migrate_v1_to_v2(
+    transaction: &rusqlite::Transaction<'_>,
+    upgrade_request_id: &str,
+) -> Result<u64, SchemaError> {
     rebuild_file_inventory(transaction)?;
     transaction.execute_batch(V2_UPGRADE_DDL)?;
     migrate_file_result_legacy_cache(transaction)?;
@@ -782,15 +805,15 @@ fn migrate_v1_to_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), Schem
 
     // v1 parse cache rows carry no SourceGuardV2 and cannot be projected safely;
     // the cache can be rebuilt from source (spec Part 8.2).
-    transaction.execute("DELETE FROM parse_cache", [])?;
+    let invalidated = transaction.execute("DELETE FROM parse_cache", [])? as u64;
 
     transaction.execute(
         "INSERT INTO schema_migration_history(
             user_version, origin, upgrade_request_id, engine_build, committed_at_ms
          ) VALUES (2, 'upgraded_v1', ?1, ?2, ?3)",
-        params![AUTO_UPGRADE_REQUEST_ID, env!("AI_DAILY_ENGINE_BUILD"), now_ms()],
+        params![upgrade_request_id, env!("AI_DAILY_ENGINE_BUILD"), now_ms()],
     )?;
-    Ok(())
+    Ok(invalidated)
 }
 
 fn rebuild_file_inventory(transaction: &rusqlite::Transaction<'_>) -> Result<(), SchemaError> {
