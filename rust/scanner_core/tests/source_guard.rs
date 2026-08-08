@@ -41,6 +41,15 @@ fn same_size_and_preserved_mtime_replacement_must_change_guard() {
     let p = dir.path().join("f.txt");
     std::fs::write(&p, "AAAA").unwrap();
     let before = compute_source_guard(&p).unwrap();
+    // A normal local temp file must form the platform metadata identity, not
+    // silently degrade to the full-content fallback. A broken handle path in
+    // windows_identity/unix_identity must fail the suite, not hide behind
+    // content_sha256_v1.
+    assert_eq!(
+        before.kind,
+        platform_metadata_guard_kind(),
+        "a normal temp file must form the platform metadata identity"
+    );
     let original_mtime = std::fs::metadata(&p).unwrap().modified().unwrap();
 
     settle_metadata();
@@ -58,6 +67,42 @@ fn same_size_and_preserved_mtime_replacement_must_change_guard() {
             );
         }
     }
+}
+
+/// Pins the platform-specific identity path: a normal local file must produce
+/// `WindowsFileIdChangeTimeV1` on Windows and `UnixInodeCtimeV1` on Unix, so a
+/// regression that always falls back to the full-content hash is caught.
+#[test]
+fn normal_local_file_uses_platform_metadata_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("identity.txt");
+    std::fs::write(&p, "identity bytes").unwrap();
+
+    let guard = compute_source_guard(&p).expect("guard computation must succeed");
+    assert_eq!(
+        guard.kind,
+        platform_metadata_guard_kind(),
+        "the primary filesystem-identity path must be exercised"
+    );
+    assert!(
+        guard.guard_sha256.is_some(),
+        "metadata identity carries a hash"
+    );
+}
+
+#[cfg(windows)]
+fn platform_metadata_guard_kind() -> SourceGuardKind {
+    SourceGuardKind::WindowsFileIdChangeTimeV1
+}
+
+#[cfg(unix)]
+fn platform_metadata_guard_kind() -> SourceGuardKind {
+    SourceGuardKind::UnixInodeCtimeV1
+}
+
+#[cfg(not(any(windows, unix)))]
+fn platform_metadata_guard_kind() -> SourceGuardKind {
+    SourceGuardKind::ContentSha256V1
 }
 
 #[test]
