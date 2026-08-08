@@ -9,9 +9,29 @@ use ai_daily_scanner_core::store::schema::{
     configure_connection, migrate, LATEST_USER_VERSION, V1_DDL,
 };
 
-/// Build a committed v1 database with a terminal success run, its context row,
-/// one inventory row, one legacy parse-cache row, and one file result row.
-fn open_v1_fixture() -> (tempfile::TempDir, rusqlite::Connection) {
+#[derive(Clone, Copy)]
+enum FixtureRunKind {
+    Success,
+    Partial,
+    Error,
+    Running,
+}
+
+impl FixtureRunKind {
+    fn request_id(&self) -> &'static str {
+        match self {
+            FixtureRunKind::Success => "123e4567-e89b-42d3-a456-426614174000",
+            FixtureRunKind::Partial => "223e4567-e89b-42d3-a456-426614174001",
+            FixtureRunKind::Error => "323e4567-e89b-42d3-a456-426614174002",
+            FixtureRunKind::Running => "423e4567-e89b-42d3-a456-426614174003",
+        }
+    }
+}
+
+/// Builds a committed v1 database whose single run matches `kind`. Terminal
+/// fixtures carry one inventory row, one legacy parse-cache row, and one file
+/// result row; Success/Partial fixtures also carry a context_runs row.
+fn build_v1_fixture(kind: FixtureRunKind) -> (tempfile::TempDir, rusqlite::Connection) {
     let directory = tempfile::tempdir().expect("temporary directory");
     let path = directory.path().join("scan_index_v1.sqlite3");
     let connection = rusqlite::Connection::open(path).expect("database opens");
@@ -21,41 +41,40 @@ fn open_v1_fixture() -> (tempfile::TempDir, rusqlite::Connection) {
         .pragma_update(None, "user_version", 1)
         .expect("seed user_version");
 
-    let envelope = r##"{
-        "contract": "ai_daily_context",
-        "protocol_version": 1,
-        "request_id": "123e4567-e89b-42d3-a456-426614174000",
-        "engine_version": "test",
-        "engine_build": "test-build",
-        "status": "ok",
-        "file_context": "# daily report\n- shipped scanner foundation",
-        "summary": {
-            "source_file_count": 1, "success_count": 1, "timeout_count": 0,
-            "included_file_count": 1, "omitted_file_count": 0, "error_file_count": 0,
-            "input_chars": 1, "output_chars": 1, "total_duration_ms": 1,
-            "discovery_duration_ms": 0, "parse_duration_ms": 0, "compression_duration_ms": 0
-        },
-        "scan_run_id": 1,
-        "context_run_id": 1,
-        "warnings": [],
-        "error": null
-    }"##;
+    let request_id = kind.request_id();
+    match kind {
+        FixtureRunKind::Success => insert_success_run(&connection, request_id),
+        FixtureRunKind::Partial => insert_partial_run(&connection, request_id),
+        FixtureRunKind::Error => insert_error_run(&connection, request_id),
+        FixtureRunKind::Running => insert_running_run(&connection, request_id),
+    }
+    (directory, connection)
+}
 
+fn open_v1_fixture() -> (tempfile::TempDir, rusqlite::Connection) {
+    build_v1_fixture(FixtureRunKind::Success)
+}
+
+fn insert_scan_run(
+    connection: &rusqlite::Connection,
+    request_id: &str,
+    status: &str,
+    finished_at_ms: Option<i64>,
+    envelope: Option<&str>,
+) {
     connection
         .execute(
             "INSERT INTO scan_runs(
                 request_id, canonical_request_json, request_hash_algorithm, request_hash,
                 owner_id, status, created_at_ms, started_at_ms, updated_at_ms,
                 finished_at_ms, final_envelope_json
-             ) VALUES (?1, '{}', 'sha256-request-v1', ?2, 'owner', 'success', 1, 1, 1, 2, ?3)",
-            rusqlite::params![
-                "123e4567-e89b-42d3-a456-426614174000",
-                "0".repeat(64),
-                envelope,
-            ],
+             ) VALUES (?1, '{}', 'sha256-request-v1', ?2, 'owner', ?3, 1, 1, 1, ?4, ?5)",
+            rusqlite::params![request_id, "0".repeat(64), status, finished_at_ms, envelope],
         )
-        .expect("terminal scan_runs row");
+        .expect("scan_runs row");
+}
 
+fn insert_common_rows(connection: &rusqlite::Connection) {
     connection
         .execute(
             "INSERT INTO file_inventory(
@@ -66,7 +85,6 @@ fn open_v1_fixture() -> (tempfile::TempDir, rusqlite::Connection) {
             [],
         )
         .expect("inventory row");
-
     connection
         .execute(
             "INSERT INTO parse_cache(
@@ -79,22 +97,6 @@ fn open_v1_fixture() -> (tempfile::TempDir, rusqlite::Connection) {
             rusqlite::params!["0".repeat(64), "1".repeat(64)],
         )
         .expect("legacy parse cache row");
-
-    connection
-        .execute(
-            "INSERT INTO context_runs(
-                context_run_id, scan_run_id, context_profile_hash, status,
-                final_context, context_sha256, source_file_count, success_count,
-                timeout_count, included_file_count, omitted_file_count,
-                error_file_count, input_chars, output_chars, total_duration_ms,
-                discovery_duration_ms, parse_duration_ms, compression_duration_ms,
-                created_at_ms
-             ) VALUES (1, 1, ?1, 'success', '# daily report\n- shipped scanner foundation',
-                       ?2, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1)",
-            rusqlite::params!["3".repeat(64), "4".repeat(64)],
-        )
-        .expect("context run row");
-
     connection
         .execute(
             "INSERT INTO scan_file_results(
@@ -110,8 +112,119 @@ fn open_v1_fixture() -> (tempfile::TempDir, rusqlite::Connection) {
             rusqlite::params!["5".repeat(64), "6".repeat(64)],
         )
         .expect("file result row");
+}
 
-    (directory, connection)
+fn insert_context_run(connection: &rusqlite::Connection, status: &str, final_context: &str) {
+    connection
+        .execute(
+            "INSERT INTO context_runs(
+                context_run_id, scan_run_id, context_profile_hash, status,
+                final_context, context_sha256, source_file_count, success_count,
+                timeout_count, included_file_count, omitted_file_count,
+                error_file_count, input_chars, output_chars, total_duration_ms,
+                discovery_duration_ms, parse_duration_ms, compression_duration_ms,
+                created_at_ms
+             ) VALUES (1, 1, ?1, ?2, ?3, ?4, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1)",
+            rusqlite::params!["3".repeat(64), status, final_context, "4".repeat(64)],
+        )
+        .expect("context run row");
+}
+
+const SUCCESS_ENVELOPE: &str = r##"{
+    "contract": "ai_daily_context",
+    "protocol_version": 1,
+    "request_id": "123e4567-e89b-42d3-a456-426614174000",
+    "engine_version": "test",
+    "engine_build": "test-build",
+    "status": "ok",
+    "file_context": "# daily report\n- shipped scanner foundation",
+    "summary": {
+        "source_file_count": 1, "success_count": 1, "timeout_count": 0,
+        "included_file_count": 1, "omitted_file_count": 0, "error_file_count": 0,
+        "input_chars": 1, "output_chars": 1, "total_duration_ms": 1,
+        "discovery_duration_ms": 0, "parse_duration_ms": 0, "compression_duration_ms": 0
+    },
+    "scan_run_id": 1,
+    "context_run_id": 1,
+    "warnings": [],
+    "error": null
+}"##;
+
+const PARTIAL_ENVELOPE: &str = r##"{
+    "contract": "ai_daily_context",
+    "protocol_version": 1,
+    "request_id": "223e4567-e89b-42d3-a456-426614174001",
+    "engine_version": "test",
+    "engine_build": "test-build",
+    "status": "partial",
+    "file_context": "# partial report\n- recovered context",
+    "summary": {
+        "source_file_count": 2, "success_count": 1, "timeout_count": 0,
+        "included_file_count": 1, "omitted_file_count": 0, "error_file_count": 1,
+        "input_chars": 2, "output_chars": 2, "total_duration_ms": 1,
+        "discovery_duration_ms": 0, "parse_duration_ms": 0, "compression_duration_ms": 0
+    },
+    "scan_run_id": 1,
+    "context_run_id": 1,
+    "warnings": [
+        {
+            "error_code": "PARSER_FAILED",
+            "message": "one file failed",
+            "retryable": false,
+            "stage": "parse",
+            "file_path": null,
+            "backend": null
+        }
+    ],
+    "error": null
+}"##;
+
+const ERROR_ENVELOPE: &str = r##"{
+    "contract": "ai_daily_context",
+    "protocol_version": 1,
+    "request_id": "323e4567-e89b-42d3-a456-426614174002",
+    "engine_version": "test",
+    "engine_build": "test-build",
+    "status": "error",
+    "file_context": "",
+    "summary": {
+        "source_file_count": 0, "success_count": 0, "timeout_count": 0,
+        "included_file_count": 0, "omitted_file_count": 0, "error_file_count": 0,
+        "input_chars": 0, "output_chars": 0, "total_duration_ms": 1,
+        "discovery_duration_ms": 0, "parse_duration_ms": 0, "compression_duration_ms": 0
+    },
+    "scan_run_id": 1,
+    "context_run_id": null,
+    "warnings": [],
+    "error": {
+        "error_code": "PARSER_FAILED",
+        "message": "scanner could not start",
+        "retryable": false,
+        "stage": "parse",
+        "file_path": null,
+        "backend": null
+    }
+}"##;
+
+fn insert_success_run(connection: &rusqlite::Connection, request_id: &str) {
+    insert_scan_run(connection, request_id, "success", Some(2), Some(SUCCESS_ENVELOPE));
+    insert_common_rows(connection);
+    insert_context_run(connection, "success", "# daily report\n- shipped scanner foundation");
+}
+
+fn insert_partial_run(connection: &rusqlite::Connection, request_id: &str) {
+    insert_scan_run(connection, request_id, "partial", Some(2), Some(PARTIAL_ENVELOPE));
+    insert_common_rows(connection);
+    insert_context_run(connection, "partial", "# partial report\n- recovered context");
+}
+
+fn insert_error_run(connection: &rusqlite::Connection, request_id: &str) {
+    insert_scan_run(connection, request_id, "error", Some(2), Some(ERROR_ENVELOPE));
+    insert_common_rows(connection);
+}
+
+fn insert_running_run(connection: &rusqlite::Connection, request_id: &str) {
+    insert_scan_run(connection, request_id, "running", None, None);
 }
 
 #[test]
@@ -236,6 +349,27 @@ fn migrated_v1_rows_are_audited_as_migrated_and_caches_invalidated() {
         "context_runs must link the migrated payload artifact"
     );
 
+    // Payload artifacts (snapshot_eligible=0) never carry semantic rows; the
+    // body lives only in the artifact's final_context.
+    let artifact_files_count: i64 = conn
+        .query_row("SELECT count(*) FROM context_artifact_files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        artifact_files_count, 0,
+        "migrated payload artifacts carry no artifact file rows"
+    );
+    let artifact_decisions_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM context_artifact_decisions",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        artifact_decisions_count, 0,
+        "migrated payload artifacts carry no artifact decision rows"
+    );
+
     // The file_inventory rebuild preserves the inventory row.
     let inventory_count: i64 = conn
         .query_row("SELECT count(*) FROM file_inventory", [], |r| r.get(0))
@@ -259,6 +393,120 @@ fn migrated_v1_rows_are_audited_as_migrated_and_caches_invalidated() {
         .unwrap();
     assert_eq!(legacy_status.as_deref(), Some("fresh"));
     assert_eq!(legacy_reason.as_deref(), Some(""));
+}
+
+#[test]
+fn partial_run_migrates_to_payload_artifact_with_verbatim_warnings() {
+    let (_directory, mut conn) = build_v1_fixture(FixtureRunKind::Partial);
+
+    migrate(&mut conn).expect("partial v1 run upgrades to v2");
+
+    let artifact_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM context_artifacts WHERE snapshot_eligible=0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(artifact_count, 1, "partial run must produce one payload artifact");
+    let files_count: i64 = conn
+        .query_row("SELECT count(*) FROM context_artifact_files", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(files_count, 0, "payload artifacts carry no artifact file rows");
+    let decisions_count: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM context_artifact_decisions",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(decisions_count, 0, "payload artifacts carry no artifact decision rows");
+
+    // The old Envelope warnings are replayed verbatim in the metadata JSON.
+    let metadata_json: Option<String> = conn
+        .query_row(
+            "SELECT final_envelope_metadata_json FROM scan_runs WHERE scan_run_id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_str(metadata_json.as_deref().expect("metadata JSON present")).unwrap();
+    assert!(
+        metadata.get("file_context").is_none(),
+        "file_context must be removed from the metadata JSON"
+    );
+    let warnings = metadata.get("warnings").expect("warnings field present");
+    let warning = warnings.get(0).expect("first warning present");
+    assert_eq!(warning.get("error_code").unwrap(), "PARSER_FAILED");
+}
+
+#[test]
+fn error_run_migrates_without_artifact() {
+    let (_directory, mut conn) = build_v1_fixture(FixtureRunKind::Error);
+
+    migrate(&mut conn).expect("error v1 run upgrades to v2");
+
+    let artifact_count: i64 = conn
+        .query_row("SELECT count(*) FROM context_artifacts", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(artifact_count, 0, "error run must not produce an artifact");
+    let context_count: i64 = conn
+        .query_row("SELECT count(*) FROM context_runs", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(context_count, 0, "v1 error runs carry no context_runs row");
+    let provenance: String = conn
+        .query_row(
+            "SELECT audit_provenance_version FROM scan_runs WHERE scan_run_id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(provenance, "migrated_v1", "error run must be audited as migrated_v1");
+}
+
+#[test]
+fn nonterminal_v1_rows_are_audited_as_migrated_v1() {
+    let (_directory, mut conn) = build_v1_fixture(FixtureRunKind::Running);
+
+    migrate(&mut conn).expect("v1 database upgrades to v2");
+
+    let provenance: String = conn
+        .query_row(
+            "SELECT audit_provenance_version FROM scan_runs WHERE scan_run_id=1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        provenance, "migrated_v1",
+        "pre-upgrade running/abandoned rows must not be mislabeled full_v2"
+    );
+}
+
+#[test]
+fn migrate_on_v2_database_is_idempotent() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("scan_index_v2.sqlite3");
+    let mut conn = rusqlite::Connection::open(&path).unwrap();
+    configure_connection(&conn).unwrap();
+    migrate(&mut conn).unwrap();
+
+    let history_before: i64 = conn
+        .query_row("SELECT count(*) FROM schema_migration_history", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(history_before, 1, "fresh v2 database has exactly one history row");
+
+    migrate(&mut conn).expect("migrate on an already-v2 database must be a no-op");
+
+    let ver: i32 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .unwrap();
+    assert_eq!(ver, LATEST_USER_VERSION);
+    let history_after: i64 = conn
+        .query_row("SELECT count(*) FROM schema_migration_history", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(history_after, 1, "idempotent migrate must not add a history row");
 }
 
 #[test]

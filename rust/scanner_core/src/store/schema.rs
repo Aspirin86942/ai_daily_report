@@ -369,7 +369,7 @@ CREATE TABLE parse_cache (
 CREATE TABLE classification_cache (
     file_identity TEXT NOT NULL REFERENCES file_inventory(file_identity) ON DELETE CASCADE,
     source_version TEXT NOT NULL,
-    source_guard_kind TEXT NOT NULL,
+    source_guard_kind TEXT NOT NULL CHECK (source_guard_kind IN ('windows_file_id_change_time_v1', 'unix_inode_ctime_v1', 'content_sha256_v1')),
     source_guard_sha256 TEXT NOT NULL CHECK (length(source_guard_sha256) = 64),
     classifier_profile_hash TEXT NOT NULL CHECK (length(classifier_profile_hash) = 64),
     classifier_build TEXT NOT NULL CHECK (length(classifier_build) = 64),
@@ -465,11 +465,11 @@ CREATE TABLE context_artifact_files (
     truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
     content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
     classifier_status TEXT,
-    classifier_page_count INTEGER,
-    classifier_result_examined_pages INTEGER,
-    classifier_nominal_charged_pages INTEGER,
-    classifier_build TEXT,
-    classifier_profile_hash TEXT,
+    classifier_page_count INTEGER CHECK (classifier_page_count IS NULL OR classifier_page_count >= 0),
+    classifier_result_examined_pages INTEGER CHECK (classifier_result_examined_pages IS NULL OR classifier_result_examined_pages >= 0),
+    classifier_nominal_charged_pages INTEGER CHECK (classifier_nominal_charged_pages IS NULL OR classifier_nominal_charged_pages >= 0),
+    classifier_build TEXT CHECK (classifier_build IS NULL OR length(classifier_build) = 64),
+    classifier_profile_hash TEXT CHECK (classifier_profile_hash IS NULL OR length(classifier_profile_hash) = 64),
     PRIMARY KEY (artifact_id, file_identity)
 ) STRICT;
 
@@ -565,7 +565,7 @@ const V2_UPGRADE_DDL: &str = r#"
 CREATE TABLE classification_cache (
     file_identity TEXT NOT NULL REFERENCES file_inventory(file_identity) ON DELETE CASCADE,
     source_version TEXT NOT NULL,
-    source_guard_kind TEXT NOT NULL,
+    source_guard_kind TEXT NOT NULL CHECK (source_guard_kind IN ('windows_file_id_change_time_v1', 'unix_inode_ctime_v1', 'content_sha256_v1')),
     source_guard_sha256 TEXT NOT NULL CHECK (length(source_guard_sha256) = 64),
     classifier_profile_hash TEXT NOT NULL CHECK (length(classifier_profile_hash) = 64),
     classifier_build TEXT NOT NULL CHECK (length(classifier_build) = 64),
@@ -611,11 +611,11 @@ CREATE TABLE context_artifact_files (
     truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
     content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
     classifier_status TEXT,
-    classifier_page_count INTEGER,
-    classifier_result_examined_pages INTEGER,
-    classifier_nominal_charged_pages INTEGER,
-    classifier_build TEXT,
-    classifier_profile_hash TEXT,
+    classifier_page_count INTEGER CHECK (classifier_page_count IS NULL OR classifier_page_count >= 0),
+    classifier_result_examined_pages INTEGER CHECK (classifier_result_examined_pages IS NULL OR classifier_result_examined_pages >= 0),
+    classifier_nominal_charged_pages INTEGER CHECK (classifier_nominal_charged_pages IS NULL OR classifier_nominal_charged_pages >= 0),
+    classifier_build TEXT CHECK (classifier_build IS NULL OR length(classifier_build) = 64),
+    classifier_profile_hash TEXT CHECK (classifier_profile_hash IS NULL OR length(classifier_profile_hash) = 64),
     PRIMARY KEY (artifact_id, file_identity)
 ) STRICT;
 
@@ -772,6 +772,14 @@ fn migrate_v1_to_v2(transaction: &rusqlite::Transaction<'_>) -> Result<(), Schem
     migrate_file_result_legacy_cache(transaction)?;
     migrate_terminal_envelopes(transaction)?;
 
+    // Rows that predate the upgrade (running/abandoned) carry no envelope; they
+    // are still audited as migrated_v1 rather than being mislabeled full_v2.
+    transaction.execute(
+        "UPDATE scan_runs SET audit_provenance_version='migrated_v1'
+         WHERE status IN ('running', 'abandoned')",
+        [],
+    )?;
+
     // v1 parse cache rows carry no SourceGuardV2 and cannot be projected safely;
     // the cache can be rebuilt from source (spec Part 8.2).
     transaction.execute("DELETE FROM parse_cache", [])?;
@@ -891,8 +899,10 @@ fn migrate_terminal_envelopes(transaction: &rusqlite::Transaction<'_>) -> Result
                     "scan_run {scan_run_id}: context summary could not be serialized: {error}"
                 ))
             })?;
-            let artifact_size_bytes =
-                (final_context.len() + semantic_summary_json.len() + metadata_json.len()) as i64;
+            // Parent + owned semantic rows only. The summary is serialized once
+            // into semantic_summary_json; metadata_json is a separate copy and is
+            // not part of the artifact payload.
+            let artifact_size_bytes = (final_context.len() + semantic_summary_json.len()) as i64;
             transaction.execute(
                 "INSERT INTO context_artifacts(
                     snapshot_eligible, snapshot_key_sha256, snapshot_key_json,
