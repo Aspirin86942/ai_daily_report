@@ -307,6 +307,9 @@ pub enum TerminalIntent {
 /// Bounded execution metrics collected by the scheduler (spec Part 5.3 subset).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExecutionMetrics {
+    /// Discovery-observed accepted source count; fixed to `MAX_SOURCE_FILES_PER_RUN
+    /// + 1` when the engine-owned ceiling triggers (spec Part 2.1).
+    pub discovery_observed_file_count: u64,
     pub source_guard_content_hash_file_count: u64,
     pub source_guard_unavailable_count: u64,
     pub source_guard_bytes_read: u64,
@@ -435,6 +438,45 @@ impl BudgetedContextScheduler {
         self.stored_workers = input.workers.clone();
         self.stored_engine_version = input.engine_version.clone();
         self.stored_engine_build = input.engine_build.clone();
+        // spec Part 2.1: engine-owned `MAX_SOURCE_FILES_PER_RUN` hard ceiling.
+        // The 1,000,001st accepted source file fails closed as a non-retryable
+        // run-level Error BEFORE `prepare_inventory`, with zero file rows and
+        // `discovery_observed_file_count = ceiling + 1`.
+        if input.discovery.len() as u64 > ai_daily_scanner_contract::MAX_SOURCE_FILES_PER_RUN {
+            let mut metrics = ExecutionMetrics {
+                discovery_observed_file_count: ai_daily_scanner_contract::MAX_SOURCE_FILES_PER_RUN
+                    + 1,
+                ..ExecutionMetrics::default()
+            };
+            metrics.deadline_precommit_elapsed_ms = self.clock.now_ms();
+            return Ok(BudgetedScanOutcome {
+                scan_run_id: input.scan_run_id,
+                terminal_intent: TerminalIntent::Error,
+                inventory: Vec::new(),
+                file_results: Vec::new(),
+                parse_cache_receipts: Vec::new(),
+                classification_cache_receipts: Vec::new(),
+                diagnostics: vec![RunDiagnosticRecord {
+                    severity: DiagnosticSeverity::Error,
+                    diagnostic: Diagnostic {
+                        error_code: ErrorCode::SourceFileLimitExceeded,
+                        message: format!(
+                            "discovery observed {} source files, exceeding the engine ceiling of {}",
+                            input.discovery.len(),
+                            ai_daily_scanner_contract::MAX_SOURCE_FILES_PER_RUN
+                        ),
+                        retryable: false,
+                        stage: DiagnosticStage::Discovery,
+                        file_path: Nullable(None),
+                        backend: Nullable(None),
+                    },
+                }],
+                stage_metrics: Vec::new(),
+                extension_metrics: Vec::new(),
+                context: None,
+                execution_metrics: metrics,
+            });
+        }
         // spec Part 5.3: discovery issues surface as run-level warnings (they
         // mark the run Partial and never silently disappear).
         let mut diagnostics: Vec<RunDiagnosticRecord> = input
@@ -507,7 +549,7 @@ impl BudgetedContextScheduler {
                 &classifier_build,
                 &existed_before,
                 &mut metrics,
-            );
+            )?;
 
         // ---- Fixed context sections + budget model ----
         let mut fixed =
@@ -557,6 +599,7 @@ impl BudgetedContextScheduler {
         let parse_outputs = self.run_parses(
             &admission,
             &snapshot,
+            &classifications,
             &profile,
             &existed_before,
             &runtime_classification,
@@ -615,6 +658,7 @@ impl BudgetedContextScheduler {
             &snapshot,
             &input.work_dir,
             &admission,
+            &classifications,
             &parse_outputs,
             &runtime_classification,
             &input.rejected_profile_hash,
@@ -773,7 +817,10 @@ struct ParseOutputs {
 }
 
 fn source_guard_metrics(discovery: &[DiscoveredFileOut]) -> ExecutionMetrics {
-    let mut metrics = ExecutionMetrics::default();
+    let mut metrics = ExecutionMetrics {
+        discovery_observed_file_count: discovery.len() as u64,
+        ..ExecutionMetrics::default()
+    };
     for file in discovery {
         match source_guard_kind_from_text(file.source_guard_kind.as_deref().unwrap_or("")) {
             Some(SourceGuardKind::Unavailable) => metrics.source_guard_unavailable_count += 1,
@@ -872,24 +919,27 @@ fn classifier_error_line(
     if runtime.contains(&plan.file_identity) {
         return None;
     }
-    let status = classifications.get(&plan.file_identity).map(|r| r.status);
+    let result = classifications.get(&plan.file_identity);
+    let status = result.map(|r| r.status);
     match status {
-        Some(PdfClassificationStatus::Unknown) => Some(format!(
-            "- {} | reason=parse_error | error=PARSER_TIMEOUT",
-            plan.relative_path
-        )),
+        Some(PdfClassificationStatus::Unknown) => {
+            let code = if result
+                .and_then(|r| r.error_code.as_deref())
+                == Some("PARSER_TIMEOUT")
+            {
+                "PARSER_TIMEOUT"
+            } else {
+                "PARSER_FAILED"
+            };
+            Some(format!(
+                "- {} | reason=parse_error | error={code}",
+                plan.relative_path
+            ))
+        }
         Some(PdfClassificationStatus::Error) => Some(format!(
             "- {} | reason=parse_error | error=PARSER_FAILED",
             plan.relative_path
         )),
-        _ => None,
-    }
-}
-
-fn outcome_page_count(status: &PdfClassificationStatus) -> Option<u64> {
-    match status {
-        PdfClassificationStatus::TextInParseWindow
-        | PdfClassificationStatus::NoTextInParseWindow => Some(1),
         _ => None,
     }
 }
@@ -900,6 +950,7 @@ fn classification_cache_record(
     classifier_build: &str,
     status: &PdfClassificationStatus,
     page_count: Option<u64>,
+    result_examined_pages: Option<u64>,
 ) -> Option<ClassificationCacheWriteRecord> {
     let kind = file.source_guard_kind.as_deref()?;
     let hash = file.source_guard_sha256.clone()?;
@@ -908,7 +959,13 @@ fn classification_cache_record(
         PdfClassificationStatus::NoTextInParseWindow => "no_text_in_parse_window",
         _ => return None,
     };
-    let pages = page_count.unwrap_or(0).max(1);
+    // spec Part 3.2: text is `1..window_pages`, no-text MUST equal
+    // `window_pages`; the typed result's real counts are preserved verbatim.
+    let pages = page_count?;
+    let examined = result_examined_pages?;
+    if pages == 0 || examined == 0 {
+        return None;
+    }
     Some(ClassificationCacheWriteRecord {
         file_identity: file.file_identity.clone(),
         source_version: file.source_version.clone(),
@@ -918,7 +975,7 @@ fn classification_cache_record(
         classifier_build: classifier_build.to_string(),
         status: status_text.to_string(),
         page_count: pages,
-        result_examined_pages: pages,
+        result_examined_pages: examined,
     })
 }
 
@@ -976,11 +1033,14 @@ impl BudgetedContextScheduler {
         classifier_build: &str,
         existed_before: &HashSet<String>,
         metrics: &mut ExecutionMetrics,
-    ) -> (
-        BTreeMap<String, crate::admission::PdfClassificationResult>,
-        HashSet<String>,
-        Vec<String>,
-    ) {
+    ) -> Result<
+        (
+            BTreeMap<String, crate::admission::PdfClassificationResult>,
+            HashSet<String>,
+            Vec<String>,
+        ),
+        SchedulerFailure,
+    > {
         let mut results = BTreeMap::new();
         let mut runtime_not_parsed = HashSet::new();
         let mut classification_fresh_hits = Vec::new();
@@ -1019,11 +1079,16 @@ impl BudgetedContextScheduler {
             metrics.classification_cache_lookup_count += 1;
             any_lookup = true;
             let existed = existed_before.contains(&plan.file_identity);
-            match self
+            let lookup = self
                 .cache
                 .lookup_classification(file, classifier_profile_hash, classifier_build, existed)
-            {
-                Ok(ClassificationCacheLookup::Fresh(entry)) => {
+                // spec Part 4: a cache lookup failure is run-level corruption /
+                // store error, NEVER a per-file miss disposition.
+                .map_err(|error| SchedulerFailure {
+                    diagnostic: error.diagnostic(DiagnosticStage::Cache),
+                })?;
+            match lookup {
+                ClassificationCacheLookup::Fresh(entry) => {
                     classification_fresh_hits.push(plan.file_identity.clone());
                     let status = match entry.status.as_str() {
                         "text_in_parse_window" => PdfClassificationStatus::TextInParseWindow,
@@ -1040,7 +1105,7 @@ impl BudgetedContextScheduler {
                         },
                     );
                 }
-                Ok(ClassificationCacheLookup::Miss(_)) => {
+                ClassificationCacheLookup::Miss(_) => {
                     any_miss = true;
                     let remaining = work_deadline.saturating_sub(self.clock.now_ms());
                     if remaining == 0 {
@@ -1062,7 +1127,11 @@ impl BudgetedContextScheduler {
                         policy_version: profile.classifier_policy_version.clone(),
                     };
                     let outcome = self.classifier.classify_pdf(&request, timeout);
-                    let (status, error_code) = match outcome {
+                    // spec Part 3.2: carry the typed result's REAL page counts
+                    // (page_count / result_examined_pages), and distinguish a
+                    // classifier per-file timeout (-> Timeout) from crash /
+                    // transient I/O / protocol failure (-> Error, retryable=true).
+                    let classification = match outcome {
                         Ok(result) => {
                             let status = match result.status {
                                 ai_daily_scanner_contract::PdfClassifierResultStatus::TextInParseWindow => {
@@ -1087,19 +1156,28 @@ impl BudgetedContextScheduler {
                                     "PARSER_FAILED".to_string()
                                 }
                             });
-                            (status, error_code)
+                            crate::admission::PdfClassificationResult {
+                                file_identity: plan.file_identity.clone(),
+                                status,
+                                page_count: result.page_count.0,
+                                result_examined_pages: result.result_examined_pages.0,
+                                error_code,
+                            }
                         }
                         Err(failure) => {
                             let timed_out =
                                 failure.diagnostic.error_code == ErrorCode::ParserTimeout;
-                            (
-                                PdfClassificationStatus::Unknown,
-                                Some(if timed_out {
+                            crate::admission::PdfClassificationResult {
+                                file_identity: plan.file_identity.clone(),
+                                status: PdfClassificationStatus::Unknown,
+                                page_count: None,
+                                result_examined_pages: None,
+                                error_code: Some(if timed_out {
                                     "PARSER_TIMEOUT".to_string()
                                 } else {
                                     "PARSER_FAILED".to_string()
                                 }),
-                            )
+                            }
                         }
                     };
                     if !self.guard.verify(&file.path, &guard) {
@@ -1115,25 +1193,10 @@ impl BudgetedContextScheduler {
                         );
                         continue;
                     }
-                    let page_count = if matches!(
-                        status,
-                        PdfClassificationStatus::TextInParseWindow
-                            | PdfClassificationStatus::NoTextInParseWindow
-                    ) {
-                        outcome_page_count(&status)
-                    } else {
-                        None
-                    };
-                    results.insert(
-                        plan.file_identity.clone(),
-                        crate::admission::PdfClassificationResult {
-                            file_identity: plan.file_identity.clone(),
-                            status,
-                            page_count,
-                            result_examined_pages: page_count,
-                            error_code,
-                        },
-                    );
+                    let status = classification.status;
+                    let page_count = classification.page_count;
+                    let result_examined_pages = classification.result_examined_pages;
+                    results.insert(plan.file_identity.clone(), classification);
                     // Success-only classification cache write while remaining > 0.
                     if self.clock.now_ms() < work_deadline {
                         if let Some(record) = classification_cache_record(
@@ -1142,6 +1205,7 @@ impl BudgetedContextScheduler {
                             classifier_build,
                             &status,
                             page_count,
+                            result_examined_pages,
                         ) {
                             let _ = self
                                 .cache
@@ -1149,22 +1213,10 @@ impl BudgetedContextScheduler {
                         }
                     }
                 }
-                Err(_) => {
-                    results.insert(
-                        plan.file_identity.clone(),
-                        crate::admission::PdfClassificationResult {
-                            file_identity: plan.file_identity.clone(),
-                            status: PdfClassificationStatus::Error,
-                            page_count: None,
-                            result_examined_pages: None,
-                            error_code: Some("CACHE_WRITE_FAILED".to_string()),
-                        },
-                    );
-                }
             }
         }
         metrics.classification_cache_all_hit = if any_lookup { Some(!any_miss) } else { None };
-        (results, runtime_not_parsed, classification_fresh_hits)
+        Ok((results, runtime_not_parsed, classification_fresh_hits))
     }
 }
 
@@ -1214,6 +1266,7 @@ impl BudgetedContextScheduler {
         &self,
         admission: &[AdmissionDecision],
         snapshot: &HashMap<String, &DiscoveredFileOut>,
+        classifications: &BTreeMap<String, crate::admission::PdfClassificationResult>,
         profile: &NormalizedScannerProfileV2,
         existed_before: &HashSet<String>,
         runtime_classification: &HashSet<String>,
@@ -1240,6 +1293,14 @@ impl BudgetedContextScheduler {
                     continue;
                 };
                 if runtime_classification.contains(&decision.file_identity) {
+                    continue;
+                }
+                // spec Part 1.2/3.2: a no-text PDF admitted as a metadata-only
+                // draft never starts a body parser.
+                if *route == RouteKind::Pdf
+                    && classifications.get(&decision.file_identity).map(|r| r.status)
+                        == Some(PdfClassificationStatus::NoTextInParseWindow)
+                {
                     continue;
                 }
                 metrics.parse_cache_lookup_count += 1;
@@ -1527,11 +1588,25 @@ fn file_evidence(
             }
         }
         PlanAction::ClassifierFailed { status } => {
-            let (parse_status, code, retryable) = match status {
-                PdfClassificationStatus::Unknown => {
+            // spec Part 3.2: a classifier per-file TIMEOUT maps to unknown ->
+            // Timeout; crash / transient I/O / protocol failure maps to unknown ->
+            // Error with retryable=true. The classification error_code carries
+            // the distinguishing PARSER_TIMEOUT / PARSER_FAILED marker.
+            let is_timeout = match status {
+                PdfClassificationStatus::Unknown => classifications
+                    .get(&file.file_identity)
+                    .and_then(|result| result.error_code.as_deref())
+                    == Some("PARSER_TIMEOUT"),
+                _ => false,
+            };
+            let (parse_status, code, retryable) = match (status, is_timeout) {
+                (PdfClassificationStatus::Unknown, true) => {
                     (ParseStatus::Timeout, ErrorCode::ParserTimeout, true)
                 }
-                PdfClassificationStatus::Error => {
+                (PdfClassificationStatus::Unknown, false) => {
+                    (ParseStatus::Error, ErrorCode::ParserFailed, true)
+                }
+                (PdfClassificationStatus::Error, _) => {
                     (ParseStatus::Error, ErrorCode::ParserFailed, false)
                 }
                 _ => (ParseStatus::Error, ErrorCode::ParserFailed, false),
@@ -1866,6 +1941,7 @@ fn build_file_results(
     snapshot: &HashMap<String, &DiscoveredFileOut>,
     work_dir: &str,
     admission: &[AdmissionDecision],
+    classifications: &BTreeMap<String, crate::admission::PdfClassificationResult>,
     parse_outputs: &ParseOutputs,
     runtime_classification: &HashSet<String>,
     rejected_profile_hash: &str,
@@ -1922,35 +1998,48 @@ fn build_file_results(
                     String::new(),
                     String::new(),
                 ),
-                PlanAction::ClassifierFailed { status } => (
-                    if *status == PdfClassificationStatus::Unknown {
-                        ParseStatus::Timeout
-                    } else {
-                        ParseStatus::Error
-                    },
-                    "not_parsed".to_string(),
-                    AuditWorkerLane::NotParsed,
-                    Some(Diagnostic {
-                        error_code: if *status == PdfClassificationStatus::Unknown {
-                            ErrorCode::ParserTimeout
-                        } else {
-                            ErrorCode::ParserFailed
-                        },
-                        message: format!("pdf classification {status:?}"),
-                        retryable: *status == PdfClassificationStatus::Unknown,
-                        stage: DiagnosticStage::Parse,
-                        file_path: Nullable(Some(file.path.clone())),
-                        backend: Nullable(Some("pdf_classifier".to_string())),
-                    }),
-                    crate::store::sha256_hex(b""),
-                    false,
-                    0,
-                    0,
-                    0,
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                ),
+                PlanAction::ClassifierFailed { status } => {
+                    let is_timeout = match status {
+                        PdfClassificationStatus::Unknown => classifications
+                            .get(&file.file_identity)
+                            .and_then(|result| result.error_code.as_deref())
+                            == Some("PARSER_TIMEOUT"),
+                        _ => false,
+                    };
+                    let (parse_status, error_code, retryable) = match (status, is_timeout) {
+                        (PdfClassificationStatus::Unknown, true) => {
+                            (ParseStatus::Timeout, ErrorCode::ParserTimeout, true)
+                        }
+                        (PdfClassificationStatus::Unknown, false) => {
+                            (ParseStatus::Error, ErrorCode::ParserFailed, true)
+                        }
+                        (PdfClassificationStatus::Error, _) => {
+                            (ParseStatus::Error, ErrorCode::ParserFailed, false)
+                        }
+                        _ => (ParseStatus::Error, ErrorCode::ParserFailed, false),
+                    };
+                    (
+                        parse_status,
+                        "not_parsed".to_string(),
+                        AuditWorkerLane::NotParsed,
+                        Some(Diagnostic {
+                            error_code,
+                            message: format!("pdf classification {status:?}"),
+                            retryable,
+                            stage: DiagnosticStage::Parse,
+                            file_path: Nullable(Some(file.path.clone())),
+                            backend: Nullable(Some("pdf_classifier".to_string())),
+                        }),
+                        crate::store::sha256_hex(b""),
+                        false,
+                        0,
+                        0,
+                        0,
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    )
+                }
                 PlanAction::Admit { .. } => {
                     if runtime_classification.contains(&file.file_identity)
                         || parse_outputs.runtime_not_parsed.contains(&file.file_identity)

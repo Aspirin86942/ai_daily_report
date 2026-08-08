@@ -708,6 +708,10 @@ struct TestCache {
     classification: HashMap<String, ClassificationCacheLookup>,
     existed: HashSet<String>,
     parse_lookups: Arc<Mutex<u64>>,
+    /// Captured classification-cache writes (verified in tests).
+    classification_writes: Arc<Mutex<Vec<ClassificationCacheWriteRecord>>>,
+    /// When set, `lookup_classification` returns this error (run-level failure).
+    classification_lookup_error: Option<CachePortError>,
 }
 
 impl TestCache {
@@ -765,6 +769,9 @@ impl CachePort for TestCache {
         _classifier_build: &str,
         _inventory_existed_before: bool,
     ) -> Result<ClassificationCacheLookup, CachePortError> {
+        if let Some(error) = &self.classification_lookup_error {
+            return Err(error.clone());
+        }
         Ok(self
             .classification
             .get(&file.file_identity)
@@ -785,8 +792,12 @@ impl CachePort for TestCache {
     fn write_classification(
         &self,
         _now_ms: u64,
-        _records: &[ClassificationCacheWriteRecord],
+        records: &[ClassificationCacheWriteRecord],
     ) -> Result<(), CachePortError> {
+        self.classification_writes
+            .lock()
+            .unwrap()
+            .extend(records.iter().cloned());
         Ok(())
     }
 }
@@ -1568,4 +1579,185 @@ fn discovery_issues_mark_the_run_partial_with_warnings() {
         .diagnostics
         .iter()
         .any(|record| record.diagnostic.error_code == ErrorCode::DiscoveryEntryUnreadable));
+}
+
+#[test]
+fn classification_cache_persists_real_page_counts() {
+    // spec Part 3.2: the classification cache stores the classifier's REAL
+    // page counts (page_count / result_examined_pages), never a hardcoded 1.
+    let profile = v2_profile(ReportMode::Daily);
+    let discovery = vec![discovered("report.pdf", ".pdf", 256)];
+    let classifier = TestClassifier {
+        results: HashMap::from([(
+            "C:\\corpus\\report.pdf".to_string(),
+            no_text_result("report.pdf"), // page_count=2, result_examined_pages=2
+        )]),
+    };
+    let parser = TestParser {
+        results: HashMap::new(),
+    };
+    let cache = TestCache {
+        classification_writes: Arc::new(Mutex::new(Vec::new())),
+        ..TestCache::default()
+    };
+    let writes = cache.classification_writes.clone();
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        cache,
+        parser,
+        classifier,
+        discovery,
+        profile,
+    )
+    .expect("outcome");
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
+    let writes = writes.lock().unwrap();
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].status, "no_text_in_parse_window");
+    assert_eq!(writes[0].page_count, 2);
+    assert_eq!(writes[0].result_examined_pages, 2);
+}
+
+#[test]
+fn source_file_limit_exceeds_fail_closed() {
+    // spec Part 2.1: the 1,000,001st source file fails closed as a non-retryable
+    // run-level Error BEFORE prepare_inventory, with zero file rows and
+    // discovery_observed_file_count = ceiling + 1.
+    let profile = v2_profile(ReportMode::Daily);
+    let discovery: Vec<DiscoveredFileOut> = (0..1_000_001)
+        .map(|index| discovered(&format!("notes/f{index:06}.md"), ".md", 64))
+        .collect();
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        TestCache::default(),
+        TestParser {
+            results: HashMap::new(),
+        },
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        discovery,
+        profile,
+    )
+    .expect("outcome");
+
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Error);
+    assert_eq!(
+        outcome.execution_metrics.discovery_observed_file_count,
+        1_000_001
+    );
+    assert!(outcome.file_results.is_empty());
+    assert!(outcome.inventory.is_empty());
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|record| record.diagnostic.error_code == ErrorCode::SourceFileLimitExceeded));
+}
+
+#[test]
+fn classification_lookup_failure_propagates_as_run_level() {
+    // spec Part 4: a classification cache lookup failure is a run-level
+    // adapter/store error, NEVER a per-file miss disposition.
+    let profile = v2_profile(ReportMode::Daily);
+    let discovery = vec![discovered("report.pdf", ".pdf", 256)];
+    let cache = TestCache {
+        classification_lookup_error: Some(CachePortError::Store {
+            detail: "injected lookup failure".to_string(),
+        }),
+        ..TestCache::default()
+    };
+    let clock = FakeClock::new();
+    let result = run_scheduler(
+        &clock,
+        cache,
+        TestParser {
+            results: HashMap::new(),
+        },
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        discovery,
+        profile,
+    );
+    assert!(result.is_err(), "lookup failure must be a SchedulerFailure");
+    let err = result.err().expect("err");
+    assert_eq!(err.diagnostic.error_code, ErrorCode::CacheWriteFailed);
+    assert!(err.diagnostic.retryable);
+}
+
+#[test]
+fn classifier_unknown_maps_timeout_vs_crash() {
+    // spec Part 3.2: classifier per-file timeout -> unknown -> Timeout; crash /
+    // transient I/O / protocol failure -> unknown -> Error retryable=true.
+    let mut profile = v2_profile(ReportMode::Daily);
+    profile.parse.pdf.max_pages = 5;
+    let diag = |code: ai_daily_scanner_contract::PythonOperationErrorCode| {
+        ai_daily_scanner_contract::PythonOperationDiagnosticV1 {
+            error_code: code,
+            message: "classifier failure".to_string(),
+            retryable: true,
+            stage: ai_daily_scanner_contract::PythonOperationStage::Process,
+            file_path: ai_daily_scanner_contract::Nullable(None),
+            backend: ai_daily_scanner_contract::Nullable(None),
+        }
+    };
+    let unknown_result = |code: ai_daily_scanner_contract::PythonOperationErrorCode| {
+        PdfClassifierResultV1 {
+            status: PdfClassifierResultStatus::Unknown,
+            page_count: ai_daily_scanner_contract::Nullable(None),
+            result_examined_pages: ai_daily_scanner_contract::Nullable(None),
+            diagnostic: ai_daily_scanner_contract::Nullable(Some(diag(code))),
+        }
+    };
+    let discovery = vec![
+        discovered("timeout.pdf", ".pdf", 128),
+        discovered("crash.pdf", ".pdf", 128),
+    ];
+    let classifier = TestClassifier {
+        results: HashMap::from([
+            (
+                "C:\\corpus\\timeout.pdf".to_string(),
+                unknown_result(
+                    ai_daily_scanner_contract::PythonOperationErrorCode::ParserTimeout,
+                ),
+            ),
+            (
+                "C:\\corpus\\crash.pdf".to_string(),
+                unknown_result(
+                    ai_daily_scanner_contract::PythonOperationErrorCode::ParserFailed,
+                ),
+            ),
+        ]),
+    };
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        TestCache::default(),
+        TestParser {
+            results: HashMap::new(),
+        },
+        classifier,
+        discovery,
+        profile,
+    )
+    .expect("outcome");
+
+    let timeout = outcome
+        .file_results
+        .iter()
+        .find(|r| r.relative_path == "timeout.pdf")
+        .expect("timeout.pdf");
+    assert_eq!(timeout.parse_status, ParseStatus::Timeout);
+    let crash = outcome
+        .file_results
+        .iter()
+        .find(|r| r.relative_path == "crash.pdf")
+        .expect("crash.pdf");
+    assert_eq!(crash.parse_status, ParseStatus::Error);
+    assert!(
+        crash.error.as_ref().is_some_and(|diag| diag.retryable),
+        "crash/transient must be retryable"
+    );
 }
