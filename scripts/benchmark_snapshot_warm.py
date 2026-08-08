@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import platform
+import shutil
 import sqlite3
 import sys
 import time
@@ -103,6 +104,14 @@ def checkpoint_db(db_path: Path) -> None:
         conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     finally:
         conn.close()
+
+
+def _fresh_dir(path: Path) -> Path:
+    """Create a fresh isolated directory (never reuse a stale DB/cold dir)."""
+    if path.exists():
+        shutil.rmtree(path)
+    path.mkdir(parents=True)
+    return path
 
 
 def request_id_exists(db_path: Path, request_id: str) -> bool:
@@ -245,8 +254,7 @@ def run_build_context(
             raise ValueError("scanner response contract mismatch")
         if parsed.get("request_id") != request_id:
             raise ValueError("scanner response request_id mismatch")
-        if parsed.get("status") not in ("ok", "partial"):
-            raise ValueError("scanner response status is not ok/partial")
+        # ok / partial / error 都接受并记录；由场景逻辑判定 cold 是否 clean。
         envelope.update(parsed)
         return parsed
 
@@ -267,6 +275,7 @@ def run_build_context(
 
 
 def run_inspect_v2(scanner: Path, db_path: Path, scan_run_id: int) -> dict:
+    """Non-raising inspect v2 probe. Returns {ok, payload, error}."""
     request = {
         "contract": "ai_daily_context",
         "protocol_version": 1,
@@ -281,10 +290,6 @@ def run_inspect_v2(scanner: Path, db_path: Path, scan_run_id: int) -> dict:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             raise ValueError("inspect response is not a JSON object")
-        if parsed.get("contract") != "ai_daily_context":
-            raise ValueError("inspect response contract mismatch")
-        if parsed.get("response_version") != 2:
-            raise ValueError("inspect response is not v2")
         payload.update(parsed)
         return parsed
 
@@ -293,12 +298,18 @@ def run_inspect_v2(scanner: Path, db_path: Path, scan_run_id: int) -> dict:
         json.dumps(request).encode("utf-8"),
         response_validator=validator,
     )
-    if result.exit_code != 0 or not result.validated or payload.get("status") != "ok":
-        raise RuntimeError(
-            f"inspect-run v2 failed exit={result.exit_code} "
-            f"validated={result.validated} status={payload.get('status')}"
-        )
-    return payload
+    if not result.validated:
+        return {"ok": False, "payload": payload, "error": "inspect validate failed"}
+    if payload.get("status") != "ok":
+        error = payload.get("error") or {}
+        return {
+            "ok": False,
+            "payload": payload,
+            "error": (error.get("error_code") or "inspect status=error"),
+        }
+    if result.exit_code != 0:
+        return {"ok": False, "payload": payload, "error": "inspect exit non-zero"}
+    return {"ok": True, "payload": payload, "error": None}
 
 
 def _execution_metrics(inspect_payload: dict) -> dict:
@@ -306,6 +317,50 @@ def _execution_metrics(inspect_payload: dict) -> dict:
     if not isinstance(metrics, dict):
         raise RuntimeError("inspect v2 response has no execution_metrics")
     return metrics
+
+
+def query_deadline_metrics(db_path: Path, scan_run_id: int) -> dict | None:
+    """DB 直接读取 stage_deadline_exhausted_count（inspect v2 对 deadline-partial
+    失败时的诚实回退；null 表示该 run 无 metrics 行）。"""
+    try:
+        conn = sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT stage_deadline_exhausted_count, snapshot_hit,"
+                " parse_cache_lookup_count, classification_cache_lookup_count"
+                " FROM scan_execution_metrics WHERE scan_run_id=?",
+                (scan_run_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return {
+                "stage_deadline_exhausted_count": row[0],
+                "snapshot_hit": bool(row[1]),
+                "parse_cache_lookup_count": row[2],
+                "classification_cache_lookup_count": row[3],
+            }
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
+def query_runtime_not_parsed_count(db_path: Path, scan_run_id: int) -> int | None:
+    """DB 直接读取 runtime NotParsed 行数（deadline-partial 审计回退）。"""
+    try:
+        conn = sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True)
+        try:
+            row = conn.execute(
+                "SELECT count(*) FROM context_decisions cd"
+                " JOIN context_runs cr USING (context_run_id)"
+                " WHERE cr.scan_run_id=? AND cd.reason='runtime_deadline_exhausted'",
+                (scan_run_id,),
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
 
 
 def _version_evidence(scanner: Path) -> dict:
@@ -346,8 +401,7 @@ def run_7d_snapshot_warm(
     profile: dict | None = None,
 ) -> dict:
     profile = profile or SEVEN_D_PROFILE
-    cold_dir = out_root / "7d_cold"
-    cold_dir.mkdir(parents=True)
+    cold_dir = _fresh_dir(out_root / "7d_cold")
     cold_db = cold_dir / "scan_index_v2.sqlite3"
 
     cold_req_id = str(uuid.uuid4())
@@ -363,15 +417,46 @@ def run_7d_snapshot_warm(
         profile=profile,
     )
     checkpoint_db(cold_db)
-    if cold["scan_run_id"] is None or cold["status"] != "ok":
-        raise RuntimeError(f"7d cold run failed: {cold}")
+    cold_inspect = None
+    cold_clean = False
+    cold_context = None
+    corpus = {"source_count": None}
+    if cold["scan_run_id"] is not None:
+        cold_inspect = run_inspect_v2(scanner, cold_db, cold["scan_run_id"])
+        conn = sqlite3.connect(cold_db)
+        try:
+            corpus = anonymous_corpus_hash(conn)
+            cold_context = capture_context_state(conn, cold["scan_run_id"])
+        finally:
+            conn.close()
+        # 7d snapshot warm 的 cold 只要求 Success（status=ok）。cold run 自身的
+        # inspect v2 若因 RUN_CORRUPT 等缺陷失败，单独记录为 cold_inspect_error，
+        # 不阻断 snapshot warm 测量（snapshot warm 的 inspect 走 snapshot rows）。
+        cold_clean = cold["status"] == "ok" and cold_context is not None
 
-    conn = sqlite3.connect(cold_db)
-    try:
-        corpus = anonymous_corpus_hash(conn)
-        cold_context = capture_context_state(conn, cold["scan_run_id"])
-    finally:
-        conn.close()
+    if not cold_clean:
+        return {
+            "window": {"start": SEVEN_D_START.isoformat(), "end": SEVEN_D_END.isoformat()},
+            "report_mode": report_mode,
+            "corpus": corpus,
+            "cold_wall_ms": cold["wall_ms"],
+            "cold_status": cold["status"],
+            "cold_inspect_ok": bool(cold_inspect and cold_inspect["ok"]),
+            "cold_inspect_error": None if cold_inspect is None else cold_inspect["error"],
+            "samples": [],
+            "gates": {
+                "cold_runs_clean": False,
+                "median_le_330ms": False,
+                "max_le_400ms": False,
+                "all_snapshot_hit": False,
+                "all_idempotent_replay_false": False,
+                "all_context_identical_to_cold": False,
+                "passes": False,
+            },
+            "snapshot_warm_wall_ms": [],
+            "snapshot_warm_median_ms": 0.0,
+            "snapshot_warm_max_ms": 0.0,
+        }
 
     seen_run_ids = {cold["scan_run_id"]}
     samples: list[dict] = []
@@ -393,8 +478,7 @@ def run_7d_snapshot_warm(
             profile=profile,
         )
         checkpoint_db(cold_db)
-        inspect_payload = run_inspect_v2(scanner, cold_db, run["scan_run_id"])
-        metrics = _execution_metrics(inspect_payload)
+        inspect_result = run_inspect_v2(scanner, cold_db, run["scan_run_id"])
         conn = sqlite3.connect(cold_db)
         try:
             context = capture_context_state(conn, run["scan_run_id"])
@@ -408,7 +492,12 @@ def run_7d_snapshot_warm(
                 idempotent_probe["request_id_absent_before_run"]
                 and run["scan_run_id"] not in seen_run_ids
             ),
-            "snapshot_hit": bool(metrics.get("snapshot_hit")),
+            "snapshot_hit": bool(
+                _execution_metrics(inspect_result["payload"]).get("snapshot_hit")
+            )
+            if inspect_result["ok"]
+            else False,
+            "inspect_error": inspect_result["error"],
             "context_hash_identical": context["context_sha256"]
             == cold_context["context_sha256"],
         }
@@ -420,6 +509,7 @@ def run_7d_snapshot_warm(
     all_idempotent = all(sample["idempotent_replay_false"] for sample in samples)
     all_context = all(sample["context_hash_identical"] for sample in samples)
     gates = {
+        "cold_runs_clean": True,
         "median_le_330ms": median_ms(warm_ms) <= 330.0,
         "max_le_400ms": max(warm_ms) <= 400.0,
         "all_snapshot_hit": all_hit,
@@ -433,6 +523,9 @@ def run_7d_snapshot_warm(
         "report_mode": report_mode,
         "corpus": corpus,
         "cold_wall_ms": cold["wall_ms"],
+        "cold_status": cold["status"],
+        "cold_inspect_ok": bool(cold_inspect and cold_inspect["ok"]),
+        "cold_inspect_error": None if cold_inspect is None else cold_inspect["error"],
         "snapshot_warm_wall_ms": warm_ms,
         "snapshot_warm_median_ms": median_ms(warm_ms),
         "snapshot_warm_max_ms": max(warm_ms),
@@ -464,8 +557,7 @@ def run_cache_only_vs_snapshot(
     # 3 independent cold DBs（手工 acceptance，Part 9.2）
     colds: list[dict] = []
     for index in range(3):
-        cold_dir = out_root / f"{label}_cold_{index}"
-        cold_dir.mkdir(parents=True)
+        cold_dir = _fresh_dir(out_root / f"{label}_cold_{index}")
         cold_db = cold_dir / "scan_index_v2.sqlite3"
         run = run_build_context(
             scanner=scanner,
@@ -479,44 +571,111 @@ def run_cache_only_vs_snapshot(
             profile=profile,
         )
         checkpoint_db(cold_db)
-        if run["scan_run_id"] is None or run["status"] != "ok":
-            raise RuntimeError(f"{label} cold run failed: {run}")
-        inspect_payload = run_inspect_v2(scanner, cold_db, run["scan_run_id"])
-        metrics = _execution_metrics(inspect_payload)
-        conn = sqlite3.connect(cold_db)
-        try:
-            context = capture_context_state(conn, run["scan_run_id"])
-        finally:
-            conn.close()
+        inspect_result = None
+        metrics = {}
+        context = None
+        if run["scan_run_id"] is not None:
+            inspect_result = run_inspect_v2(scanner, cold_db, run["scan_run_id"])
+            if inspect_result["ok"]:
+                metrics = _execution_metrics(inspect_result["payload"])
+                conn = sqlite3.connect(cold_db)
+                try:
+                    context = capture_context_state(conn, run["scan_run_id"])
+                finally:
+                    conn.close()
         colds.append(
             {
                 "db": cold_db,
                 "run": run,
                 "context": context,
                 "metrics": metrics,
+                "inspect_result": inspect_result,
             }
         )
 
-    cold_evidence = [
-        {
-            "wall_ms": cold["run"]["wall_ms"],
-            "status": cold["run"]["status"],
-            "stage_deadline_exhausted_count": cold["metrics"][
-                "stage_deadline_exhausted_count"
-            ],
-            "deadline_ms": deadline_ms,
-            "deadline_exceeded": cold["run"]["wall_ms"] > deadline_ms,
-        }
-        for cold in colds
-    ]
+    cold_evidence = []
+    for cold in colds:
+        metrics = cold["metrics"]
+        inspect_result = cold["inspect_result"]
+        run = cold["run"]
+        # inspect v2 失败（如 deadline-partial RUN_CORRUPT）时从 DB 诚实回退。
+        fallback_metrics = (
+            None if inspect_result and inspect_result["ok"] else query_deadline_metrics(cold["db"], run["scan_run_id"])
+        )
+        deadline_count = (
+            metrics.get("stage_deadline_exhausted_count")
+            if inspect_result and inspect_result["ok"]
+            else (
+                None
+                if fallback_metrics is None
+                else fallback_metrics["stage_deadline_exhausted_count"]
+            )
+        )
+        runtime_not_parsed = (
+            None
+            if run["scan_run_id"] is None
+            else query_runtime_not_parsed_count(cold["db"], run["scan_run_id"])
+        )
+        cold_evidence.append(
+            {
+                "wall_ms": run["wall_ms"],
+                "status": run["status"],
+                "scan_run_id": run["scan_run_id"],
+                "inspect_ok": bool(inspect_result and inspect_result["ok"]),
+                "inspect_error": None
+                if inspect_result is None
+                else inspect_result["error"],
+                "stage_deadline_exhausted_count": deadline_count,
+                "runtime_not_parsed_count": runtime_not_parsed,
+                "deadline_ms": deadline_ms,
+                "deadline_exceeded": (
+                    run["wall_ms"] > deadline_ms or deadline_count not in (None, 0)
+                ),
+            }
+        )
+
     corpus_conn = sqlite3.connect(colds[0]["db"])
     try:
         corpus = anonymous_corpus_hash(corpus_conn)
     finally:
         corpus_conn.close()
 
+    # 只有 3 个 cold 都 clean（status=ok、inspect ok、无 stage deadline 触发）才可
+    # 做 cache-only vs snapshot 的 warm 对比；否则 acceptance 已在 cold 阶段失败。
+    cold_runs_clean = all(
+        cold["run"]["status"] == "ok"
+        and cold["inspect_result"] is not None
+        and cold["inspect_result"]["ok"]
+        and cold["metrics"].get("stage_deadline_exhausted_count") == 0
+        for cold in colds
+    )
+    if not cold_runs_clean:
+        gates = {
+            "cold_runs_clean": False,
+            "snapshot_warm_median_improvement_ge_20pct": False,
+            "cache_warm_all_snapshot_miss_and_cache_all_hit": False,
+            "snapshot_warm_all_snapshot_hit": False,
+            "semantic_identical": False,
+            "passes": False,
+        }
+        return {
+            "window": {"start": start.isoformat(), "end": end.isoformat()},
+            "report_mode": report_mode,
+            "profile": profile,
+            "corpus": corpus,
+            "cold_deadline_ms": deadline_ms,
+            "cold": cold_evidence,
+            "warm_comparison": "skipped_cold_not_clean",
+            "cache_only_warm_wall_ms": [],
+            "snapshot_warm_wall_ms": [],
+            "improvement": 0.0,
+            "gates": gates,
+        }
+
     # cache-only seed from cold[0]（isolated clone + marker）
     seed_out = out_root / f"{label}_seed"
+    if seed_out.exists():
+        shutil.rmtree(seed_out)
     seed_marker = out_root / f"{label}_seed.marker.json"
     seed = prepare_cache_only_seed(
         src=colds[0]["db"], out_dir=seed_out, marker=seed_marker
@@ -525,8 +684,7 @@ def run_cache_only_vs_snapshot(
     # cache-only warm：3 samples，各从只读 seed 克隆新 DB
     cache_samples: list[dict] = []
     for index in range(3):
-        clone_dir = out_root / f"{label}_cache_warm_{index}"
-        clone_dir.mkdir(parents=True)
+        clone_dir = _fresh_dir(out_root / f"{label}_cache_warm_{index}")
         clone_db = clone_dir / "scan_index_v2.sqlite3"
         verify_cache_only_seed_marker(seed_marker, seed_out)
         copy_sqlite_db(seed_out / "scan_index_v2.sqlite3", clone_db)
@@ -547,13 +705,15 @@ def run_cache_only_vs_snapshot(
             profile=profile,
         )
         checkpoint_db(clone_db)
-        inspect_payload = run_inspect_v2(scanner, clone_db, run["scan_run_id"])
-        metrics = _execution_metrics(inspect_payload)
+        inspect_result = run_inspect_v2(scanner, clone_db, run["scan_run_id"])
         conn = sqlite3.connect(clone_db)
         try:
             context = capture_context_state(conn, run["scan_run_id"])
         finally:
             conn.close()
+        metrics = (
+            _execution_metrics(inspect_result["payload"]) if inspect_result["ok"] else {}
+        )
         cache_samples.append(
             {
                 "index": index,
@@ -563,14 +723,15 @@ def run_cache_only_vs_snapshot(
                     "request_id_absent_before_run"
                 ],
                 "snapshot_hit": bool(metrics.get("snapshot_hit")),
-                "parse_cache_lookup_count": metrics["parse_cache_lookup_count"],
-                "classification_cache_lookup_count": metrics[
+                "parse_cache_lookup_count": metrics.get("parse_cache_lookup_count"),
+                "classification_cache_lookup_count": metrics.get(
                     "classification_cache_lookup_count"
-                ],
-                "parse_cache_all_hit": metrics["parse_cache_all_hit"],
-                "classification_cache_all_hit": metrics[
+                ),
+                "parse_cache_all_hit": metrics.get("parse_cache_all_hit"),
+                "classification_cache_all_hit": metrics.get(
                     "classification_cache_all_hit"
-                ],
+                ),
+                "inspect_error": inspect_result["error"],
                 "context_sha256": context["context_sha256"],
             }
         )
@@ -599,13 +760,15 @@ def run_cache_only_vs_snapshot(
             profile=profile,
         )
         checkpoint_db(snap_cold["db"])
-        inspect_payload = run_inspect_v2(scanner, snap_cold["db"], run["scan_run_id"])
-        metrics = _execution_metrics(inspect_payload)
+        inspect_result = run_inspect_v2(scanner, snap_cold["db"], run["scan_run_id"])
         conn = sqlite3.connect(snap_cold["db"])
         try:
             context = capture_context_state(conn, run["scan_run_id"])
         finally:
             conn.close()
+        metrics = (
+            _execution_metrics(inspect_result["payload"]) if inspect_result["ok"] else {}
+        )
         snap_samples.append(
             {
                 "index": index,
@@ -616,6 +779,7 @@ def run_cache_only_vs_snapshot(
                     and run["scan_run_id"] not in seen_run_ids
                 ),
                 "snapshot_hit": bool(metrics.get("snapshot_hit")),
+                "inspect_error": inspect_result["error"],
                 "context_sha256": context["context_sha256"],
                 "context_identical_to_cold": context["context_sha256"]
                 == snap_cold["context"]["context_sha256"],
@@ -653,6 +817,7 @@ def run_cache_only_vs_snapshot(
     )
 
     gates = {
+        "cold_runs_clean": True,
         "snapshot_warm_median_improvement_ge_20pct": improvement >= 0.20,
         "cache_warm_all_snapshot_miss_and_cache_all_hit": cache_warm_ok,
         "snapshot_warm_all_snapshot_hit": snap_warm_ok,
@@ -667,6 +832,7 @@ def run_cache_only_vs_snapshot(
         "corpus": corpus,
         "cold_deadline_ms": deadline_ms,
         "cold": cold_evidence,
+        "warm_comparison": "completed",
         "seed": {
             "source_sha256": seed["source_sha256"],
             "seed_sha256": seed["seed_sha256"],

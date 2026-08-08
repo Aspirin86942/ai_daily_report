@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
+import benchmark_snapshot_warm as b  # noqa: E402
 from benchmark_snapshot_warm import (  # noqa: E402
     run_7d_snapshot_warm,
     run_cache_only_vs_snapshot,
@@ -75,6 +77,7 @@ def test_7d_snapshot_warm_semantics(tmp_path: Path) -> None:
     )
 
     assert len(result["samples"]) == 3
+    assert result["gates"]["cold_runs_clean"] is True
     for sample in result["samples"]:
         # 每次运行前 request_id 不存在 + 每次新 scan_run_id → idempotent_replay=false
         assert sample["idempotent_replay_false"] is True
@@ -101,6 +104,9 @@ def test_30d_cache_only_vs_snapshot_semantics(tmp_path: Path) -> None:
 
     assert len(result["cache_only_warm_samples"]) == 3
     assert len(result["snapshot_warm_samples"]) == 3
+    assert result["gates"]["cold_runs_clean"] is True
+    assert result["warm_comparison"] == "completed"
+    assert result["gates"]["semantic_identical"] is True
     for sample in result["cache_only_warm_samples"]:
         assert sample["snapshot_hit"] is False
         assert sample["parse_cache_lookup_count"] > 0
@@ -117,3 +123,53 @@ def test_30d_cache_only_vs_snapshot_semantics(tmp_path: Path) -> None:
     # seed 证据齐全：cache count/hash 已随 marker 校验
     assert result["seed"]["seed_sha256"]
     assert "parse_cache" in result["seed"]["cold_cache_state"]
+
+
+def test_30d_records_non_clean_cold_without_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """deadline-exhausted cold（Partial + inspect RUN_CORRUPT）如实记录而非 raise。"""
+    work_dir = _build_fixture(tmp_path)
+    out_root = tmp_path / "out"
+
+    def fake_build_context(**kwargs):
+        db_path = kwargs["db_path"]
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS file_inventory"
+            " (file_identity TEXT, source_version TEXT, size_bytes INTEGER)"
+        )
+        conn.execute("INSERT OR IGNORE INTO file_inventory VALUES ('x','v',1)")
+        conn.commit()
+        conn.close()
+        return {
+            "wall_ms": 25100.0,
+            "exit_code": 0,
+            "request_id": kwargs["request_id"],
+            "validated": True,
+            "status": "partial",
+            "scan_run_id": 1,
+            "context_run_id": 1,
+        }
+
+    def fake_inspect(scanner, db_path, scan_run_id):
+        return {"ok": False, "payload": {}, "error": "RUN_CORRUPT"}
+
+    monkeypatch.setattr(b, "run_build_context", fake_build_context)
+    monkeypatch.setattr(b, "run_inspect_v2", fake_inspect)
+
+    result = run_cache_only_vs_snapshot(
+        scanner=SCANNER_BIN,
+        office_worker=OFFICE_BIN,
+        work_dir=work_dir,
+        label="30d",
+        out_root=out_root,
+    )
+    assert len(result["cold"]) == 3
+    assert result["warm_comparison"] == "skipped_cold_not_clean"
+    assert result["gates"]["cold_runs_clean"] is False
+    assert result["gates"]["passes"] is False
+    assert all(item["inspect_error"] == "RUN_CORRUPT" for item in result["cold"])
+    assert all(item["status"] == "partial" for item in result["cold"])
+    assert all(item["deadline_exceeded"] for item in result["cold"])

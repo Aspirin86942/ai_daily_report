@@ -1,0 +1,20 @@
+{
+  "scanner_sha256": "9af3ae40ecd8ad3a25150f128a703a6183a8387610669f9e1eae3aa56d9876d2",
+  "corpus": "D:\\01- \u5de5\u4f5c",
+  "source_count": 136,
+  "source_count_consistent": true,
+  "cold_median_ms": 2533.0346999980975,
+  "cold_max_ms": 2566.4433000056306,
+  "warm_median_ms": 345.57430000131717,
+  "warm_max_ms": 346.7588999992586,
+  "all_samples": [
+    2566.4433000056306,
+    2533.0346999980975,
+    2524.0323999969405,
+    346.7588999992586,
+    345.32929999841144,
+    345.57430000131717
+  ],
+  "samples_clean": true,
+  "warm_median_ms_over_400": false
+}

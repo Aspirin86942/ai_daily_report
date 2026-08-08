@@ -1,0 +1,216 @@
+{
+  "schema": "snapshot_warm_benchmark_v1",
+  "generated_at_utc": "2026-08-08T17:47:17Z",
+  "hardware": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 23 Model 96 Stepping 1, AuthenticAMD",
+    "python": "3.11.15"
+  },
+  "build": {
+    "scanner_sha256": "9af3ae40ecd8ad3a25150f128a703a6183a8387610669f9e1eae3aa56d9876d2",
+    "office_worker_sha256": "731aced498462c32ff6551f5e07a398cd4fdc2a18ea5005600aa1af9e178579a",
+    "engine_version": "0.1.0",
+    "engine_build": "sha256-source-v1:df12b4b5c4d4201ed2f765503d14d8669d2c839c8b3ab94d60c7abbbecec3c9e",
+    "target_triple": "x86_64-pc-windows-msvc"
+  },
+  "corpus": {
+    "work_dir": "D:\\01- 工作"
+  },
+  "scenarios": {
+    "7d": {
+      "window": {
+        "start": "2026-08-02",
+        "end": "2026-08-08"
+      },
+      "report_mode": "weekly",
+      "corpus": {
+        "anonymous_manifest_sha256": "bfbcc7759e0cce2bf182023e73a0b12fa94be147a703b0648dfa053fe3f07e88",
+        "source_count": 136
+      },
+      "cold_wall_ms": 2513.444600001094,
+      "cold_status": "ok",
+      "cold_inspect_ok": false,
+      "cold_inspect_error": "RUN_CORRUPT",
+      "snapshot_warm_wall_ms": [
+        421.73449999972945,
+        354.8378000050434,
+        356.6091000029701
+      ],
+      "snapshot_warm_median_ms": 356.6091000029701,
+      "snapshot_warm_max_ms": 421.73449999972945,
+      "samples": [
+        {
+          "index": 0,
+          "wall_ms": 421.73449999972945,
+          "scan_run_id": 2,
+          "idempotent_replay_false": true,
+          "snapshot_hit": true,
+          "inspect_error": null,
+          "context_hash_identical": true
+        },
+        {
+          "index": 1,
+          "wall_ms": 354.8378000050434,
+          "scan_run_id": 3,
+          "idempotent_replay_false": true,
+          "snapshot_hit": true,
+          "inspect_error": null,
+          "context_hash_identical": true
+        },
+        {
+          "index": 2,
+          "wall_ms": 356.6091000029701,
+          "scan_run_id": 4,
+          "idempotent_replay_false": true,
+          "snapshot_hit": true,
+          "inspect_error": null,
+          "context_hash_identical": true
+        }
+      ],
+      "gates": {
+        "cold_runs_clean": true,
+        "median_le_330ms": false,
+        "max_le_400ms": false,
+        "all_snapshot_hit": true,
+        "all_idempotent_replay_false": true,
+        "all_context_identical_to_cold": true,
+        "passes": false
+      }
+    },
+    "30d": {
+      "window": {
+        "start": "2026-07-10",
+        "end": "2026-08-08"
+      },
+      "report_mode": "monthly",
+      "profile": {
+        "schema_version": "scanner_profile_v2",
+        "summary_pdf_max_pages": 5,
+        "max_candidate_files": 384,
+        "max_total_pdf_classification_pages": 370,
+        "max_pdf_text_extractions": 16,
+        "total_deadline_ms": 25000
+      },
+      "corpus": {
+        "anonymous_manifest_sha256": "99f1d4e36e2567b7429a4019a9677ec5c2fb9053dbbce23138ea020052bc70a3",
+        "source_count": 318
+      },
+      "cold_deadline_ms": 25000,
+      "cold": [
+        {
+          "wall_ms": 23594.26820000226,
+          "status": "partial",
+          "scan_run_id": 1,
+          "inspect_ok": false,
+          "inspect_error": "RUN_CORRUPT",
+          "stage_deadline_exhausted_count": 1,
+          "runtime_not_parsed_count": 40,
+          "deadline_ms": 25000,
+          "deadline_exceeded": true
+        },
+        {
+          "wall_ms": 23581.006100001105,
+          "status": "partial",
+          "scan_run_id": 1,
+          "inspect_ok": false,
+          "inspect_error": "RUN_CORRUPT",
+          "stage_deadline_exhausted_count": 1,
+          "runtime_not_parsed_count": 39,
+          "deadline_ms": 25000,
+          "deadline_exceeded": true
+        },
+        {
+          "wall_ms": 23573.366500000702,
+          "status": "partial",
+          "scan_run_id": 1,
+          "inspect_ok": false,
+          "inspect_error": "RUN_CORRUPT",
+          "stage_deadline_exhausted_count": 1,
+          "runtime_not_parsed_count": 39,
+          "deadline_ms": 25000,
+          "deadline_exceeded": true
+        }
+      ],
+      "warm_comparison": "skipped_cold_not_clean",
+      "cache_only_warm_wall_ms": [],
+      "snapshot_warm_wall_ms": [],
+      "improvement": 0.0,
+      "gates": {
+        "cold_runs_clean": false,
+        "snapshot_warm_median_improvement_ge_20pct": false,
+        "cache_warm_all_snapshot_miss_and_cache_all_hit": false,
+        "snapshot_warm_all_snapshot_hit": false,
+        "semantic_identical": false,
+        "passes": false
+      }
+    },
+    "90d": {
+      "window": {
+        "start": "2026-05-11",
+        "end": "2026-08-08"
+      },
+      "report_mode": "monthly",
+      "profile": {
+        "schema_version": "scanner_profile_v2",
+        "summary_pdf_max_pages": 5,
+        "max_candidate_files": 600,
+        "max_total_pdf_classification_pages": 800,
+        "max_pdf_text_extractions": 32,
+        "total_deadline_ms": 45000
+      },
+      "corpus": {
+        "anonymous_manifest_sha256": "c4fb4d457f1d2ddc8622e6ee1edeabc817c718948b144f475fb97d0ebf180037",
+        "source_count": 729
+      },
+      "cold_deadline_ms": 45000,
+      "cold": [
+        {
+          "wall_ms": 43630.28369999665,
+          "status": "error",
+          "scan_run_id": 1,
+          "inspect_ok": false,
+          "inspect_error": "RUN_CORRUPT",
+          "stage_deadline_exhausted_count": 1,
+          "runtime_not_parsed_count": 0,
+          "deadline_ms": 45000,
+          "deadline_exceeded": true
+        },
+        {
+          "wall_ms": 43630.76039999578,
+          "status": "error",
+          "scan_run_id": 1,
+          "inspect_ok": false,
+          "inspect_error": "RUN_CORRUPT",
+          "stage_deadline_exhausted_count": 1,
+          "runtime_not_parsed_count": 0,
+          "deadline_ms": 45000,
+          "deadline_exceeded": true
+        },
+        {
+          "wall_ms": 43634.295699994254,
+          "status": "error",
+          "scan_run_id": 1,
+          "inspect_ok": false,
+          "inspect_error": "RUN_CORRUPT",
+          "stage_deadline_exhausted_count": 1,
+          "runtime_not_parsed_count": 0,
+          "deadline_ms": 45000,
+          "deadline_exceeded": true
+        }
+      ],
+      "warm_comparison": "skipped_cold_not_clean",
+      "cache_only_warm_wall_ms": [],
+      "snapshot_warm_wall_ms": [],
+      "improvement": 0.0,
+      "gates": {
+        "cold_runs_clean": false,
+        "snapshot_warm_median_improvement_ge_20pct": false,
+        "cache_warm_all_snapshot_miss_and_cache_all_hit": false,
+        "snapshot_warm_all_snapshot_hit": false,
+        "semantic_identical": false,
+        "passes": false
+      }
+    }
+  }
+}
