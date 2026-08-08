@@ -90,7 +90,38 @@ def run_once(
     }
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Record the same-yardstick wall-clock cold/parse-cache-warm baseline."
+    )
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        default=PROJECT_ROOT / "tests" / "fixtures" / "worker_documents",
+        help="corpus 目录（默认 3-file fixture；真实 7d 语料传 D:/01- 工作）",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=PROJECT_ROOT / ".artifacts" / "timer-baseline.json",
+        help="evidence JSON 输出路径",
+    )
+    parser.add_argument(
+        "--start",
+        type=date.fromisoformat,
+        default=date(2026, 8, 1),
+        help="start date (default 2026-08-01)",
+    )
+    parser.add_argument(
+        "--end",
+        type=date.fromisoformat,
+        default=date(2026, 8, 8),
+        help="end date (default 2026-08-08)",
+    )
+    args = parser.parse_args(argv)
+
     scanner = PROJECT_ROOT / "rust" / "target" / "release" / (
         "ai-daily-scanner" if sys.platform != "win32" else "ai-daily-scanner.exe"
     )
@@ -99,10 +130,10 @@ def main() -> int:
     )
     assert scanner.is_file(), scanner
     assert office_worker.is_file(), office_worker
-    work_dir = (PROJECT_ROOT / "tests" / "fixtures" / "worker_documents").resolve()
+    work_dir = args.work_dir.resolve()
     assert work_dir.is_dir(), work_dir
     python_executable = Path(sys.executable).resolve()
-    start, end = date(2026, 8, 1), date(2026, 8, 8)
+    start, end = args.start, args.end
 
     cold: list[dict] = []
     warm: list[dict] = []
@@ -156,9 +187,14 @@ def main() -> int:
     stop_gate_bad_sample = bool(bad)
     stop_gate_warm_slow = warm_median > 400.0
 
+    try:
+        corpus_label = str(work_dir.relative_to(PROJECT_ROOT)).replace("\\", "/")
+    except ValueError:
+        corpus_label = str(work_dir)
+
     out = {
         "scanner_sha256": sha256_file(scanner),
-        "corpus": str(work_dir.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+        "corpus": corpus_label,
         "source_count": source_count,
         "source_count_consistent": source_count_consistent,
         "cold_median_ms": cold_median,
@@ -170,7 +206,7 @@ def main() -> int:
         "warm_median_ms_over_400": stop_gate_warm_slow,
     }
     (PROJECT_ROOT / ".artifacts").mkdir(exist_ok=True)
-    (PROJECT_ROOT / ".artifacts" / "timer-baseline.json").write_text(
+    args.out.write_text(
         json.dumps(out, indent=2), encoding="utf-8"
     )
 
