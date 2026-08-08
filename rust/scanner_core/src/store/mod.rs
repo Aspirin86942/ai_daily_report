@@ -5897,6 +5897,68 @@ mod tests {
     }
 
     #[test]
+    fn not_parsed_rows_write_not_applicable_with_empty_miss_reason() {
+        // spec Part 5.2/5.3 regression (real-corpus RUN_CORRUPT): a NotParsed row
+        // that performed a lookup (cache_status=Miss, reason=new_file) must be
+        // persisted with parse_cache_status=not_applicable and an EMPTY
+        // cache_miss_reason. FileAuditV2::validate fail-closes any non-miss row
+        // that carries a non-empty reason.
+        let mut harness = harness("00000000-0000-4000-8000-000000000023");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        record_both_workers(&mut harness.store, &active, 1);
+        let source = "mtime_ns=100:size=5";
+        let profile_hash = "a".repeat(64);
+        let mut batch = error_batch(&active);
+        batch.inventory.push(inventory_record("file-a", source));
+        batch.file_results.push(FileResultRecord {
+            file_identity: "file-a".to_string(),
+            relative_path: "evidence.txt".to_string(),
+            source_version: source.to_string(),
+            parse_profile_hash: profile_hash.clone(),
+            cache_status: CacheStatus::Miss,
+            cache_miss_reason: CacheMissReason::NewFile,
+            parse_status: ParseStatus::NotParsed,
+            parser_backend: "not_parsed".to_string(),
+            worker_lane: AuditWorkerLane::NotParsed,
+            truncated: false,
+            content_sha256: sha256_hex(b""),
+            primary_duration_ms: 0,
+            fallback_duration_ms: 0,
+            parse_duration_ms: 0,
+            failure_class: String::new(),
+            fallback_backend: String::new(),
+            fallback_reason_code: String::new(),
+            error: None,
+        });
+        harness.store.finalize(&active, &batch, 2).unwrap();
+
+        let connection = rusqlite::Connection::open(&harness.db_path).unwrap();
+        let (parse_cache_status, cache_miss_reason): (Option<String>, String) = connection
+            .query_row(
+                "SELECT parse_cache_status, cache_miss_reason
+                 FROM scan_file_results WHERE file_identity=?1",
+                ["file-a"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(parse_cache_status.as_deref(), Some("not_applicable"));
+        assert_eq!(
+            cache_miss_reason, "",
+            "not_applicable rows must carry an empty miss reason"
+        );
+    }
+
+    #[test]
     fn failed_final_transaction_leaves_no_cache_inventory_or_false_success() {
         let mut harness = harness("00000000-0000-4000-8000-000000000013");
         let active = started(

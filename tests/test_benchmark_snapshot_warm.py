@@ -125,6 +125,39 @@ def test_30d_cache_only_vs_snapshot_semantics(tmp_path: Path) -> None:
     assert "parse_cache" in result["seed"]["cold_cache_state"]
 
 
+def test_semantic_key_includes_decisions_and_semantic_counts() -> None:
+    """一致性 gate 必须比较 full tuple，不只 context_sha256（brief 强制）。"""
+    base = {
+        "context_sha256": "0" * 64,
+        "decisions": [
+            ["file-a", "keep", "small_file_keep", 20, 10, 10, 0, ""]
+        ],
+        "semantic_counts": {
+            "source_file_count": 1,
+            "success_count": 1,
+            "timeout_count": 0,
+            "included_file_count": 1,
+            "omitted_file_count": 0,
+            "error_file_count": 0,
+            "input_chars": 10,
+            "output_chars": 10,
+        },
+    }
+    same_sha_different_decisions = dict(
+        base,
+        decisions=[["file-b", "keep", "small_file_keep", 20, 10, 10, 0, ""]],
+    )
+    same_sha_different_counts = dict(
+        base,
+        semantic_counts={**base["semantic_counts"], "output_chars": 11},
+    )
+    assert b.semantic_key(base) == b.semantic_key(
+        dict(base, decisions=[list(row) for row in base["decisions"]])
+    )
+    assert b.semantic_key(base) != b.semantic_key(same_sha_different_decisions)
+    assert b.semantic_key(base) != b.semantic_key(same_sha_different_counts)
+
+
 def test_30d_records_non_clean_cold_without_raising(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

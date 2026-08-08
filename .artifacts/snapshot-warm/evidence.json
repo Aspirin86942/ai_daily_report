@@ -1,6 +1,6 @@
 {
   "schema": "snapshot_warm_benchmark_v1",
-  "generated_at_utc": "2026-08-08T17:47:17Z",
+  "generated_at_utc": "2026-08-08T18:19:06Z",
   "hardware": {
     "platform": "Windows-10-10.0.26200-SP0",
     "machine": "AMD64",
@@ -8,10 +8,10 @@
     "python": "3.11.15"
   },
   "build": {
-    "scanner_sha256": "9af3ae40ecd8ad3a25150f128a703a6183a8387610669f9e1eae3aa56d9876d2",
-    "office_worker_sha256": "731aced498462c32ff6551f5e07a398cd4fdc2a18ea5005600aa1af9e178579a",
+    "scanner_sha256": "fac4ea5a79a375acf5d2ee9fbe93c755e40c27208fa233c9f481826ab1552c6a",
+    "office_worker_sha256": "6746a2c1df4de99a94d0f4888ccbf4654f060049ad4db27a791edfde3d7d2808",
     "engine_version": "0.1.0",
-    "engine_build": "sha256-source-v1:df12b4b5c4d4201ed2f765503d14d8669d2c839c8b3ab94d60c7abbbecec3c9e",
+    "engine_build": "sha256-source-v1:42a0b5df8ade7be155b3d063ad0ee02703d87db8c4e04087c86e364b86490832",
     "target_triple": "x86_64-pc-windows-msvc"
   },
   "corpus": {
@@ -28,21 +28,21 @@
         "anonymous_manifest_sha256": "bfbcc7759e0cce2bf182023e73a0b12fa94be147a703b0648dfa053fe3f07e88",
         "source_count": 136
       },
-      "cold_wall_ms": 2513.444600001094,
+      "cold_wall_ms": 2749.62869999581,
       "cold_status": "ok",
-      "cold_inspect_ok": false,
-      "cold_inspect_error": "RUN_CORRUPT",
+      "cold_inspect_ok": true,
+      "cold_inspect_error": null,
       "snapshot_warm_wall_ms": [
-        421.73449999972945,
-        354.8378000050434,
-        356.6091000029701
+        356.772799990722,
+        361.21540000021923,
+        353.9402999886079
       ],
-      "snapshot_warm_median_ms": 356.6091000029701,
-      "snapshot_warm_max_ms": 421.73449999972945,
+      "snapshot_warm_median_ms": 356.772799990722,
+      "snapshot_warm_max_ms": 361.21540000021923,
       "samples": [
         {
           "index": 0,
-          "wall_ms": 421.73449999972945,
+          "wall_ms": 356.772799990722,
           "scan_run_id": 2,
           "idempotent_replay_false": true,
           "snapshot_hit": true,
@@ -51,7 +51,7 @@
         },
         {
           "index": 1,
-          "wall_ms": 354.8378000050434,
+          "wall_ms": 361.21540000021923,
           "scan_run_id": 3,
           "idempotent_replay_false": true,
           "snapshot_hit": true,
@@ -60,7 +60,7 @@
         },
         {
           "index": 2,
-          "wall_ms": 356.6091000029701,
+          "wall_ms": 353.9402999886079,
           "scan_run_id": 4,
           "idempotent_replay_false": true,
           "snapshot_hit": true,
@@ -71,7 +71,7 @@
       "gates": {
         "cold_runs_clean": true,
         "median_le_330ms": false,
-        "max_le_400ms": false,
+        "max_le_400ms": true,
         "all_snapshot_hit": true,
         "all_idempotent_replay_false": true,
         "all_context_identical_to_cold": true,
@@ -99,35 +99,35 @@
       "cold_deadline_ms": 25000,
       "cold": [
         {
-          "wall_ms": 23594.26820000226,
+          "wall_ms": 23574.667399996542,
           "status": "partial",
           "scan_run_id": 1,
-          "inspect_ok": false,
-          "inspect_error": "RUN_CORRUPT",
+          "inspect_ok": true,
+          "inspect_error": null,
           "stage_deadline_exhausted_count": 1,
-          "runtime_not_parsed_count": 40,
+          "runtime_not_parsed_count": 41,
           "deadline_ms": 25000,
           "deadline_exceeded": true
         },
         {
-          "wall_ms": 23581.006100001105,
+          "wall_ms": 23584.61590000661,
           "status": "partial",
           "scan_run_id": 1,
-          "inspect_ok": false,
-          "inspect_error": "RUN_CORRUPT",
+          "inspect_ok": true,
+          "inspect_error": null,
           "stage_deadline_exhausted_count": 1,
-          "runtime_not_parsed_count": 39,
+          "runtime_not_parsed_count": 41,
           "deadline_ms": 25000,
           "deadline_exceeded": true
         },
         {
-          "wall_ms": 23573.366500000702,
+          "wall_ms": 23605.65189999761,
           "status": "partial",
           "scan_run_id": 1,
-          "inspect_ok": false,
-          "inspect_error": "RUN_CORRUPT",
+          "inspect_ok": true,
+          "inspect_error": null,
           "stage_deadline_exhausted_count": 1,
-          "runtime_not_parsed_count": 39,
+          "runtime_not_parsed_count": 41,
           "deadline_ms": 25000,
           "deadline_exceeded": true
         }
@@ -166,33 +166,33 @@
       "cold_deadline_ms": 45000,
       "cold": [
         {
-          "wall_ms": 43630.28369999665,
+          "wall_ms": 43619.3634000083,
           "status": "error",
           "scan_run_id": 1,
           "inspect_ok": false,
-          "inspect_error": "RUN_CORRUPT",
+          "inspect_error": "RUN_CORRUPT: persisted scanner run is corrupt: error envelope has unexpected context rows",
           "stage_deadline_exhausted_count": 1,
           "runtime_not_parsed_count": 0,
           "deadline_ms": 45000,
           "deadline_exceeded": true
         },
         {
-          "wall_ms": 43630.76039999578,
+          "wall_ms": 43627.03380000312,
           "status": "error",
           "scan_run_id": 1,
           "inspect_ok": false,
-          "inspect_error": "RUN_CORRUPT",
+          "inspect_error": "RUN_CORRUPT: persisted scanner run is corrupt: error envelope has unexpected context rows",
           "stage_deadline_exhausted_count": 1,
           "runtime_not_parsed_count": 0,
           "deadline_ms": 45000,
           "deadline_exceeded": true
         },
         {
-          "wall_ms": 43634.295699994254,
+          "wall_ms": 43648.0453999975,
           "status": "error",
           "scan_run_id": 1,
           "inspect_ok": false,
-          "inspect_error": "RUN_CORRUPT",
+          "inspect_error": "RUN_CORRUPT: persisted scanner run is corrupt: error envelope has unexpected context rows",
           "stage_deadline_exhausted_count": 1,
           "runtime_not_parsed_count": 0,
           "deadline_ms": 45000,

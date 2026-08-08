@@ -4061,6 +4061,55 @@ mod tests {
     }
 
     #[test]
+    fn file_audit_v2_fail_closes_non_miss_row_with_non_empty_miss_reason() {
+        // spec Part 5.3: cache_miss_reason is only valid for parse_cache_status=miss.
+        // A not_applicable row with a non-empty reason (real-corpus RUN_CORRUPT
+        // regression) must fail validation.
+        fn audit(cache_miss_reason: &str) -> FileAuditV2 {
+            FileAuditV2 {
+                relative_path: "evidence.txt".to_string(),
+                file_identity: "file-a".to_string(),
+                source_version: "mtime_ns=100:size=5".to_string(),
+                source_guard_kind: SourceGuardKind::Unavailable,
+                source_guard_sha256: Nullable(None),
+                parse_status: ParseStatus::NotParsed,
+                parser_backend: "not_parsed".to_string(),
+                worker_lane: AuditWorkerLane::NotParsed,
+                parse_cache_status: ParseCacheStatus::NotApplicable,
+                cache_miss_reason: cache_miss_reason.to_string(),
+                truncated: false,
+                content_sha256: "0".repeat(64),
+                parse_duration_ms: 0,
+                failure_class: String::new(),
+                fallback_backend: String::new(),
+                fallback_reason_code: String::new(),
+                parse_transport: ParseTransport::NotApplicable,
+                parse_attempt_count: 0,
+                final_diagnostic: Nullable(None),
+                pdf_classification: Nullable(None),
+            }
+        }
+        assert!(
+            audit("new_file").validate().is_err(),
+            "not_applicable row with a non-empty miss reason must fail validation"
+        );
+        assert!(
+            audit("").validate().is_ok(),
+            "not_applicable row with an empty miss reason must validate"
+        );
+        // The same holds for fresh/snapshot rows.
+        for status in [
+            ParseCacheStatus::Fresh,
+            ParseCacheStatus::Snapshot,
+        ] {
+            let mut row = audit("");
+            row.parse_cache_status = status;
+            row.cache_miss_reason = "new_file".to_string();
+            assert!(row.validate().is_err(), "{status:?} with reason must fail");
+        }
+    }
+
+    #[test]
     fn worker_diagnostic_v1_rejects_scanner_only_codes_and_stages() {
         for (error_code, stage) in [
             ("STAGE_DEADLINE_EXHAUSTED", "parse"),

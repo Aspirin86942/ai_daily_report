@@ -174,6 +174,8 @@ def capture_context_state(conn: sqlite3.Connection, scan_run_id: int) -> dict:
         " ORDER BY file_identity",
         (context_run_id,),
     ).fetchall()
+    # rows 转 list 以便 JSON 序列化与跨样本比较
+    decisions = [list(row) for row in decisions]
     return {
         "context_sha256": context_sha256,
         "semantic_counts": {
@@ -188,6 +190,16 @@ def capture_context_state(conn: sqlite3.Connection, scan_run_id: int) -> dict:
         },
         "decisions": decisions,
     }
+
+
+def semantic_key(context: dict) -> tuple:
+    """final_context hash + decisions + semantic counts 的完整一致性键
+    （spec Part 6：``final_context``/decisions/semantic counts 完全一致）。"""
+    return (
+        context["context_sha256"],
+        json.dumps(context["decisions"], ensure_ascii=False, sort_keys=False),
+        json.dumps(context["semantic_counts"], ensure_ascii=False, sort_keys=True),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -302,11 +314,10 @@ def run_inspect_v2(scanner: Path, db_path: Path, scan_run_id: int) -> dict:
         return {"ok": False, "payload": payload, "error": "inspect validate failed"}
     if payload.get("status") != "ok":
         error = payload.get("error") or {}
-        return {
-            "ok": False,
-            "payload": payload,
-            "error": (error.get("error_code") or "inspect status=error"),
-        }
+        code = error.get("error_code") or "inspect status=error"
+        message = error.get("message") or ""
+        detail = f"{code}: {message}" if message else code
+        return {"ok": False, "payload": payload, "error": detail}
     if result.exit_code != 0:
         return {"ok": False, "payload": payload, "error": "inspect exit non-zero"}
     return {"ok": True, "payload": payload, "error": None}
@@ -733,6 +744,7 @@ def run_cache_only_vs_snapshot(
                 ),
                 "inspect_error": inspect_result["error"],
                 "context_sha256": context["context_sha256"],
+                "semantic": context,
             }
         )
 
@@ -783,6 +795,7 @@ def run_cache_only_vs_snapshot(
                 "context_sha256": context["context_sha256"],
                 "context_identical_to_cold": context["context_sha256"]
                 == snap_cold["context"]["context_sha256"],
+                "semantic": context,
             }
         )
         seen_run_ids.add(run["scan_run_id"])
@@ -795,13 +808,15 @@ def run_cache_only_vs_snapshot(
     if cache_median > 0:
         improvement = 1.0 - snap_median / cache_median
 
-    # semantic identity across cache-warm + snapshot-warm + their colds
+    # semantic identity across cache-warm + snapshot-warm + their colds:
+    # brief mandates final_context + decisions + semantic counts 完全一致,
+    # so the gate compares the full captured tuple, not just context_sha256.
     all_contexts = (
-        [sample["context_sha256"] for sample in cache_samples]
-        + [sample["context_sha256"] for sample in snap_samples]
-        + [cold["context"]["context_sha256"] for cold in colds]
+        [sample["semantic"] for sample in cache_samples]
+        + [sample["semantic"] for sample in snap_samples]
+        + [cold["context"] for cold in colds]
     )
-    semantic_identical = len(set(all_contexts)) == 1
+    semantic_identical = len({semantic_key(context) for context in all_contexts}) == 1
 
     cache_warm_ok = all(
         sample["snapshot_hit"] is False
@@ -945,13 +960,23 @@ def main(argv: list[str] | None = None) -> int:
             continue
         results["scenarios"][scenario] = result
 
+    # Evidence 只含聚合值；`semantic` 字段含 decisions（含 file_identity 真实路径），
+    # 只用于内存中的一致性 gate，写入前必须剥离（scope：禁止真实路径/文件名）。
+    def _strip_semantic(payload: dict) -> dict:
+        for scenario in payload.get("scenarios", {}).values():
+            for key in ("cache_only_warm_samples", "snapshot_warm_samples"):
+                for sample in scenario.get(key, []):
+                    if isinstance(sample, dict):
+                        sample.pop("semantic", None)
+        return payload
+
     evidence_path = out_root / "evidence.json"
+    evidence = _strip_semantic(json.loads(json.dumps(results, default=str)))
     evidence_path.write_text(
-        json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8"
+        json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print("=== snapshot-warm benchmark (aggregate) ===")
-    compact = json.loads(json.dumps(results, default=str))
-    print(json.dumps(compact, ensure_ascii=False, indent=2))
+    print(json.dumps(evidence, ensure_ascii=False, indent=2))
 
     failed = [
         scenario

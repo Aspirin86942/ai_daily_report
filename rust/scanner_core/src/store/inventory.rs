@@ -299,6 +299,17 @@ pub(crate) fn insert_file_results(
         } else {
             parse_cache_status_text(record)
         };
+        // spec Part 5.2/5.3: `cache_miss_reason` is only valid when
+        // `parse_cache_status=miss`; fresh / snapshot / not_applicable rows must
+        // carry an empty reason. A not_applicable row (policy/semantic/runtime
+        // NotParsed, classifier failure, no-text metadata) may have performed a
+        // lookup (record.cache_status=miss), but the row's v2 parse provenance
+        // is not_applicable, so the reason must not leak into the audit.
+        let cache_miss_reason = if parse_cache_status == "miss" {
+            cache_miss_reason_text(record.cache_miss_reason)
+        } else {
+            ""
+        };
         statement.execute(params![
             scan_run_id,
             record.file_identity,
@@ -306,7 +317,7 @@ pub(crate) fn insert_file_results(
             record.source_version,
             record.parse_profile_hash,
             cache_status_text(record.cache_status),
-            cache_miss_reason_text(record.cache_miss_reason),
+            cache_miss_reason,
             parse_status_text(record.parse_status),
             record.parser_backend,
             worker_lane_text(record.worker_lane),
