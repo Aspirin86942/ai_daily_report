@@ -6,8 +6,11 @@
 //! and a committed v1 database upgrades inside a single transaction.
 
 use ai_daily_scanner_core::store::schema::{
-    configure_connection, migrate, LATEST_USER_VERSION, V1_DDL,
+    configure_connection, migrate, upgrade_v1_to_v2, LATEST_USER_VERSION, V1_DDL,
 };
+
+/// Request id recorded in schema_migration_history by the explicit v1→v2 upgrade.
+const UPGRADE_REQUEST_ID: &str = "123e4567-e89b-42d3-a456-426614174000";
 
 #[derive(Clone, Copy)]
 enum FixtureRunKind {
@@ -272,7 +275,7 @@ fn fresh_v2_db_has_incremental_vacuum_and_new_tables() {
 fn migrated_v1_rows_are_audited_as_migrated_and_caches_invalidated() {
     let (_directory, mut conn) = open_v1_fixture();
 
-    migrate(&mut conn).expect("v1 database upgrades to v2");
+    upgrade_v1_to_v2(&mut conn, UPGRADE_REQUEST_ID).expect("v1 database upgrades to v2");
 
     let ver: i32 = conn
         .pragma_query_value(None, "user_version", |r| r.get(0))
@@ -399,7 +402,7 @@ fn migrated_v1_rows_are_audited_as_migrated_and_caches_invalidated() {
 fn partial_run_migrates_to_payload_artifact_with_verbatim_warnings() {
     let (_directory, mut conn) = build_v1_fixture(FixtureRunKind::Partial);
 
-    migrate(&mut conn).expect("partial v1 run upgrades to v2");
+    upgrade_v1_to_v2(&mut conn, UPGRADE_REQUEST_ID).expect("partial v1 run upgrades to v2");
 
     let artifact_count: i64 = conn
         .query_row(
@@ -445,7 +448,7 @@ fn partial_run_migrates_to_payload_artifact_with_verbatim_warnings() {
 fn error_run_migrates_without_artifact() {
     let (_directory, mut conn) = build_v1_fixture(FixtureRunKind::Error);
 
-    migrate(&mut conn).expect("error v1 run upgrades to v2");
+    upgrade_v1_to_v2(&mut conn, UPGRADE_REQUEST_ID).expect("error v1 run upgrades to v2");
 
     let artifact_count: i64 = conn
         .query_row("SELECT count(*) FROM context_artifacts", [], |r| r.get(0))
@@ -469,7 +472,7 @@ fn error_run_migrates_without_artifact() {
 fn nonterminal_v1_rows_are_audited_as_migrated_v1() {
     let (_directory, mut conn) = build_v1_fixture(FixtureRunKind::Running);
 
-    migrate(&mut conn).expect("v1 database upgrades to v2");
+    upgrade_v1_to_v2(&mut conn, UPGRADE_REQUEST_ID).expect("v1 database upgrades to v2");
 
     let provenance: String = conn
         .query_row(
@@ -518,7 +521,7 @@ fn corrupt_v1_envelope_aborts_migration_and_keeps_user_version() {
     )
     .expect("corrupt envelope seeded");
 
-    let result = migrate(&mut conn);
+    let result = upgrade_v1_to_v2(&mut conn, UPGRADE_REQUEST_ID);
     assert!(result.is_err(), "migration must fail on a corrupt envelope");
 
     let ver: i32 = conn

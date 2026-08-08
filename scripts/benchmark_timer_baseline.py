@@ -158,6 +158,7 @@ def main() -> int:
 
     out = {
         "scanner_sha256": sha256_file(scanner),
+        "corpus": str(work_dir.relative_to(PROJECT_ROOT)).replace("\\", "/"),
         "source_count": source_count,
         "source_count_consistent": source_count_consistent,
         "cold_median_ms": cold_median,

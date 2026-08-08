@@ -1420,7 +1420,22 @@ fn upgrade_audit_inner(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabaseRes
             ),
         );
     }
-    let detected = count_parse_cache(&connection).unwrap_or(0);
+    let detected = match count_parse_cache(&connection) {
+        Ok(detected) => detected,
+        Err(error) => {
+            // The detected count is a hard precondition for the audit response;
+            // a silent 0 could under-report `detected` below a later `invalidated`.
+            return upgrade_error_response(
+                request,
+                Some(1),
+                pre,
+                UpgradeIntegrityCheck::NotRun,
+                false,
+                0,
+                error.diagnostic(DiagnosticStage::Maintenance),
+            );
+        }
+    };
     upgrade_ok_response(
         request,
         1,
@@ -1549,7 +1564,23 @@ fn upgrade_database_apply(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabase
             ),
         );
     }
-    let detected = count_parse_cache(&connection).unwrap_or(0);
+    let detected = match count_parse_cache(&connection) {
+        Ok(detected) => detected,
+        Err(error) => {
+            // Propagate instead of defaulting to 0: if the count silently read 0
+            // and the migration then invalidates N>0 rows, the response would
+            // violate `invalidated <= detected`.
+            return upgrade_error_response(
+                request,
+                Some(1),
+                pre,
+                UpgradeIntegrityCheck::NotRun,
+                false,
+                0,
+                error.diagnostic(DiagnosticStage::Maintenance),
+            );
+        }
+    };
     if pre == UpgradeIntegrityCheck::Failed {
         return upgrade_error_response(
             request,

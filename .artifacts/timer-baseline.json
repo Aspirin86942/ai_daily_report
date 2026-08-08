@@ -1,5 +1,6 @@
 {
   "scanner_sha256": "bded9c018241db204f6741e0019159e19ede3c68e89124a8e5f7c7c38aa36391",
+  "corpus": "tests/fixtures/worker_documents",
   "source_count": 3,
   "source_count_consistent": true,
   "cold_median_ms": 932.7918999988469,

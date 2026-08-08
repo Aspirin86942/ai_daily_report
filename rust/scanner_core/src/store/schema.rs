@@ -16,15 +16,12 @@ pub const LATEST_USER_VERSION: i32 = 2;
 pub const COMMITTED_USER_VERSIONS: &[i32] = &[0, 1];
 pub const BUSY_TIMEOUT_MS: u64 = 2_000;
 
-/// Synthetic upgrade request id recorded by the automatic migrate() path when it
-/// upgrades a v1 database. The strict upgrade-db command (a later task) supplies
-/// its own request_id through a separate path.
-const AUTO_UPGRADE_REQUEST_ID: &str = "00000000-0000-4000-8000-000000000001";
-
 #[derive(Debug, Error)]
 pub enum SchemaError {
     #[error("scanner database schema is newer than this engine")]
     TooNew,
+    #[error("scanner database v1 must be upgraded by the upgrade-db command")]
+    UpgradeRequired,
     #[error("scanner database v1 to v2 migration failed: {0}")]
     MigrationFailed(String),
     #[error("scanner database schema migration failed")]
@@ -718,6 +715,13 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
     if version > LATEST_USER_VERSION {
         return Err(SchemaError::TooNew);
     }
+    if version == 1 {
+        // A committed v1 database must never be auto-migrated by a generic
+        // migrate() call: only the separately-authorized upgrade-db command may
+        // upgrade it (spec Part 8.3). Callers that verified the gate can route
+        // through the explicit upgrade_v1_to_v2 entry.
+        return Err(SchemaError::UpgradeRequired);
+    }
     if version == 0 {
         // A fresh database must set auto_vacuum=INCREMENTAL before the first table
         // is created (spec Part 4/8.2). configure_connection already does this
@@ -729,22 +733,6 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
         insert_created_empty_history(&transaction)?;
         transaction.pragma_update(None, "user_version", LATEST_USER_VERSION)?;
         transaction.commit()?;
-    } else if version == 1 {
-        // The file_inventory rebuild must DROP the v1 parent table while child rows
-        // still reference it, and SQLite cannot defer DROP TABLE's implicit DELETE.
-        // FK enforcement is therefore disabled for the duration of the atomic
-        // migration transaction (the documented table-rebuild approach) and
-        // re-enabled immediately afterwards.
-        connection.pragma_update(None, "foreign_keys", false)?;
-        let migration = (|| -> Result<(), SchemaError> {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-            migrate_v1_to_v2(&transaction, AUTO_UPGRADE_REQUEST_ID)?;
-            transaction.pragma_update(None, "user_version", LATEST_USER_VERSION)?;
-            transaction.commit()?;
-            Ok(())
-        })();
-        connection.pragma_update(None, "foreign_keys", true)?;
-        migration?;
     }
     Ok(())
 }
@@ -1063,7 +1051,15 @@ mod tests {
                 .pragma_update(None, "user_version", version)
                 .expect("seed version");
             configure_connection(&connection).expect("pragmas");
-            migrate(&mut connection).expect("migration");
+            if version == 1 {
+                // A committed v1 database is upgraded only through the explicit
+                // upgrade_v1_to_v2 entry (the upgrade-db command); migrate()
+                // refuses it (spec Part 8.3).
+                upgrade_v1_to_v2(&mut connection, "123e4567-e89b-42d3-a456-426614174000")
+                    .expect("explicit v1 upgrade");
+            } else {
+                migrate(&mut connection).expect("migration");
+            }
             let migrated: i32 = connection
                 .pragma_query_value(None, "user_version", |row| row.get(0))
                 .expect("migrated version");
@@ -1075,6 +1071,31 @@ mod tests {
                 )
                 .expect("migrated schema is writable");
         }
+    }
+
+    #[test]
+    fn migrate_refuses_to_auto_upgrade_a_committed_v1_database() {
+        let (_directory, mut connection) = open_database("v1-refused.sqlite3");
+        connection
+            .execute_batch(V1_DDL)
+            .expect("v1 schema for the refused upgrade fixture");
+        connection.pragma_update(None, "user_version", 1).expect("seed version");
+        configure_connection(&connection).expect("pragmas");
+
+        assert!(matches!(
+            migrate(&mut connection),
+            Err(SchemaError::UpgradeRequired)
+        ));
+        let version: i32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .expect("user_version");
+        assert_eq!(version, 1, "migrate must not touch a v1 database");
+        let parse_cache_count: i64 = connection
+            .query_row("SELECT count(*) FROM sqlite_schema WHERE name='parse_cache'", [], |row| {
+                row.get(0)
+            })
+            .expect("schema count");
+        assert_eq!(parse_cache_count, 1, "v1 schema must be left untouched");
     }
 
     #[test]
