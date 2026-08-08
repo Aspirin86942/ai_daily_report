@@ -5768,6 +5768,151 @@ mod tests {
     }
 
     #[test]
+    fn zero_file_error_run_inspects_cleanly_v1_and_v2() {
+        // spec Part 2.3 regression: a zero-file scheduler Error outcome
+        // (source-file ceiling, BUDGET_MODEL_MISMATCH, enforced-render mismatch)
+        // commits a context_runs row with 4 reconciling zero stage metrics, so
+        // v1 AND v2 inspect both succeed (previously `stages.len() != 4` RUN_CORRUPT).
+        let mut harness = harness("00000000-0000-4000-8000-000000000025");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        record_both_workers(&mut harness.store, &active, 1);
+        let error = Diagnostic {
+            error_code: ErrorCode::SourceFileLimitExceeded,
+            message: "discovery observed 1000001 source files, exceeding the engine ceiling of 1000000".to_string(),
+            retryable: false,
+            stage: DiagnosticStage::Discovery,
+            file_path: Nullable(None),
+            backend: Nullable(None),
+        };
+        let summary = empty_summary();
+        let context = ContextRunRecord {
+            context_profile_hash: "0".repeat(64),
+            status: RunStatus::Error,
+            final_context: String::new(),
+            context_sha256: sha256_hex(b""),
+            summary: summary.clone(),
+            decisions: Vec::new(),
+        };
+        let version = crate::version_response();
+        let envelope = ContextEnvelope {
+            contract: "ai_daily_context".to_string(),
+            protocol_version: 1,
+            request_id: active.request_id().to_string(),
+            engine_version: version.engine_version,
+            engine_build: version.engine_build,
+            status: EngineStatus::Error,
+            file_context: String::new(),
+            summary,
+            scan_run_id: Nullable(Some(active.scan_run_id())),
+            context_run_id: Nullable(Some(active.context_run_id())),
+            warnings: Vec::new(),
+            error: Nullable(Some(error.clone())),
+        };
+        let batch = FinalizationBatch {
+            status: RunStatus::Error,
+            envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
+            inventory: Vec::new(),
+            cache_writes: Vec::new(),
+            file_results: Vec::new(),
+            diagnostics: vec![RunDiagnosticRecord {
+                severity: DiagnosticSeverity::Error,
+                diagnostic: error,
+            }],
+            stage_metrics: vec![
+                StageMetric { stage: StageName::Discovery, item_count: 0, duration_ms: 0 },
+                StageMetric { stage: StageName::Cache, item_count: 0, duration_ms: 0 },
+                StageMetric { stage: StageName::Parse, item_count: 0, duration_ms: 0 },
+                StageMetric { stage: StageName::Context, item_count: 0, duration_ms: 0 },
+            ],
+            extension_metrics: Vec::new(),
+            context: Some(context),
+            artifact: None,
+            snapshot_key: None,
+            snapshot_hit: None,
+            execution_metrics: Some(ai_daily_scanner_contract::ExecutionMetricsV2 {
+                discovery_observed_file_count: 1_000_001,
+                source_guard_content_hash_file_count: 0,
+                source_guard_unavailable_count: 0,
+                source_guard_bytes_read: 0,
+                candidate_file_count: 0,
+                admitted_file_count: 0,
+                classification_slot_count: 0,
+                confirmed_run_inspected_pages_total: 0,
+                unobserved_classification_attempt_count: 0,
+                nominal_charged_pages_total: 0,
+                extraction_slot_count: 0,
+                pdfplumber_invocations: 0,
+                snapshot_hit: false,
+                parse_cache_lookup_count: 0,
+                classification_cache_lookup_count: 0,
+                parse_cache_all_hit: Nullable(None),
+                classification_cache_all_hit: Nullable(None),
+                stage_deadline_exhausted_count: 0,
+                session_restart_count: 0,
+                session_fallback_count: 0,
+                classify_attempt_count: 0,
+                parse_attempt_count: 0,
+                reserved_chars: 0,
+                rendered_chars: 0,
+                worker_handshake_ms: 5,
+                discovery_ms: 2,
+                snapshot_lookup_ms: 0,
+                current_run_audit_write_ms: 0,
+                terminal_precommit_ms: 0,
+                deadline_precommit_elapsed_ms: 0,
+                envelope_rebuild_ms: 0,
+                terminal_rows_written: 0,
+                peak_worker_rss_bytes: Nullable(None),
+            }),
+        };
+        harness.store.finalize(&active, &batch, 2).expect("zero-file error finalize");
+
+        let (context_run_id, status, artifact_id): (i64, String, Option<i64>) = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT context_run_id, status, artifact_id
+                 FROM context_runs WHERE scan_run_id=?1",
+                [active.scan_run_id() as i64],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(context_run_id, active.context_run_id() as i64);
+        assert_eq!(status, "error");
+        assert!(artifact_id.is_none());
+
+        let snapshot = harness
+            .store
+            .inspect_run(active.scan_run_id(), false)
+            .expect("v1 inspect must succeed for a zero-file error run");
+        assert_eq!(snapshot.run_status, RunStatus::Error);
+        assert_eq!(snapshot.stage_metrics.len(), 4, "zero-file error must persist 4 stage rows");
+
+        let request = ai_daily_scanner_contract::InspectRunRequest {
+            contract: "ai_daily_context".to_string(),
+            protocol_version: 1,
+            request_id: "00000000-0000-4000-8000-000000000025".to_string(),
+            scan_db_path: harness.db_path.to_string_lossy().to_string(),
+            scan_run_id: active.scan_run_id(),
+            include_content: false,
+        };
+        let v2 = crate::inspect::assemble_inspect_v2(&request, &snapshot)
+            .expect("v2 inspect must succeed for a zero-file error run");
+        assert_eq!(v2.status, ai_daily_scanner_contract::InspectStatus::Ok);
+        assert_eq!(v2.execution_metrics.discovery_observed_file_count, 1_000_001);
+    }
+
+    #[test]
     fn cache_miss_hit_source_profile_and_build_invalidation_are_explicit() {
         let mut harness = harness("00000000-0000-4000-8000-000000000010");
         let source = "mtime_ns=100:size=5";

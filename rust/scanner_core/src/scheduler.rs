@@ -483,7 +483,7 @@ impl BudgetedContextScheduler {
                         backend: Nullable(None),
                     },
                 }],
-                stage_metrics: Vec::new(),
+                stage_metrics: zero_stage_metrics(),
                 extension_metrics: Vec::new(),
                 context: None,
                 execution_metrics: metrics,
@@ -1967,7 +1967,7 @@ fn internal_error_outcome(
         classification_cache_receipts: parse_outputs.classification_cache_receipts,
         classifications: std::collections::BTreeMap::new(),
         diagnostics,
-        stage_metrics: Vec::new(),
+        stage_metrics: zero_stage_metrics(),
         extension_metrics: Vec::new(),
         context: None,
         execution_metrics: metrics,
@@ -2208,6 +2208,19 @@ fn build_stage_metrics(
             item_count: context_item_count,
             duration_ms: context_duration_ms,
         },
+    ]
+}
+
+/// Spec Part 2.3: zero-file scheduler Error outcomes (source-file ceiling,
+/// BUDGET_MODEL_MISMATCH, enforced-render mismatch) still commit a `context_runs`
+/// row whose relational summary must reconcile with exactly 4 stage rows, so the
+/// terminal batch carries four all-zero stage metrics instead of none.
+fn zero_stage_metrics() -> Vec<StageMetric> {
+    vec![
+        StageMetric { stage: StageName::Discovery, item_count: 0, duration_ms: 0 },
+        StageMetric { stage: StageName::Cache, item_count: 0, duration_ms: 0 },
+        StageMetric { stage: StageName::Parse, item_count: 0, duration_ms: 0 },
+        StageMetric { stage: StageName::Context, item_count: 0, duration_ms: 0 },
     ]
 }
 
