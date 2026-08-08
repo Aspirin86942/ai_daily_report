@@ -362,6 +362,9 @@ CREATE TABLE parse_cache (
     worker_version TEXT NOT NULL,
     worker_build TEXT NOT NULL,
     cached_at_ms INTEGER NOT NULL,
+    entry_size_bytes INTEGER NOT NULL CHECK (entry_size_bytes >= 0),
+    generation_rank INTEGER NOT NULL DEFAULT 1 CHECK (generation_rank IN (0, 1)),
+    last_accessed_bucket TEXT NOT NULL,
     PRIMARY KEY (file_identity, source_version, source_guard_kind, source_guard_sha256, parse_profile_hash)
 ) STRICT;
 
@@ -716,6 +719,9 @@ CREATE TABLE parse_cache_v2 (
     worker_version TEXT NOT NULL,
     worker_build TEXT NOT NULL,
     cached_at_ms INTEGER NOT NULL,
+    entry_size_bytes INTEGER NOT NULL CHECK (entry_size_bytes >= 0),
+    generation_rank INTEGER NOT NULL DEFAULT 1 CHECK (generation_rank IN (0, 1)),
+    last_accessed_bucket TEXT NOT NULL,
     PRIMARY KEY (file_identity, source_version, source_guard_kind, source_guard_sha256, parse_profile_hash)
 ) STRICT;
 DROP TABLE parse_cache;
@@ -766,10 +772,11 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
         transaction.commit()?;
         return Ok(());
     }
-    // Version 2 schema amendment: the parse_cache table MUST be SourceGuardV2-bound.
-    // A committed v2 database created before the amendment has the legacy
-    // file_identity+source_version+parse_profile_hash key; detect the missing
-    // guard column and rebuild the table (clearing legacy rows).
+    // Version 2 schema amendment: the parse_cache table MUST be SourceGuardV2-bound
+    // and carry the retention columns (`entry_size_bytes`, `generation_rank`,
+    // `last_accessed_bucket`, spec Part 4). A committed v2 database created
+    // before the amendment has the legacy key/columns; detect the missing column
+    // and rebuild the table (clearing legacy rows).
     if version == LATEST_USER_VERSION {
         let has_guard: bool = connection.query_row(
             "SELECT EXISTS(
@@ -779,7 +786,15 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
             [],
             |row| row.get(0),
         )?;
-        if !has_guard {
+        let has_size: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('parse_cache')
+                WHERE name='entry_size_bytes'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_guard || !has_size {
             let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PARSE_CACHE_GUARD_DDL)?;
             transaction.commit()?;

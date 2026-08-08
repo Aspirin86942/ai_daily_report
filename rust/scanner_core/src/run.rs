@@ -5,9 +5,9 @@ use ai_daily_discovery::{
 use ai_daily_scanner_contract::{
     BuildContextRequest, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
     DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest,
-    InspectRunResponse, InspectStatus, Nullable, RunStatus, TransportErrorResponse,
-    UpgradeDatabaseRequestV1, UpgradeStatus, Validate, VersionResponse, WorkerDiagnosticV1,
-    WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
+    InspectRunResponse, InspectStatus, MaintenanceRequestV1, MaintenanceStatus, Nullable,
+    RunStatus, TransportErrorResponse, UpgradeDatabaseRequestV1, UpgradeStatus, Validate,
+    VersionResponse, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
 };
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
@@ -104,8 +104,31 @@ pub fn dispatch(command: &str, input: &[u8]) -> Result<CommandOutput, EngineShel
             };
             upgrade_database_command(&request)
         }
+        "maintenance" => {
+            let request = match decode_request::<MaintenanceRequestV1>(input) {
+                Ok(request) => request,
+                Err(_) => return invalid_request_output(),
+            };
+            maintenance_command(&request)
+        }
         _ => invalid_request_output(),
     }
+}
+
+fn maintenance_command(
+    request: &MaintenanceRequestV1,
+) -> Result<CommandOutput, EngineShellError> {
+    let response = ScannerStore::maintenance(request);
+    debug_assert!(
+        response.validate().is_ok(),
+        "maintenance response violates the wire contract"
+    );
+    let exit_code = if response.status == MaintenanceStatus::Error {
+        1
+    } else {
+        0
+    };
+    CommandOutput::with_exit(&response, exit_code)
 }
 
 fn upgrade_database_command(
@@ -704,6 +727,7 @@ fn execute_active_build(
             );
         }
     };
+    let absolute_deadline_ms = input.absolute_deadline_ms;
     let scheduler = BudgetedContextScheduler::new(
         Box::new(classifier_port),
         Box::new(parser_port),
@@ -786,7 +810,22 @@ fn execute_active_build(
     };
     let exit_code = i32::from(run_status == RunStatus::Error);
     match store.finalize(active, &batch, finalize_now_ms) {
-        Ok(()) => CommandOutput::canonical_json(envelope_json, exit_code),
+        Ok(()) => {
+            // spec Part 4 opportunistic GC: only when >=10ms remain to the
+            // absolute deadline. It runs in an independent zero-wait transaction,
+            // forms a freelist only, and never rewrites the committed terminal
+            // result; its cost stays fully inside benchmark_wall_ms.
+            if let Ok(now) = current_time_millis() {
+                let remaining = absolute_deadline_ms.saturating_sub(now);
+                if remaining >= crate::store::cache::OPPORTUNISTIC_GC_BUDGET_MS {
+                    let _ = store.run_opportunistic_gc(
+                        now,
+                        crate::store::cache::OPPORTUNISTIC_GC_BUDGET_MS,
+                    );
+                }
+            }
+            CommandOutput::canonical_json(envelope_json, exit_code)
+        }
         Err(error) => build_error_output(
             request,
             version,

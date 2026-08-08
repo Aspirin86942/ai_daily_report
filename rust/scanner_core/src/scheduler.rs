@@ -153,6 +153,17 @@ pub trait CachePort: Send + Sync {
         now_ms: u64,
         records: &[ClassificationCacheWriteRecord],
     ) -> Result<(), CachePortError>;
+    /// Batch `last_accessed_bucket` touch for cache hits (spec Part 4: same row
+    /// at most once/day, all hits updated in one transaction). Default no-op for
+    /// adapters that do not track access buckets.
+    fn touch_access(
+        &self,
+        _now_ms: u64,
+        _parse_hits: &[String],
+        _classification_hits: &[String],
+    ) -> Result<(), CachePortError> {
+        Ok(())
+    }
 }
 
 /// Per-file parse request.
@@ -487,15 +498,16 @@ impl BudgetedContextScheduler {
             .iter()
             .map(|file| (file.file_identity.clone(), file))
             .collect();
-        let (classifications, runtime_classification) = self.run_classifications(
-            &classified,
-            &snapshot,
-            &profile,
-            &classifier_profile_hash,
-            &classifier_build,
-            &existed_before,
-            &mut metrics,
-        );
+        let (classifications, runtime_classification, classification_fresh_hits) =
+            self.run_classifications(
+                &classified,
+                &snapshot,
+                &profile,
+                &classifier_profile_hash,
+                &classifier_build,
+                &existed_before,
+                &mut metrics,
+            );
 
         // ---- Fixed context sections + budget model ----
         let mut fixed =
@@ -709,6 +721,14 @@ impl BudgetedContextScheduler {
             }
         };
 
+        // spec Part 4: batch `last_accessed_bucket` touch for cache hits, all in
+        // one transaction. Best-effort: a busy/deadline failure never fails the run.
+        let _ = self.cache.touch_access(
+            self.clock.now_ms(),
+            &parse_outputs.parse_fresh_hits,
+            &classification_fresh_hits,
+        );
+
         metrics.deadline_precommit_elapsed_ms = self.clock.now_ms();
 
         Ok(BudgetedScanOutcome {
@@ -748,6 +768,8 @@ struct ParseOutputs {
     cache_write_warnings: Vec<Diagnostic>,
     /// Parser fallback / degradation warnings surfaced by the parser adapter.
     parse_warnings: Vec<Diagnostic>,
+    /// Fresh parse-cache hit identities for the batch `last_accessed_bucket` touch.
+    parse_fresh_hits: Vec<String>,
 }
 
 fn source_guard_metrics(discovery: &[DiscoveredFileOut]) -> ExecutionMetrics {
@@ -957,9 +979,11 @@ impl BudgetedContextScheduler {
     ) -> (
         BTreeMap<String, crate::admission::PdfClassificationResult>,
         HashSet<String>,
+        Vec<String>,
     ) {
         let mut results = BTreeMap::new();
         let mut runtime_not_parsed = HashSet::new();
+        let mut classification_fresh_hits = Vec::new();
         let mut any_lookup = false;
         let mut any_miss = false;
         for plan in classified {
@@ -1000,6 +1024,7 @@ impl BudgetedContextScheduler {
                 .lookup_classification(file, classifier_profile_hash, classifier_build, existed)
             {
                 Ok(ClassificationCacheLookup::Fresh(entry)) => {
+                    classification_fresh_hits.push(plan.file_identity.clone());
                     let status = match entry.status.as_str() {
                         "text_in_parse_window" => PdfClassificationStatus::TextInParseWindow,
                         _ => PdfClassificationStatus::NoTextInParseWindow,
@@ -1139,7 +1164,7 @@ impl BudgetedContextScheduler {
             }
         }
         metrics.classification_cache_all_hit = if any_lookup { Some(!any_miss) } else { None };
-        (results, runtime_not_parsed)
+        (results, runtime_not_parsed, classification_fresh_hits)
     }
 }
 
@@ -1203,6 +1228,7 @@ impl BudgetedContextScheduler {
         let mut parse_cache_miss_reason = HashMap::new();
         let mut cache_write_warnings = Vec::new();
         let mut parse_warnings = Vec::new();
+        let mut parse_fresh_hits = Vec::new();
         let mut any_lookup = false;
         let mut any_miss = false;
         let work_deadline = self.stored_work_deadline;
@@ -1249,6 +1275,7 @@ impl BudgetedContextScheduler {
                             .insert(decision.file_identity.clone(), CacheStatus::Fresh);
                         parse_cache_miss_reason
                             .insert(decision.file_identity.clone(), CacheMissReason::None);
+                        parse_fresh_hits.push(decision.file_identity.clone());
                         results.insert(
                             decision.file_identity.clone(),
                             ParseResult {
@@ -1373,6 +1400,7 @@ impl BudgetedContextScheduler {
             parse_cache_miss_reason,
             cache_write_warnings,
             parse_warnings,
+            parse_fresh_hits,
         })
     }
 }

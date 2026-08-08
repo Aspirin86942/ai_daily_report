@@ -6,11 +6,13 @@ pub mod schema;
 
 use ai_daily_discovery::normalize_contract_path_text;
 use ai_daily_scanner_contract::{
-    BuildContextRequest, ContextAction, ContextDecision, ContextEnvelope, ContextSummary,
-    Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, ExtensionMetric,
-    NormalizedScannerProfileV1, Nullable, ParseStatus, RunStatus, StageMetric, StageName,
-    UpgradeDatabaseRequestV1, UpgradeDatabaseResponseV1, UpgradeIntegrityCheck, UpgradeStatus,
-    Validate, VersionResponse,
+    AutoVacuumMode, BuildContextRequest, ContextAction, ContextDecision, ContextEnvelope,
+    ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, ExtensionMetric,
+    MaintenanceDeletedV1, MaintenanceMode, MaintenancePostIntegrityCheck,
+    MaintenancePreIntegrityCheck, MaintenanceRequestV1, MaintenanceResponseV1, MaintenanceSizeV1,
+    MaintenanceStatus, MaintenanceVacuumStatus, MaintenanceVacuumV1, NormalizedScannerProfileV1,
+    Nullable, ParseStatus, RunStatus, StageMetric, StageName, UpgradeDatabaseRequestV1,
+    UpgradeDatabaseResponseV1, UpgradeIntegrityCheck, UpgradeStatus, Validate, VersionResponse,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
@@ -461,6 +463,113 @@ impl ScannerStore {
         } else {
             upgrade_database_audit(request)
         }
+    }
+
+    /// Executes the `maintenance` command (spec Part 4/5.3): exclusive lease →
+    /// before sizes → pre integrity → mode preflight → (dry-run ends) → deep row
+    /// GC transaction → selected vacuum → post integrity → after sizes. Only
+    /// `gc`/`incremental_vacuum`; `full_vacuum` is intentionally removed.
+    pub fn maintenance(request: &MaintenanceRequestV1) -> MaintenanceResponseV1 {
+        maintenance_command(request)
+    }
+
+    /// Batch `last_accessed_bucket` update for parse/classification cache hits
+    /// (spec Part 4): same row at most once/day, all hits in one transaction.
+    pub fn touch_cache_access(
+        &mut self,
+        now_ms: u64,
+        parse_hits: &[String],
+        classification_hits: &[String],
+    ) -> Result<(), StoreError> {
+        let now_ms = checked_i64(now_ms, "cache touch timestamp")?;
+        if parse_hits.is_empty() && classification_hits.is_empty() {
+            return Ok(());
+        }
+        let bucket = cache::date_bucket_for_ms(now_ms);
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(cache_write)?;
+        cache::touch_parse_cache_access(&transaction, parse_hits, &bucket).map_err(cache_write)?;
+        cache::touch_classification_cache_access(&transaction, classification_hits, &bucket)
+            .map_err(cache_write)?;
+        transaction.commit().map_err(cache_write)
+    }
+
+    /// Opportunistic age/orphan row GC (spec Part 4): runs after the terminal
+    /// COMMIT only when `remaining_to_absolute_deadline >= 10ms`. Independent
+    /// transaction with `busy_timeout=0`, bounded indexed delete batches, and a
+    /// 10ms admission budget checked before each statement. It only forms a
+    /// freelist (no vacuum) and never rewrites the committed terminal result.
+    pub fn run_opportunistic_gc(&mut self, now_ms: u64, budget_ms: u64) -> Result<(), StoreError> {
+        let now_ms = checked_i64(now_ms, "opportunistic gc timestamp")?;
+        let budget_ms = checked_i64(budget_ms, "opportunistic gc budget")?;
+        if budget_ms <= 0 {
+            return Ok(());
+        }
+        self.connection
+            .busy_timeout(Duration::from_millis(0))
+            .map_err(cache_open)?;
+        let outcome = (|| -> Result<(), StoreError> {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Deferred)
+                .map_err(cache_write)?;
+            let started = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as i64)
+                .unwrap_or(now_ms);
+            let deadline = started.saturating_add(budget_ms);
+            // Orphan artifacts first (zero `context_runs` references).
+            loop {
+                if remaining_opportunistic_ms(deadline) <= 0 {
+                    break;
+                }
+                let deleted = transaction
+                    .execute(
+                        "DELETE FROM context_artifacts WHERE artifact_id IN (
+                            SELECT artifact_id FROM context_artifacts
+                            WHERE NOT EXISTS(
+                                SELECT 1 FROM context_runs
+                                WHERE context_runs.artifact_id = context_artifacts.artifact_id
+                            )
+                            LIMIT 64
+                         )",
+                        [],
+                    )
+                    .map_err(cache_write)?;
+                if deleted == 0 {
+                    break;
+                }
+            }
+            // Aged terminal runs (>90 days) by finished_at_ms ASC.
+            let cutoff = now_ms.saturating_sub(cache::TERMINAL_RUN_MAX_AGE_DAYS * 86_400_000);
+            loop {
+                if remaining_opportunistic_ms(deadline) <= 0 {
+                    break;
+                }
+                let deleted = transaction
+                    .execute(
+                        "DELETE FROM scan_runs WHERE scan_run_id IN (
+                            SELECT scan_run_id FROM scan_runs
+                            WHERE status IN ('success', 'partial', 'error', 'abandoned')
+                              AND finished_at_ms IS NOT NULL AND finished_at_ms < ?1
+                            ORDER BY finished_at_ms ASC, scan_run_id ASC
+                            LIMIT 64
+                         )",
+                        params![cutoff],
+                    )
+                    .map_err(cache_write)?;
+                if deleted == 0 {
+                    break;
+                }
+            }
+            transaction.commit().map_err(cache_write)
+        })();
+        let _ = self
+            .connection
+            .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS));
+        outcome
     }
 
     pub fn path(&self) -> &Path {
@@ -971,15 +1080,18 @@ impl ScannerStore {
         }
 
         let status = terminal_status_text(batch.status)?;
+        let audit_size = compute_audit_size(batch);
         let updated = transaction
             .execute(
                 "UPDATE scan_runs
-                 SET status=?1, updated_at_ms=?2, finished_at_ms=?2, final_envelope_json=?3
-                 WHERE scan_run_id=?4 AND owner_id=?5 AND status='running'",
+                 SET status=?1, updated_at_ms=?2, finished_at_ms=?2, final_envelope_json=?3,
+                     audit_size_bytes=?4
+                 WHERE scan_run_id=?5 AND owner_id=?6 AND status='running'",
                 params![
                     status,
                     now_ms,
                     batch.envelope_json,
+                    audit_size,
                     active.scan_run_id,
                     active.owner_id,
                 ],
@@ -1004,6 +1116,10 @@ impl ScannerStore {
         if attempt_updated != 1 {
             return Err(StoreError::LeaseLost);
         }
+        // spec Part 4 terminal run GC: make room for the current record inside
+        // the same terminal transaction. Protected set = the current run.
+        retention_gc_for_current_run(&transaction, active.scan_run_id, now_ms, audit_size)
+            .map_err(cache_write)?;
         let lease_deleted = transaction
             .execute(
                 "DELETE FROM engine_lease WHERE lease_key=1 AND owner_id=?1",
@@ -1190,6 +1306,17 @@ fn configure_readonly_connection(connection: &Connection) -> Result<(), StoreErr
     connection
         .execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")
         .map_err(cache_open)
+}
+
+/// Maintenance connection configuration. Unlike `schema::configure_connection`
+/// this deliberately does NOT switch `journal_mode` to WAL: maintenance is an
+/// exclusive single-connection operation, and a dry-run must not mutate the DB
+/// header or create `-wal`/`-shm` sidecars (spec Part 5.3: dry-run 零写).
+fn configure_maintenance_connection(connection: &Connection) -> Result<(), schema::SchemaError> {
+    connection.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
+    connection.pragma_update(None, "foreign_keys", true)?;
+    connection.pragma_update(None, "synchronous", "NORMAL")?;
+    Ok(())
 }
 
 const V1_SCHEMA_TABLES: &[&str] = &[
@@ -1828,6 +1955,975 @@ fn upgrade_database_apply(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabase
             )],
         )
     }
+}
+
+// ---------------------------------------------------------------------------
+// maintenance command（spec Part 4/5.3）：独占 lease → before sizes → pre
+// integrity → mode preflight →（dry-run 结束）→ 深度 row GC transaction →
+// 所选 vacuum → post integrity → after sizes。mode 只 `gc|incremental_vacuum`，
+// 无 full_vacuum；v1 DB → SCHEMA_UPGRADE_REQUIRED；auto_vacuum=none +
+// incremental_vacuum → MAINTENANCE_MODE_UNAVAILABLE。失败路径 deleted/before/
+// after 报告真实部分进展，绝不伪造 ok。
+// ---------------------------------------------------------------------------
+
+fn maintenance_command(request: &MaintenanceRequestV1) -> MaintenanceResponseV1 {
+    if let Err(message) = request.validate() {
+        return maintenance_error_response(
+            request,
+            None,
+            None,
+            false,
+            zero_maintenance_deleted(),
+            MaintenancePreIntegrityCheck::Failed,
+            MaintenancePostIntegrityCheck::NotRun,
+            None,
+            upgrade_diagnostic(ErrorCode::InvalidRequest, message, false),
+        );
+    }
+    let path = Path::new(&request.scan_db_path);
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let mut connection = match Connection::open_with_flags(path, flags) {
+        Ok(connection) => connection,
+        Err(error) => {
+            return maintenance_error_response(
+                request,
+                None,
+                None,
+                false,
+                zero_maintenance_deleted(),
+                MaintenancePreIntegrityCheck::Failed,
+                MaintenancePostIntegrityCheck::NotRun,
+                None,
+                upgrade_diagnostic(
+                    ErrorCode::CacheOpenFailed,
+                    format!("scan database could not be opened read-write: {error}"),
+                    true,
+                ),
+            );
+        }
+    };
+    if let Err(error) = configure_maintenance_connection(&connection) {
+        return maintenance_error_response(
+            request,
+            None,
+            None,
+            false,
+            zero_maintenance_deleted(),
+            MaintenancePreIntegrityCheck::Failed,
+            MaintenancePostIntegrityCheck::NotRun,
+            None,
+            upgrade_diagnostic(
+                ErrorCode::CacheOpenFailed,
+                format!("database connection could not be configured: {error}"),
+                true,
+            ),
+        );
+    }
+    let version = match read_user_version(&connection) {
+        Ok(version) => version,
+        Err(error) => {
+            return maintenance_error_response(
+                request,
+                None,
+                None,
+                false,
+                zero_maintenance_deleted(),
+                MaintenancePreIntegrityCheck::Failed,
+                MaintenancePostIntegrityCheck::NotRun,
+                None,
+                error.diagnostic(DiagnosticStage::Maintenance),
+            );
+        }
+    };
+    if version > LATEST_USER_VERSION {
+        return maintenance_error_response(
+            request,
+            None,
+            None,
+            false,
+            zero_maintenance_deleted(),
+            MaintenancePreIntegrityCheck::Failed,
+            MaintenancePostIntegrityCheck::NotRun,
+            None,
+            upgrade_diagnostic(
+                ErrorCode::SchemaUpgradeRequired,
+                format!(
+                    "scanner database user_version={version} is newer than this engine ({LATEST_USER_VERSION}); fail closed"
+                ),
+                false,
+            ),
+        );
+    }
+    if version != LATEST_USER_VERSION {
+        // v1 (or an empty user_version 0) DBs are upgraded only by upgrade-db.
+        return maintenance_error_response(
+            request,
+            None,
+            None,
+            false,
+            zero_maintenance_deleted(),
+            MaintenancePreIntegrityCheck::Failed,
+            MaintenancePostIntegrityCheck::NotRun,
+            None,
+            upgrade_diagnostic(
+                ErrorCode::SchemaUpgradeRequired,
+                "maintenance requires a v2 scanner database; run upgrade-db apply=true first".to_string(),
+                false,
+            ),
+        );
+    }
+    // Safe v2 amendment: rebuild parse_cache with the retention columns if a
+    // pre-amendment v2 database is encountered.
+    if let Err(error) = schema::migrate(&mut connection) {
+        return maintenance_error_response(
+            request,
+            None,
+            None,
+            false,
+            zero_maintenance_deleted(),
+            MaintenancePreIntegrityCheck::Failed,
+            MaintenancePostIntegrityCheck::NotRun,
+            None,
+            upgrade_diagnostic(
+                ErrorCode::CacheOpenFailed,
+                format!("v2 schema amendment failed: {error}"),
+                false,
+            ),
+        );
+    }
+    let now_ms = match current_time_millis() {
+        Ok(value) => value as i64,
+        Err(error) => {
+            return maintenance_error_response(
+                request,
+                None,
+                None,
+                false,
+                zero_maintenance_deleted(),
+                MaintenancePreIntegrityCheck::Failed,
+                MaintenancePostIntegrityCheck::NotRun,
+                None,
+                error.diagnostic(DiagnosticStage::Maintenance),
+            );
+        }
+    };
+    if let Err(error) = acquire_upgrade_lease(&mut connection, now_ms) {
+        return maintenance_error_response(
+            request,
+            None,
+            None,
+            false,
+            zero_maintenance_deleted(),
+            MaintenancePreIntegrityCheck::Failed,
+            MaintenancePostIntegrityCheck::NotRun,
+            None,
+            error.diagnostic(DiagnosticStage::Maintenance),
+        );
+    }
+    let before = match maintenance_sizes(&connection, path) {
+        Ok(sizes) => sizes,
+        Err(error) => {
+            let _ = release_upgrade_lease(&connection);
+            return maintenance_error_response(
+                request,
+                None,
+                None,
+                false,
+                zero_maintenance_deleted(),
+                MaintenancePreIntegrityCheck::Failed,
+                MaintenancePostIntegrityCheck::NotRun,
+                None,
+                error.diagnostic(DiagnosticStage::Maintenance),
+            );
+        }
+    };
+    let pre = maintenance_integrity(&connection);
+    if pre == MaintenancePreIntegrityCheck::Failed {
+        let _ = release_upgrade_lease(&connection);
+        return maintenance_error_response(
+            request,
+            Some(before.clone()),
+            Some(before.clone()),
+            true,
+            zero_maintenance_deleted(),
+            pre,
+            MaintenancePostIntegrityCheck::NotRun,
+            Some(MaintenanceVacuumV1 {
+                mode: request.mode,
+                status: MaintenanceVacuumStatus::NotRequested,
+                pages_changed: 0,
+            }),
+            upgrade_diagnostic(
+                ErrorCode::RunCorrupt,
+                "pre-integrity check failed before any maintenance mutation".to_string(),
+                false,
+            ),
+        );
+    }
+    let mut vacuum = MaintenanceVacuumV1 {
+        mode: request.mode,
+        status: MaintenanceVacuumStatus::NotRequested,
+        pages_changed: 0,
+    };
+    let auto_vacuum = match auto_vacuum_mode(&connection) {
+        Ok(mode) => mode,
+        Err(error) => {
+            let _ = release_upgrade_lease(&connection);
+            return maintenance_error_response(
+                request,
+                Some(before.clone()),
+                Some(before.clone()),
+                true,
+                zero_maintenance_deleted(),
+                pre,
+                MaintenancePostIntegrityCheck::NotRun,
+                Some(vacuum),
+                error.diagnostic(DiagnosticStage::Maintenance),
+            );
+        }
+    };
+    if request.mode == MaintenanceMode::IncrementalVacuum && auto_vacuum == AutoVacuumMode::None {
+        let _ = release_upgrade_lease(&connection);
+        vacuum.status = MaintenanceVacuumStatus::Error;
+        return maintenance_error_response(
+            request,
+            Some(before.clone()),
+            Some(before.clone()),
+            true,
+            zero_maintenance_deleted(),
+            pre,
+            MaintenancePostIntegrityCheck::NotRun,
+            Some(vacuum),
+            upgrade_diagnostic(
+                ErrorCode::MaintenanceModeUnavailable,
+                "incremental_vacuum requires auto_vacuum=INCREMENTAL; this database is auto_vacuum=none (upgrade-path conversion is a known limitation)".to_string(),
+                false,
+            ),
+        );
+    }
+    if request.dry_run {
+        let _ = release_upgrade_lease(&connection);
+        vacuum.status = MaintenanceVacuumStatus::SkippedDryRun;
+        return maintenance_ok_response(
+            request,
+            before.clone(),
+            before.clone(),
+            true,
+            zero_maintenance_deleted(),
+            pre,
+            MaintenancePostIntegrityCheck::NotRun,
+            vacuum,
+        );
+    }
+    let deleted = match run_maintenance_gc(&mut connection, now_ms) {
+        Ok(deleted) => deleted,
+        Err(error) => {
+            // GC transaction failed: no vacuum; still attempt read-only post
+            // integrity + after sizing so partial progress is honest.
+            let post = maintenance_post_integrity(&connection);
+            let after = maintenance_sizes(&connection, path).ok();
+            let _ = release_upgrade_lease(&connection);
+            vacuum.status = MaintenanceVacuumStatus::Error;
+            return maintenance_error_response(
+                request,
+                Some(before.clone()),
+                after.or(Some(before.clone())),
+                true,
+                zero_maintenance_deleted(),
+                pre,
+                post,
+                Some(vacuum),
+                error.diagnostic(DiagnosticStage::Maintenance),
+            );
+        }
+    };
+    if request.mode == MaintenanceMode::IncrementalVacuum {
+        match run_incremental_vacuum(&connection) {
+            Ok(pages_changed) => {
+                vacuum.status = MaintenanceVacuumStatus::Ok;
+                vacuum.pages_changed = pages_changed;
+            }
+            Err(error) => {
+                // Vacuum failed after the committed GC: GC deletions are NOT
+                // rolled back; deleted/before/after report real partial progress.
+                let post = maintenance_post_integrity(&connection);
+                let after = maintenance_sizes(&connection, path).ok();
+                let _ = release_upgrade_lease(&connection);
+                vacuum.status = MaintenanceVacuumStatus::Error;
+                return maintenance_error_response(
+                    request,
+                    Some(before.clone()),
+                    after.or(Some(before.clone())),
+                    true,
+                    deleted,
+                    pre,
+                    post,
+                    Some(vacuum),
+                    error.diagnostic(DiagnosticStage::Maintenance),
+                );
+            }
+        }
+    }
+    let post = maintenance_post_integrity(&connection);
+    let after = match maintenance_sizes(&connection, path) {
+        Ok(sizes) => sizes,
+        Err(error) => {
+            let _ = release_upgrade_lease(&connection);
+            return maintenance_error_response(
+                request,
+                Some(before.clone()),
+                Some(before.clone()),
+                false,
+                deleted,
+                pre,
+                post,
+                Some(vacuum),
+                error.diagnostic(DiagnosticStage::Maintenance),
+            );
+        }
+    };
+    if post == MaintenancePostIntegrityCheck::Failed {
+        let _ = release_upgrade_lease(&connection);
+        vacuum.status = MaintenanceVacuumStatus::Error;
+        return maintenance_error_response(
+            request,
+            Some(before.clone()),
+            Some(after.clone()),
+            true,
+            deleted,
+            pre,
+            post,
+            Some(vacuum),
+            upgrade_diagnostic(
+                ErrorCode::RunCorrupt,
+                "post-integrity check failed after maintenance mutations".to_string(),
+                false,
+            ),
+        );
+    }
+    let _ = release_upgrade_lease(&connection);
+    maintenance_ok_response(request, before, after, true, deleted, pre, post, vacuum)
+}
+
+fn maintenance_ok_response(
+    request: &MaintenanceRequestV1,
+    before: MaintenanceSizeV1,
+    after: MaintenanceSizeV1,
+    after_complete: bool,
+    deleted: MaintenanceDeletedV1,
+    pre: MaintenancePreIntegrityCheck,
+    post: MaintenancePostIntegrityCheck,
+    vacuum: MaintenanceVacuumV1,
+) -> MaintenanceResponseV1 {
+    MaintenanceResponseV1 {
+        contract: "ai_daily_scanner_maintenance".to_string(),
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        status: MaintenanceStatus::Ok,
+        cache_retention_policy: cache::cache_retention_policy(),
+        before,
+        after,
+        after_complete,
+        deleted,
+        pre_integrity_check: pre,
+        post_integrity_check: post,
+        vacuum,
+        warnings: Vec::new(),
+        error: Nullable(None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn maintenance_error_response(
+    request: &MaintenanceRequestV1,
+    before: Option<MaintenanceSizeV1>,
+    after: Option<MaintenanceSizeV1>,
+    after_complete: bool,
+    deleted: MaintenanceDeletedV1,
+    pre: MaintenancePreIntegrityCheck,
+    post: MaintenancePostIntegrityCheck,
+    vacuum: Option<MaintenanceVacuumV1>,
+    error: Diagnostic,
+) -> MaintenanceResponseV1 {
+    let before = before.unwrap_or_else(zero_maintenance_size);
+    let after = after.unwrap_or_else(|| before.clone());
+    MaintenanceResponseV1 {
+        contract: "ai_daily_scanner_maintenance".to_string(),
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        status: MaintenanceStatus::Error,
+        cache_retention_policy: cache::cache_retention_policy(),
+        before,
+        after,
+        after_complete,
+        deleted,
+        pre_integrity_check: pre,
+        post_integrity_check: post,
+        vacuum: vacuum.unwrap_or(MaintenanceVacuumV1 {
+            mode: request.mode,
+            status: MaintenanceVacuumStatus::Error,
+            pages_changed: 0,
+        }),
+        warnings: Vec::new(),
+        error: Nullable(Some(error)),
+    }
+}
+
+fn zero_maintenance_deleted() -> MaintenanceDeletedV1 {
+    MaintenanceDeletedV1 {
+        parse_cache_rows: 0,
+        classification_cache_rows: 0,
+        context_artifacts_rows: 0,
+        context_artifact_files_rows: 0,
+        context_artifact_decisions_rows: 0,
+        scan_runs_rows: 0,
+        scan_run_attempts_rows: 0,
+        run_diagnostics_rows: 0,
+        scan_file_results_rows: 0,
+        scan_stage_metrics_rows: 0,
+        scan_extension_metrics_rows: 0,
+        context_runs_rows: 0,
+        context_decisions_rows: 0,
+        file_inventory_rows: 0,
+    }
+}
+
+fn zero_maintenance_size() -> MaintenanceSizeV1 {
+    MaintenanceSizeV1 {
+        parse_cache_logical_bytes: 0,
+        classification_cache_logical_bytes: 0,
+        context_artifacts_logical_bytes: 0,
+        terminal_audit_logical_bytes: 0,
+        database_file_bytes: 0,
+        wal_file_bytes: 0,
+        shm_file_bytes: 0,
+        total_physical_bytes: 0,
+        freelist_bytes: 0,
+        auto_vacuum_mode: AutoVacuumMode::None,
+    }
+}
+
+fn maintenance_sizes(
+    connection: &Connection,
+    db_path: &Path,
+) -> Result<MaintenanceSizeV1, StoreError> {
+    let sum = |sql: &str| -> Result<u64, StoreError> {
+        connection
+            .query_row(sql, [], |row| row.get::<_, i64>(0))
+            .map_err(cache_open)
+            .map(|value| value.max(0) as u64)
+    };
+    let parse_cache_logical_bytes =
+        sum("SELECT COALESCE(SUM(entry_size_bytes), 0) FROM parse_cache")?;
+    let classification_cache_logical_bytes =
+        sum("SELECT COALESCE(SUM(entry_size_bytes), 0) FROM classification_cache")?;
+    let context_artifacts_logical_bytes =
+        sum("SELECT COALESCE(SUM(artifact_size_bytes), 0) FROM context_artifacts")?;
+    let terminal_audit_logical_bytes = sum(
+        "SELECT COALESCE(SUM(audit_size_bytes), 0) FROM scan_runs
+         WHERE status IN ('success', 'partial', 'error', 'abandoned')",
+    )?;
+    let page_size: i64 = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .map_err(cache_open)?;
+    let freelist_count: i64 = connection
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .map_err(cache_open)?;
+    let freelist_bytes = page_size.max(0) as u64 * freelist_count.max(0) as u64;
+    let database_file_bytes = fs::metadata(db_path).map(|meta| meta.len()).unwrap_or(0);
+    let wal_file_bytes = sidecar_len(db_path, "-wal");
+    let shm_file_bytes = sidecar_len(db_path, "-shm");
+    let total_physical_bytes = database_file_bytes + wal_file_bytes + shm_file_bytes;
+    Ok(MaintenanceSizeV1 {
+        parse_cache_logical_bytes,
+        classification_cache_logical_bytes,
+        context_artifacts_logical_bytes,
+        terminal_audit_logical_bytes,
+        database_file_bytes,
+        wal_file_bytes,
+        shm_file_bytes,
+        total_physical_bytes,
+        freelist_bytes,
+        auto_vacuum_mode: auto_vacuum_mode(connection)?,
+    })
+}
+
+fn sidecar_len(db_path: &Path, kind: &str) -> u64 {
+    fs::metadata(sqlite_sidecar_path(db_path, kind))
+        .map(|meta| meta.len())
+        .unwrap_or(0)
+}
+
+fn auto_vacuum_mode(connection: &Connection) -> Result<AutoVacuumMode, StoreError> {
+    let value: i64 = connection
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .map_err(cache_open)?;
+    Ok(match value {
+        1 => AutoVacuumMode::Full,
+        2 => AutoVacuumMode::Incremental,
+        _ => AutoVacuumMode::None,
+    })
+}
+
+/// 单次 integrity check（spec Part 4/5.3）：`PRAGMA integrity_check` +
+/// `foreign_key_check` + entry_size 全量重算 + artifact hash/row-count/nullability
+/// invariant 全部通过才为 ok。
+fn maintenance_integrity(connection: &Connection) -> MaintenancePreIntegrityCheck {
+    if integrity_checks_pass(connection) {
+        MaintenancePreIntegrityCheck::Ok
+    } else {
+        MaintenancePreIntegrityCheck::Failed
+    }
+}
+
+fn maintenance_post_integrity(connection: &Connection) -> MaintenancePostIntegrityCheck {
+    if integrity_checks_pass(connection) {
+        MaintenancePostIntegrityCheck::Ok
+    } else {
+        MaintenancePostIntegrityCheck::Failed
+    }
+}
+
+fn integrity_checks_pass(connection: &Connection) -> bool {
+    let integrity_ok: bool = connection
+        .query_row("PRAGMA integrity_check", [], |row| row.get::<_, String>(0))
+        .map(|value| value == "ok")
+        .unwrap_or(false);
+    if !integrity_ok {
+        return false;
+    }
+    let fk_ok: bool = connection
+        .prepare("PRAGMA foreign_key_check")
+        .and_then(|mut statement| statement.query_map([], |_| Ok(())).map(|rows| rows.count()))
+        .map(|count| count == 0)
+        .unwrap_or(false);
+    if !fk_ok {
+        return false;
+    }
+    if !parse_cache_entry_sizes_match(connection) {
+        return false;
+    }
+    if !classification_cache_entry_sizes_match(connection) {
+        return false;
+    }
+    if !artifact_invariants_hold(connection) {
+        return false;
+    }
+    true
+}
+
+fn parse_cache_entry_sizes_match(connection: &Connection) -> bool {
+    let mut statement = match connection.prepare(
+        "SELECT file_identity, source_version, source_guard_kind, source_guard_sha256,
+                parse_profile_hash, content, content_sha256, parser_backend, worker_lane,
+                worker_contract_version, worker_version, worker_build, entry_size_bytes
+         FROM parse_cache",
+    ) {
+        Ok(statement) => statement,
+        Err(_) => return false,
+    };
+    let mut rows = match statement.query([]) {
+        Ok(rows) => rows,
+        Err(_) => return false,
+    };
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(_) => return false,
+        };
+        let columns: Vec<String> = (0..12)
+            .map(|index| row.get::<_, String>(index).unwrap_or_default())
+            .collect();
+        let stored: i64 = row.get(12).unwrap_or(-1);
+        let text_bytes: usize = columns.iter().map(|value| value.len()).sum();
+        if stored != text_bytes as i64 + 8 {
+            return false;
+        }
+    }
+    true
+}
+
+fn classification_cache_entry_sizes_match(connection: &Connection) -> bool {
+    let mut statement = match connection.prepare(
+        "SELECT file_identity, source_version, source_guard_kind, source_guard_sha256,
+                classifier_profile_hash, classifier_build, status, entry_size_bytes
+         FROM classification_cache",
+    ) {
+        Ok(statement) => statement,
+        Err(_) => return false,
+    };
+    let mut rows = match statement.query([]) {
+        Ok(rows) => rows,
+        Err(_) => return false,
+    };
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(_) => return false,
+        };
+        let columns: Vec<String> = (0..7)
+            .map(|index| row.get::<_, String>(index).unwrap_or_default())
+            .collect();
+        let stored: i64 = row.get(7).unwrap_or(-1);
+        let text_bytes: usize = columns.iter().map(|value| value.len()).sum();
+        if stored != text_bytes as i64 + 16 {
+            return false;
+        }
+    }
+    true
+}
+
+fn artifact_invariants_hold(connection: &Connection) -> bool {
+    let nullability_bad: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM context_artifacts WHERE
+                (snapshot_eligible = 1 AND (snapshot_key_sha256 IS NULL OR snapshot_key_json IS NULL))
+             OR (snapshot_eligible = 0 AND (snapshot_key_sha256 IS NOT NULL OR snapshot_key_json IS NOT NULL))",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(1);
+    if nullability_bad != 0 {
+        return false;
+    }
+    let rowcount_bad: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM context_artifacts a WHERE
+                (a.snapshot_eligible = 1 AND NOT EXISTS(
+                    SELECT 1 FROM context_artifact_files f WHERE f.artifact_id = a.artifact_id
+                 ))
+             OR (a.snapshot_eligible = 1 AND NOT EXISTS(
+                    SELECT 1 FROM context_artifact_decisions d WHERE d.artifact_id = a.artifact_id
+                 ))
+             OR (a.snapshot_eligible = 0 AND EXISTS(
+                    SELECT 1 FROM context_artifact_files f WHERE f.artifact_id = a.artifact_id
+                 ))
+             OR (a.snapshot_eligible = 0 AND EXISTS(
+                    SELECT 1 FROM context_artifact_decisions d WHERE d.artifact_id = a.artifact_id
+                 ))",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(1);
+    if rowcount_bad != 0 {
+        return false;
+    }
+    let eligible_count_mismatch: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM context_artifacts a WHERE a.snapshot_eligible = 1 AND
+                (SELECT count(*) FROM context_artifact_files f WHERE f.artifact_id = a.artifact_id)
+                <> (SELECT count(*) FROM context_artifact_decisions d WHERE d.artifact_id = a.artifact_id)",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(1);
+    if eligible_count_mismatch != 0 {
+        return false;
+    }
+    let mut statement = match connection
+        .prepare("SELECT final_context, context_sha256 FROM context_artifacts")
+    {
+        Ok(statement) => statement,
+        Err(_) => return false,
+    };
+    let mut rows = match statement.query([]) {
+        Ok(rows) => rows,
+        Err(_) => return false,
+    };
+    loop {
+        let row = match rows.next() {
+            Ok(Some(row)) => row,
+            Ok(None) => break,
+            Err(_) => return false,
+        };
+        let final_context: String = row.get(0).unwrap_or_default();
+        let context_sha256: String = row.get(1).unwrap_or_default();
+        if cache::sha256_hex(final_context.as_bytes()) != context_sha256 {
+            return false;
+        }
+    }
+    true
+}
+
+fn run_maintenance_gc(
+    connection: &mut Connection,
+    now_ms: i64,
+) -> Result<MaintenanceDeletedV1, StoreError> {
+    let before = table_counts(connection)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(cache_write)?;
+    // maintenance holds the exclusive lease; any remaining running row is stale.
+    expire_stale_running_runs(&transaction, now_ms).map_err(cache_write)?;
+    gc_terminal_runs(&transaction, now_ms).map_err(cache_write)?;
+    gc_orphan_artifacts(&transaction).map_err(cache_write)?;
+    cache::evict_parse_cache(&transaction, cache::PARSE_CACHE_MAX_BYTES)
+        .map_err(cache_write)?;
+    cache::evict_classification_cache(&transaction, cache::CLASSIFICATION_CACHE_MAX_BYTES)
+        .map_err(cache_write)?;
+    // Count the deletions inside the transaction so a commit failure rolls back
+    // everything and the reported deleted counts stay honest (zero on rollback).
+    let after = table_counts(&*transaction)?;
+    transaction.commit().map_err(cache_write)?;
+    Ok(deleted_diff(&before, &after))
+}
+
+fn expire_stale_running_runs(
+    transaction: &rusqlite::Transaction<'_>,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    transaction.execute(
+        "UPDATE scan_runs SET status='abandoned', finished_at_ms=?1, updated_at_ms=?1
+         WHERE status='running'",
+        params![now_ms],
+    )?;
+    Ok(())
+}
+
+/// Terminal run GC（spec Part 4）：先删超 90 天且不在 protected set 的 rows
+///（maintenance 无当前 record，protected set 为空），再按
+/// `(finished_at_ms ASC, scan_run_id ASC)` 删到 ≤500 runs 且 ≤2GiB。不级联删除
+/// 全局 inventory/parse cache。
+fn gc_terminal_runs(
+    transaction: &rusqlite::Transaction<'_>,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let cutoff_ms = now_ms.saturating_sub(cache::TERMINAL_RUN_MAX_AGE_DAYS * 86_400_000);
+    transaction.execute(
+        "DELETE FROM scan_runs
+         WHERE status IN ('success', 'partial', 'error', 'abandoned')
+           AND finished_at_ms IS NOT NULL AND finished_at_ms < ?1",
+        params![cutoff_ms],
+    )?;
+    loop {
+        let count: i64 = transaction.query_row(
+            "SELECT count(*) FROM scan_runs
+             WHERE status IN ('success', 'partial', 'error', 'abandoned')",
+            [],
+            |row| row.get(0),
+        )?;
+        let total: i64 = transaction.query_row(
+            "SELECT COALESCE(SUM(audit_size_bytes), 0) FROM scan_runs
+             WHERE status IN ('success', 'partial', 'error', 'abandoned')",
+            [],
+            |row| row.get(0),
+        )?;
+        if count <= cache::TERMINAL_RUN_MAX_COUNT && total <= cache::TERMINAL_AUDIT_MAX_BYTES {
+            break;
+        }
+        let deleted = transaction.execute(
+            "DELETE FROM scan_runs WHERE scan_run_id IN (
+                SELECT scan_run_id FROM scan_runs
+                WHERE status IN ('success', 'partial', 'error', 'abandoned')
+                ORDER BY finished_at_ms ASC, scan_run_id ASC
+                LIMIT 1
+             )",
+            [],
+        )?;
+        if deleted == 0 {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Orphan artifact GC（spec Part 4）：只删除引用计数为零（无任何
+/// `context_runs.artifact_id`）的 artifact；被引用的绝不淘汰。
+fn gc_orphan_artifacts(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    transaction.execute(
+        "DELETE FROM context_artifacts
+         WHERE NOT EXISTS(
+             SELECT 1 FROM context_runs WHERE context_runs.artifact_id = context_artifacts.artifact_id
+         )",
+        [],
+    )?;
+    Ok(())
+}
+
+/// `scan_runs.audit_size_bytes` 的逻辑 payload 近似（spec Part 4）：覆盖 run 的
+/// envelope/attempt/diagnostic/current file/decision/stage/extension/context-run
+/// 元数据；不含其引用的 artifact、全局 inventory 或 cache。Store 在 insert 时
+/// 计算，不接受 wire 输入。
+fn compute_audit_size(batch: &FinalizationBatch) -> i64 {
+    let mut total = batch.envelope_json.len() as i64;
+    total += batch.inventory.len() as i64 * 256;
+    for record in &batch.file_results {
+        total += record.relative_path.len() as i64 + 256;
+    }
+    for record in &batch.diagnostics {
+        total += record.diagnostic.message.len() as i64 + 160;
+    }
+    total += batch.stage_metrics.len() as i64 * 48;
+    for record in &batch.extension_metrics {
+        total += record.extension.len() as i64 + 64;
+    }
+    if let Some(context) = &batch.context {
+        total += context.final_context.len() as i64 + 320;
+        for record in &context.decisions {
+            total += record.decision.relative_path.len() as i64 + 160;
+        }
+    }
+    total
+}
+
+/// Terminal run GC for the CURRENT finalize（spec Part 4）：先删超 90 天且不在
+/// protected set（当前 run）的 rows，再按 `(finished_at_ms ASC, scan_run_id ASC)`
+/// 删到 ≤500 runs 且 ≤2GiB。为当前 record 腾挪使用「现存 + 当前 audit」比较；
+/// 若删尽未保护旧 run 后当前 record 自身仍超 cap → fail closed（不部分落 audit）。
+fn retention_gc_for_current_run(
+    transaction: &rusqlite::Transaction<'_>,
+    current_run_id: i64,
+    now_ms: i64,
+    audit_size: i64,
+) -> Result<(), StoreError> {
+    if audit_size > cache::TERMINAL_AUDIT_MAX_BYTES {
+        return Err(StoreError::RunCorrupt(
+            "current terminal audit exceeds the 2 GiB retention cap".to_string(),
+        ));
+    }
+    let cutoff_ms = now_ms.saturating_sub(cache::TERMINAL_RUN_MAX_AGE_DAYS * 86_400_000);
+    transaction
+        .execute(
+            "DELETE FROM scan_runs
+             WHERE scan_run_id <> ?1
+               AND status IN ('success', 'partial', 'error', 'abandoned')
+               AND finished_at_ms IS NOT NULL AND finished_at_ms < ?2",
+            params![current_run_id, cutoff_ms],
+        )
+        .map_err(cache_write)?;
+    loop {
+        let count: i64 = transaction
+            .query_row(
+                "SELECT count(*) FROM scan_runs
+                 WHERE status IN ('success', 'partial', 'error', 'abandoned')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(cache_write)?;
+        let total: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(SUM(audit_size_bytes), 0) FROM scan_runs
+                 WHERE status IN ('success', 'partial', 'error', 'abandoned')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(cache_write)?;
+        if count <= cache::TERMINAL_RUN_MAX_COUNT && total <= cache::TERMINAL_AUDIT_MAX_BYTES {
+            return Ok(());
+        }
+        let deleted = transaction
+            .execute(
+                "DELETE FROM scan_runs WHERE scan_run_id IN (
+                    SELECT scan_run_id FROM scan_runs
+                    WHERE status IN ('success', 'partial', 'error', 'abandoned')
+                      AND scan_run_id <> ?1
+                    ORDER BY finished_at_ms ASC, scan_run_id ASC
+                    LIMIT 1
+                 )",
+                params![current_run_id],
+            )
+            .map_err(cache_write)?;
+        if deleted == 0 {
+            // 无未保护旧 run 可删，仍超 cap → fail closed。
+            return Err(StoreError::RunCorrupt(
+                "terminal audit retention could not make room for the current record".to_string(),
+            ));
+        }
+    }
+}
+
+fn run_incremental_vacuum(connection: &Connection) -> Result<u64, StoreError> {
+    let before_freelist: i64 = connection
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .map_err(cache_open)?;
+    connection
+        .execute_batch("PRAGMA incremental_vacuum;")
+        .map_err(cache_write)?;
+    let after_freelist: i64 = connection
+        .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+        .map_err(cache_open)?;
+    Ok(before_freelist.max(0).saturating_sub(after_freelist.max(0)) as u64)
+}
+
+fn table_counts(connection: &Connection) -> Result<MaintenanceDeletedV1, StoreError> {
+    Ok(MaintenanceDeletedV1 {
+        parse_cache_rows: count_table(connection, "parse_cache")?,
+        classification_cache_rows: count_table(connection, "classification_cache")?,
+        context_artifacts_rows: count_table(connection, "context_artifacts")?,
+        context_artifact_files_rows: count_table(connection, "context_artifact_files")?,
+        context_artifact_decisions_rows: count_table(connection, "context_artifact_decisions")?,
+        scan_runs_rows: count_table(connection, "scan_runs")?,
+        scan_run_attempts_rows: count_table(connection, "scan_run_attempts")?,
+        run_diagnostics_rows: count_table(connection, "run_diagnostics")?,
+        scan_file_results_rows: count_table(connection, "scan_file_results")?,
+        scan_stage_metrics_rows: count_table(connection, "scan_stage_metrics")?,
+        scan_extension_metrics_rows: count_table(connection, "scan_extension_metrics")?,
+        context_runs_rows: count_table(connection, "context_runs")?,
+        context_decisions_rows: count_table(connection, "context_decisions")?,
+        file_inventory_rows: count_table(connection, "file_inventory")?,
+    })
+}
+
+fn count_table(connection: &Connection, table: &str) -> Result<u64, StoreError> {
+    connection
+        .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(cache_open)
+        .map(|count| count.max(0) as u64)
+}
+
+fn deleted_diff(
+    before: &MaintenanceDeletedV1,
+    after: &MaintenanceDeletedV1,
+) -> MaintenanceDeletedV1 {
+    MaintenanceDeletedV1 {
+        parse_cache_rows: before.parse_cache_rows.saturating_sub(after.parse_cache_rows),
+        classification_cache_rows: before
+            .classification_cache_rows
+            .saturating_sub(after.classification_cache_rows),
+        context_artifacts_rows: before
+            .context_artifacts_rows
+            .saturating_sub(after.context_artifacts_rows),
+        context_artifact_files_rows: before
+            .context_artifact_files_rows
+            .saturating_sub(after.context_artifact_files_rows),
+        context_artifact_decisions_rows: before
+            .context_artifact_decisions_rows
+            .saturating_sub(after.context_artifact_decisions_rows),
+        scan_runs_rows: before.scan_runs_rows.saturating_sub(after.scan_runs_rows),
+        scan_run_attempts_rows: before
+            .scan_run_attempts_rows
+            .saturating_sub(after.scan_run_attempts_rows),
+        run_diagnostics_rows: before
+            .run_diagnostics_rows
+            .saturating_sub(after.run_diagnostics_rows),
+        scan_file_results_rows: before
+            .scan_file_results_rows
+            .saturating_sub(after.scan_file_results_rows),
+        scan_stage_metrics_rows: before
+            .scan_stage_metrics_rows
+            .saturating_sub(after.scan_stage_metrics_rows),
+        scan_extension_metrics_rows: before
+            .scan_extension_metrics_rows
+            .saturating_sub(after.scan_extension_metrics_rows),
+        context_runs_rows: before.context_runs_rows.saturating_sub(after.context_runs_rows),
+        context_decisions_rows: before
+            .context_decisions_rows
+            .saturating_sub(after.context_decisions_rows),
+        file_inventory_rows: before
+            .file_inventory_rows
+            .saturating_sub(after.file_inventory_rows),
+    }
+}
+
+fn remaining_opportunistic_ms(deadline: i64) -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| deadline.saturating_sub(duration.as_millis() as i64))
+        .unwrap_or(0)
 }
 
 fn acquire_upgrade_lease(connection: &mut Connection, now_ms: i64) -> Result<(), StoreError> {
@@ -4285,5 +5381,200 @@ mod tests {
             .pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap();
         assert_eq!(version, 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // maintenance command（spec Part 4/5.3）
+    // -----------------------------------------------------------------------
+
+    fn maintenance_request(
+        db_path: &Path,
+        mode: MaintenanceMode,
+        dry_run: bool,
+    ) -> MaintenanceRequestV1 {
+        MaintenanceRequestV1 {
+            contract: "ai_daily_scanner_maintenance".to_string(),
+            protocol_version: 1,
+            request_id: "123e4567-e89b-42d3-a456-426614174100".to_string(),
+            scan_db_path: db_path.to_string_lossy().to_string(),
+            mode,
+            dry_run,
+        }
+    }
+
+    #[test]
+    fn maintenance_dry_run_ok_on_fresh_v2_db() {
+        let harness = harness("00000000-0000-4000-8000-000000000101");
+        let response = ScannerStore::maintenance(&maintenance_request(
+            &harness.db_path,
+            MaintenanceMode::Gc,
+            true,
+        ));
+        response.validate().expect("maintenance response validates");
+        assert_eq!(response.status, MaintenanceStatus::Ok);
+        assert_eq!(response.deleted.parse_cache_rows, 0);
+        assert_eq!(response.deleted.scan_runs_rows, 0);
+        assert_eq!(response.before, response.after);
+        assert!(response.after_complete);
+        assert_eq!(
+            response.pre_integrity_check,
+            MaintenancePreIntegrityCheck::Ok
+        );
+        assert_eq!(
+            response.post_integrity_check,
+            MaintenancePostIntegrityCheck::NotRun
+        );
+        assert_eq!(response.vacuum.status, MaintenanceVacuumStatus::SkippedDryRun);
+        assert!(response.error.0.is_none());
+    }
+
+    #[test]
+    fn maintenance_gc_deletes_aged_terminal_runs() {
+        let harness = harness("00000000-0000-4000-8000-000000000102");
+        // Insert an aged terminal run directly.
+        let connection = rusqlite::Connection::open(&harness.db_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO scan_runs(
+                    request_id, canonical_request_json, request_hash_algorithm, request_hash,
+                    owner_id, status, created_at_ms, started_at_ms, updated_at_ms,
+                    finished_at_ms, final_envelope_json, audit_provenance_version, audit_size_bytes
+                 ) VALUES ('aged', '{}', 'sha256-request-v1', ?, 'owner', 'error',
+                            1, 1, 1, 1, '{}', 'full_v2', 10)",
+                params![format!("{:0>64}", "0")],
+            )
+            .unwrap();
+        drop(connection);
+
+        let response = ScannerStore::maintenance(&maintenance_request(
+            &harness.db_path,
+            MaintenanceMode::Gc,
+            false,
+        ));
+        response.validate().expect("maintenance response validates");
+        assert_eq!(response.status, MaintenanceStatus::Ok);
+        assert_eq!(response.deleted.scan_runs_rows, 1);
+        assert_eq!(
+            response.vacuum.status,
+            MaintenanceVacuumStatus::NotRequested
+        );
+        assert_eq!(response.post_integrity_check, MaintenancePostIntegrityCheck::Ok);
+        assert!(response.error.0.is_none());
+    }
+
+    #[test]
+    fn maintenance_incremental_vacuum_on_auto_vacuum_none_fails_cleanly() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let db_path = directory.path().join(SCAN_DB_FILENAME);
+        // Build a v2 DB WITHOUT auto_vacuum=INCREMENTAL (default none).
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection.execute_batch(schema::V2_DDL).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migration_history(
+                    user_version, origin, upgrade_request_id, engine_build, committed_at_ms
+                 ) VALUES (2, 'created_empty', NULL, 'build', 1)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let response = ScannerStore::maintenance(&maintenance_request(
+            &db_path,
+            MaintenanceMode::IncrementalVacuum,
+            false,
+        ));
+        response.validate().expect("maintenance response validates");
+        assert_eq!(response.status, MaintenanceStatus::Error);
+        let error = response.error.0.as_ref().expect("error diagnostic");
+        assert_eq!(error.error_code, ErrorCode::MaintenanceModeUnavailable);
+        assert_eq!(error.stage, DiagnosticStage::Maintenance);
+        assert_eq!(response.vacuum.status, MaintenanceVacuumStatus::Error);
+        assert_eq!(response.deleted.scan_runs_rows, 0);
+        assert_eq!(response.before, response.after);
+    }
+
+    #[test]
+    fn retention_gc_for_current_run_trims_to_run_count_cap() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let db_path = directory.path().join(SCAN_DB_FILENAME);
+        let mut connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection.execute_batch(schema::V2_DDL).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migration_history(
+                    user_version, origin, upgrade_request_id, engine_build, committed_at_ms
+                 ) VALUES (2, 'created_empty', NULL, 'build', 1)",
+                [],
+            )
+            .unwrap();
+        connection.pragma_update(None, "foreign_keys", true).unwrap();
+        // 520 aged terminal runs (each tiny audit).
+        for index in 0..520 {
+            connection
+                .execute(
+                    "INSERT INTO scan_runs(
+                        request_id, canonical_request_json, request_hash_algorithm, request_hash,
+                        owner_id, status, created_at_ms, started_at_ms, updated_at_ms,
+                        finished_at_ms, final_envelope_json, audit_provenance_version, audit_size_bytes
+                     ) VALUES (?1, '{}', 'sha256-request-v1', ?2, 'owner', 'error',
+                                1, 1, 1, ?3, '{}', 'full_v2', 100)",
+                    params![
+                        format!("aged-{index}"),
+                        "0".repeat(64),
+                        1_000 + index as i64,
+                    ],
+                )
+                .unwrap();
+        }
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        // 当前 run 已 terminal（由 finalize 先写）；此处直接调用 retention GC。
+        retention_gc_for_current_run(&transaction, 1, 1_000_000, 100)
+            .expect("retention gc succeeds");
+        let count: i64 = transaction
+            .query_row(
+                "SELECT count(*) FROM scan_runs
+                 WHERE status IN ('success', 'partial', 'error', 'abandoned')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, cache::TERMINAL_RUN_MAX_COUNT);
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn retention_gc_for_current_run_fails_closed_when_record_exceeds_cap() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let db_path = directory.path().join(SCAN_DB_FILENAME);
+        let mut connection = rusqlite::Connection::open(&db_path).unwrap();
+        connection.execute_batch(schema::V2_DDL).unwrap();
+        connection.pragma_update(None, "user_version", 2).unwrap();
+        connection
+            .execute(
+                "INSERT INTO schema_migration_history(
+                    user_version, origin, upgrade_request_id, engine_build, committed_at_ms
+                 ) VALUES (2, 'created_empty', NULL, 'build', 1)",
+                [],
+            )
+            .unwrap();
+        connection.pragma_update(None, "foreign_keys", true).unwrap();
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        // 当前 record 自身超 2 GiB → fail closed。
+        let error = retention_gc_for_current_run(
+            &transaction,
+            1,
+            1_000_000,
+            cache::TERMINAL_AUDIT_MAX_BYTES + 1,
+        )
+        .expect_err("current audit over cap must fail closed");
+        assert!(matches!(error, StoreError::RunCorrupt(_)));
+        transaction.commit().unwrap();
     }
 }

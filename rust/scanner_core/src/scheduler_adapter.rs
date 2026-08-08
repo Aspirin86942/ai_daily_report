@@ -172,6 +172,23 @@ impl CachePort for StoreCachePort {
                 detail: error.to_string(),
             })
     }
+
+    fn touch_access(
+        &self,
+        now_ms: u64,
+        parse_hits: &[String],
+        classification_hits: &[String],
+    ) -> Result<(), CachePortError> {
+        if parse_hits.is_empty() && classification_hits.is_empty() {
+            return Ok(());
+        }
+        let mut store = self.open()?;
+        store
+            .touch_cache_access(now_ms, parse_hits, classification_hits)
+            .map_err(|error| CachePortError::Store {
+                detail: error.to_string(),
+            })
+    }
 }
 
 /// Parser adapter that delegates to the existing v1 [`ParserScheduler`].

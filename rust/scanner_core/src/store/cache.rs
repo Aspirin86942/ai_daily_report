@@ -2,7 +2,8 @@
 //! the success-only PDF classification cache (spec Part 3/4).
 
 use ai_daily_scanner_contract::{
-    CacheMissReason, NormalizedScannerProfileV1, NormalizedScannerProfileV2, Validate,
+    CacheMissReason, CacheRetentionPolicy, NormalizedScannerProfileV1, NormalizedScannerProfileV2,
+    Validate,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
@@ -14,6 +15,32 @@ use crate::planner::PlannedFile;
 pub const PARSE_PROFILE_HASH_ALGORITHM: &str = "sha256-parse-profile-v1";
 pub const CLASSIFIER_PROFILE_HASH_ALGORITHM: &str = "sha256-classifier-profile-v1";
 const CLASSIFIER_DOMAIN: &[u8] = b"classifier-profile-v1\0";
+
+// ---------------------------------------------------------------------------
+// cache_retention_v1 固定硬上限（spec Part 4 表）。这些常量由
+// VersionResponseV2 与 maintenance response 回显；调参必须另升 policy version。
+// ---------------------------------------------------------------------------
+
+pub const PARSE_CACHE_MAX_BYTES: i64 = 1_073_741_824; // 1 GiB
+pub const CLASSIFICATION_CACHE_MAX_BYTES: i64 = 134_217_728; // 128 MiB
+pub const CONTEXT_ARTIFACTS_MAX_BYTES: i64 = 536_870_912; // 512 MiB
+pub const TERMINAL_AUDIT_MAX_BYTES: i64 = 2_147_483_648; // 2 GiB
+pub const TERMINAL_RUN_MAX_COUNT: i64 = 500;
+pub const TERMINAL_RUN_MAX_AGE_DAYS: i64 = 90;
+pub const OPPORTUNISTIC_GC_BUDGET_MS: u64 = 10;
+
+pub fn cache_retention_policy() -> CacheRetentionPolicy {
+    CacheRetentionPolicy {
+        policy_version: "cache_retention_v1".to_string(),
+        parse_cache_max_bytes: PARSE_CACHE_MAX_BYTES as u64,
+        classification_cache_max_bytes: CLASSIFICATION_CACHE_MAX_BYTES as u64,
+        context_artifacts_max_bytes: CONTEXT_ARTIFACTS_MAX_BYTES as u64,
+        terminal_audit_max_bytes: TERMINAL_AUDIT_MAX_BYTES as u64,
+        terminal_run_max_count: TERMINAL_RUN_MAX_COUNT as u64,
+        terminal_run_max_age_days: TERMINAL_RUN_MAX_AGE_DAYS as u64,
+        opportunistic_gc_budget_ms: OPPORTUNISTIC_GC_BUDGET_MS,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -355,17 +382,69 @@ pub(crate) fn lookup_cache(
     }
 }
 
+/// spec Part 4 parse eviction `recompute_rank`：light_text=1、xlsx=2、office=2、
+/// sharepoint=3、python_office=4、pdf=10。新 parser backend 未升级 retention
+/// policy 时 fail closed 为 profile route invariant（返回 None）。
+pub(crate) fn recompute_rank(parser_backend: &str) -> Option<i64> {
+    match parser_backend {
+        "light_text_v1" => Some(1),
+        "rust_xlsx_bounded_v1" => Some(2),
+        "rust_office_oxide_v1" => Some(2),
+        "python_sharepoint_text_v1" => Some(3),
+        "python_office_v1" => Some(4),
+        "pdf_text_v1" => Some(10),
+        _ => None,
+    }
+}
+
+/// parse cache row 的逻辑 payload 字节数（spec Part 4：Store 计算，不接受 wire
+/// 输入；本实现覆盖全部 text 列 + truncated 的 SQLite i64 表示）。
+pub(crate) fn parse_entry_size_bytes(record: &CacheWriteRecord) -> i64 {
+    let text_bytes: usize = [
+        record.file_identity.as_str(),
+        record.source_version.as_str(),
+        record.source_guard_kind.as_str(),
+        record.source_guard_sha256.as_str(),
+        record.parse_profile_hash.as_str(),
+        record.content.as_str(),
+        record.content_sha256.as_str(),
+        record.parser_backend.as_str(),
+        record.worker_lane.as_str(),
+        record.worker_contract_version.as_str(),
+        record.worker_version.as_str(),
+        record.worker_build.as_str(),
+    ]
+    .iter()
+    .map(|value| value.len())
+    .sum();
+    (text_bytes + 8) as i64
+}
+
+/// 单 entry 大于载体 cap 时的 skipped 信号，由 Store 层转成 skipped receipt
+/// warning（spec Part 4：单 entry 超 cap → 直接 skipped，不改变 context）。
+fn over_cap_error(message: String) -> rusqlite::Error {
+    rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error {
+            code: rusqlite::ErrorCode::OperationAborted,
+            extended_code: 0,
+        },
+        Some(message),
+    )
+}
+
 pub(crate) fn write_success_cache(
     transaction: &Transaction<'_>,
     cached_at_ms: i64,
     records: &[CacheWriteRecord],
 ) -> rusqlite::Result<()> {
+    let bucket = date_bucket_for_ms(cached_at_ms);
     let mut statement = transaction.prepare_cached(
         "INSERT INTO parse_cache(
             file_identity, source_version, source_guard_kind, source_guard_sha256,
             parse_profile_hash, content, content_sha256, parser_backend, worker_lane,
-            truncated, worker_contract_version, worker_version, worker_build, cached_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            truncated, worker_contract_version, worker_version, worker_build, cached_at_ms,
+            entry_size_bytes, generation_rank, last_accessed_bucket
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1, ?16)
          ON CONFLICT(file_identity, source_version, source_guard_kind, source_guard_sha256,
                      parse_profile_hash) DO UPDATE SET
             content=excluded.content,
@@ -376,9 +455,25 @@ pub(crate) fn write_success_cache(
             worker_contract_version=excluded.worker_contract_version,
             worker_version=excluded.worker_version,
             worker_build=excluded.worker_build,
-            cached_at_ms=excluded.cached_at_ms",
+            cached_at_ms=excluded.cached_at_ms,
+            entry_size_bytes=excluded.entry_size_bytes,
+            last_accessed_bucket=excluded.last_accessed_bucket",
     )?;
     for record in records {
+        // spec Part 4: 新 parser backend 未升级 retention policy → fail closed。
+        if recompute_rank(&record.parser_backend).is_none() {
+            return Err(over_cap_error(format!(
+                "parse cache backend '{}' has no retention recompute_rank",
+                record.parser_backend
+            )));
+        }
+        let entry_size = parse_entry_size_bytes(record);
+        if entry_size > PARSE_CACHE_MAX_BYTES {
+            // 单 entry 大于载体 cap → skipped receipt warning。
+            return Err(over_cap_error(format!(
+                "parse cache entry exceeds the {PARSE_CACHE_MAX_BYTES} byte hard cap"
+            )));
+        }
         statement.execute(params![
             record.file_identity,
             record.source_version,
@@ -394,7 +489,75 @@ pub(crate) fn write_success_cache(
             record.worker_version,
             record.worker_build,
             cached_at_ms,
+            entry_size,
+            bucket,
         ])?;
+    }
+    // 同一 work-phase cache transaction 内按唯一 tuple 淘汰到硬上限以下。
+    evict_parse_cache(transaction, PARSE_CACHE_MAX_BYTES)?;
+    Ok(())
+}
+
+/// 按 spec Part 4 eviction tuple 升序删除 parse cache 行，直到
+/// `sum(entry_size_bytes) <= cap`。`recompute_rank` 由 `parser_backend` 推导；
+/// 未知 backend 排最后（防御：正常写入已 fail closed，因此只能来自历史数据）。
+pub(crate) fn evict_parse_cache(
+    transaction: &Transaction<'_>,
+    cap: i64,
+) -> rusqlite::Result<()> {
+    let mut total: i64 = transaction.query_row(
+        "SELECT COALESCE(SUM(entry_size_bytes), 0) FROM parse_cache",
+        [],
+        |row| row.get(0),
+    )?;
+    while total > cap {
+        let victim: Option<(String, String, String, String, String, i64)> = transaction
+            .query_row(
+                "SELECT file_identity, source_version, source_guard_kind, source_guard_sha256,
+                        parse_profile_hash, entry_size_bytes
+                 FROM parse_cache
+                 ORDER BY generation_rank ASC,
+                          CASE parser_backend
+                              WHEN 'light_text_v1' THEN 1
+                              WHEN 'rust_xlsx_bounded_v1' THEN 2
+                              WHEN 'rust_office_oxide_v1' THEN 2
+                              WHEN 'python_sharepoint_text_v1' THEN 3
+                              WHEN 'python_office_v1' THEN 4
+                              WHEN 'pdf_text_v1' THEN 10
+                              ELSE 99
+                          END ASC,
+                          last_accessed_bucket ASC,
+                          cached_at_ms ASC,
+                          (length(file_identity) + length(source_version) +
+                           length(source_guard_kind) + length(source_guard_sha256) +
+                           length(parse_profile_hash)) ASC
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((identity, version, kind, guard, hash, entry_size)) = victim else {
+            break;
+        };
+        let deleted = transaction.execute(
+            "DELETE FROM parse_cache
+             WHERE file_identity=?1 AND source_version=?2 AND source_guard_kind=?3
+               AND source_guard_sha256=?4 AND parse_profile_hash=?5",
+            params![identity, version, kind, guard, hash],
+        )?;
+        if deleted != 1 {
+            break;
+        }
+        total = total.saturating_sub(entry_size);
     }
     Ok(())
 }
@@ -589,7 +752,8 @@ pub(crate) fn lookup_classification_cache(
 
 /// 只写成功 text/no-text 缓存（spec Part 3.2：无负缓存）。entry_size_bytes
 /// 是本 Store 计算的逻辑 payload 字节数；`last_accessed_bucket` 使用当前 UTC
-/// 日期，`generation_rank` 默认 1。
+/// 日期，`generation_rank` 默认 1。超过 128 MiB 硬上限时在同一 work-phase
+/// cache transaction 内按唯一 tuple 淘汰；单 entry 超 cap → skipped。
 // T2-4 Scheduler consumes the write path; until then only tests exercise it.
 #[allow(dead_code)]
 pub(crate) fn write_success_classification_cache(
@@ -597,6 +761,7 @@ pub(crate) fn write_success_classification_cache(
     cached_at_ms: i64,
     records: &[ClassificationCacheWriteRecord],
 ) -> rusqlite::Result<()> {
+    let bucket = date_bucket_for_ms(cached_at_ms);
     let mut statement = transaction.prepare_cached(
         "INSERT INTO classification_cache(
             file_identity, source_version, source_guard_kind, source_guard_sha256,
@@ -614,6 +779,12 @@ pub(crate) fn write_success_classification_cache(
             last_accessed_bucket=excluded.last_accessed_bucket",
     )?;
     for record in records {
+        let entry_size = classification_entry_size_bytes(record);
+        if entry_size > CLASSIFICATION_CACHE_MAX_BYTES {
+            return Err(over_cap_error(format!(
+                "classification cache entry exceeds the {CLASSIFICATION_CACHE_MAX_BYTES} byte hard cap"
+            )));
+        }
         statement.execute(params![
             record.file_identity,
             record.source_version,
@@ -625,9 +796,69 @@ pub(crate) fn write_success_classification_cache(
             record.page_count as i64,
             record.result_examined_pages as i64,
             cached_at_ms,
-            classification_entry_size_bytes(record),
-            utc_date_bucket(),
+            entry_size,
+            bucket,
         ])?;
+    }
+    evict_classification_cache(transaction, CLASSIFICATION_CACHE_MAX_BYTES)?;
+    Ok(())
+}
+
+/// 按 spec Part 4 eviction tuple 升序删除 classification cache 行，直到
+/// `sum(entry_size_bytes) <= cap`。tuple 前缀为
+/// `(generation_rank, result_examined_pages, last_accessed_bucket, cached_at_ms,
+/// primary_key_bytes)`。
+pub(crate) fn evict_classification_cache(
+    transaction: &Transaction<'_>,
+    cap: i64,
+) -> rusqlite::Result<()> {
+    let mut total: i64 = transaction.query_row(
+        "SELECT COALESCE(SUM(entry_size_bytes), 0) FROM classification_cache",
+        [],
+        |row| row.get(0),
+    )?;
+    while total > cap {
+        let victim: Option<(String, String, String, String, String, String, i64)> = transaction
+            .query_row(
+                "SELECT file_identity, source_version, source_guard_kind, source_guard_sha256,
+                        classifier_profile_hash, classifier_build, entry_size_bytes
+                 FROM classification_cache
+                 ORDER BY generation_rank ASC,
+                          result_examined_pages ASC,
+                          last_accessed_bucket ASC,
+                          cached_at_ms ASC,
+                          (length(file_identity) + length(source_version) +
+                           length(source_guard_kind) + length(source_guard_sha256) +
+                           length(classifier_profile_hash) + length(classifier_build)) ASC
+                 LIMIT 1",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get::<_, i64>(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((identity, version, kind, guard, profile_hash, build, entry_size)) = victim
+        else {
+            break;
+        };
+        let deleted = transaction.execute(
+            "DELETE FROM classification_cache
+             WHERE file_identity=?1 AND source_version=?2 AND source_guard_kind=?3
+               AND source_guard_sha256=?4 AND classifier_profile_hash=?5 AND classifier_build=?6",
+            params![identity, version, kind, guard, profile_hash, build],
+        )?;
+        if deleted != 1 {
+            break;
+        }
+        total = total.saturating_sub(entry_size);
     }
     Ok(())
 }
@@ -651,18 +882,14 @@ fn classification_entry_size_bytes(record: &ClassificationCacheWriteRecord) -> i
     (text_bytes + 8 + 8) as i64
 }
 
-// T2-4 Scheduler consumes the classification cache write path; until then only
-// tests exercise this helper.
-#[allow(dead_code)]
-fn utc_date_bucket() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let seconds = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_secs());
+/// `last_accessed_bucket` 使用 UTC 日期（spec Part 4），同一天内同一行最多更新
+/// 一次。该函数把 epoch ms 归一化为 `YYYY-MM-DD` UTC。
+pub(crate) fn date_bucket_for_ms(ms: i64) -> String {
+    let seconds = ms.div_euclid(1_000);
     // 自 1970-01-01 起的天数；每天 UTC 边界翻转。
-    let days = seconds / 86_400;
+    let days = seconds.div_euclid(86_400);
     const DAYS_FROM_0_TO_1970: i64 = 719_468;
-    let z = days as i64 + DAYS_FROM_0_TO_1970;
+    let z = days + DAYS_FROM_0_TO_1970;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = z - era * 146_097;
     let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
@@ -673,6 +900,46 @@ fn utc_date_bucket() -> String {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if month <= 2 { year + 1 } else { year };
     format!("{year:04}-{month:02}-{day:02}")
+}
+
+/// 批量 cache hit 的 `last_accessed_bucket` 更新（spec Part 4：同一行同一天
+/// 最多更新一次，批量 hit 一个事务）。只更新 bucket 已过期的行。
+pub(crate) fn touch_parse_cache_access(
+    transaction: &Transaction<'_>,
+    identities: &[String],
+    bucket: &str,
+) -> rusqlite::Result<usize> {
+    let mut updated = 0usize;
+    if identities.is_empty() {
+        return Ok(0);
+    }
+    let mut statement = transaction.prepare_cached(
+        "UPDATE parse_cache SET last_accessed_bucket=?2
+         WHERE file_identity=?1 AND last_accessed_bucket<>?2",
+    )?;
+    for identity in identities {
+        updated += statement.execute(params![identity, bucket])? as usize;
+    }
+    Ok(updated)
+}
+
+pub(crate) fn touch_classification_cache_access(
+    transaction: &Transaction<'_>,
+    identities: &[String],
+    bucket: &str,
+) -> rusqlite::Result<usize> {
+    let mut updated = 0usize;
+    if identities.is_empty() {
+        return Ok(0);
+    }
+    let mut statement = transaction.prepare_cached(
+        "UPDATE classification_cache SET last_accessed_bucket=?2
+         WHERE file_identity=?1 AND last_accessed_bucket<>?2",
+    )?;
+    for identity in identities {
+        updated += statement.execute(params![identity, bucket])? as usize;
+    }
+    Ok(updated)
 }
 
 #[cfg(test)]
@@ -1019,5 +1286,149 @@ mod tests {
                 .validate()
                 .is_ok()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // cache_retention_v1：parse cache 硬上限 + eviction tuple（spec Part 4）
+    // -----------------------------------------------------------------------
+
+    fn parse_record(identity: &str, source_version: &str, profile_hash: &str) -> CacheWriteRecord {
+        let version = crate::version_response();
+        CacheWriteRecord {
+            file_identity: identity.to_string(),
+            source_version: source_version.to_string(),
+            source_guard_kind: "content_sha256_v1".to_string(),
+            source_guard_sha256: "0".repeat(64),
+            parse_profile_hash: profile_hash.to_string(),
+            content: format!("content-{identity}"),
+            content_sha256: sha256_hex(format!("content-{identity}").as_bytes()),
+            parser_backend: "light_text_v1".to_string(),
+            worker_lane: "rust_core".to_string(),
+            truncated: false,
+            worker_contract_version: "ai_daily_context_v1".to_string(),
+            worker_version: version.engine_version,
+            worker_build: version.engine_build,
+        }
+    }
+
+    #[test]
+    fn parse_cache_evicts_oldest_by_tuple_to_respect_the_cap() {
+        let mut connection = fresh_v2_db();
+        for (identity, version) in [
+            ("fixture:a", "mtime_ns=1:size=2"),
+            ("fixture:b", "mtime_ns=5:size=6"),
+            ("fixture:c", "mtime_ns=9:size=10"),
+        ] {
+            insert_inventory(&connection, identity, version);
+        }
+        let transaction = connection.transaction().expect("tx");
+        // 三条 record 的 entry_size 各约数百字节，cap=1000 应只保留最新一条。
+        write_success_cache(
+            &transaction,
+            100,
+            &[parse_record("fixture:a", "mtime_ns=1:size=2", "a".repeat(64).as_str())],
+        )
+        .expect("write a");
+        write_success_cache(
+            &transaction,
+            200,
+            &[parse_record("fixture:b", "mtime_ns=5:size=6", "b".repeat(64).as_str())],
+        )
+        .expect("write b");
+        write_success_cache(
+            &transaction,
+            300,
+            &[parse_record("fixture:c", "mtime_ns=9:size=10", "c".repeat(64).as_str())],
+        )
+        .expect("write c");
+        // 直接用小 cap 触发 eviction；tuple 前缀相同 → 最老 cached_at_ms 先删。
+        evict_parse_cache(&transaction, 1_000).expect("evict");
+        let remaining: i64 = transaction
+            .query_row("SELECT count(*) FROM parse_cache", [], |row| row.get(0))
+            .expect("count");
+        let total: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(SUM(entry_size_bytes), 0) FROM parse_cache",
+                [],
+                |row| row.get(0),
+            )
+            .expect("sum");
+        assert!(remaining >= 1 && remaining <= 2, "cap eviction must leave 1-2 rows");
+        assert!(total <= 1_000, "cap eviction must keep total <= cap");
+        let newest_identity: String = transaction
+            .query_row(
+                "SELECT file_identity FROM parse_cache ORDER BY cached_at_ms DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .expect("newest");
+        assert_eq!(newest_identity, "fixture:c");
+        transaction.commit().expect("commit");
+    }
+
+    #[test]
+    fn parse_cache_single_entry_over_cap_is_skipped() {
+        let mut connection = fresh_v2_db();
+        insert_inventory(&connection, "fixture:a", "mtime_ns=1:size=2");
+        let transaction = connection.transaction().expect("tx");
+        let mut record = parse_record("fixture:a", "mtime_ns=1:size=2", &"a".repeat(64));
+        record.content = "x".repeat(PARSE_CACHE_MAX_BYTES as usize + 1);
+        record.content_sha256 = sha256_hex(record.content.as_bytes());
+        let error = write_success_cache(&transaction, 100, &[record]).expect_err("over cap");
+        assert!(
+            error.to_string().contains("hard cap"),
+            "over-cap entry must be skipped with a cap warning, got {error}"
+        );
+        transaction.commit().expect("commit");
+    }
+
+    #[test]
+    fn parse_cache_unknown_backend_fails_closed() {
+        let mut connection = fresh_v2_db();
+        insert_inventory(&connection, "fixture:a", "mtime_ns=1:size=2");
+        let transaction = connection.transaction().expect("tx");
+        let mut record = parse_record("fixture:a", "mtime_ns=1:size=2", &"a".repeat(64));
+        record.parser_backend = "future_backend_v9".to_string();
+        assert!(
+            write_success_cache(&transaction, 100, &[record]).is_err(),
+            "new backend without a retention recompute_rank must fail closed"
+        );
+        transaction.commit().expect("commit");
+    }
+
+    #[test]
+    fn classification_cache_evicts_least_recently_examined_first() {
+        let mut connection = fresh_v2_db();
+        for (identity, version) in [
+            ("fixture:a", "mtime_ns=1:size=2"),
+            ("fixture:b", "mtime_ns=5:size=6"),
+        ] {
+            insert_inventory(&connection, identity, version);
+        }
+        let transaction = connection.transaction().expect("tx");
+        let mut few_pages =
+            cache_record("fixture:a", "mtime_ns=1:size=2", "text_in_parse_window", &"a".repeat(64));
+        few_pages.result_examined_pages = 1;
+        let many_pages =
+            cache_record("fixture:b", "mtime_ns=5:size=6", "no_text_in_parse_window", &"a".repeat(64));
+        write_success_classification_cache(&transaction, 100, &[few_pages]).expect("write a");
+        write_success_classification_cache(&transaction, 200, &[many_pages]).expect("write b");
+        // cap=500：只容纳一条 → result_examined_pages 更少的 a 先淘汰。
+        evict_classification_cache(&transaction, 500).expect("evict");
+        let remaining_identity: String = transaction
+            .query_row("SELECT file_identity FROM classification_cache", [], |row| {
+                row.get(0)
+            })
+            .expect("remaining");
+        assert_eq!(remaining_identity, "fixture:b");
+        transaction.commit().expect("commit");
+    }
+
+    #[test]
+    fn date_bucket_for_ms_is_utc_date() {
+        // 2020-01-01T00:00:00Z = 1577836800s；2020-01-02 边界 = +86400s。
+        assert_eq!(date_bucket_for_ms(1_577_836_800_000), "2020-01-01");
+        assert_eq!(date_bucket_for_ms(1_577_923_200_000 - 1), "2020-01-01");
+        assert_eq!(date_bucket_for_ms(1_577_923_200_000), "2020-01-02");
     }
 }
