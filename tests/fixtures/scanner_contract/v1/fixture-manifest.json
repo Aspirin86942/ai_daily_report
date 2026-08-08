@@ -58,6 +58,10 @@
       "schema": "build-context-request-v1.schema.json"
     },
     {
+      "file": "request-v2.json",
+      "schema": "build-context-request-v1.schema.json"
+    },
+    {
       "file": "request.json",
       "schema": "build-context-request-v1.schema.json"
     },

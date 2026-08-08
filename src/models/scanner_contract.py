@@ -1189,11 +1189,13 @@ class VersionResponseV2(ContractModel):
 
 class PdfClassificationAuditV1(ContractModel):
     status: PdfClassificationStatus
-    page_count: PositiveInt | None
+    # spec Part 3: the three page fields are nullable u64 — 0 is a legitimate
+    # value (snapshot/not_eligible rows report run/result pages as 0).
+    page_count: NonNegativeInt | None
     classification_cache_status: ClassificationCacheStatus
     classification_cache_miss_reason: Annotated[str, Field(max_length=1024)]
-    result_examined_pages: PositiveInt | None
-    run_inspected_pages: PositiveInt | None
+    result_examined_pages: NonNegativeInt | None
+    run_inspected_pages: NonNegativeInt | None
     nominal_charged_pages: NonNegativeInt
     duration_ms: NonNegativeInt
     transport: ClassificationTransport

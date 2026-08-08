@@ -9,6 +9,7 @@ pub mod config;
 pub mod context_audit;
 pub mod decision;
 pub mod fallback;
+pub mod inspect;
 pub mod metrics;
 pub mod nominal;
 pub mod parsers;
@@ -28,5 +29,6 @@ pub mod discovery {
 }
 
 pub use run::{
-    dispatch, invalid_request_output, version_response, CommandOutput, EngineShellError,
+    dispatch, dispatch_with_response_version, invalid_request_output, version_response,
+    version_response_v2, CommandOutput, EngineShellError,
 };

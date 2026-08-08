@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.config import Config, SCANNER_CONTRACT_FIELDS
+from src.services.scanner_config import SCANNER_PROFILE_V2_ONLY_FIELDS
 from src.models.scanner_contract import (
     WorkerParseRequest,
     build_rust_core_crashed_envelope,
@@ -93,13 +94,16 @@ def test_scanner_contract_profile_copies_only_present_raw_leaves() -> None:
 
 
 def test_scanner_contract_profile_allowlist_matches_wire_schema() -> None:
-    """配置提取 allowlist 必须与版本化 raw profile schema 同步。"""
+    """配置提取 allowlist 必须与版本化 raw profile schema 同步。
+
+    The v1|v2 raw profile schema accepts both `scanner_profile_v1` and
+    `scanner_profile_v2`; the extraction allowlist must cover every v1 leaf
+    plus every v2-only leaf (spec Part 8.1).
+    """
     schema = _load_json(CONTRACT_DIR / "scanner-profile-request-v1.schema.json")
     assert isinstance(schema, dict)
-    expected = tuple(
-        key for key in schema["properties"] if key != "schema_version"
-    )
-    assert SCANNER_CONTRACT_FIELDS == expected
+    expected = set(schema["properties"]) - {"schema_version"}
+    assert expected == set(SCANNER_CONTRACT_FIELDS) | SCANNER_PROFILE_V2_ONLY_FIELDS
 
 
 def test_scanner_contract_profile_rejects_unknown_candidate_leaf() -> None:

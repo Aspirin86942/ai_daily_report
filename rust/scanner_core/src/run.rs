@@ -8,7 +8,7 @@ use ai_daily_scanner_contract::{
     DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest, InspectRunResponse,
     InspectStatus, MaintenanceRequestV1, MaintenanceStatus, Nullable, ParseStatus, RunStatus,
     StageMetric, StageName, TransportErrorResponse, UpgradeDatabaseRequestV1, UpgradeStatus,
-    Validate, VersionResponse, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
+    Validate, VersionResponse, VersionResponseV2, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
     WorkerDiagnosticV1Stage,
 };
 use chrono::NaiveDate;
@@ -25,6 +25,7 @@ use thiserror::Error;
 use crate::artifact::{
     snapshot_key_parts, ArtifactDecisionRow, ArtifactDraft, ArtifactFileRow, ClassifierIdentity,
     PdfClassificationProvenanceV1, SemanticSummary, CLASSIFIER_CONTRACT_VERSION,
+    SESSION_CONTRACT_VERSION,
 };
 use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
 use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
@@ -83,44 +84,69 @@ impl CommandOutput {
 }
 
 pub fn dispatch(command: &str, input: &[u8]) -> Result<CommandOutput, EngineShellError> {
-    match command {
-        "version" => CommandOutput::success(&version_response()),
-        "build-context" => {
-            let request = match decode_request::<BuildContextRequest>(input) {
-                Ok(request) => request,
-                Err(_) => return invalid_request_output(),
-            };
-            build_context_command(&request)
+    dispatch_with_response_version(command, input, 1)
+}
+
+/// CLI entry that honors `--response-version N` (spec Part 5.3): response
+/// version 2 serves the strict `InspectRunResponseV2` / `VersionResponseV2`
+/// surfaces; version 1 (default) keeps the frozen v1 projection unchanged.
+pub fn dispatch_with_response_version(
+    command: &str,
+    input: &[u8],
+    response_version: u64,
+) -> Result<CommandOutput, EngineShellError> {
+    if response_version == 2 {
+        match command {
+            "version" => CommandOutput::success(&version_response_v2()),
+            "inspect-run" => {
+                let request = match decode_request::<InspectRunRequest>(input) {
+                    Ok(request) => request,
+                    Err(_) => return invalid_request_output(),
+                };
+                inspect_run_command_v2(&request)
+            }
+            _ => invalid_request_output(),
         }
-        "doctor" => {
-            let request = match decode_request::<DoctorRequest>(input) {
-                Ok(request) => request,
-                Err(_) => return invalid_request_output(),
-            };
-            doctor(&request)
+    } else {
+        match command {
+            "version" => CommandOutput::success(&version_response()),
+            "build-context" => {
+                let request = match decode_request::<BuildContextRequest>(input) {
+                    Ok(request) => request,
+                    Err(_) => return invalid_request_output(),
+                };
+                build_context_command(&request)
+            }
+            "doctor" => {
+                let request = match decode_request::<DoctorRequest>(input) {
+                    Ok(request) => request,
+                    Err(_) => return invalid_request_output(),
+                };
+                doctor(&request)
+            }
+            "inspect-run" => {
+                let request = match decode_request::<InspectRunRequest>(input) {
+                    Ok(request) => request,
+                    Err(_) => return invalid_request_output(),
+                };
+                inspect_run_command(&request)
+            }
+            "upgrade-db" => {
+                let request = match decode_request::<UpgradeDatabaseRequestV1>(input) {
+                    Ok(request) => request,
+                    Err(_) => return invalid_request_output(),
+                };
+                upgrade_database_command(&request)
+            }
+            "maintenance" => {
+                let request = match decode_request::<MaintenanceRequestV1>(input) {
+                    Ok(request) => request,
+                    Err(_) => return invalid_request_output(),
+                };
+                maintenance_command(&request)
+            }
+            _ => invalid_request_output(),
         }
-        "inspect-run" => {
-            let request = match decode_request::<InspectRunRequest>(input) {
-                Ok(request) => request,
-                Err(_) => return invalid_request_output(),
-            };
-            inspect_run_command(&request)
-        }
-        "upgrade-db" => {
-            let request = match decode_request::<UpgradeDatabaseRequestV1>(input) {
-                Ok(request) => request,
-                Err(_) => return invalid_request_output(),
-            };
-            upgrade_database_command(&request)
-        }
-        "maintenance" => {
-            let request = match decode_request::<MaintenanceRequestV1>(input) {
-                Ok(request) => request,
-                Err(_) => return invalid_request_output(),
-            };
-            maintenance_command(&request)
-        }
-        _ => invalid_request_output(),
     }
 }
 
@@ -300,6 +326,10 @@ fn inspect_run_command(request: &InspectRunRequest) -> Result<CommandOutput, Eng
     };
     match store.inspect_run(request.scan_run_id, request.include_content) {
         Ok(snapshot) => {
+            // spec Part 5.3: full_v2 rows are projected lossily into v1 and the
+            // projection warnings are appended (output-only, bounded to 257).
+            let warnings =
+                crate::inspect::v1_lossy_projection_warnings(&snapshot, &snapshot.warnings);
             let response = InspectRunResponse {
                 contract: "ai_daily_context".to_string(),
                 protocol_version: 1,
@@ -313,7 +343,7 @@ fn inspect_run_command(request: &InspectRunRequest) -> Result<CommandOutput, Eng
                 extension_metrics: snapshot.extension_metrics,
                 files: snapshot.files,
                 decisions: snapshot.decisions,
-                warnings: snapshot.warnings,
+                warnings,
                 error: Nullable(None),
             };
             CommandOutput::success(&response)
@@ -331,6 +361,80 @@ fn inspect_run_command(request: &InspectRunRequest) -> Result<CommandOutput, Eng
                 error.error.to_string(),
                 retryable,
                 error.run_status,
+            )
+        }
+    }
+}
+
+/// `inspect-run --response-version 2`: returns the strict `InspectRunResponseV2`.
+/// Migrated v1 runs fail closed with `INSPECT_V2_PROVENANCE_UNAVAILABLE` and the
+/// sentinel execution metrics (spec Part 5.3) — never fake 0/null evidence.
+fn inspect_run_command_v2(request: &InspectRunRequest) -> Result<CommandOutput, EngineShellError> {
+    let mut store = match ScannerStore::open_existing(Path::new(&request.scan_db_path)) {
+        Ok(store) => store,
+        Err(error) => {
+            return CommandOutput::with_exit(
+                &crate::inspect::inspect_v2_error(
+                    request,
+                    error.error_code(),
+                    error.to_string(),
+                    error.retryable(),
+                    None,
+                ),
+                1,
+            );
+        }
+    };
+    match store.inspect_run(request.scan_run_id, request.include_content) {
+        Ok(snapshot) => {
+            let response = match snapshot.audit_provenance_version {
+                Some(crate::context_audit::AuditProvenanceVersion::MigratedV1) => {
+                    crate::inspect::inspect_v2_error(
+                        request,
+                        ErrorCode::InspectV2ProvenanceUnavailable,
+                        "migrated v1 run lacks v2 provenance".to_string(),
+                        false,
+                        Some(snapshot.run_status),
+                    )
+                }
+                Some(crate::context_audit::AuditProvenanceVersion::FullV2) => {
+                    match crate::inspect::assemble_inspect_v2(request, &snapshot) {
+                        Ok(response) => return CommandOutput::success(&response),
+                        Err(message) => crate::inspect::inspect_v2_error(
+                            request,
+                            ErrorCode::RunCorrupt,
+                            message,
+                            false,
+                            Some(snapshot.run_status),
+                        ),
+                    }
+                }
+                None => crate::inspect::inspect_v2_error(
+                    request,
+                    ErrorCode::RunCorrupt,
+                    "nonterminal run has no v2 provenance".to_string(),
+                    false,
+                    Some(snapshot.run_status),
+                ),
+            };
+            CommandOutput::with_exit(&response, 1)
+        }
+        Err(error) => {
+            let (error_code, retryable) = match &error.error {
+                InspectAuditError::RunNotFound => (ErrorCode::RunNotFound, false),
+                InspectAuditError::RunCorrupt(_) => (ErrorCode::RunCorrupt, false),
+                InspectAuditError::ContentForbidden => (ErrorCode::InvalidRequest, false),
+                InspectAuditError::Sql(_) => (ErrorCode::CacheOpenFailed, true),
+            };
+            CommandOutput::with_exit(
+                &crate::inspect::inspect_v2_error(
+                    request,
+                    error_code,
+                    error.error.to_string(),
+                    retryable,
+                    error.run_status,
+                ),
+                1,
             )
         }
     }
@@ -1944,6 +2048,43 @@ pub fn version_response() -> VersionResponse {
         ],
         office_worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
         python_worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
+    }
+}
+
+/// `version --response-version 2` (spec Part 5.3): deny-unknown strict
+/// `VersionResponseV2` with the canonical capability arrays and the
+/// engine-owned `cache_retention_v1` constants echoed from Plan 2.
+pub fn version_response_v2() -> VersionResponseV2 {
+    VersionResponseV2 {
+        contract: "ai_daily_context".to_string(),
+        protocol_version: 1,
+        response_version: 2,
+        binary_name: "ai-daily-scanner".to_string(),
+        engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        engine_build: env!("AI_DAILY_ENGINE_BUILD").to_string(),
+        target_triple: target_triple(),
+        supported_commands: vec![
+            "version".to_string(),
+            "doctor".to_string(),
+            "build-context".to_string(),
+            "inspect-run".to_string(),
+            "maintenance".to_string(),
+            "upgrade-db".to_string(),
+        ],
+        office_worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
+        python_worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
+        accepted_scanner_profile_versions: vec![
+            "scanner_profile_v1".to_string(),
+            "scanner_profile_v2".to_string(),
+        ],
+        inspect_response_versions: vec![1, 2],
+        classifier_contract_versions: vec![CLASSIFIER_CONTRACT_VERSION.to_string()],
+        session_contract_versions: vec![SESSION_CONTRACT_VERSION.to_string()],
+        maintenance_contract_versions: vec!["ai_daily_scanner_maintenance_v1".to_string()],
+        upgrade_contract_versions: vec!["ai_daily_scanner_upgrade_v1".to_string()],
+        source_guard_policy: "source_guard_v2".to_string(),
+        max_source_files_per_run: ai_daily_scanner_contract::MAX_SOURCE_FILES_PER_RUN,
+        cache_retention_policy: crate::store::cache::cache_retention_policy(),
     }
 }
 

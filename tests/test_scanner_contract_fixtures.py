@@ -50,6 +50,7 @@ REQUIRED_VALID_FIXTURES = {
     "profile-weekly.json",
     "python-worker-version-response.json",
     "request-windows-unc.json",
+    "request-v2.json",
     "request.json",
     "response-error.json",
     "response-ok.json",

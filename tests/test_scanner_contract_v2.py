@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -25,9 +27,44 @@ from src.models.scanner_contract import (
 )
 from src.services.scanner_config import (
     SCANNER_PROFILE_V2_ONLY_FIELDS,
+    SCANNER_PROFILE_V2_QUOTA_DEFAULTS,
     extract_scanner_profile,
     normalize_scanner_profile_v2,
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_python_quota_defaults_match_rust_v2_quota_defaults() -> None:
+    """Python 默认表必须与 Rust `v2_quota_defaults` 逐字一致（spec Part 8.1）。
+
+    生产默认值的唯一所有者是 Rust core；Python 的镜像表若漂移，本测试从 Rust
+    源码直接抽取 tuple 断言相等，而不是让两边各自复制同样的字面量。
+    """
+    rust_source = (
+        PROJECT_ROOT
+        / "rust"
+        / "scanner_contract"
+        / "src"
+        / "lib.rs"
+    ).read_text(encoding="utf-8")
+    marker = "pub fn v2_quota_defaults"
+    start = rust_source.index(marker)
+    end = rust_source.index("\n}", start)
+    body = rust_source[start:end]
+
+    rust_table: dict[str, tuple[int, int, int, int]] = {}
+    for mode, label in (("Daily", "daily"), ("Weekly", "weekly"), ("Monthly", "monthly")):
+        pattern = re.compile(
+            rf"ReportMode::{mode}\s*=>\s*\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+_\d+|\d+)\s*\)"
+        )
+        match = pattern.search(body)
+        assert match is not None, f"missing v2_quota_defaults arm for {mode}"
+        rust_table[label] = tuple(
+            int(part.replace("_", "")) for part in match.groups()
+        )
+
+    assert rust_table == SCANNER_PROFILE_V2_QUOTA_DEFAULTS
 
 
 def test_raw_profile_v2_is_strict_superset() -> None:

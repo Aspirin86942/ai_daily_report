@@ -9,7 +9,11 @@
   ],
   "properties": {
     "schema_version": {
-      "const": "scanner_profile_v1"
+      "type": "string",
+      "enum": [
+        "scanner_profile_v1",
+        "scanner_profile_v2"
+      ]
     },
     "allowed_extensions": {
       "$ref": "#/$defs/extensionArray"
@@ -162,6 +166,57 @@
     },
     "summary_document_excerpt_max_chars": {
       "$ref": "#/$defs/charBudget"
+    },
+    "max_candidate_files": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "max_pdf_text_extractions": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "max_total_pdf_classification_pages": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000
+    },
+    "admission_policy_version": {
+      "const": "budget_admission_v2"
+    },
+    "classifier_policy_version": {
+      "const": "pdf_text_presence_v1"
+    },
+    "pdf_classification_timeout_ms": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 60000
+    },
+    "total_deadline_ms": {
+      "type": "integer",
+      "minimum": 5000,
+      "maximum": 3600000
+    },
+    "session_concurrency": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "max_requests_per_session": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    },
+    "session_idle_ttl_ms": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 600000
+    },
+    "session_rss_limit_bytes": {
+      "type": "integer",
+      "minimum": 67108864,
+      "maximum": 8589934592
     }
   },
   "$defs": {

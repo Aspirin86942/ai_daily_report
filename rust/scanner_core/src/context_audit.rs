@@ -3,8 +3,8 @@
 use ai_daily_scanner_contract::{
     AuditWorkerLane, CacheMissReason, CacheStatus, ContextAction, ContextDecision,
     ContextProfile, ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode,
-    ExtensionMetric, FileAudit, NormalizedScannerProfileV1, Nullable, ParseStatus, RunStatus,
-    StageMetric, StageName, Validate,
+    ExecutionMetricsV2, ExtensionMetric, FileAudit, NormalizedScannerProfileV1, Nullable,
+    ParseStatus, PdfClassificationStatus, RunStatus, StageMetric, StageName, Validate,
 };
 use rusqlite::{OptionalExtension, Transaction};
 use serde::Serialize;
@@ -13,6 +13,7 @@ use std::path::Path;
 use thiserror::Error;
 
 use crate::classifier::ClassificationError;
+use crate::artifact::PdfClassificationProvenanceV1;
 use crate::decision::ContextFileEvidence;
 use crate::parsers::{worker_diagnostic_to_scanner, ParsedPayload, ScheduledFileParse};
 use crate::planner::PlanAction;
@@ -535,6 +536,209 @@ pub struct InspectSnapshot {
     pub files: Vec<FileAudit>,
     pub decisions: Vec<ContextDecision>,
     pub warnings: Vec<Diagnostic>,
+    // ---- Inspect v2 provenance (spec Part 5.3). `audit_provenance_version`
+    // is None only for nonterminal (running/abandoned) rows; `migrated_v1`
+    // rows fail closed with `INSPECT_V2_PROVENANCE_UNAVAILABLE`.
+    pub audit_provenance_version: Option<AuditProvenanceVersion>,
+    pub artifact_id: Option<u64>,
+    pub reused_from_context_run_id: Option<u64>,
+    pub snapshot_hit: bool,
+    /// `reserved_chars`/`rendered_chars` reconstructed from the artifact's
+    /// immutable semantic summary (spec Part 5.3 `execution_metrics`).
+    pub reserved_chars: u64,
+    pub rendered_chars: u64,
+    /// WorkDeadline run-level trigger fired during this run (0 or 1).
+    pub stage_deadline_exhausted: bool,
+    /// Full_v2 per-file rows (v1 FileAudit + SourceGuardV2 + classifier
+    /// provenance). Empty for migrated_v1/nonterminal rows.
+    pub files_v2: Vec<FileAuditV2Source>,
+}
+
+/// `scan_runs.audit_provenance_version` (spec Part 8.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuditProvenanceVersion {
+    MigratedV1,
+    FullV2,
+}
+
+/// Per-file SourceGuardV2 + classifier provenance used to assemble
+/// `FileAuditV2` (spec Part 5.3). Migrated v1 rows carry null guards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileAuditV2Source {
+    pub relative_path: String,
+    pub file_identity: String,
+    pub source_version: String,
+    pub source_guard_kind: Option<String>,
+    pub source_guard_sha256: Option<String>,
+    pub file_type: String,
+    pub size_bytes: u64,
+    pub parse_status: ParseStatus,
+    pub parser_backend: String,
+    pub worker_lane: AuditWorkerLane,
+    pub parse_cache_status: Option<String>,
+    pub cache_miss_reason: String,
+    pub truncated: bool,
+    pub content_sha256: String,
+    pub parse_duration_ms: u64,
+    pub failure_class: String,
+    pub fallback_backend: String,
+    pub fallback_reason_code: String,
+    pub final_diagnostic: Option<Diagnostic>,
+    pub classifier: Option<PdfClassificationProvenanceV1>,
+}
+
+/// Assembles the strict `execution_metrics` object (spec Part 5.3) from the
+/// persisted full_v2 run. Counts that the scheduler owns and that cannot be
+/// reconstructed from persisted rows are only populated for non-snapshot runs
+/// via best-effort derivation from the per-file audit rows; a snapshot-hit
+/// current run legitimately reports 0 for every plan/execution count because
+/// the scheduler did not run. The two `*_all_hit` nullables follow the
+/// `lookup_count=0 -> null` rule.
+pub fn assemble_execution_metrics_v2(snapshot: &InspectSnapshot) -> ExecutionMetricsV2 {
+    let discovery_observed_file_count = snapshot
+        .stage_metrics
+        .iter()
+        .find(|metric| metric.stage == StageName::Discovery)
+        .map(|metric| metric.item_count)
+        .unwrap_or(snapshot.summary.source_file_count);
+    let discovery_ms = snapshot
+        .stage_metrics
+        .iter()
+        .find(|metric| metric.stage == StageName::Discovery)
+        .map(|metric| metric.duration_ms)
+        .unwrap_or(snapshot.summary.discovery_duration_ms);
+
+    let mut source_guard_content_hash_file_count = 0_u64;
+    let mut source_guard_unavailable_count = 0_u64;
+    let mut source_guard_bytes_read = 0_u64;
+    let mut parse_cache_lookup_count = 0_u64;
+    let mut parse_cache_fresh_count = 0_u64;
+    let mut pdfplumber_invocations = 0_u64;
+    let mut parse_attempt_count = 0_u64;
+    for file in &snapshot.files_v2 {
+        match file.source_guard_kind.as_deref() {
+            Some("content_sha256_v1") => {
+                source_guard_content_hash_file_count = source_guard_content_hash_file_count + 1;
+                // spec Part 5.3: a full-content hash attempt reads the entire
+                // file; the inventory size is the best persisted proxy.
+                source_guard_bytes_read = source_guard_bytes_read.saturating_add(file.size_bytes);
+            }
+            Some("unavailable") => source_guard_unavailable_count = source_guard_unavailable_count + 1,
+            _ => {}
+        }
+        let cache_status = file.parse_cache_status.as_deref();
+        if matches!(cache_status, Some("fresh") | Some("miss")) {
+            parse_cache_lookup_count = parse_cache_lookup_count + 1;
+            if cache_status == Some("fresh") {
+                parse_cache_fresh_count = parse_cache_fresh_count + 1;
+            }
+        }
+        if file.parser_backend == "pdf_text_v1" && cache_status == Some("miss") {
+            pdfplumber_invocations = pdfplumber_invocations + 1;
+        }
+        if cache_status == Some("miss")
+            && matches!(
+                file.parse_status,
+                ParseStatus::Success | ParseStatus::Error | ParseStatus::Timeout
+            )
+        {
+            parse_attempt_count = parse_attempt_count + 1;
+        }
+    }
+    let parse_cache_all_hit = if parse_cache_lookup_count > 0 {
+        Some(parse_cache_fresh_count == parse_cache_lookup_count)
+    } else {
+        None
+    };
+
+    // Plan/execution counts are authoritative only when the scheduler ran; a
+    // snapshot-hit current run skips planning + classification + parse, so 0 is
+    // the truthful value. For non-snapshot runs the derived values below are
+    // best-effort reconstructions from the persisted per-file rows.
+    let (candidate_file_count, admitted_file_count, classification_slot_count, extraction_slot_count, nominal_charged_pages_total, classify_attempt_count, classification_lookup_count) =
+        if snapshot.snapshot_hit {
+            (0, 0, 0, 0, 0, 0, 0)
+        } else {
+            let mut admitted = 0_u64;
+            let mut classification_slot = 0_u64;
+            let mut extraction_slot = 0_u64;
+            let mut nominal = 0_u64;
+            let mut classify_attempt = 0_u64;
+            let mut classification_lookup = 0_u64;
+            for file in &snapshot.files_v2 {
+                let cache_status = file.parse_cache_status.as_deref();
+                if file.parser_backend != "not_parsed" || cache_status == Some("fresh") {
+                    admitted = admitted + 1;
+                }
+                if let Some(classifier) = &file.classifier {
+                    classification_slot = classification_slot + 1;
+                    nominal = nominal.saturating_add(classifier.nominal_charged_pages);
+                    if cache_status != Some("snapshot") {
+                        classification_lookup = classification_lookup + 1;
+                        classify_attempt = classify_attempt + 1;
+                    }
+                    if matches!(
+                        classifier.status,
+                        PdfClassificationStatus::TextInParseWindow
+                            | PdfClassificationStatus::NoTextInParseWindow
+                    ) {
+                        extraction_slot = extraction_slot + 1;
+                    }
+                }
+            }
+            (
+                snapshot.files_v2.len() as u64,
+                admitted,
+                classification_slot,
+                extraction_slot,
+                nominal,
+                classify_attempt,
+                classification_lookup,
+            )
+        };
+    let classification_cache_all_hit = if classification_lookup_count > 0 {
+        // Exact per-file classification cache status is not persisted; a
+        // conservative false never fabricates an all-hit claim.
+        Some(false)
+    } else {
+        None
+    };
+
+    ExecutionMetricsV2 {
+        discovery_observed_file_count,
+        source_guard_content_hash_file_count,
+        source_guard_unavailable_count,
+        source_guard_bytes_read,
+        candidate_file_count,
+        admitted_file_count,
+        classification_slot_count,
+        confirmed_run_inspected_pages_total: 0,
+        unobserved_classification_attempt_count: 0,
+        nominal_charged_pages_total,
+        extraction_slot_count,
+        pdfplumber_invocations,
+        snapshot_hit: snapshot.snapshot_hit,
+        parse_cache_lookup_count,
+        classification_cache_lookup_count: classification_lookup_count,
+        parse_cache_all_hit: Nullable(parse_cache_all_hit),
+        classification_cache_all_hit: Nullable(classification_cache_all_hit),
+        stage_deadline_exhausted_count: u64::from(snapshot.stage_deadline_exhausted),
+        session_restart_count: 0,
+        session_fallback_count: 0,
+        classify_attempt_count,
+        parse_attempt_count,
+        reserved_chars: snapshot.reserved_chars,
+        rendered_chars: snapshot.rendered_chars,
+        worker_handshake_ms: 0,
+        discovery_ms,
+        snapshot_lookup_ms: 0,
+        current_run_audit_write_ms: 0,
+        terminal_precommit_ms: 0,
+        deadline_precommit_elapsed_ms: 0,
+        envelope_rebuild_ms: 0,
+        terminal_rows_written: 0,
+        peak_worker_rss_bytes: Nullable(None),
+    }
 }
 
 #[derive(Debug, Error)]
@@ -576,10 +780,17 @@ pub(crate) fn load_inspect_snapshot(
     scan_run_id: i64,
     include_content: bool,
 ) -> Result<InspectSnapshot, InspectLoadError> {
-    let run_row: Option<(String, String, String, String, Option<String>)> = transaction
+    let run_row: Option<(
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+    )> = transaction
         .query_row(
             "SELECT request_id, canonical_request_json, request_hash, status,
-                    final_envelope_metadata_json
+                    final_envelope_metadata_json, audit_provenance_version
              FROM scan_runs WHERE scan_run_id=?1",
             [scan_run_id],
             |row| {
@@ -589,13 +800,20 @@ pub(crate) fn load_inspect_snapshot(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )
         .optional()
         .map_err(|error| InspectLoadError::before_status(InspectAuditError::Sql(error)))?;
-    let (stored_request_id, canonical_request_json, request_hash, run_status_text, envelope_metadata_json) =
-        run_row.ok_or_else(|| InspectLoadError::before_status(InspectAuditError::RunNotFound))?;
+    let (
+        stored_request_id,
+        canonical_request_json,
+        request_hash,
+        run_status_text,
+        envelope_metadata_json,
+        provenance_version,
+    ) = run_row.ok_or_else(|| InspectLoadError::before_status(InspectAuditError::RunNotFound))?;
     if crate::store::cache::domain_hash(b"request-v1\0", canonical_request_json.as_bytes())
         != request_hash
     {
@@ -766,6 +984,86 @@ pub(crate) fn load_inspect_snapshot(
         .map(|record| record.decision)
         .collect();
 
+    // ---- Inspect v2 provenance (spec Part 5.3): only terminal full_v2 rows
+    // carry it; migrated_v1 fails closed and nonterminal rows expose none.
+    let audit_provenance_version = match (run_status, provenance_version.as_deref()) {
+        (RunStatus::Running | RunStatus::Abandoned, None) => None,
+        (RunStatus::Running | RunStatus::Abandoned, Some(_)) => {
+            return Err(InspectLoadError::after_status(
+                InspectAuditError::RunCorrupt(
+                    "nonterminal run has an audit provenance version".to_string(),
+                ),
+                run_status,
+            ));
+        }
+        (_, Some("full_v2")) => Some(AuditProvenanceVersion::FullV2),
+        (_, Some("migrated_v1")) => Some(AuditProvenanceVersion::MigratedV1),
+        (_, Some(_)) => {
+            return Err(InspectLoadError::after_status(
+                InspectAuditError::RunCorrupt(
+                    "run has an unknown audit provenance version".to_string(),
+                ),
+                run_status,
+            ));
+        }
+        (_, None) => {
+            return Err(InspectLoadError::after_status(
+                InspectAuditError::RunCorrupt(
+                    "terminal run has no audit provenance version".to_string(),
+                ),
+                run_status,
+            ));
+        }
+    };
+    let (artifact_id, reused_from_context_run_id, snapshot_hit) = match context.as_ref() {
+        Some(_) => {
+            let (artifact_id, reused_from, snapshot_hit) =
+                load_context_run_provenance(transaction, scan_run_id)
+                    .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+            if artifact_id.is_none() && !matches!(run_status, RunStatus::Error) {
+                return Err(InspectLoadError::after_status(
+                    InspectAuditError::RunCorrupt(
+                        "success/partial context run has no artifact".to_string(),
+                    ),
+                    run_status,
+                ));
+            }
+            (artifact_id, reused_from, snapshot_hit)
+        }
+        None => (None, None, false),
+    };
+    let (reserved_chars, rendered_chars) = match (context.as_ref(), artifact_id) {
+        (Some(_), Some(artifact_id)) => {
+            let artifact_id = i64::try_from(artifact_id).map_err(|_| {
+                InspectLoadError::after_status(
+                    InspectAuditError::RunCorrupt("artifact_id exceeds i64".to_string()),
+                    run_status,
+                )
+            })?;
+            load_artifact_semantic_chars(transaction, artifact_id)
+                .map_err(|error| InspectLoadError::after_status(error, run_status))?
+        }
+        _ => (0, 0),
+    };
+    let files_v2 = if matches!(run_status, RunStatus::Success | RunStatus::Partial | RunStatus::Error)
+    {
+        let artifact_id = match artifact_id {
+            Some(value) => Some(i64::try_from(value).map_err(|_| {
+                InspectLoadError::after_status(
+                    InspectAuditError::RunCorrupt("artifact_id exceeds i64".to_string()),
+                    run_status,
+                )
+            })?),
+            None => None,
+        };
+        load_file_audits_v2(transaction, scan_run_id, artifact_id)
+            .map_err(|error| InspectLoadError::after_status(error, run_status))?
+    } else {
+        Vec::new()
+    };
+    let stage_deadline_exhausted = load_stage_deadline_exhausted(transaction, scan_run_id)
+        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+
     Ok(InspectSnapshot {
         context_run_id,
         run_status,
@@ -775,6 +1073,332 @@ pub(crate) fn load_inspect_snapshot(
         files,
         decisions,
         warnings,
+        audit_provenance_version,
+        artifact_id,
+        reused_from_context_run_id,
+        snapshot_hit,
+        reserved_chars,
+        rendered_chars,
+        stage_deadline_exhausted,
+        files_v2,
+    })
+}
+
+/// `stage_deadline_exhausted_count` is 0 or 1 (spec Part 5.3): true exactly
+/// when a `STAGE_DEADLINE_EXHAUSTED` diagnostic was persisted for this run.
+fn load_stage_deadline_exhausted(
+    transaction: &Transaction<'_>,
+    scan_run_id: i64,
+) -> Result<bool, InspectAuditError> {
+    let count: i64 = transaction
+        .query_row(
+            "SELECT count(*) FROM run_diagnostics
+             WHERE scan_run_id=?1 AND error_code='STAGE_DEADLINE_EXHAUSTED'",
+            [scan_run_id],
+            |row| row.get(0),
+        )
+        .map_err(InspectAuditError::Sql)?;
+    if count > 1 {
+        return Err(InspectAuditError::RunCorrupt(
+            "run persisted multiple stage deadline triggers".to_string(),
+        ));
+    }
+    Ok(count == 1)
+}
+
+/// Loads the current `context_runs` snapshot relationship columns:
+/// `artifact_id`, `reused_from_context_run_id`, `snapshot_hit`.
+fn load_context_run_provenance(
+    transaction: &Transaction<'_>,
+    scan_run_id: i64,
+) -> Result<(Option<u64>, Option<u64>, bool), InspectAuditError> {
+    let row: Option<(Option<i64>, Option<i64>, i64)> = transaction
+        .query_row(
+            "SELECT artifact_id, reused_from_context_run_id, snapshot_hit
+             FROM context_runs WHERE scan_run_id=?1",
+            [scan_run_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(InspectAuditError::Sql)?;
+    let Some((artifact_id, reused_from, snapshot_hit)) = row else {
+        return Ok((None, None, false));
+    };
+    let snapshot_hit = match snapshot_hit {
+        0 => false,
+        1 => true,
+        _ => {
+            return Err(InspectAuditError::RunCorrupt(
+                "context run snapshot_hit is invalid".to_string(),
+            ));
+        }
+    };
+    if snapshot_hit && reused_from.is_none() {
+        return Err(InspectAuditError::RunCorrupt(
+            "snapshot hit context run has no reused_from source".to_string(),
+        ));
+    }
+    if !snapshot_hit && reused_from.is_some() {
+        return Err(InspectAuditError::RunCorrupt(
+            "non-snapshot context run has a reused_from source".to_string(),
+        ));
+    }
+    Ok((
+        artifact_id.map(|value| value as u64),
+        reused_from.map(|value| value as u64),
+        snapshot_hit,
+    ))
+}
+
+/// Loads `reserved_chars`/`rendered_chars` from the artifact's immutable
+/// semantic summary JSON (spec Part 5.3 `execution_metrics`).
+fn load_artifact_semantic_chars(
+    transaction: &Transaction<'_>,
+    artifact_id: i64,
+) -> Result<(u64, u64), InspectAuditError> {
+    let summary_json: String = transaction
+        .query_row(
+            "SELECT semantic_summary_json FROM context_artifacts WHERE artifact_id=?1",
+            [artifact_id],
+            |row| row.get(0),
+        )
+        .map_err(InspectAuditError::Sql)?;
+    let value: serde_json::Value = serde_json::from_str(&summary_json)
+        .map_err(|error| InspectAuditError::RunCorrupt(error.to_string()))?;
+    let reserved = value
+        .get("reserved_chars")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            InspectAuditError::RunCorrupt("artifact summary is missing reserved_chars".to_string())
+        })?;
+    let rendered = value
+        .get("rendered_chars")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            InspectAuditError::RunCorrupt("artifact summary is missing rendered_chars".to_string())
+        })?;
+    Ok((reserved, rendered))
+}
+
+/// Loads full_v2 per-file rows (SourceGuardV2 + classifier provenance) for
+/// `FileAuditV2` assembly (spec Part 5.3). `artifact_id` selects the current
+/// run's `context_artifact_files` rows (none for ineligible/migrated runs).
+fn load_file_audits_v2(
+    transaction: &Transaction<'_>,
+    scan_run_id: i64,
+    artifact_id: Option<i64>,
+) -> Result<Vec<FileAuditV2Source>, InspectAuditError> {
+    #[allow(clippy::type_complexity)]
+    let mut statement = transaction.prepare(
+        "SELECT fr.relative_path, fr.file_identity, fr.source_version,
+                fi.source_guard_kind, fi.source_guard_sha256, fi.file_type, fi.size_bytes,
+                fr.parse_status, fr.parser_backend, fr.worker_lane,
+                fr.parse_cache_status, fr.cache_miss_reason,
+                fr.truncated, fr.content_sha256, fr.parse_duration_ms,
+                fr.failure_class, fr.fallback_backend, fr.fallback_reason_code,
+                fr.error_code, fr.error_message, fr.error_retryable, fr.error_stage,
+                fr.error_file_path, fr.error_backend,
+                af.classifier_status, af.classifier_page_count,
+                af.classifier_result_examined_pages, af.classifier_nominal_charged_pages,
+                af.classifier_build, af.classifier_profile_hash
+         FROM scan_file_results fr
+         LEFT JOIN file_inventory fi ON fi.file_identity = fr.file_identity
+         LEFT JOIN context_artifact_files af
+             ON af.file_identity = fr.file_identity AND af.artifact_id = ?2
+         WHERE fr.scan_run_id = ?1
+         ORDER BY lower(fr.relative_path), fr.relative_path, fr.file_identity",
+    )
+    .map_err(InspectAuditError::Sql)?;
+    let raw = statement
+        .query_map([scan_run_id, artifact_id.unwrap_or(-1)], |row| {
+            #[allow(clippy::type_complexity)]
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, i64>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, i64>(14)?,
+                row.get::<_, String>(15)?,
+                row.get::<_, String>(16)?,
+                row.get::<_, String>(17)?,
+                row.get::<_, Option<String>>(18)?,
+                row.get::<_, Option<String>>(19)?,
+                row.get::<_, Option<i64>>(20)?,
+                row.get::<_, Option<String>>(21)?,
+                row.get::<_, Option<String>>(22)?,
+                row.get::<_, Option<String>>(23)?,
+                row.get::<_, Option<String>>(24)?,
+                row.get::<_, Option<i64>>(25)?,
+                row.get::<_, Option<i64>>(26)?,
+                row.get::<_, Option<i64>>(27)?,
+                row.get::<_, Option<String>>(28)?,
+                row.get::<_, Option<String>>(29)?,
+            ))
+        })
+        .map_err(InspectAuditError::Sql)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(InspectAuditError::Sql)?;
+
+    let mut rows = Vec::with_capacity(raw.len());
+    for row in raw {
+        let parse_status: ParseStatus = parse_enum(&row.7, "file v2 parse_status")?;
+        let worker_lane: AuditWorkerLane = parse_enum(&row.9, "file v2 worker_lane")?;
+        // spec Part 5.3: FileAuditV2.final_diagnostic is non-null only for
+        // Error/Timeout; Success and every NotParsed (semantic/policy/runtime
+        // and pre-classification reject) carry null. The reject diagnostic
+        // stays in the ContextDecision row, not the file audit.
+        let final_diagnostic = match parse_status {
+            ParseStatus::Error | ParseStatus::Timeout => assemble_final_diagnostic(
+                &row.18,
+                &row.19,
+                row.20,
+                &row.21,
+                &row.22,
+                &row.23,
+            )?,
+            ParseStatus::Success | ParseStatus::NotParsed => None,
+        };
+        if let Some(diagnostic) = &final_diagnostic {
+            diagnostic
+                .validate()
+                .map_err(|_| InspectAuditError::RunCorrupt("file final diagnostic is invalid".to_string()))?;
+        }
+        if matches!(parse_status, ParseStatus::Error | ParseStatus::Timeout)
+            && final_diagnostic.is_none()
+        {
+            return Err(InspectAuditError::RunCorrupt(
+                "error/timeout file audit is missing its final diagnostic".to_string(),
+            ));
+        }
+        if matches!(parse_status, ParseStatus::Success | ParseStatus::NotParsed)
+            && final_diagnostic.is_some()
+        {
+            return Err(InspectAuditError::RunCorrupt(
+                "success/not_parsed file audit carries a final diagnostic".to_string(),
+            ));
+        }
+        let classifier = match (
+            row.24.as_deref(),
+            row.25,
+            row.26,
+            row.27,
+            row.28.as_deref(),
+            row.29.as_deref(),
+        ) {
+            (Some(status), page_count, result_pages, nominal, Some(build), Some(profile)) => {
+                let status: PdfClassificationStatus = parse_enum(status, "classifier status")?;
+                Some(PdfClassificationProvenanceV1 {
+                    status,
+                    page_count: to_positive_u64(page_count, "classifier page_count")?,
+                    result_examined_pages: to_positive_u64(
+                        result_pages,
+                        "classifier result pages",
+                    )?,
+                    nominal_charged_pages: to_u64_opt(nominal, "classifier nominal pages")?,
+                    classifier_build: build.to_string(),
+                    classifier_profile_hash: profile.to_string(),
+                })
+            }
+            (None, None, None, None, None, None) => None,
+            _ => {
+                return Err(InspectAuditError::RunCorrupt(
+                    "classifier provenance columns are inconsistent".to_string(),
+                ));
+            }
+        };
+        rows.push(FileAuditV2Source {
+            relative_path: row.0,
+            file_identity: row.1,
+            source_version: row.2,
+            source_guard_kind: row.3,
+            source_guard_sha256: row.4,
+            file_type: row.5,
+            size_bytes: to_u64_opt(Some(row.6), "file size_bytes")?,
+            parse_status,
+            parser_backend: row.8,
+            worker_lane,
+            parse_cache_status: row.10,
+            cache_miss_reason: row.11,
+            truncated: parse_bool(row.12, "file v2 truncated")?,
+            content_sha256: row.13,
+            parse_duration_ms: to_u64_opt(Some(row.14), "file v2 parse_duration_ms")?,
+            failure_class: row.15,
+            fallback_backend: row.16,
+            fallback_reason_code: row.17,
+            final_diagnostic,
+            classifier,
+        });
+    }
+    Ok(rows)
+}
+
+/// Rebuilds the nullable `final_diagnostic` from the persisted error columns.
+fn assemble_final_diagnostic(
+    error_code: &Option<String>,
+    error_message: &Option<String>,
+    error_retryable: Option<i64>,
+    error_stage: &Option<String>,
+    error_file_path: &Option<String>,
+    error_backend: &Option<String>,
+) -> Result<Option<Diagnostic>, InspectAuditError> {
+    match (error_code, error_message, error_retryable, error_stage) {
+        (None, None, None, None) => Ok(None),
+        (Some(_), Some(_), Some(_), Some(_)) => {
+            let diagnostic = Diagnostic {
+                error_code: parse_enum(
+                    error_code.as_deref().unwrap_or_default(),
+                    "final diagnostic error_code",
+                )?,
+                message: error_message.clone().unwrap_or_default(),
+                retryable: parse_bool(error_retryable.unwrap_or_default(), "diagnostic retryable")?,
+                stage: parse_enum(
+                    error_stage.as_deref().unwrap_or_default(),
+                    "final diagnostic stage",
+                )?,
+                file_path: Nullable(error_file_path.clone()),
+                backend: Nullable(error_backend.clone()),
+            };
+            diagnostic.validate().map_err(|_| {
+                InspectAuditError::RunCorrupt("final diagnostic is invalid".to_string())
+            })?;
+            Ok(Some(diagnostic))
+        }
+        _ => Err(InspectAuditError::RunCorrupt(
+            "persisted final diagnostic is partially populated".to_string(),
+        )),
+    }
+}
+
+fn to_positive_u64(value: Option<i64>, field: &str) -> Result<Option<u64>, InspectAuditError> {
+    value
+        .map(|value| u64::try_from(value).map_err(|_| {
+            InspectAuditError::RunCorrupt(format!("persisted {field} is negative"))
+        }))
+        .transpose()
+}
+
+fn to_u64_opt(value: Option<i64>, field: &str) -> Result<u64, InspectAuditError> {
+    let value = value.ok_or_else(|| {
+        InspectAuditError::RunCorrupt(format!("persisted {field} is missing"))
+    })?;
+    u64::try_from(value).map_err(|_| {
+        InspectAuditError::RunCorrupt(format!("persisted {field} is negative"))
     })
 }
 

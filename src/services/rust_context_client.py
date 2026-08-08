@@ -23,9 +23,11 @@ from src.models.scanner_contract import (
     DoctorResponse,
     InspectRunRequest,
     InspectRunResponse,
+    InspectRunResponseV2,
     UpgradeDatabaseRequestV1,
     UpgradeDatabaseResponseV1,
     VersionResponse,
+    VersionResponseV2,
     build_rust_core_crashed_envelope,
 )
 
@@ -175,7 +177,7 @@ class RustContextClient:
         }
 
     def version(self) -> VersionResponse:
-        """Validate the requestless scanner identity contract."""
+        """Validate the requestless scanner identity contract (v1 projection)."""
         result = run_json_process(
             command=[str(self._scanner_binary), "version"],
             request_payload=None,
@@ -185,6 +187,19 @@ class RustContextClient:
         )
         if result.response is None:
             raise self._probe_error("version", result)
+        return result.response
+
+    def version_v2(self) -> VersionResponseV2:
+        """`version --response-version 2`: strict v2 capabilities (spec Part 5.3)."""
+        result = run_json_process(
+            command=[str(self._scanner_binary), "version", "--response-version", "2"],
+            request_payload=None,
+            response_model=VersionResponseV2,
+            timeout_seconds=self._timeout_seconds,
+            cwd=self._project_root,
+        )
+        if result.response is None:
+            raise self._probe_error("version --response-version 2", result)
         return result.response
 
     def doctor(self) -> DoctorResponse:
@@ -268,6 +283,41 @@ class RustContextClient:
         )
         if result.response is None:
             raise RuntimeError("Rust inspect-run did not return a trusted response")
+        return result.response
+
+    def inspect_run_v2(
+        self,
+        scan_run_id: int,
+        *,
+        include_content: bool = False,
+    ) -> InspectRunResponseV2:
+        """`inspect-run --response-version 2`: strict full-provenance v2 audit."""
+        request_id = str(self._request_id_factory())
+        request = InspectRunRequest(
+            contract="ai_daily_context",
+            protocol_version=1,
+            request_id=request_id,
+            scan_db_path=str(self._scan_db_path),
+            scan_run_id=scan_run_id,
+            include_content=include_content,
+        )
+        result = run_json_process(
+            command=[
+                str(self._scanner_binary),
+                "inspect-run",
+                "--response-version",
+                "2",
+            ],
+            request_payload=request.model_dump(mode="json"),
+            response_model=InspectRunResponseV2,
+            timeout_seconds=self._timeout_seconds,
+            expected_request_id=request_id,
+            cwd=self._project_root,
+        )
+        if result.response is None:
+            raise RuntimeError(
+                "Rust inspect-run v2 did not return a trusted response"
+            )
         return result.response
 
     def upgrade_database(
