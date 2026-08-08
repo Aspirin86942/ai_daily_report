@@ -344,6 +344,13 @@ git commit -m "feat: add pypdfium2 pdf text classifier with classification cache
 - Consumes: Task 1 guard、Task 2 计划、Task 3 classifier。
 - Produces: `BudgetedContextScheduler::execute(ScheduledRunInput) -> Result<BudgetedScanOutcome, SchedulerFailure>`；`TerminalFailure { phase: PreOutcome|PostOutcome, diagnostic, execution_metrics }`；`BudgetedScanOutcome`（inventory/file results/decisions、committed cache receipts、artifact draft、diagnostics、metrics、terminal intent）。`run.rs` 顺序固定：静态校验 → begin_run/idempotent replay → 创建 monotonic deadline → bounded parallel handshakes → discovery → Scheduler → terminal finalization。
 
+- [ ] **Step 0: 改码前表征当前 golden（契约变更前提）**
+
+在**任何** decision.rs/compressor.rs/run.rs 语义改动之前，先对当前 unmodified binary 在 fixed corpus 上记录证据：
+- 用现有 `scripts/benchmark_scanner.py` 在 frozen corpus 跑一次，记录 `context_sha256`、included/omitted/reason 集合、各文件 parse 顺序。
+- **专门验证当前排序 bug**：构造一个含 Error 文件的 corpus，断言当前实现把 Error 文件排到 priority 80（证明「顺序依赖解析结果」现状），存为 `pre_change_order_evidence`。
+- 保存到 `.artifacts/golden-pre-change.json`。这一步是 spec「接受新确定性准入策略前先表征旧行为」的要求——新顺序会改变含 Error run 的最终 context，这是**行为变更**，不是无感重构。
+
 - [ ] **Step 1: 写 failing 状态矩阵测试（缓存无关确定性 + NotParsed 计数）**
 
 ```rust
@@ -396,13 +403,19 @@ Expected: FAIL
 
 用 fake clock 在 classification/parse/context 各阶段前触发 deadline，断言：queued → runtime NotParsed；in-flight → Timeout；Partial/Error 判定；cache commit 规则；不可复用 payload；snapshot 禁止。以及：post-begin pre-outcome failure 提交最小空 Error；transaction 后失败不二次覆盖；COMMIT 未发生 → abandon/lease 原子 cleanup。
 
-- [ ] **Step 8: 全量 + Commit**
+- [ ] **Step 8: 冻结新 golden + 缓存无关一致性基线**
+
+- 在 Task 4 语义改动全部落地后，对 fixed corpus 重新生成 golden：`context_sha256`、ClassificationPlan/ContentAdmissionPlan、included/omitted/reason 集合、semantic counts。保存为 `.artifacts/golden-post-change.json`，与 pre-change 证据对比，**显式记录含 Error run 的排序差异**。
+- 冻结 golden fixture：新建 `tests/fixtures/scanner_golden/manifest.json`（匿名 hash/count，不含真实路径），作为后续所有回归的语义基准。Plan 4 Task 2 的九态门禁消费该 golden。
+- **缓存无关确定性是本 Task 的第一验收门槛**：三态一致性测试（Step 1）与九态门禁（Plan 4 Task 2）都以此 golden 为断言目标；任何后续改动不得静默漂移 context_sha256。
+
+- [ ] **Step 9: 全量 + Commit**
 
 Run: `cargo test --manifest-path rust/Cargo.toml --workspace --locked && uv run pytest`
 Commit:
 ```bash
-git add rust/scanner_core/src/scheduler.rs rust/scanner_core/src/run.rs rust/scanner_core/src/decision.rs rust/scanner_core/src/context_audit.rs rust/scanner_core/src/store/mod.rs rust/scanner_core/tests/scheduler_core.rs
-git commit -m "feat: assemble BudgetedContextScheduler with cache-independent state matrix"
+git add rust/scanner_core/src/scheduler.rs rust/scanner_core/src/run.rs rust/scanner_core/src/decision.rs rust/scanner_core/src/context_audit.rs rust/scanner_core/src/store/mod.rs rust/scanner_core/tests/scheduler_core.rs tests/fixtures/scanner_golden/manifest.json .artifacts/golden-pre-change.json .artifacts/golden-post-change.json
+git commit -m "feat: assemble BudgetedContextScheduler with frozen golden output"
 ```
 
 ---

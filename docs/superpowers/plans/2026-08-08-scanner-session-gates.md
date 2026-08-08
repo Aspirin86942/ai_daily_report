@@ -264,9 +264,49 @@ git commit -m "release: freeze requirements projection and document schema upgra
 
 ---
 
+### Task 5: 低风险调优（批量 cache 查询 + discovery 微调，最后做）
+
+**Files:**
+- Modify: `rust/scanner_core/src/store/mod.rs`（`attach_cache_evidence` 批量查询）
+- Modify: `rust/discovery/src/lib.rs`（去冗余 canonicalize）
+- Modify: `rust/scanner_core/src/config.rs`（`max_workers` 按 CPU 自动取值）
+- Test: `rust/scanner_core/tests/scheduler_core.rs`、`rust/discovery/tests/*`（既有）
+
+**Interfaces:**
+- Consumes: Plan 2/3/4 全部 correctness gate 已绿。
+- Produces: `attach_cache_evidence` 由逐文件查询改为**分块或临时表批量查询**（保持 cache miss reason 唯一判定树与优先级，不构造超大 `IN(...)`）；discovery 的扩展名/忽略模式判断在 `canonicalize` 之前（复核排除目录重复 canonicalize）；`max_workers` 默认 `min(配置, cpu_count)`。
+
+- [ ] **Step 1: 先确认 correctness gate 全绿（本 Task 的准入条件）**
+
+Run: `uv run pytest && cargo test --manifest-path rust/Cargo.toml --workspace --locked && uv run python scripts/corpus_gate.py`
+Expected: 全部通过。**未全绿前禁止进入本 Task**（spec：批量 SQL/discovery 微调仅在 correctness gate 后进行，按 profile 再做）。
+
+- [ ] **Step 2: 批量 cache 查询（保持 miss reason 优先级）**
+
+将 `attach_cache_evidence` 的逐文件 `lookup_cache` 改为：按固定 batch 用 `IN(...)` 或临时表一次取回候选键，**miss reason 判定树顺序不变**（exact → identity → source → evicted → new_file，spec Part 4）。分块保证语句大小有界；任一文件批次失败按原有错误语义处理。断言：批量前后 miss reason 分布与 cache 命中集合逐文件一致（fixture 对比）。
+
+- [ ] **Step 3: discovery 微调**
+
+复核 `discovery/lib.rs`：扩展名/忽略模式判断已在 `canonicalize` 之前（保持），排除目录判断避免重复 `canonicalize`（每目录一次）。不改变 discovery 结果与 SourceGuardV2 产出。
+
+- [ ] **Step 4: max_workers 自动取值**
+
+`NormalizedScannerProfileV2` 的 `session_concurrency`/worker 并行默认改为 `min(显式配置, cpu_count)`（`std::thread::available_parallelism`）；显式配置仍优先。不得改变语义结果（只影响执行并行度）。
+
+- [ ] **Step 5: 回归 + Commit**
+
+Run: `uv run pytest && cargo test --manifest-path rust/Cargo.toml --workspace --locked && cargo build --manifest-path rust/Cargo.toml --workspace --release --locked`
+Commit:
+```bash
+git add rust/scanner_core/src/store/mod.rs rust/discovery/src/lib.rs rust/scanner_core/src/config.rs
+git commit -m "perf: batch cache lookup and trim discovery canonicalize after gates"
+```
+
+---
+
 ## Self-Review
 
-**Spec 覆盖（Plan 4 范围）**：流式 session 契约与生命周期（Part 7）→ Task 1；fixed-corpus 九态门禁（Part 9.1）→ Task 2；真实目录手工 acceptance 反作弊（Part 9.2）→ Task 3；release/requirements 投影 + 部署声明（Part 10 + 8.3 回滚声明）→ Task 4。
+**Spec 覆盖（Plan 4 范围）**：流式 session 契约与生命周期（Part 7）→ Task 1；fixed-corpus 九态门禁（Part 9.1）→ Task 2；真实目录手工 acceptance 反作弊（Part 9.2）→ Task 3；release/requirements 投影 + 部署声明（Part 10 + 8.3 回滚声明）→ Task 4；**低风险调优：批量 SQL + discovery 微调（spec 实施顺序第 8 步）→ Task 5**。
 
 **占位符检查**：无 TBD。Task 1 Step 1 的错配测试是 TDD 首步。
 
