@@ -34,4 +34,4 @@ link-mode = "hardlink"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --tb=short"
-pythonpath = ["."]
+pythonpath = [".", "scripts"]

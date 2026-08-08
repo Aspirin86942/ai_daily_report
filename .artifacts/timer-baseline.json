@@ -1,0 +1,19 @@
+{
+  "scanner_sha256": "bded9c018241db204f6741e0019159e19ede3c68e89124a8e5f7c7c38aa36391",
+  "source_count": 3,
+  "source_count_consistent": true,
+  "cold_median_ms": 942.3170000009122,
+  "cold_max_ms": 3043.950400002359,
+  "warm_median_ms": 85.06000000124914,
+  "warm_max_ms": 85.87050000278396,
+  "all_samples": [
+    3043.950400002359,
+    918.8069999981963,
+    942.3170000009122,
+    85.06000000124914,
+    85.87050000278396,
+    84.7460000004503
+  ],
+  "samples_clean": true,
+  "warm_median_ms_over_400": false
+}
