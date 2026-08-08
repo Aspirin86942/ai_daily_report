@@ -174,7 +174,9 @@ fn golden_office_pdf_error_priority_and_path_tie_break_are_frozen() {
 }
 
 #[test]
-fn golden_global_budget_exhaustion_omits_later_evidence_deterministically() {
+fn golden_global_budget_overflow_is_budget_model_mismatch_not_omit() {
+    // spec Part 2.2: 成功后因全局预算改 Omit 的兼容分支已删除；一个已准入文件
+    // 在渲染时超过全局预算即 BUDGET_MODEL_MISMATCH 内部错误，不静默 Omit。
     let result = build_context(
         vec![
             evidence("a.md", ".md", &"A".repeat(260)),
@@ -183,20 +185,12 @@ fn golden_global_budget_exhaustion_omits_later_evidence_deterministically() {
         ],
         &profile(1_250, 300),
         ReportMode::Daily,
-    )
-    .expect("golden context");
-
-    assert!(result.content.chars().count() <= 1_250);
-    assert_eq!(result.decisions[0].decision.action, ContextAction::Keep);
-    assert!(result
-        .decisions
-        .iter()
-        .skip(1)
-        .any(|record| record.decision.action == ContextAction::Omit));
-    assert!(result.decisions.iter().any(|record| {
-        record.decision.action == ContextAction::Omit
-            && record.decision.reason == "global_budget_exceeded"
-    }));
+    );
+    let error = result.expect_err("budget overflow must fail closed");
+    assert!(
+        error.contains("BUDGET_MODEL_MISMATCH"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

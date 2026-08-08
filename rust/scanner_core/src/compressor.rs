@@ -4,6 +4,7 @@ use ai_daily_scanner_contract::{
     ContextAction, ContextDecision, ContextProfile, ParseStatus, ReportMode, Validate,
 };
 
+use crate::budget_model::{budget_model_mismatch, count_chars};
 use crate::decision::{decide_files, ContextFileEvidence, DecidedFile};
 
 const GLOBAL_BUDGET_REASON: &str = "global_budget_exceeded";
@@ -71,10 +72,10 @@ pub fn build_context(
         "## 文件证据".to_string(),
     ];
     let mut decisions = Vec::with_capacity(decided.len());
-    let mut omitted = Vec::new();
+    let omitted = Vec::new();
     let mut parse_issues = Vec::new();
     let mut included_file_count = 0_u64;
-    let mut omitted_file_count = 0_u64;
+    let omitted_file_count = 0_u64;
     let mut metadata_only_count = 0_u64;
     let mut compressed_file_count = 0_u64;
 
@@ -110,11 +111,12 @@ pub fn build_context(
                 _ => {}
             }
         } else {
-            decision.action = ContextAction::Omit;
-            decision.reason = GLOBAL_BUDGET_REASON.to_string();
-            decision.output_chars = 0;
-            omitted_file_count += 1;
-            omitted.push((decision.relative_path.clone(), decision.input_chars));
+            // spec Part 2.2: 成功后因全局预算改 Omit 的兼容分支已删除。
+            // 被准入文件的真实渲染必须满足 rendered <= reserved；违反是
+            // 非重试 BUDGET_MODEL_MISMATCH 内部 Error，不 panic、不静默 Omit。
+            return Err(budget_model_mismatch(
+                "admitted file section exceeds the global context budget",
+            ));
         }
         decisions.push(BudgetedDecision {
             file_identity: evidence.file_identity,
@@ -132,14 +134,16 @@ pub fn build_context(
     append_omitted_summary(&mut sections, &omitted, profile.global_max_chars);
     append_parse_issues(&mut sections, &parse_issues, profile.global_max_chars);
 
-    let mut content = join_sections(&sections);
-    if content.chars().count() as u64 > profile.global_max_chars {
-        content = take_prefix_chars(&content, profile.global_max_chars as usize);
+    let content = join_sections(&sections);
+    if count_chars(&content) > profile.global_max_chars {
+        return Err(budget_model_mismatch(
+            "rendered context exceeds the global budget",
+        ));
     }
     if content.is_empty() {
         return Err("context budget produced an empty result".to_string());
     }
-    let output_chars = content.chars().count() as u64;
+    let output_chars = count_chars(&content);
     let truncated_file_count = decisions
         .iter()
         .filter(|record| record.decision.truncated)
@@ -205,20 +209,20 @@ fn render_file_section(
         );
     }
 
-    let input_count = evidence.content.chars().count();
-    let limit = profile.per_file_max_chars as usize;
+    let input_count = count_chars(&evidence.content);
+    let limit = profile.per_file_max_chars;
     let body = if input_count > limit {
         decision.action = ContextAction::Compress;
         decision.truncated = true;
         if evidence.extension == ".log" {
-            take_suffix_chars(&evidence.content, limit)
+            take_suffix_chars(&evidence.content, limit as usize)
         } else {
-            take_prefix_chars(&evidence.content, limit)
+            take_prefix_chars(&evidence.content, limit as usize)
         }
     } else {
         evidence.content.clone()
     };
-    decision.output_chars = body.chars().count() as u64;
+    decision.output_chars = count_chars(&body);
     let truncated_note = if decision.truncated {
         "\n- 内容已按单文件预算或解析预算截断"
     } else {
@@ -289,7 +293,7 @@ fn append_if_fits(sections: &mut Vec<String>, candidate: String, global_budget: 
             .chain(std::iter::once(candidate.clone()))
             .collect::<Vec<_>>(),
     );
-    if projected.chars().count() as u64 <= global_budget {
+    if count_chars(&projected) <= global_budget {
         sections.push(candidate);
     }
 }
@@ -302,7 +306,7 @@ fn can_append_with_footer(sections: &[String], candidate: &str, global_budget: u
             .chain([candidate.to_string(), PARSE_FOOTER.to_string()])
             .collect::<Vec<_>>(),
     );
-    projected.chars().count() as u64 <= global_budget
+    count_chars(&projected) <= global_budget
 }
 
 fn join_sections(sections: &[String]) -> String {
@@ -319,7 +323,7 @@ fn take_prefix_chars(value: &str, count: usize) -> String {
 }
 
 fn take_suffix_chars(value: &str, count: usize) -> String {
-    let total = value.chars().count();
+    let total = count_chars(value) as usize;
     value.chars().skip(total.saturating_sub(count)).collect()
 }
 

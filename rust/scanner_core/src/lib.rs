@@ -1,5 +1,7 @@
 //! Windows-first scanner engine process shell.
 
+pub mod admission;
+pub mod budget_model;
 pub mod classifier;
 pub mod compressor;
 pub mod config;
@@ -7,6 +9,7 @@ pub mod context_audit;
 pub mod decision;
 pub mod fallback;
 pub mod metrics;
+pub mod nominal;
 pub mod parsers;
 pub mod planner;
 pub mod process;
