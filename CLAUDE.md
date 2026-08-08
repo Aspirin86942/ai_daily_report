@@ -138,3 +138,10 @@ rust/
 - `llm.provider = "deepseek"` 时，使用 `DEEPSEEK_API_KEY`（或 `api.deepseek_api_key`），默认模型 `deepseek-chat`
 - `llm.provider = "openai"` 时，使用 `OPENAI_API_KEY`（或 `api.openai_api_key`）
 - DeepSeek 和 OpenAI 均使用 Chat Completions API + JSON schema 输出
+
+## CodeGraph
+
+本项目已由 CodeGraph 索引（`.codegraph/` 存在）。需要理解或定位 `src/`、`rust/` 代码时，**先用**
+`codegraph explore "<符号名或问题>"`（或 MCP `codegraph_explore`）——一次返回相关符号的逐字源码、
+调用链与 blast radius，能跨动态分发，比 Grep/Read 更准更快。仅在输出不足以回答时，才回退到
+Grep/Glob/Read。
