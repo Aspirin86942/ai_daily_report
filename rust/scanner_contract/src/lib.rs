@@ -2945,6 +2945,242 @@ impl Validate for PdfClassificationAuditV1 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ai_daily_pdf_classifier_v1 wire（spec Part 7.1）：独立于共享 worker v1
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PythonOperationErrorCode {
+    #[serde(rename = "INVALID_REQUEST")]
+    InvalidRequest,
+    #[serde(rename = "PARSER_START_FAILED")]
+    ParserStartFailed,
+    #[serde(rename = "PARSER_TIMEOUT")]
+    ParserTimeout,
+    #[serde(rename = "PARSER_INVALID_PAYLOAD")]
+    ParserInvalidPayload,
+    #[serde(rename = "PARSER_FAILED")]
+    ParserFailed,
+    #[serde(rename = "SOURCE_VERSION_CHANGED")]
+    SourceVersionChanged,
+    #[serde(rename = "INTERNAL_ERROR")]
+    InternalError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PythonOperationStage {
+    Request,
+    Parse,
+    Process,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PythonOperationDiagnosticV1 {
+    pub error_code: PythonOperationErrorCode,
+    pub message: String,
+    pub retryable: bool,
+    pub stage: PythonOperationStage,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub file_path: Nullable<String>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub backend: Nullable<String>,
+}
+
+impl Validate for PythonOperationDiagnosticV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_range(
+            self.message.chars().count() as u64,
+            1,
+            4_096,
+            "message",
+        )?;
+        if let Some(path) = self.file_path.0.as_deref() {
+            require_absolute_path(path, "file_path")?;
+        }
+        if let Some(backend) = self.backend.0.as_deref() {
+            require_non_empty(backend, 1_024, "backend")?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdfClassifierRequestV1 {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub file_path: String,
+    pub source_version: String,
+    pub max_pages: u64,
+    pub policy_version: String,
+}
+
+impl Validate for PdfClassifierRequestV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_pdf_classifier", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        require_absolute_path(&self.file_path, "file_path")?;
+        require_source_version(&self.source_version, "source_version")?;
+        require_range(self.max_pages, 1, 10_000, "max_pages")?;
+        require_const(
+            &self.policy_version,
+            CLASSIFIER_POLICY_VERSION,
+            "policy_version",
+        )
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdfClassifierResultStatus {
+    TextInParseWindow,
+    NoTextInParseWindow,
+    Unknown,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdfClassifierResultV1 {
+    pub status: PdfClassifierResultStatus,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub page_count: Nullable<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub result_examined_pages: Nullable<u64>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub diagnostic: Nullable<PythonOperationDiagnosticV1>,
+}
+
+impl Validate for PdfClassifierResultV1 {
+    fn validate(&self) -> Result<(), String> {
+        match self.status {
+            PdfClassifierResultStatus::TextInParseWindow
+            | PdfClassifierResultStatus::NoTextInParseWindow => {
+                if self.diagnostic.0.is_some() {
+                    return Err("text/no-text result must not carry a diagnostic".to_string());
+                }
+                if self.page_count.0.is_none() || self.result_examined_pages.0.is_none() {
+                    return Err("text/no-text result requires page counts".to_string());
+                }
+            }
+            PdfClassifierResultStatus::Unknown | PdfClassifierResultStatus::Error => {
+                let diagnostic = self.diagnostic.0.as_ref().ok_or_else(|| {
+                    "unknown/error result requires a diagnostic".to_string()
+                })?;
+                diagnostic.validate()?;
+                if diagnostic.retryable != (self.status == PdfClassifierResultStatus::Unknown) {
+                    return Err("unknown must be retryable and error must not be".to_string());
+                }
+            }
+        }
+        if let Some(page_count) = self.page_count.0 {
+            if page_count == 0 {
+                return Err("page_count must be positive".to_string());
+            }
+        }
+        if let Some(pages) = self.result_examined_pages.0 {
+            if pages == 0 && self.status != PdfClassifierResultStatus::NoTextInParseWindow {
+                return Err("result_examined_pages must be positive".to_string());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClassifierResponseStatus {
+    Ok,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PdfClassifierResponseV1 {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub status: ClassifierResponseStatus,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub result: Nullable<PdfClassifierResultV1>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub error: Nullable<PythonOperationDiagnosticV1>,
+}
+
+impl Validate for PdfClassifierResponseV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_pdf_classifier", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        match self.status {
+            ClassifierResponseStatus::Ok => {
+                if self.result.0.is_none() || self.error.0.is_some() {
+                    return Err("ok classifier response requires a result and no error".to_string());
+                }
+                self.result.0.as_ref().expect("checked above").validate()?;
+            }
+            ClassifierResponseStatus::Error => {
+                if self.result.0.is_some() || self.error.0.is_none() {
+                    return Err(
+                        "error classifier response requires an error and no result".to_string(),
+                    );
+                }
+                self.error.0.as_ref().expect("checked above").validate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClassifierVersionResponseV1 {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub classifier_contract_version: String,
+    pub classifier_build: String,
+    pub policy_version: String,
+    pub python_implementation: String,
+    pub python_version: String,
+    pub unicode_data_version: String,
+    pub pypdfium2_version: String,
+    pub pdfium_version: String,
+    pub target_triple: String,
+}
+
+impl Validate for ClassifierVersionResponseV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_pdf_classifier", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_const(
+            &self.classifier_contract_version,
+            "ai_daily_pdf_classifier_v1",
+            "classifier_contract_version",
+        )?;
+        require_sha256_hex(&self.classifier_build, "classifier_build")?;
+        require_const(
+            &self.policy_version,
+            CLASSIFIER_POLICY_VERSION,
+            "policy_version",
+        )?;
+        for (field, value) in [
+            ("python_implementation", self.python_implementation.as_str()),
+            ("python_version", self.python_version.as_str()),
+            ("unicode_data_version", self.unicode_data_version.as_str()),
+            ("pypdfium2_version", self.pypdfium2_version.as_str()),
+            ("pdfium_version", self.pdfium_version.as_str()),
+            ("target_triple", self.target_triple.as_str()),
+        ] {
+            require_non_empty(value, 1_024, field)?;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileAuditV2 {

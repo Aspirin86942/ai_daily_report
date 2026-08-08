@@ -1,2 +1,3 @@
 tests/fixtures/pdf_benchmark/*.pdf binary
+tests/fixtures/pdf_classifier/*.pdf binary
 requirements.lock text eol=lf

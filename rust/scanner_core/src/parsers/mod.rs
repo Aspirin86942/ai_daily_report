@@ -1,3 +1,4 @@
+pub mod classifier;
 pub mod document;
 pub mod light_text;
 pub mod office;

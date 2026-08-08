@@ -1,0 +1,1098 @@
+{
+  "algorithm": "pdf_classifier_corpus_v1",
+  "policy_version": "pdf_text_presence_v1",
+  "default_max_pages": 5,
+  "entries": [
+    {
+      "file": "text_cjk_01.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "cjk"
+      ]
+    },
+    {
+      "file": "text_cjk_02.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "cjk"
+      ]
+    },
+    {
+      "file": "text_cjk_03.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "cjk"
+      ]
+    },
+    {
+      "file": "text_plain_01.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_02.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_03.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_04.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_05.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_06.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_07.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_08.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_09.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_10.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_11.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_plain_12.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ascii"
+      ]
+    },
+    {
+      "file": "text_mixed_01.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "cjk",
+        "mixed"
+      ]
+    },
+    {
+      "file": "text_mixed_02.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "cjk",
+        "mixed"
+      ]
+    },
+    {
+      "file": "text_mixed_03.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "cjk",
+        "mixed"
+      ]
+    },
+    {
+      "file": "text_sparse_01.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "sparse"
+      ]
+    },
+    {
+      "file": "text_sparse_02.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "sparse"
+      ]
+    },
+    {
+      "file": "text_sparse_03.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "sparse"
+      ]
+    },
+    {
+      "file": "text_rotated_01.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "rotated"
+      ]
+    },
+    {
+      "file": "text_rotated_02.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "rotated"
+      ]
+    },
+    {
+      "file": "text_rotated_03.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "rotated"
+      ]
+    },
+    {
+      "file": "text_image_mixed_01.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "mixed"
+      ]
+    },
+    {
+      "file": "text_image_mixed_02.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "mixed"
+      ]
+    },
+    {
+      "file": "text_image_mixed_03.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "mixed"
+      ]
+    },
+    {
+      "file": "text_ocr_hidden_01.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ocr_hidden"
+      ]
+    },
+    {
+      "file": "text_ocr_hidden_02.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ocr_hidden"
+      ]
+    },
+    {
+      "file": "text_ocr_hidden_03.pdf",
+      "ground_truth": "text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "ocr_hidden"
+      ]
+    },
+    {
+      "file": "no_text_blank_01.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "blank"
+      ]
+    },
+    {
+      "file": "no_text_blank_02.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "blank"
+      ]
+    },
+    {
+      "file": "no_text_blank_03.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "blank"
+      ]
+    },
+    {
+      "file": "no_text_beyond_max_pages_01.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "beyond_max_pages"
+      ]
+    },
+    {
+      "file": "no_text_beyond_max_pages_02.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "beyond_max_pages"
+      ]
+    },
+    {
+      "file": "no_text_beyond_max_pages_03.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "beyond_max_pages"
+      ]
+    },
+    {
+      "file": "no_text_image_01.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_02.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_03.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_04.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_05.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_06.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_07.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_08.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_09.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_10.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_11.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_12.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_13.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_14.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_15.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_16.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_17.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_18.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_19.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_20.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_21.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_22.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_23.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_24.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_25.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_26.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_27.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_28.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_29.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_30.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_31.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_32.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_33.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_34.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_35.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_36.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_37.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_38.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_39.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_40.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_41.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_42.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_43.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_44.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_45.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_46.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_47.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_48.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_49.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_50.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_51.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_52.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_53.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_54.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_55.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_56.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_57.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_58.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_59.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_60.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_61.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_62.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_63.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_64.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_65.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_66.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_67.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_68.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_69.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_70.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_71.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_72.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_73.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_74.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_75.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_76.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_77.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_78.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_79.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_80.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_81.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_82.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_83.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_84.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_85.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_86.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_87.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_88.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_89.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_90.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_91.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_92.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_93.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "no_text_image_94.pdf",
+      "ground_truth": "no_text_in_parse_window",
+      "max_pages": 5,
+      "categories": [
+        "image_only"
+      ]
+    },
+    {
+      "file": "error_encrypted_01.pdf",
+      "ground_truth": "error",
+      "max_pages": 5,
+      "categories": [
+        "encrypted"
+      ]
+    },
+    {
+      "file": "error_encrypted_02.pdf",
+      "ground_truth": "error",
+      "max_pages": 5,
+      "categories": [
+        "encrypted"
+      ]
+    },
+    {
+      "file": "error_encrypted_03.pdf",
+      "ground_truth": "error",
+      "max_pages": 5,
+      "categories": [
+        "encrypted"
+      ]
+    },
+    {
+      "file": "error_corrupt_01.pdf",
+      "ground_truth": "error",
+      "max_pages": 5,
+      "categories": [
+        "corrupt"
+      ]
+    },
+    {
+      "file": "error_corrupt_02.pdf",
+      "ground_truth": "error",
+      "max_pages": 5,
+      "categories": [
+        "corrupt"
+      ]
+    },
+    {
+      "file": "error_corrupt_03.pdf",
+      "ground_truth": "error",
+      "max_pages": 5,
+      "categories": [
+        "corrupt"
+      ]
+    }
+  ]
+}

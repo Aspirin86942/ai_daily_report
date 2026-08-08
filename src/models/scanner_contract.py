@@ -1210,6 +1210,101 @@ class PdfClassificationAuditV1(ContractModel):
         return self
 
 
+# ---------------------------------------------------------------------------
+# ai_daily_pdf_classifier_v1 wire（spec Part 7.1）：独立于共享 worker v1
+# ---------------------------------------------------------------------------
+
+PythonOperationErrorCode = Literal[
+    "INVALID_REQUEST",
+    "PARSER_START_FAILED",
+    "PARSER_TIMEOUT",
+    "PARSER_INVALID_PAYLOAD",
+    "PARSER_FAILED",
+    "SOURCE_VERSION_CHANGED",
+    "INTERNAL_ERROR",
+]
+PythonOperationStage = Literal["request", "parse", "process"]
+PdfClassifierStatus = Literal[
+    "text_in_parse_window",
+    "no_text_in_parse_window",
+    "unknown",
+    "error",
+]
+
+
+class PythonOperationDiagnosticV1(ContractModel):
+    error_code: PythonOperationErrorCode
+    message: Annotated[str, Field(min_length=1, max_length=4096)]
+    retryable: bool
+    stage: PythonOperationStage
+    file_path: AbsolutePath | None
+    backend: Annotated[str | None, Field(min_length=1, max_length=1024)] = None
+
+
+class PdfClassifierRequestV1(ContractModel):
+    contract: Literal["ai_daily_pdf_classifier"]
+    protocol_version: Literal[1]
+    request_id: RequestId
+    file_path: AbsolutePath
+    source_version: SourceVersion
+    max_pages: Annotated[int, Field(ge=1, le=10_000)]
+    policy_version: Literal["pdf_text_presence_v1"]
+
+
+class PdfClassifierResultV1(ContractModel):
+    status: PdfClassifierStatus
+    page_count: PositiveInt | None
+    result_examined_pages: PositiveInt | None
+    diagnostic: PythonOperationDiagnosticV1 | None
+
+    @model_validator(mode="after")
+    def validate_status_invariants(self) -> "PdfClassifierResultV1":
+        if self.status in {"text_in_parse_window", "no_text_in_parse_window"}:
+            if self.diagnostic is not None:
+                raise ValueError("text/no-text result must not carry a diagnostic")
+            if self.page_count is None or self.result_examined_pages is None:
+                raise ValueError("text/no-text result requires page counts")
+        else:
+            if self.diagnostic is None:
+                raise ValueError("unknown/error result requires a diagnostic")
+            if self.diagnostic.retryable != (self.status == "unknown"):
+                raise ValueError("unknown must be retryable and error must not be")
+        return self
+
+
+class PdfClassifierResponseV1(ContractModel):
+    contract: Literal["ai_daily_pdf_classifier"]
+    protocol_version: Literal[1]
+    request_id: RequestId
+    status: Literal["ok", "error"]
+    result: PdfClassifierResultV1 | None
+    error: PythonOperationDiagnosticV1 | None
+
+    @model_validator(mode="after")
+    def validate_status_invariants(self) -> "PdfClassifierResponseV1":
+        if self.status == "ok":
+            if self.result is None or self.error is not None:
+                raise ValueError("ok classifier response requires a result and no error")
+        else:
+            if self.result is not None or self.error is None:
+                raise ValueError("error classifier response requires an error and no result")
+        return self
+
+
+class ClassifierVersionResponseV1(ContractModel):
+    contract: Literal["ai_daily_pdf_classifier"]
+    protocol_version: Literal[1]
+    classifier_contract_version: Literal["ai_daily_pdf_classifier_v1"]
+    classifier_build: Sha256Hex
+    policy_version: Literal["pdf_text_presence_v1"]
+    python_implementation: NonEmpty1024
+    python_version: NonEmpty1024
+    unicode_data_version: NonEmpty1024
+    pypdfium2_version: NonEmpty1024
+    pdfium_version: NonEmpty1024
+    target_triple: NonEmpty1024
+
+
 class FileAuditV2(ContractModel):
     relative_path: RelativePath
     file_identity: NonEmpty4096
@@ -1625,6 +1720,7 @@ __all__ = [
     "ContextEnvelope",
     "ContextProfileV2",
     "ContextSummary",
+    "ClassifierVersionResponseV1",
     "Diagnostic",
     "DoctorCheck",
     "DoctorRequest",
@@ -1643,6 +1739,10 @@ __all__ = [
     "NormalizedScannerProfileV1",
     "NormalizedScannerProfileV2",
     "PdfClassificationAuditV1",
+    "PdfClassifierRequestV1",
+    "PdfClassifierResponseV1",
+    "PdfClassifierResultV1",
+    "PythonOperationDiagnosticV1",
     "RawScannerProfileV1",
     "RawScannerProfileV2",
     "ScannerProfile",

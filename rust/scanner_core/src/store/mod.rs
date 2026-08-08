@@ -20,8 +20,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 pub use cache::{
-    parse_profile_hash, sha256_hex, CacheAwarePlanEntry, CacheEntry, CacheLookup, CacheWriteRecord,
-    RouteStackFingerprint, RouteStackFingerprints, PARSE_PROFILE_HASH_ALGORITHM,
+    classifier_profile_hash, parse_profile_hash, sha256_hex, CacheAwarePlanEntry, CacheEntry,
+    CacheLookup, CacheWriteRecord, ClassificationCacheEntry, ClassificationCacheLookup,
+    ClassificationCacheMissReason, ClassificationCacheWriteRecord, RouteStackFingerprint,
+    RouteStackFingerprints, CLASSIFIER_PROFILE_HASH_ALGORITHM, PARSE_PROFILE_HASH_ALGORITHM,
 };
 pub use inventory::{FileResultRecord, InventoryRecord};
 pub use schema::{BUSY_TIMEOUT_MS, LATEST_USER_VERSION};

@@ -20,6 +20,7 @@ PYTHON_WORKER_BUILD_INPUTS = (
     "src/services/document_parser.py",
     "src/workers/contracts.py",
     "src/workers/document_parser_worker.py",
+    "src/workers/pdf_classifier.py",
     "src/workers/python_worker_identity.py",
 )
 PYTHON_OFFICE_BACKEND = "python_office_v1"
