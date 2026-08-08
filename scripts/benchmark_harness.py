@@ -22,7 +22,6 @@ def wall_clock_ms(
     """wall_ms 从 CreateProcessW 前一刻到 stdout/stderr/exit/schema 校验完成。"""
     started = time.perf_counter()
     proc = subprocess.run(command, input=stdin_bytes, capture_output=True, timeout=3600)
-    wall_ms = (time.perf_counter() - started) * 1000.0
     validated = True
     request_id = None
     if response_validator is not None:
@@ -32,4 +31,5 @@ def wall_clock_ms(
                 request_id = parsed.get("request_id")
         except Exception:
             validated = False
+    wall_ms = (time.perf_counter() - started) * 1000.0
     return BenchmarkResult(wall_ms=wall_ms, exit_code=proc.returncode, request_id=request_id, validated=validated)
