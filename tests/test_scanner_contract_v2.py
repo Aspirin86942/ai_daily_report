@@ -14,6 +14,7 @@ from src.models.scanner_contract import (
     MaintenanceRequestV1,
     MaintenanceResponseV1,
     RawScannerProfileV2,
+    TransportErrorResponse,
     UpgradeDatabaseRequestV1,
     UpgradeDatabaseResponseV1,
     VersionResponseV2,
@@ -168,6 +169,49 @@ def test_worker_parse_response_round_trips_frozen_error_code() -> None:
     assert response.error.retryable is False
     assert response.error.file_path == "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc"
     assert response.error.backend == "python_sharepoint_text_v1"
+
+
+def test_transport_error_rejects_scanner_side_code() -> None:
+    """ai_daily_transport wire 也使用 frozen WorkerDiagnosticV1：scanner-side code 拒绝。"""
+    with pytest.raises(ValueError, match="STAGE_DEADLINE_EXHAUSTED"):
+        TransportErrorResponse.model_validate(
+            {
+                "contract": "ai_daily_transport",
+                "protocol_version": 1,
+                "status": "error",
+                "error": {
+                    "error_code": "STAGE_DEADLINE_EXHAUSTED",
+                    "message": "scanner-only code must not enter the transport wire",
+                    "retryable": True,
+                    "stage": "parse",
+                    "file_path": None,
+                    "backend": None,
+                },
+            }
+        )
+
+
+def test_transport_error_round_trips_frozen_invalid_request() -> None:
+    """Frozen INVALID_REQUEST 在 ai_daily_transport wire 上往返并保留原值。"""
+    response = TransportErrorResponse.model_validate(
+        {
+            "contract": "ai_daily_transport",
+            "protocol_version": 1,
+            "status": "error",
+            "error": {
+                "error_code": "INVALID_REQUEST",
+                "message": "stdin is not a valid worker request",
+                "retryable": False,
+                "stage": "request",
+                "file_path": None,
+                "backend": None,
+            },
+        }
+    )
+    assert response.error.error_code == "INVALID_REQUEST"
+    assert response.error.stage == "request"
+    assert response.error.file_path is None
+    assert response.error.backend is None
 
 
 def test_scanner_diagnostic_accepts_the_new_codes_and_stage() -> None:

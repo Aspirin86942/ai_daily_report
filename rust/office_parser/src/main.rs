@@ -2,8 +2,8 @@ use std::io::{self, Read, Write};
 
 use ai_daily_office_parser::{parse_worker_request, worker_version_response};
 use ai_daily_scanner_contract::{
-    Diagnostic, DiagnosticStage, ErrorCode, Nullable, TransportErrorResponse, Validate,
-    WorkerParseRequest, WorkerStatus,
+    Nullable, TransportErrorResponse, Validate, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
+    WorkerDiagnosticV1Stage, WorkerParseRequest, WorkerStatus,
 };
 use serde::Serialize;
 
@@ -56,11 +56,11 @@ fn invalid_request_response() -> TransportErrorResponse {
         contract: "ai_daily_transport".to_string(),
         protocol_version: 1,
         status: "error".to_string(),
-        error: Diagnostic {
-            error_code: ErrorCode::InvalidRequest,
+        error: WorkerDiagnosticV1 {
+            error_code: WorkerDiagnosticV1ErrorCode::InvalidRequest,
             message: "stdin is not a valid worker request".to_string(),
             retryable: false,
-            stage: DiagnosticStage::Request,
+            stage: WorkerDiagnosticV1Stage::Request,
             file_path: Nullable(None),
             backend: Nullable(None),
         },

@@ -2627,6 +2627,27 @@
       ]
     },
     {
+      "name": "transport_error_scanner_side_code_rejected",
+      "schema": "transport-error-v1.schema.json",
+      "validation_layer": "schema",
+      "rule_classes": [
+        "enum"
+      ],
+      "payload": {
+        "contract": "ai_daily_transport",
+        "protocol_version": 1,
+        "status": "error",
+        "error": {
+          "error_code": "STAGE_DEADLINE_EXHAUSTED",
+          "message": "scanner-only code must not enter the transport wire",
+          "retryable": true,
+          "stage": "parse",
+          "file_path": null,
+          "backend": null
+        }
+      }
+    },
+    {
       "name": "worker_parse_scanner_side_error_code_rejected",
       "schema": "worker-parse-response-v1.schema.json",
       "validation_layer": "schema",

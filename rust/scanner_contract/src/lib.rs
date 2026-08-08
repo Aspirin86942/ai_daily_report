@@ -2006,7 +2006,9 @@ pub struct TransportErrorResponse {
     pub contract: String,
     pub protocol_version: u64,
     pub status: String,
-    pub error: Diagnostic,
+    // ai_daily_transport wire carries the frozen worker diagnostic (spec Part
+    // 7.1): scanner-side new ErrorCode/stage must never deserialize here.
+    pub error: WorkerDiagnosticV1,
 }
 
 impl Validate for TransportErrorResponse {
@@ -2015,8 +2017,8 @@ impl Validate for TransportErrorResponse {
         require_range(self.protocol_version, 1, 1, "protocol_version")?;
         require_const(&self.status, "error", "status")?;
         self.error.validate()?;
-        if self.error.error_code == ErrorCode::InvalidRequest
-            && self.error.stage == DiagnosticStage::Request
+        if self.error.error_code == WorkerDiagnosticV1ErrorCode::InvalidRequest
+            && self.error.stage == WorkerDiagnosticV1Stage::Request
             && self.error.file_path.0.is_none()
             && self.error.backend.0.is_none()
         {
@@ -3880,6 +3882,30 @@ mod tests {
         assert!(
             result.is_err(),
             "scanner-side error code must be rejected on the worker wire"
+        );
+    }
+
+    #[test]
+    fn transport_error_rejects_scanner_side_code_at_deserialization() {
+        // spec Part 7.1: the ai_daily_transport wire also carries only the frozen
+        // WorkerDiagnosticV1, so a scanner-only code must fail serde, not merely
+        // the semantic validator.
+        let payload = serde_json::json!({
+            "contract": "ai_daily_transport",
+            "protocol_version": 1,
+            "status": "error",
+            "error": {
+                "error_code": "STAGE_DEADLINE_EXHAUSTED",
+                "message": "scanner-only code must not enter the transport wire",
+                "retryable": true,
+                "stage": "parse",
+                "file_path": null,
+                "backend": null
+            }
+        });
+        assert!(
+            serde_json::from_value::<TransportErrorResponse>(payload).is_err(),
+            "scanner-side code must fail transport deserialization"
         );
     }
 }

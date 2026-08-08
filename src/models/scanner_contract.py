@@ -789,7 +789,7 @@ class TransportErrorResponse(ContractModel):
     contract: Literal["ai_daily_transport"]
     protocol_version: Literal[1]
     status: Literal["error"]
-    error: Diagnostic
+    error: WorkerDiagnosticV1
 
     @model_validator(mode="after")
     def validate_request_error(self) -> "TransportErrorResponse":

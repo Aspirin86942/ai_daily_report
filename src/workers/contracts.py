@@ -10,7 +10,6 @@ from time import perf_counter
 from typing import Any
 
 from src.models.scanner_contract import (
-    Diagnostic,
     TransportErrorResponse,
     WorkerDiagnosticV1,
     WorkerParseRequest,
@@ -476,7 +475,7 @@ def invalid_request_response() -> TransportErrorResponse:
         contract="ai_daily_transport",
         protocol_version=1,
         status="error",
-        error=Diagnostic(
+        error=WorkerDiagnosticV1(
             error_code="INVALID_REQUEST",
             message="stdin is not a valid worker request",
             retryable=False,

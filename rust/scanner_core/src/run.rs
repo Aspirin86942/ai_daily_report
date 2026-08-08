@@ -6,7 +6,8 @@ use ai_daily_scanner_contract::{
     BuildContextRequest, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
     DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest,
     InspectRunResponse, InspectStatus, Nullable, RunStatus, TransportErrorResponse,
-    UpgradeDatabaseRequestV1, UpgradeStatus, Validate, VersionResponse,
+    UpgradeDatabaseRequestV1, UpgradeStatus, Validate, VersionResponse, WorkerDiagnosticV1,
+    WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
 };
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
@@ -1350,11 +1351,11 @@ pub fn invalid_request_output() -> Result<CommandOutput, EngineShellError> {
         contract: "ai_daily_transport".to_string(),
         protocol_version: 1,
         status: "error".to_string(),
-        error: Diagnostic {
-            error_code: ErrorCode::InvalidRequest,
+        error: WorkerDiagnosticV1 {
+            error_code: WorkerDiagnosticV1ErrorCode::InvalidRequest,
             message: "command request could not be decoded".to_string(),
             retryable: false,
-            stage: DiagnosticStage::Request,
+            stage: WorkerDiagnosticV1Stage::Request,
             file_path: Nullable(None),
             backend: Nullable(None),
         },
