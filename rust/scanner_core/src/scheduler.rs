@@ -174,6 +174,9 @@ pub struct ParseResult {
     pub content_sha256: String,
     pub parse_status: ParseStatus,
     pub error: Option<Diagnostic>,
+    /// Parser fallback / degradation warnings (e.g. a primary backend failure
+    /// that recovered via fallback).
+    pub warnings: Vec<Diagnostic>,
     pub failure_class: String,
     pub fallback_backend: String,
     pub fallback_reason_code: String,
@@ -222,6 +225,11 @@ pub struct ScheduledRunInput {
     /// Terminal `context_runs.context_profile_hash` (canonical v1/v2 profile
     /// fingerprint computed by the run shell before execution).
     pub context_profile_hash: String,
+    /// Rejected-profile fingerprint for non-admitted file rows (computed by the
+    /// run shell from the canonical v1 profile).
+    pub rejected_profile_hash: String,
+    /// Discovery wall span observed by the run shell (spec Part 5.3).
+    pub discovery_duration_ms: u64,
     /// Monotonic ms at which all heavy work must stop (Absolute - 2,000ms).
     pub work_deadline_ms: u64,
     /// Monotonic ms at which no terminal write may begin.
@@ -242,6 +250,8 @@ impl ScheduledRunInput {
         engine_version: String,
         engine_build: String,
         context_profile_hash: String,
+        rejected_profile_hash: String,
+        discovery_duration_ms: u64,
         clock: &dyn Clock,
     ) -> Result<Self, SchedulerFailure> {
         let now = clock.now_ms();
@@ -267,6 +277,8 @@ impl ScheduledRunInput {
             engine_version,
             engine_build,
             context_profile_hash,
+            rejected_profile_hash,
+            discovery_duration_ms,
             work_deadline_ms: work,
             absolute_deadline_ms: absolute,
         })
@@ -412,13 +424,22 @@ impl BudgetedContextScheduler {
         self.stored_workers = input.workers.clone();
         self.stored_engine_version = input.engine_version.clone();
         self.stored_engine_build = input.engine_build.clone();
+        // spec Part 5.3: discovery issues surface as run-level warnings (they
+        // mark the run Partial and never silently disappear).
+        let mut diagnostics: Vec<RunDiagnosticRecord> = input
+            .discovery_issues
+            .iter()
+            .map(discovery_issue_warning)
+            .collect();
         let inventory = build_inventory(&input.discovery, &input.work_dir)?;
+        let cache_started = self.clock.now_ms();
         let existed_before = self
             .cache
             .prepare_inventory(input.scan_run_id, input.started_at_ms, &inventory)
             .map_err(|error| SchedulerFailure {
                 diagnostic: error.diagnostic(DiagnosticStage::Cache),
             })?;
+        let cache_duration_ms = self.clock.now_ms().saturating_sub(cache_started);
 
         let discovery_count = input.discovery.len() as u64;
         let profile = input.profile.clone();
@@ -520,6 +541,7 @@ impl BudgetedContextScheduler {
             .count() as u64;
 
         // ---- Execute admitted parses ----
+        let parse_started = self.clock.now_ms();
         let parse_outputs = self.run_parses(
             &admission,
             &snapshot,
@@ -527,7 +549,8 @@ impl BudgetedContextScheduler {
             &existed_before,
             &runtime_classification,
             &mut metrics,
-        );
+        )?;
+        let parse_duration_ms = self.clock.now_ms().saturating_sub(parse_started);
 
         // ---- Build per-file evidence + decide + render ----
         let evidence = build_evidence(
@@ -539,27 +562,42 @@ impl BudgetedContextScheduler {
             &runtime_classification,
             &parse_outputs,
         )?;
-        let rendered = build_context(evidence, &profile.context, profile.report_mode).map_err(
-            |message| {
-                SchedulerFailure::new(
+        let render_started = self.clock.now_ms();
+        let rendered = match build_context(evidence, &profile.context, profile.report_mode) {
+            Ok(rendered) => rendered,
+            Err(message) => {
+                // spec Solution: BUDGET_MODEL_MISMATCH is a defined terminal
+                // state -> Ok(outcome) with Error intent, never Err(SchedulerFailure).
+                return Ok(internal_error_outcome(
+                    input.scan_run_id,
+                    metrics,
+                    diagnostics,
+                    parse_outputs,
                     ErrorCode::BudgetModelMismatch,
                     message,
-                    false,
-                    DiagnosticStage::Context,
-                )
-            },
-        )?;
+                ));
+            }
+        };
+        let compression_duration_ms = self.clock.now_ms().saturating_sub(render_started);
 
         // ---- Enforce the rendered <= reserved budget-model invariant ----
-        enforce_rendered_within_reserved(&rendered, &admission, &model)?;
+        if let Err(failure) = enforce_rendered_within_reserved(&rendered, &admission, &model) {
+            return Ok(internal_error_outcome(
+                input.scan_run_id,
+                metrics,
+                diagnostics,
+                parse_outputs,
+                failure.diagnostic.error_code,
+                failure.diagnostic.message,
+            ));
+        }
 
         metrics.reserved_chars = model
             .base_chars()
             .saturating_add(admission.iter().map(|d| d.reserved_chars).sum::<u64>());
         metrics.rendered_chars = count_chars(&rendered.content);
 
-        // ---- Terminal intent + diagnostics ----
-        let (terminal_intent, diagnostics) = terminal_state(&rendered, &classifications, &runtime_classification, &parse_outputs, metrics.stage_deadline_exhausted_count);
+        // ---- Terminal file results + intent + bounded diagnostics ----
         let file_results = build_file_results(
             &classified,
             &snapshot,
@@ -567,17 +605,67 @@ impl BudgetedContextScheduler {
             &admission,
             &parse_outputs,
             &runtime_classification,
+            &input.rejected_profile_hash,
         )?;
+        let (mut terminal_intent, run_diagnostics) = terminal_state(
+            &rendered,
+            &file_results,
+            &runtime_classification,
+            &parse_outputs,
+            metrics.stage_deadline_exhausted_count,
+        );
+        diagnostics.extend(
+            parse_outputs
+                .cache_write_warnings
+                .iter()
+                .cloned()
+                .map(|diagnostic| RunDiagnosticRecord {
+                    severity: DiagnosticSeverity::Warning,
+                    diagnostic,
+                }),
+        );
+        diagnostics.extend(
+            parse_outputs
+                .parse_warnings
+                .iter()
+                .cloned()
+                .map(|diagnostic| RunDiagnosticRecord {
+                    severity: DiagnosticSeverity::Warning,
+                    diagnostic,
+                }),
+        );
+        diagnostics.extend(run_diagnostics);
+        // spec Part 2.2: 257-warning bounded projection (run-level first,
+        // 256 detail + 1 DIAGNOSTICS_AGGREGATED).
+        diagnostics = project_warnings(diagnostics);
+        // Discovery issues / parser degradation / cache-write warnings are
+        // run-level warnings: they mark the run Partial, never Success.
+        if terminal_intent == TerminalIntent::Success
+            && diagnostics
+                .iter()
+                .any(|record| record.severity == DiagnosticSeverity::Warning)
+        {
+            terminal_intent = TerminalIntent::Partial;
+        }
 
         let stage_metrics = build_stage_metrics(
             discovery_count,
             rendered.decisions.len() as u64,
             discovery_count,
             metrics.parse_attempt_count,
+            input.discovery_duration_ms,
+            cache_duration_ms,
+            parse_duration_ms,
+            compression_duration_ms,
         );
         let extension_metrics = crate::context_audit::extension_metrics(&inventory, &file_results)
             .map_err(|message| SchedulerFailure::internal(&message))?;
 
+        let total_duration_ms = input
+            .discovery_duration_ms
+            .saturating_add(cache_duration_ms)
+            .saturating_add(parse_duration_ms)
+            .saturating_add(compression_duration_ms);
         let context = match terminal_intent {
             // Error envelopes carry an EMPTY file_context; run.rs builds the
             // error envelope from the outcome diagnostics.
@@ -593,10 +681,10 @@ impl BudgetedContextScheduler {
                     error_file_count: rendered.error_file_count,
                     input_chars: rendered.input_chars,
                     output_chars: rendered.output_chars,
-                    total_duration_ms: 0,
-                    discovery_duration_ms: 0,
-                    parse_duration_ms: 0,
-                    compression_duration_ms: 0,
+                    total_duration_ms,
+                    discovery_duration_ms: input.discovery_duration_ms,
+                    parse_duration_ms,
+                    compression_duration_ms,
                 };
                 let decisions = rendered
                     .decisions
@@ -655,6 +743,11 @@ struct ParseOutputs {
     parse_cache_status: HashMap<String, CacheStatus>,
     /// Per-file parse cache miss reason for the terminal file results.
     parse_cache_miss_reason: HashMap<String, CacheMissReason>,
+    /// Warnings for cache writes that were SKIPPED (space/busy/deadline); the
+    /// result itself is still authoritative, only the receipt is not committed.
+    cache_write_warnings: Vec<Diagnostic>,
+    /// Parser fallback / degradation warnings surfaced by the parser adapter.
+    parse_warnings: Vec<Diagnostic>,
 }
 
 fn source_guard_metrics(discovery: &[DiscoveredFileOut]) -> ExecutionMetrics {
@@ -671,6 +764,30 @@ fn source_guard_metrics(discovery: &[DiscoveredFileOut]) -> ExecutionMetrics {
         }
     }
     metrics
+}
+
+/// Surfaces a discovery issue as a run-level warning (spec Part 5.3); an
+/// unreadable discovery entry must mark the run Partial, never silently vanish.
+fn discovery_issue_warning(issue: &DiscoveryIssue) -> RunDiagnosticRecord {
+    let file_path = issue
+        .path
+        .as_ref()
+        .filter(|path| Path::new(path).is_absolute());
+    RunDiagnosticRecord {
+        severity: DiagnosticSeverity::Warning,
+        diagnostic: Diagnostic {
+            error_code: ErrorCode::DiscoveryEntryUnreadable,
+            message: issue
+                .message
+                .chars()
+                .take(4_096)
+                .collect(),
+            retryable: true,
+            stage: DiagnosticStage::Discovery,
+            file_path: Nullable(file_path.cloned()),
+            backend: Nullable(None),
+        },
+    }
 }
 
 fn build_inventory(
@@ -1076,7 +1193,7 @@ impl BudgetedContextScheduler {
         existed_before: &HashSet<String>,
         runtime_classification: &HashSet<String>,
         metrics: &mut ExecutionMetrics,
-    ) -> ParseOutputs {
+    ) -> Result<ParseOutputs, SchedulerFailure> {
         let mut results = HashMap::new();
         let mut runtime_not_parsed = HashSet::new();
         let mut parse_cache_receipts = Vec::new();
@@ -1084,6 +1201,8 @@ impl BudgetedContextScheduler {
         let mut parse_profile_hashes = HashMap::new();
         let mut parse_cache_status = HashMap::new();
         let mut parse_cache_miss_reason = HashMap::new();
+        let mut cache_write_warnings = Vec::new();
+        let mut parse_warnings = Vec::new();
         let mut any_lookup = false;
         let mut any_miss = false;
         let work_deadline = self.stored_work_deadline;
@@ -1100,68 +1219,77 @@ impl BudgetedContextScheduler {
                 metrics.parse_cache_lookup_count += 1;
                 any_lookup = true;
                 let existed_before_file = existed_before.contains(&decision.file_identity);
-                match self.cache.lookup_parse(file, *route, existed_before_file) {
-                    Ok(lookup) => {
-                        let profile_hash = lookup.parse_profile_hash.clone();
-                        match lookup.lookup {
-                            CacheLookup::Fresh(entry) => {
-                                parse_profile_hashes
-                                    .insert(decision.file_identity.clone(), profile_hash);
-                                parse_cache_status
-                                    .insert(decision.file_identity.clone(), CacheStatus::Fresh);
-                                parse_cache_miss_reason.insert(
-                                    decision.file_identity.clone(),
-                                    CacheMissReason::None,
-                                );
-                                results.insert(
-                                    decision.file_identity.clone(),
-                                    ParseResult {
-                                        file_identity: decision.file_identity.clone(),
-                                        content: entry.content,
-                                        parser_backend: entry.parser_backend,
-                                        worker_lane: entry.worker_lane,
-                                        truncated: entry.truncated,
-                                        content_sha256: entry.content_sha256,
-                                        parse_status: ParseStatus::Success,
-                                        error: None,
-                                        failure_class: String::new(),
-                                        fallback_backend: String::new(),
-                                        fallback_reason_code: String::new(),
-                                        primary_duration_ms: 0,
-                                        fallback_duration_ms: 0,
-                                        parse_duration_ms: 0,
-                                    },
-                                );
-                            }
-                            CacheLookup::Miss(reason) => {
-                                any_miss = true;
-                                parse_cache_status
-                                    .insert(decision.file_identity.clone(), CacheStatus::Miss);
-                                parse_cache_miss_reason.insert(
-                                    decision.file_identity.clone(),
-                                    reason,
-                                );
-                                if self.clock.now_ms() >= work_deadline {
-                                    runtime_not_parsed.insert(decision.file_identity.clone());
-                                    metrics.stage_deadline_exhausted_count = 1;
-                                    continue;
-                                }
-                                let remaining =
-                                    work_deadline.saturating_sub(self.clock.now_ms());
-                                let timeout_ms =
-                                    route_timeout_ms(*route, profile).min(remaining);
-                                metrics.parse_attempt_count += 1;
-                                admitted.push((
-                                    (*file).clone(),
-                                    *route,
-                                    timeout_ms,
-                                    profile_hash,
-                                ));
-                            }
+                let lookup = self
+                    .cache
+                    .lookup_parse(file, *route, existed_before_file)
+                    .map_err(|error| SchedulerFailure {
+                        diagnostic: error.diagnostic(DiagnosticStage::Cache),
+                    })?;
+                let profile_hash = lookup.parse_profile_hash.clone();
+                match lookup.lookup {
+                    CacheLookup::Fresh(entry) => {
+                        // spec SourceGuard v2: the parse cache key is guard-bound,
+                        // and the guard is verified BEFORE consuming the cached
+                        // value (TOCTOU between discovery and lookup).
+                        let Some(guard) = expected_guard(file) else {
+                            continue;
+                        };
+                        if !self.guard.verify(&file.path, &guard) {
+                            results.insert(
+                                file.file_identity.clone(),
+                                source_version_changed_parse(file),
+                            );
+                            parse_profile_hashes
+                                .insert(decision.file_identity.clone(), profile_hash);
+                            continue;
                         }
+                        parse_profile_hashes
+                            .insert(decision.file_identity.clone(), profile_hash);
+                        parse_cache_status
+                            .insert(decision.file_identity.clone(), CacheStatus::Fresh);
+                        parse_cache_miss_reason
+                            .insert(decision.file_identity.clone(), CacheMissReason::None);
+                        results.insert(
+                            decision.file_identity.clone(),
+                            ParseResult {
+                                file_identity: decision.file_identity.clone(),
+                                content: entry.content,
+                                parser_backend: entry.parser_backend,
+                                worker_lane: entry.worker_lane,
+                                truncated: entry.truncated,
+                                content_sha256: entry.content_sha256,
+                                parse_status: ParseStatus::Success,
+                                error: None,
+                                warnings: Vec::new(),
+                                failure_class: String::new(),
+                                fallback_backend: String::new(),
+                                fallback_reason_code: String::new(),
+                                primary_duration_ms: 0,
+                                fallback_duration_ms: 0,
+                                parse_duration_ms: 0,
+                            },
+                        );
                     }
-                    Err(_) => {
-                        runtime_not_parsed.insert(decision.file_identity.clone());
+                    CacheLookup::Miss(reason) => {
+                        any_miss = true;
+                        parse_cache_status
+                            .insert(decision.file_identity.clone(), CacheStatus::Miss);
+                        parse_cache_miss_reason
+                            .insert(decision.file_identity.clone(), reason);
+                        if self.clock.now_ms() >= work_deadline {
+                            runtime_not_parsed.insert(decision.file_identity.clone());
+                            metrics.stage_deadline_exhausted_count = 1;
+                            continue;
+                        }
+                        let remaining = work_deadline.saturating_sub(self.clock.now_ms());
+                        let timeout_ms = route_timeout_ms(*route, profile).min(remaining);
+                        metrics.parse_attempt_count += 1;
+                        admitted.push((
+                            (*file).clone(),
+                            *route,
+                            timeout_ms,
+                            profile_hash,
+                        ));
                     }
                 }
             }
@@ -1178,6 +1306,7 @@ impl BudgetedContextScheduler {
             };
             if !self.guard.verify(&file.path, &guard) {
                 results.insert(file.file_identity.clone(), source_version_changed_parse(&file));
+                parse_profile_hashes.insert(file.file_identity.clone(), profile_hash);
                 continue;
             }
             let result = self.parser.parse(&ParseRequest {
@@ -1185,9 +1314,11 @@ impl BudgetedContextScheduler {
                 route,
                 timeout_ms,
             });
+            parse_warnings.extend(result.warnings.iter().cloned());
             if result.parse_status == ParseStatus::Success {
                 if !self.guard.verify(&file.path, &guard) {
                     results.insert(file.file_identity.clone(), source_version_changed_parse(&file));
+                    parse_profile_hashes.insert(file.file_identity.clone(), profile_hash);
                     continue;
                 }
                 if self.clock.now_ms() < work_deadline {
@@ -1196,6 +1327,12 @@ impl BudgetedContextScheduler {
                     let record = CacheWriteRecord {
                         file_identity: file.file_identity.clone(),
                         source_version: file.source_version.clone(),
+                        source_guard_kind: crate::source_guard::source_guard_kind_text(guard.kind)
+                            .to_string(),
+                        source_guard_sha256: guard
+                            .guard_sha256
+                            .clone()
+                            .unwrap_or_default(),
                         parse_profile_hash: profile_hash.clone(),
                         content: result.content.clone(),
                         content_sha256: result.content_sha256.clone(),
@@ -1206,8 +1343,19 @@ impl BudgetedContextScheduler {
                         worker_version,
                         worker_build,
                     };
-                    let _ = self.cache.write_parse(self.clock.now_ms(), &[record.clone()]);
-                    parse_cache_receipts.push(record);
+                    // spec Solution: cache COMMIT is a receipt; a failed write is
+                    // a SKIPPED receipt with a warning, never a committed one.
+                    match self.cache.write_parse(self.clock.now_ms(), &[record.clone()]) {
+                        Ok(()) => parse_cache_receipts.push(record),
+                        Err(error) => cache_write_warnings.push(Diagnostic {
+                            error_code: ErrorCode::CacheWriteFailed,
+                            message: format!("parse cache write skipped: {}", error.diagnostic(DiagnosticStage::Cache).message),
+                            retryable: true,
+                            stage: DiagnosticStage::Cache,
+                            file_path: Nullable(Some(file.path.clone())),
+                            backend: Nullable(Some(route.backend().to_string())),
+                        }),
+                    }
                 }
             }
             results.insert(file.file_identity.clone(), result);
@@ -1215,7 +1363,7 @@ impl BudgetedContextScheduler {
         }
         metrics.parse_cache_all_hit = if any_lookup { Some(!any_miss) } else { None };
         let _ = existed_before;
-        ParseOutputs {
+        Ok(ParseOutputs {
             results,
             runtime_not_parsed,
             parse_cache_receipts,
@@ -1223,7 +1371,9 @@ impl BudgetedContextScheduler {
             parse_profile_hashes,
             parse_cache_status,
             parse_cache_miss_reason,
-        }
+            cache_write_warnings,
+            parse_warnings,
+        })
     }
 }
 
@@ -1244,6 +1394,7 @@ fn source_version_changed_parse(file: &DiscoveredFileOut) -> ParseResult {
             file_path: Nullable(Some(file.path.clone())),
             backend: Nullable(Some(file.extension.clone())),
         }),
+        warnings: Vec::new(),
         failure_class: "deterministic".to_string(),
         fallback_backend: String::new(),
         fallback_reason_code: "source_version_changed".to_string(),
@@ -1502,12 +1653,11 @@ fn enforce_rendered_within_reserved(
 
 fn terminal_state(
     rendered: &ContextBuildOutput,
-    classifications: &BTreeMap<String, crate::admission::PdfClassificationResult>,
+    file_results: &[FileResultRecord],
     runtime_classification: &HashSet<String>,
     parse_outputs: &ParseOutputs,
     stage_deadline_exhausted_count: u64,
 ) -> (TerminalIntent, Vec<RunDiagnosticRecord>) {
-    let _ = classifications;
     let has_failure = rendered.error_file_count > 0
         || rendered.timeout_count > 0
         || !runtime_classification.is_empty()
@@ -1527,33 +1677,19 @@ fn terminal_state(
             },
         });
     }
-    // Per-file Error/Timeout become warnings; a deadline-driven run with an
-    // empty context (no included files) becomes Error with the primary file
-    // diagnostic as the envelope error.
+    // Per-file Error/Timeout become warnings (spec Part 2.3). The REAL final
+    // Diagnostic is preserved verbatim (error_code/retryable/file_path/backend);
+    // the run shell must not re-synthesize or collapse it.
     let mut primary_error: Option<Diagnostic> = None;
     if has_failure {
-        for record in &rendered.decisions {
-            let mut diag = None;
-            if record.decision.action == ai_daily_scanner_contract::ContextAction::Error {
-                diag = Some(Diagnostic {
-                    error_code: match record.decision.error_code.as_str() {
-                        "PARSER_TIMEOUT" => ErrorCode::ParserTimeout,
-                        _code => ErrorCode::ParserFailed,
-                    },
-                    message: format!("{}: {}", record.decision.relative_path, record.decision.reason),
-                    retryable: true,
-                    stage: DiagnosticStage::Parse,
-                    file_path: Nullable(None),
-                    backend: Nullable(None),
-                });
-            }
-            if let Some(diag) = diag {
+        for result in file_results {
+            if let Some(error) = &result.error {
                 if primary_error.is_none() {
-                    primary_error = Some(diag.clone());
+                    primary_error = Some(error.clone());
                 }
                 diagnostics.push(RunDiagnosticRecord {
                     severity: DiagnosticSeverity::Warning,
-                    diagnostic: diag,
+                    diagnostic: error.clone(),
                 });
             }
         }
@@ -1592,6 +1728,110 @@ fn terminal_state(
     (intent, diagnostics)
 }
 
+/// spec Part 2.2 bounded warning projection: run-level warnings first, then up
+/// to 256 detail rows, then a single `DIAGNOSTICS_AGGREGATED` row
+/// (`stage=internal`, `retryable=any folded true`, `file_path/backend=null`).
+/// Error-severity diagnostics pass through untouched (the envelope error).
+fn project_warnings(diagnostics: Vec<RunDiagnosticRecord>) -> Vec<RunDiagnosticRecord> {
+    let mut errors = Vec::new();
+    let mut warnings = Vec::new();
+    for record in diagnostics {
+        if record.severity == DiagnosticSeverity::Error {
+            errors.push(record);
+        } else {
+            warnings.push(record);
+        }
+    }
+    if warnings.len() <= 256 {
+        warnings.extend(errors);
+        return warnings;
+    }
+    let tail = warnings.split_off(256);
+    warnings.push(aggregate_warning(&tail));
+    warnings.extend(errors);
+    warnings
+}
+
+fn aggregate_warning(folded: &[RunDiagnosticRecord]) -> RunDiagnosticRecord {
+    let mut groups: BTreeMap<(String, String, bool), u64> = BTreeMap::new();
+    let mut any_retryable = false;
+    for record in folded {
+        let key = (
+            crate::store::inventory::enum_text(&record.diagnostic.stage),
+            crate::store::inventory::enum_text(&record.diagnostic.error_code),
+            record.diagnostic.retryable,
+        );
+        *groups.entry(key).or_insert(0) += 1;
+        any_retryable |= record.diagnostic.retryable;
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut other_count = 0_u64;
+    for ((stage, code, retryable), count) in groups {
+        let part = format!("{stage}:{code}:retryable={retryable}:{count}");
+        let projected = parts.iter().map(|p| p.len() + 1).sum::<usize>() + part.len();
+        if projected <= 4_096 {
+            parts.push(part);
+        } else {
+            other_count = other_count.saturating_add(count);
+        }
+    }
+    if other_count > 0 {
+        parts.push(format!("other:{other_count}"));
+    }
+    let message = format!("aggregated {} diagnostics: {}", folded.len(), parts.join(","));
+    RunDiagnosticRecord {
+        severity: DiagnosticSeverity::Warning,
+        diagnostic: Diagnostic {
+            error_code: ErrorCode::DiagnosticsAggregated,
+            message: message.chars().take(4_096).collect(),
+            retryable: any_retryable,
+            stage: DiagnosticStage::Internal,
+            file_path: Nullable(None),
+            backend: Nullable(None),
+        },
+    }
+}
+
+/// Defines a minimal Error outcome for defined internal terminal states
+/// (`BUDGET_MODEL_MISMATCH`, `CONTEXT_FIXED_SECTIONS_OVER_BUDGET`,
+/// `enforce_rendered_within_reserved`) — returned as `Ok`, never `Err`
+/// (spec Solution: defined business terminal states are `Ok(outcome)`).
+#[allow(clippy::too_many_arguments)]
+fn internal_error_outcome(
+    scan_run_id: u64,
+    metrics: ExecutionMetrics,
+    diagnostics: Vec<RunDiagnosticRecord>,
+    parse_outputs: ParseOutputs,
+    error_code: ErrorCode,
+    message: String,
+) -> BudgetedScanOutcome {
+    let mut diagnostics = project_warnings(diagnostics);
+    diagnostics.push(RunDiagnosticRecord {
+        severity: DiagnosticSeverity::Error,
+        diagnostic: Diagnostic {
+            error_code,
+            message: message.chars().take(4_096).collect(),
+            retryable: false,
+            stage: DiagnosticStage::Context,
+            file_path: Nullable(None),
+            backend: Nullable(None),
+        },
+    });
+    BudgetedScanOutcome {
+        scan_run_id,
+        terminal_intent: TerminalIntent::Error,
+        inventory: Vec::new(),
+        file_results: Vec::new(),
+        parse_cache_receipts: parse_outputs.parse_cache_receipts,
+        classification_cache_receipts: parse_outputs.classification_cache_receipts,
+        diagnostics,
+        stage_metrics: Vec::new(),
+        extension_metrics: Vec::new(),
+        context: None,
+        execution_metrics: metrics,
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn build_file_results(
     classified: &[ClassifiedPlan],
@@ -1600,6 +1840,7 @@ fn build_file_results(
     admission: &[AdmissionDecision],
     parse_outputs: &ParseOutputs,
     runtime_classification: &HashSet<String>,
+    rejected_profile_hash: &str,
 ) -> Result<Vec<FileResultRecord>, SchedulerFailure> {
     let mut records = Vec::with_capacity(classified.len());
     for plan in classified {
@@ -1738,8 +1979,8 @@ fn build_file_results(
                 .parse_profile_hashes
                 .get(&file.file_identity)
                 .cloned()
-                .unwrap_or_else(|| rejected_hash_for(&file.file_identity)),
-            _ => rejected_hash_for(&file.file_identity),
+                .unwrap_or_else(|| rejected_profile_hash.to_string()),
+            _ => rejected_profile_hash.to_string(),
         };
         let (cache_status, cache_miss_reason) = match action {
             PlanAction::Admit { .. } => (
@@ -1780,36 +2021,124 @@ fn build_file_results(
     Ok(records)
 }
 
-fn rejected_hash_for(_file_identity: &str) -> String {
-    "a".repeat(64)
-}
-
 fn build_stage_metrics(
     source_file_count: u64,
     context_item_count: u64,
     cache_item_count: u64,
     parse_item_count: u64,
+    discovery_duration_ms: u64,
+    cache_duration_ms: u64,
+    parse_duration_ms: u64,
+    context_duration_ms: u64,
 ) -> Vec<StageMetric> {
     vec![
         StageMetric {
             stage: StageName::Discovery,
             item_count: source_file_count,
-            duration_ms: 0,
+            duration_ms: discovery_duration_ms,
         },
         StageMetric {
             stage: StageName::Cache,
             item_count: cache_item_count,
-            duration_ms: 0,
+            duration_ms: cache_duration_ms,
         },
         StageMetric {
             stage: StageName::Parse,
             item_count: parse_item_count,
-            duration_ms: 0,
+            duration_ms: parse_duration_ms,
         },
         StageMetric {
             stage: StageName::Context,
             item_count: context_item_count,
-            duration_ms: 0,
+            duration_ms: context_duration_ms,
         },
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn warning(error_code: ErrorCode, retryable: bool) -> RunDiagnosticRecord {
+        RunDiagnosticRecord {
+            severity: DiagnosticSeverity::Warning,
+            diagnostic: Diagnostic {
+                error_code,
+                message: "synthetic".to_string(),
+                retryable,
+                stage: DiagnosticStage::Parse,
+                file_path: Nullable(Some("C:\\f\\a.md".to_string())),
+                backend: Nullable(None),
+            },
+        }
+    }
+
+    #[test]
+    fn project_warnings_folds_overflow_into_one_aggregate() {
+        let mut diagnostics: Vec<RunDiagnosticRecord> = (0..300)
+            .map(|index| {
+                warning(
+                    if index % 2 == 0 {
+                        ErrorCode::ParserFailed
+                    } else {
+                        ErrorCode::ParserTimeout
+                    },
+                    index % 3 == 0,
+                )
+            })
+            .collect();
+        // Keep one Error diagnostic to assert it passes through untouched.
+        diagnostics.push(RunDiagnosticRecord {
+            severity: DiagnosticSeverity::Error,
+            diagnostic: Diagnostic {
+                error_code: ErrorCode::InternalError,
+                message: "primary".to_string(),
+                retryable: false,
+                stage: DiagnosticStage::Internal,
+                file_path: Nullable(None),
+                backend: Nullable(None),
+            },
+        });
+
+        let projected = project_warnings(diagnostics);
+        let warnings: Vec<_> = projected
+            .iter()
+            .filter(|record| record.severity == DiagnosticSeverity::Warning)
+            .collect();
+        let errors: Vec<_> = projected
+            .iter()
+            .filter(|record| record.severity == DiagnosticSeverity::Error)
+            .collect();
+        // 256 detail + 1 DIAGNOSTICS_AGGREGATED.
+        assert_eq!(warnings.len(), 257);
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|record| record.diagnostic.error_code == ErrorCode::DiagnosticsAggregated)
+                .count(),
+            1
+        );
+        let aggregate = warnings
+            .iter()
+            .find(|record| record.diagnostic.error_code == ErrorCode::DiagnosticsAggregated)
+            .expect("aggregate");
+        assert_eq!(aggregate.diagnostic.stage, DiagnosticStage::Internal);
+        assert!(aggregate.diagnostic.retryable, "any folded retryable => true");
+        assert!(aggregate.diagnostic.file_path.0.is_none());
+        assert!(aggregate.diagnostic.backend.0.is_none());
+        assert_eq!(errors.len(), 1, "error diagnostics pass through untouched");
+    }
+
+    #[test]
+    fn project_warnings_passes_through_few_warnings() {
+        let diagnostics = vec![
+            warning(ErrorCode::ParserFailed, false),
+            warning(ErrorCode::ParserTimeout, true),
+        ];
+        let projected = project_warnings(diagnostics);
+        assert_eq!(projected.len(), 2);
+        assert!(!projected
+            .iter()
+            .any(|record| record.diagnostic.error_code == ErrorCode::DiagnosticsAggregated));
+    }
 }

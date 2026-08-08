@@ -131,6 +131,11 @@ impl RouteStackMember {
 pub struct CacheWriteRecord {
     pub file_identity: String,
     pub source_version: String,
+    /// Engine-owned SourceGuardV2 kind (spec SourceGuard v2). The parse cache key
+    /// is `file_identity + source_version + guard + parse_profile_hash`, so a
+    /// same-size + preserved-mtime content replacement forces a miss.
+    pub source_guard_kind: String,
+    pub source_guard_sha256: String,
     pub parse_profile_hash: String,
     pub content: String,
     pub content_sha256: String,
@@ -144,10 +149,21 @@ pub struct CacheWriteRecord {
 
 impl CacheWriteRecord {
     pub(crate) fn validate(&self) -> Result<(), String> {
+        let guard_sha256 = |value: &str| {
+            value.len() == 64
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
         if self.file_identity.is_empty()
             || self.file_identity.chars().count() > 4_096
             || self.source_version.is_empty()
             || super::inventory::parse_source_version(&self.source_version).is_err()
+            || !matches!(
+                self.source_guard_kind.as_str(),
+                "windows_file_id_change_time_v1" | "unix_inode_ctime_v1" | "content_sha256_v1"
+            )
+            || !guard_sha256(&self.source_guard_sha256)
             || !super::inventory::is_sha256(&self.parse_profile_hash)
             || !super::inventory::is_sha256(&self.content_sha256)
             || sha256_hex(self.content.as_bytes()) != self.content_sha256
@@ -252,6 +268,8 @@ pub(crate) fn lookup_cache(
     connection: &Connection,
     file_identity: &str,
     source_version: &str,
+    source_guard_kind: &str,
+    source_guard_sha256: &str,
     parse_profile_hash: &str,
     inventory_existed_before: bool,
 ) -> rusqlite::Result<CacheLookup> {
@@ -260,8 +278,16 @@ pub(crate) fn lookup_cache(
             "SELECT content, content_sha256, parser_backend, worker_lane, truncated,
                     worker_contract_version, worker_version, worker_build
              FROM parse_cache
-             WHERE file_identity=?1 AND source_version=?2 AND parse_profile_hash=?3",
-            params![file_identity, source_version, parse_profile_hash],
+             WHERE file_identity=?1 AND source_version=?2
+               AND source_guard_kind=?3 AND source_guard_sha256=?4
+               AND parse_profile_hash=?5",
+            params![
+                file_identity,
+                source_version,
+                source_guard_kind,
+                source_guard_sha256,
+                parse_profile_hash
+            ],
             |row| {
                 Ok(CacheEntry {
                     content: row.get(0)?,
@@ -284,42 +310,34 @@ pub(crate) fn lookup_cache(
         return Ok(CacheLookup::Miss(CacheMissReason::ErrorCache));
     }
 
-    let exact_uncached_result: bool = connection.query_row(
+    // spec Part 4 miss-reason tree (cache-only; `scan_file_results` is the
+    // per-run audit, not a cache, so it never decides a miss reason): the exact
+    // key is bound by identity + source_version + SourceGuardV2 +
+    // parse_profile_hash. A miss with the SAME identity+source+guard (different
+    // profile hash) is `parser_identity_changed`; a guard/source change is
+    // `source_version_changed`; the `entry_absent_or_evicted` / `new_file` branch
+    // uses the pre-round existence flag reported by `prepare_inventory`.
+    let same_source_and_guard: bool = connection.query_row(
         "SELECT EXISTS(
-            SELECT 1 FROM scan_file_results
-            WHERE file_identity=?1 AND source_version=?2 AND parse_profile_hash=?3
+            SELECT 1 FROM parse_cache
+            WHERE file_identity=?1 AND source_version=?2
+              AND source_guard_kind=?3 AND source_guard_sha256=?4
          )",
-        params![file_identity, source_version, parse_profile_hash],
+        params![
+            file_identity,
+            source_version,
+            source_guard_kind,
+            source_guard_sha256
+        ],
         |row| row.get(0),
     )?;
-    if exact_uncached_result {
-        return Ok(CacheLookup::Miss(CacheMissReason::ErrorCache));
-    }
-
-    let same_source: bool = connection.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM parse_cache WHERE file_identity=?1 AND source_version=?2
-            UNION ALL
-            SELECT 1 FROM scan_file_results WHERE file_identity=?1 AND source_version=?2
-         )",
-        params![file_identity, source_version],
-        |row| row.get(0),
-    )?;
-    if same_source {
+    if same_source_and_guard {
         return Ok(CacheLookup::Miss(CacheMissReason::ParserProfileChanged));
     }
 
-    // spec Part 4 miss-reason tree steps 4-5: the global `file_inventory` is
-    // upserted by `prepare_inventory` BEFORE the lookup, so it cannot decide
-    // "same identity" (the current round's rows would make every new file look
-    // changed). Identity changes come only from prior cache/result rows, and the
-    // `entry_absent_or_evicted` / `new_file` branch uses the pre-round existence
-    // flag reported by `prepare_inventory`.
     let same_identity: bool = connection.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM parse_cache WHERE file_identity=?1
-            UNION ALL
-            SELECT 1 FROM scan_file_results WHERE file_identity=?1
          )",
         [file_identity],
         |row| row.get(0),
@@ -344,11 +362,12 @@ pub(crate) fn write_success_cache(
 ) -> rusqlite::Result<()> {
     let mut statement = transaction.prepare_cached(
         "INSERT INTO parse_cache(
-            file_identity, source_version, parse_profile_hash, content,
-            content_sha256, parser_backend, worker_lane, truncated,
-            worker_contract_version, worker_version, worker_build, cached_at_ms
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
-         ON CONFLICT(file_identity, source_version, parse_profile_hash) DO UPDATE SET
+            file_identity, source_version, source_guard_kind, source_guard_sha256,
+            parse_profile_hash, content, content_sha256, parser_backend, worker_lane,
+            truncated, worker_contract_version, worker_version, worker_build, cached_at_ms
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+         ON CONFLICT(file_identity, source_version, source_guard_kind, source_guard_sha256,
+                     parse_profile_hash) DO UPDATE SET
             content=excluded.content,
             content_sha256=excluded.content_sha256,
             parser_backend=excluded.parser_backend,
@@ -363,6 +382,8 @@ pub(crate) fn write_success_cache(
         statement.execute(params![
             record.file_identity,
             record.source_version,
+            record.source_guard_kind,
+            record.source_guard_sha256,
             record.parse_profile_hash,
             record.content,
             record.content_sha256,

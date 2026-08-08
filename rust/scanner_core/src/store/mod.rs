@@ -740,12 +740,15 @@ impl ScannerStore {
         &self,
         file_identity: &str,
         source_version: &str,
+        source_guard_kind: &str,
+        source_guard_sha256: &str,
         parse_profile_hash: &str,
         inventory_existed_before: bool,
     ) -> Result<CacheLookup, StoreError> {
         if file_identity.is_empty()
             || source_version.is_empty()
             || inventory::parse_source_version(source_version).is_err()
+            || !valid_guard_wire(source_guard_kind, source_guard_sha256)
             || !inventory::is_sha256(parse_profile_hash)
         {
             return Err(StoreError::InvalidRequest(
@@ -756,6 +759,8 @@ impl ScannerStore {
             &self.connection,
             file_identity,
             source_version,
+            source_guard_kind,
+            source_guard_sha256,
             parse_profile_hash,
             inventory_existed_before,
         )
@@ -898,6 +903,8 @@ impl ScannerStore {
                     let lookup = self.lookup_cache(
                         &planned.file.file_identity,
                         &planned.file.source_version,
+                        "content_sha256_v1",
+                        &"0".repeat(64),
                         &profile_hash,
                         false,
                     )?;
@@ -1883,6 +1890,15 @@ thread_local! {
 fn checked_i64(value: u64, field: &str) -> Result<i64, StoreError> {
     i64::try_from(value)
         .map_err(|_| StoreError::InvalidRequest(format!("{field} exceeds SQLite integer range")))
+}
+
+/// SourceGuardV2 wire for the parse-cache key: only an available kind with a
+/// 64-char lowercase-hex SHA-256 (unavailable files never reach the cache).
+fn valid_guard_wire(kind: &str, hash: &str) -> bool {
+    matches!(
+        kind,
+        "windows_file_id_change_time_v1" | "unix_inode_ctime_v1" | "content_sha256_v1"
+    ) && inventory::is_sha256(hash)
 }
 
 fn now_millis() -> Result<u64, StoreError> {
@@ -2952,6 +2968,8 @@ mod tests {
         CacheWriteRecord {
             file_identity: identity.to_string(),
             source_version: source_version.to_string(),
+            source_guard_kind: "content_sha256_v1".to_string(),
+            source_guard_sha256: "0".repeat(64),
             parse_profile_hash: profile_hash.to_string(),
             content: content.to_string(),
             content_sha256: sha256_hex(content.as_bytes()),
@@ -3416,7 +3434,7 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", source, &profile_hash, false)
+                .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::NewFile)
         );
@@ -3443,28 +3461,28 @@ mod tests {
         assert!(matches!(
             harness
                 .store
-                .lookup_cache("file-a", source, &profile_hash, false)
+                .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
                 .unwrap(),
             CacheLookup::Fresh(_)
         ));
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=101:size=6", &profile_hash, false)
+                .lookup_cache("file-a", "mtime_ns=101:size=6", "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=100:size=6", &profile_hash, false)
+                .lookup_cache("file-a", "mtime_ns=100:size=6", "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=101:size=5", &profile_hash, false)
+                .lookup_cache("file-a", "mtime_ns=101:size=5", "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
@@ -3474,10 +3492,91 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", source, &changed_hash, false)
+                .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &changed_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::ParserProfileChanged)
         );
+    }
+
+    #[test]
+    fn parse_cache_key_is_source_guard_bound() {
+        // spec R3-29: a same-size + preserved-mtime content replacement keeps the
+        // legacy source_version unchanged, so the SourceGuardV2 must be part of the
+        // parse cache key. Changing only the guard forces a miss, never a Fresh hit.
+        let mut harness = harness("00000000-0000-4000-8000-000000000099");
+        let source = "mtime_ns=100:size=5";
+        let profile_hash = "b".repeat(64);
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        record_both_workers(&mut harness.store, &active, 1);
+        harness
+            .store
+            .finalize(
+                &active,
+                &success_batch(&active, "file-a", source, &profile_hash, "hello"),
+                2,
+            )
+            .unwrap();
+        // Same identity + source_version + profile, SAME guard -> Fresh.
+        assert!(matches!(
+            harness
+                .store
+                .lookup_cache(
+                    "file-a",
+                    source,
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &profile_hash,
+                    false,
+                )
+                .unwrap(),
+            CacheLookup::Fresh(_)
+        ));
+        // Same identity + source_version + profile, DIFFERENT guard -> miss.
+        assert_eq!(
+            harness
+                .store
+                .lookup_cache(
+                    "file-a",
+                    source,
+                    "content_sha256_v1",
+                    &"1".repeat(64),
+                    &profile_hash,
+                    false,
+                )
+                .unwrap(),
+            CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
+        );
+        // A fresh write with the new guard lands under its own key and hits.
+        let mut second = cache_record("file-a", source, &profile_hash, "changed");
+        second.source_guard_sha256 = "1".repeat(64);
+        harness
+            .store
+            .write_success_parse_cache(&[second], 5)
+            .unwrap();
+        assert!(matches!(
+            harness
+                .store
+                .lookup_cache(
+                    "file-a",
+                    source,
+                    "content_sha256_v1",
+                    &"1".repeat(64),
+                    &profile_hash,
+                    false,
+                )
+                .unwrap(),
+            CacheLookup::Fresh(_)
+        ));
     }
 
     #[test]
@@ -3526,11 +3625,11 @@ mod tests {
         let lookups = [
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=101:size=6", &profile_hash, false)
+                .lookup_cache("file-a", "mtime_ns=101:size=6", "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
                 .unwrap(),
             harness
                 .store
-                .lookup_cache("file-b", source, &profile_hash, false)
+                .lookup_cache("file-b", source, "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
                 .unwrap(),
         ];
         assert_eq!(
@@ -3597,12 +3696,15 @@ mod tests {
             error: Some(diagnostic),
         });
         harness.store.finalize(&active, &batch, 2).unwrap();
+        // v2 spec Part 4: no negative cache — an Error result row is per-run
+        // audit, not a cache entry, so the guard-bound cache lookup reports a
+        // new-file miss rather than the legacy `error_cache` literal.
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", source, &profile_hash, false)
+                .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
                 .unwrap(),
-            CacheLookup::Miss(CacheMissReason::ErrorCache)
+            CacheLookup::Miss(CacheMissReason::NewFile)
         );
     }
 

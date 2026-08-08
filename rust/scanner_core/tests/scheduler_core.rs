@@ -711,7 +711,7 @@ struct TestCache {
 }
 
 impl TestCache {
-    fn fresh_parse(identity: &str, content: &str) -> CacheEntry {
+    fn fresh_parse(_identity: &str, content: &str) -> CacheEntry {
         CacheEntry {
             content: content.to_string(),
             content_sha256: ai_daily_scanner_core::store::sha256_hex(content.as_bytes()),
@@ -817,6 +817,7 @@ impl ParserPort for TestParser {
                     file_path: Nullable(Some(request.file.path.clone())),
                     backend: Nullable(Some(request.route.backend().to_string())),
                 }),
+                warnings: Vec::new(),
                 failure_class: "deterministic".to_string(),
                 fallback_backend: String::new(),
                 fallback_reason_code: String::new(),
@@ -838,6 +839,7 @@ fn success_parse(identity: &str, path: &str, content: &str) -> ParseResult {
         content_sha256: ai_daily_scanner_core::store::sha256_hex(content.as_bytes()),
         parse_status: ParseStatus::Success,
         error: None,
+        warnings: Vec::new(),
         failure_class: String::new(),
         fallback_backend: String::new(),
         fallback_reason_code: String::new(),
@@ -944,6 +946,8 @@ fn run_scheduler(
         "0.1.0".to_string(),
         "engine-test".to_string(),
         "c".repeat(64),
+        "d".repeat(64),
+        0,
         clock,
     )
     .expect("scheduled input");
@@ -1217,6 +1221,7 @@ impl ParserPort for DeadlineParser {
                 truncated: false,
                 content_sha256: ai_daily_scanner_core::store::sha256_hex(b""),
                 parse_status: ParseStatus::Timeout,
+                warnings: Vec::new(),
                 error: Some(Diagnostic {
                     error_code: ErrorCode::ParserTimeout,
                     message: "parse process exceeded its deadline".to_string(),
@@ -1263,6 +1268,8 @@ fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
         "0.1.0".to_string(),
         "engine-test".to_string(),
         "c".repeat(64),
+        "d".repeat(64),
+        0,
         &clock,
     )
     .expect("input");
@@ -1345,6 +1352,8 @@ fn work_deadline_before_any_parse_forms_error_run_without_snapshot() {
         "0.1.0".to_string(),
         "engine-test".to_string(),
         "c".repeat(64),
+        "d".repeat(64),
+        0,
         &clock,
     )
     .expect("input");
@@ -1418,6 +1427,8 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
         "0.1.0".to_string(),
         "engine-test".to_string(),
         "c".repeat(64),
+        "d".repeat(64),
+        0,
         &clock,
     )
     .expect("input");
@@ -1505,4 +1516,56 @@ fn cache_commit_skipped_after_work_deadline() {
     assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
     // One successful parse produced exactly one committed receipt.
     assert_eq!(outcome.parse_cache_receipts.len(), 1);
+}
+
+#[test]
+fn discovery_issues_mark_the_run_partial_with_warnings() {
+    // An unreadable discovery entry must surface as a run-level warning and mark
+    // the run Partial, never silently vanish (spec Part 5.3).
+    let profile = v2_profile(ReportMode::Daily);
+    let discovery = vec![discovered("notes/a.md", ".md", 64)];
+    let issues = vec![ai_daily_discovery::DiscoveryIssue {
+        kind: ai_daily_discovery::DiscoveryIssueKind::Metadata,
+        path: Some("C:\\corpus\\notes\\unreadable.md".to_string()),
+        message: "metadata unavailable".to_string(),
+    }];
+    let clock = FakeClock::new();
+    let input = ScheduledRunInput::new(
+        1,
+        0,
+        "C:\\corpus".to_string(),
+        discovery.clone(),
+        issues,
+        profile,
+        WorkerIdentities {
+            classifier_build: Some("a".repeat(64)),
+            ..WorkerIdentities::default()
+        },
+        "0.1.0".to_string(),
+        "engine-test".to_string(),
+        "c".repeat(64),
+        "d".repeat(64),
+        0,
+        &clock,
+    )
+    .expect("input");
+    let scheduler = BudgetedContextScheduler::new(
+        Box::new(TestClassifier { results: HashMap::new() }),
+        Box::new(TestParser {
+            results: HashMap::from([(
+                "fixture:notes/a.md".to_string(),
+                success_parse("fixture:notes/a.md", "", "evidence"),
+            )]),
+        }),
+        Box::new(TestCache::default()),
+        Box::new(clock),
+        Box::new(PassGuard),
+    );
+    let outcome = scheduler.execute(input).expect("outcome");
+
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|record| record.diagnostic.error_code == ErrorCode::DiscoveryEntryUnreadable));
 }

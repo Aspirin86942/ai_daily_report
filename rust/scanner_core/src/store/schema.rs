@@ -350,6 +350,8 @@ CREATE TABLE file_inventory (
 CREATE TABLE parse_cache (
     file_identity TEXT NOT NULL REFERENCES file_inventory(file_identity) ON DELETE CASCADE,
     source_version TEXT NOT NULL,
+    source_guard_kind TEXT NOT NULL CHECK (source_guard_kind IN ('windows_file_id_change_time_v1', 'unix_inode_ctime_v1', 'content_sha256_v1')),
+    source_guard_sha256 TEXT NOT NULL CHECK (length(source_guard_sha256) = 64),
     parse_profile_hash TEXT NOT NULL CHECK (length(parse_profile_hash) = 64),
     content TEXT NOT NULL,
     content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
@@ -360,7 +362,7 @@ CREATE TABLE parse_cache (
     worker_version TEXT NOT NULL,
     worker_build TEXT NOT NULL,
     cached_at_ms INTEGER NOT NULL,
-    PRIMARY KEY (file_identity, source_version, parse_profile_hash)
+    PRIMARY KEY (file_identity, source_version, source_guard_kind, source_guard_sha256, parse_profile_hash)
 ) STRICT;
 
 CREATE TABLE classification_cache (
@@ -692,6 +694,35 @@ CREATE TABLE file_inventory_v2 (
 ) STRICT;
 "#;
 
+/// Rebuilds `parse_cache` with the SourceGuardV2-bound primary key
+/// (spec R3-29 / acceptance "SourceGuardV2 在 legacy mtime+size 未变的内容替换上
+/// 仍强制 cache miss"). Legacy rows carry no guard and cannot be guard-bound, so
+/// the rebuild clears them (the cache can be rebuilt from source). Fresh v2
+/// databases get the guard-bound shape directly from `V2_DDL`; committed v1→v2
+/// databases and pre-amendment v2 databases are converged here.
+const PARSE_CACHE_GUARD_DDL: &str = r#"
+CREATE TABLE parse_cache_v2 (
+    file_identity TEXT NOT NULL REFERENCES file_inventory(file_identity) ON DELETE CASCADE,
+    source_version TEXT NOT NULL,
+    source_guard_kind TEXT NOT NULL CHECK (source_guard_kind IN ('windows_file_id_change_time_v1', 'unix_inode_ctime_v1', 'content_sha256_v1')),
+    source_guard_sha256 TEXT NOT NULL CHECK (length(source_guard_sha256) = 64),
+    parse_profile_hash TEXT NOT NULL CHECK (length(parse_profile_hash) = 64),
+    content TEXT NOT NULL,
+    content_sha256 TEXT NOT NULL CHECK (length(content_sha256) = 64),
+    parser_backend TEXT NOT NULL,
+    worker_lane TEXT NOT NULL,
+    truncated INTEGER NOT NULL CHECK (truncated IN (0, 1)),
+    worker_contract_version TEXT NOT NULL,
+    worker_version TEXT NOT NULL,
+    worker_build TEXT NOT NULL,
+    cached_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (file_identity, source_version, source_guard_kind, source_guard_sha256, parse_profile_hash)
+) STRICT;
+DROP TABLE parse_cache;
+ALTER TABLE parse_cache_v2 RENAME TO parse_cache;
+CREATE INDEX idx_cache_created ON parse_cache(cached_at_ms);
+"#;
+
 pub fn configure_connection(connection: &Connection) -> Result<(), SchemaError> {
     connection.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))?;
     connection.pragma_update(None, "foreign_keys", true)?;
@@ -733,6 +764,26 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
         insert_created_empty_history(&transaction)?;
         transaction.pragma_update(None, "user_version", LATEST_USER_VERSION)?;
         transaction.commit()?;
+        return Ok(());
+    }
+    // Version 2 schema amendment: the parse_cache table MUST be SourceGuardV2-bound.
+    // A committed v2 database created before the amendment has the legacy
+    // file_identity+source_version+parse_profile_hash key; detect the missing
+    // guard column and rebuild the table (clearing legacy rows).
+    if version == LATEST_USER_VERSION {
+        let has_guard: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('parse_cache')
+                WHERE name='source_guard_kind'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_guard {
+            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(PARSE_CACHE_GUARD_DDL)?;
+            transaction.commit()?;
+        }
     }
     Ok(())
 }
@@ -792,8 +843,15 @@ fn migrate_v1_to_v2(
     )?;
 
     // v1 parse cache rows carry no SourceGuardV2 and cannot be projected safely;
-    // the cache can be rebuilt from source (spec Part 8.2).
-    let invalidated = transaction.execute("DELETE FROM parse_cache", [])? as u64;
+    // the cache can be rebuilt from source (spec Part 8.2). The table is rebuilt
+    // with the SourceGuardV2-bound primary key so post-upgrade writes are
+    // guard-bound (spec R3-29).
+    let invalidated: u64 = transaction
+        .query_row("SELECT count(*) FROM parse_cache", [], |row| {
+            row.get::<_, i64>(0)
+        })?
+        as u64;
+    transaction.execute_batch(PARSE_CACHE_GUARD_DDL)?;
 
     transaction.execute(
         "INSERT INTO schema_migration_history(

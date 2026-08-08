@@ -86,10 +86,24 @@ impl CachePort for StoreCachePort {
             detail: message,
         })?;
         let store = self.open()?;
+        let guard_kind = file
+            .source_guard_kind
+            .as_deref()
+            .ok_or_else(|| CachePortError::InvalidKey {
+                detail: "source guard kind is missing".to_string(),
+            })?;
+        let guard_sha256 = file
+            .source_guard_sha256
+            .as_deref()
+            .ok_or_else(|| CachePortError::InvalidKey {
+                detail: "source guard sha256 is missing".to_string(),
+            })?;
         let lookup = store
             .lookup_cache(
                 &file.file_identity,
                 &file.source_version,
+                guard_kind,
+                guard_sha256,
                 &profile_hash,
                 inventory_existed_before,
             )
@@ -198,6 +212,7 @@ impl ParserPort for ProductionParser {
                     ParseStatus::Error
                 },
                 error: Some(failure.diagnostic),
+                warnings: Vec::new(),
                 failure_class: String::new(),
                 fallback_backend: String::new(),
                 fallback_reason_code: String::new(),
@@ -255,6 +270,17 @@ fn to_parse_result(parsed: ScheduledFileParse, file_identity: &str) -> ParseResu
         .fallback_backend
         .map(|backend| backend.as_str().to_string())
         .unwrap_or_default();
+    // A primary parser failure that recovered via fallback is a degradation
+    // warning (spec Part 5.2/2.2), never silently dropped.
+    let warnings: Vec<Diagnostic> = if error.is_none() {
+        parsed
+            .primary_failure
+            .iter()
+            .map(|failure| failure.diagnostic.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
     ParseResult {
         file_identity: file_identity.to_string(),
         content,
@@ -270,6 +296,7 @@ fn to_parse_result(parsed: ScheduledFileParse, file_identity: &str) -> ParseResu
         content_sha256,
         parse_status,
         error,
+        warnings,
         failure_class,
         fallback_backend,
         fallback_reason_code,
@@ -296,6 +323,7 @@ fn internal_parse_error(request: &ParseRequest) -> ParseResult {
             file_path: Nullable(Some(request.file.path.clone())),
             backend: Nullable(Some(request.route.backend().to_string())),
         }),
+        warnings: Vec::new(),
         failure_class: String::new(),
         fallback_backend: String::new(),
         fallback_reason_code: String::new(),

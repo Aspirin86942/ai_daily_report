@@ -21,7 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
-use crate::context_audit::{context_profile_hash, InspectAuditError};
+use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
 use crate::parsers::{
     document, office, register_worker, register_worker_pair, RegisteredWorker, WorkerCommand,
     WorkerRegistry, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
@@ -593,6 +593,7 @@ fn execute_active_build(
             );
         }
     };
+    let discovery_duration_ms = elapsed_ms(discovery_started);
     let mut warnings: Vec<Diagnostic> = discovery
         .issues
         .iter()
@@ -625,6 +626,26 @@ fn execute_active_build(
                     message,
                     false,
                     DiagnosticStage::Context,
+                ),
+                elapsed_summary(started_at),
+            );
+        }
+    };
+    let rejected_profile_hash = match rejected_profile_hash(1, &version.engine_build, profile) {
+        Ok(value) => value,
+        Err(message) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Cache,
                 ),
                 elapsed_summary(started_at),
             );
@@ -665,6 +686,8 @@ fn execute_active_build(
         version.engine_version.clone(),
         version.engine_build.clone(),
         context_profile_hash,
+        rejected_profile_hash,
+        discovery_duration_ms,
         &clock,
     ) {
         Ok(input) => input,

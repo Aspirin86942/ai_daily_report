@@ -312,6 +312,16 @@ fn normalize_parser_result(
     let cache_write = (parse_status == ParseStatus::Success).then(|| CacheWriteRecord {
         file_identity: parsed.file.file_identity.clone(),
         source_version: parsed.file.source_version.clone(),
+        source_guard_kind: parsed
+            .file
+            .source_guard_kind
+            .clone()
+            .unwrap_or_else(|| "content_sha256_v1".to_string()),
+        source_guard_sha256: parsed
+            .file
+            .source_guard_sha256
+            .clone()
+            .unwrap_or_else(|| "0".repeat(64)),
         parse_profile_hash: parse_profile_hash.to_string(),
         content: content.clone(),
         content_sha256: content_sha256.clone(),
