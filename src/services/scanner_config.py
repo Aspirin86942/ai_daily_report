@@ -58,6 +58,24 @@ SCANNER_CONTRACT_FIELDS = (
     "summary_document_excerpt_max_chars",
 )
 
+# v2-only leaves（spec Part 8.1 表）。显式配置出现任一叶子即输出
+# schema_version=scanner_profile_v2；否则继续输出 v1。
+SCANNER_PROFILE_V2_ONLY_FIELDS = frozenset(
+    {
+        "max_candidate_files",
+        "max_pdf_text_extractions",
+        "max_total_pdf_classification_pages",
+        "admission_policy_version",
+        "classifier_policy_version",
+        "pdf_classification_timeout_ms",
+        "total_deadline_ms",
+        "session_concurrency",
+        "max_requests_per_session",
+        "session_idle_ttl_ms",
+        "session_rss_limit_bytes",
+    }
+)
+
 SCANNER_INFRASTRUCTURE_FIELDS = frozenset(
     {
         "rust_office_parser_bin",
@@ -93,10 +111,11 @@ def _to_builtin_value(value: Any) -> Any:
 
 
 def extract_scanner_profile(scanner_settings: Any) -> dict[str, Any]:
-    """提取调用方显式配置的 scanner v1 wire 叶子。
+    """提取调用方显式配置的 scanner wire 叶子。
 
-    Rust 是默认值和归一化的唯一所有者，因此这里不补默认值，也不携带
-    worker、数据库或进程路径。
+    显式配置出现任一 v2-only 叶子时输出 `schema_version=scanner_profile_v2`
+    （v1 叶子是 v2 的严格子集），否则继续输出 v1。Rust 是默认值和归一化的
+    唯一所有者，因此这里不补默认值，也不携带 worker、数据库或进程路径。
     """
     if isinstance(scanner_settings, Mapping):
         raw_items = scanner_settings.items()
@@ -109,16 +128,19 @@ def extract_scanner_profile(scanner_settings: Any) -> dict[str, Any]:
         str(key).strip().lower(): _to_builtin_value(value)
         for key, value in raw_items
     }
-    unknown = sorted(
-        set(present)
-        - set(SCANNER_CONTRACT_FIELDS)
-        - SCANNER_INFRASTRUCTURE_FIELDS
-    )
+    known_fields = set(SCANNER_CONTRACT_FIELDS) | SCANNER_PROFILE_V2_ONLY_FIELDS
+    unknown = sorted(set(present) - known_fields - SCANNER_INFRASTRUCTURE_FIELDS)
     if unknown:
         raise UnknownScannerContractFieldsError(unknown)
 
-    profile: dict[str, Any] = {"schema_version": "scanner_profile_v1"}
-    for key in SCANNER_CONTRACT_FIELDS:
+    has_v2_only = bool(set(present) & SCANNER_PROFILE_V2_ONLY_FIELDS)
+    schema_version = "scanner_profile_v2" if has_v2_only else "scanner_profile_v1"
+
+    profile: dict[str, Any] = {"schema_version": schema_version}
+    ordered_fields = tuple(SCANNER_CONTRACT_FIELDS) + tuple(
+        sorted(SCANNER_PROFILE_V2_ONLY_FIELDS)
+    )
+    for key in ordered_fields:
         if key in present:
             profile[key] = present[key]
     return profile
