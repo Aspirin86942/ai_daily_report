@@ -20,25 +20,24 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
-use crate::compressor::build_context;
-use crate::config::normalize_scanner_profile_for_request;
-use crate::context_audit::{
-    assemble_scan_audit, context_profile_hash, extension_metrics, rejected_profile_hash,
-    stage_metrics, InspectAuditError, LocalParserFingerprint, ScanAuditBundle, StageMetricInputs,
-};
+use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
+use crate::context_audit::{context_profile_hash, InspectAuditError};
 use crate::parsers::{
-    document, office, register_worker, register_worker_pair, ParserScheduler, RegisteredWorker,
-    WorkerCommand, WorkerRegistry, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
+    document, office, register_worker, register_worker_pair, RegisteredWorker, WorkerCommand,
+    WorkerRegistry, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
 };
-use crate::planner::{plan_candidates, PlanAction};
+use crate::parsers::classifier::ClassifierPort;
+use crate::scheduler::{
+    BudgetedContextScheduler, RealClock, RealGuardVerifier, ScheduledRunInput, WorkerIdentities,
+};
+use crate::scheduler_adapter::{ProductionParser, StoreCachePort};
 use crate::source_guard::{
     compute_source_guard, source_guard_kind_text, SourceGuardKind, SourceGuardV2,
 };
 use crate::store::{
     canonical_envelope_json, current_time_millis, ActiveRun, AttemptRuntime, BeginRunOutcome,
-    CacheLookup, ContextDecisionRecord, ContextRunRecord, DiagnosticSeverity, FinalizationBatch,
-    RouteStackFingerprint, RouteStackFingerprints, RunDiagnosticRecord, ScannerStore, StoreError,
-    WorkerFingerprint, HEARTBEAT_INTERVAL_MS,
+    DiagnosticSeverity, FinalizationBatch, RouteStackFingerprint, RouteStackFingerprints,
+    RunDiagnosticRecord, ScannerStore, StoreError, WorkerFingerprint, HEARTBEAT_INTERVAL_MS,
 };
 
 #[derive(Debug, Error)]
@@ -365,6 +364,24 @@ fn build_context_command(request: &BuildContextRequest) -> Result<CommandOutput,
             );
         }
     };
+    let v2_profile = match normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode) {
+        Ok(profile) => profile,
+        Err(message) => {
+            return build_error_output(
+                request,
+                &version,
+                diagnostic(
+                    ErrorCode::InvalidRequest,
+                    message,
+                    false,
+                    DiagnosticStage::Request,
+                ),
+                Vec::new(),
+                empty_summary(),
+                None,
+            );
+        }
+    };
     let canonical = match ScannerStore::canonicalize_request(request, &profile) {
         Ok(canonical) => canonical,
         Err(error) => {
@@ -439,6 +456,7 @@ fn build_context_command(request: &BuildContextRequest) -> Result<CommandOutput,
         request,
         &version,
         &profile,
+        &v2_profile,
         &work_dir,
         &mut store,
         &active,
@@ -452,12 +470,14 @@ fn execute_active_build(
     request: &BuildContextRequest,
     version: &VersionResponse,
     profile: &ai_daily_scanner_contract::NormalizedScannerProfileV1,
+    v2_profile: &ai_daily_scanner_contract::NormalizedScannerProfileV2,
     work_dir: &Path,
     store: &mut ScannerStore,
     active: &ActiveRun,
     heartbeat: &mut LeaseHeartbeat,
     started_at: Instant,
 ) -> Result<CommandOutput, EngineShellError> {
+    // ---- bounded parallel worker handshakes (spec Solution run.rs order) ----
     let office_command = office::worker_command(&request.adapters);
     let python_command = document::worker_command(&request.adapters);
     let (office_result, python_result) =
@@ -532,28 +552,29 @@ fn execute_active_build(
         office: Some(office_worker.clone()),
         python_document: Some(python_worker.clone()),
     };
-    let route_stacks =
-        match route_stack_fingerprints(version, profile, &office_worker, &python_worker) {
-            Ok(value) => value,
-            Err(message) => {
-                return finish_active_error(
-                    request,
-                    version,
-                    store,
-                    active,
-                    heartbeat,
-                    Vec::new(),
-                    diagnostic(
-                        ErrorCode::InternalError,
-                        message,
-                        false,
-                        DiagnosticStage::Cache,
-                    ),
-                    elapsed_summary(started_at),
-                );
-            }
-        };
+    let route_stacks = match route_stack_fingerprints(version, profile, &office_worker, &python_worker)
+    {
+        Ok(value) => value,
+        Err(message) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                Vec::new(),
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Cache,
+                ),
+                elapsed_summary(started_at),
+            );
+        }
+    };
 
+    // ---- discovery (with engine-owned SourceGuardV2) ----
     let discovery_started = Instant::now();
     let mut discovery = match discover_with_timeout(work_dir, request, profile) {
         Ok(report) => report,
@@ -572,72 +593,24 @@ fn execute_active_build(
             );
         }
     };
-    let discovery_duration_ms = elapsed_ms(discovery_started);
-    let discovered_count = discovery.files.len() as u64;
     let mut warnings: Vec<Diagnostic> = discovery
         .issues
         .iter()
         .map(discovery_issue_diagnostic)
         .collect();
-
-    // Engine-owned SourceGuardV2: every discovered file gets its content
-    // identity here, before cache/snapshot identity is consumed. An I/O hard
-    // failure on a just-discovered file stays unavailable so the scheduler
-    // fails that file closed with SOURCE_GUARD_UNAVAILABLE instead of guessing.
     attach_source_guards(&mut discovery.files);
 
-    let planned = plan_candidates(discovery.files, profile);
-    let cache_started = Instant::now();
-    let cache_plan = match store.attach_cache_evidence(planned, profile, &route_stacks) {
-        Ok(value) => value,
-        Err(error) => {
-            let mut summary = elapsed_summary(started_at);
-            summary.source_file_count = discovered_count;
-            summary.discovery_duration_ms = discovery_duration_ms;
-            return finish_active_error(
-                request,
-                version,
-                store,
-                active,
-                heartbeat,
-                warnings,
-                error.diagnostic(DiagnosticStage::Cache),
-                summary,
-            );
-        }
-    };
-    let cache_duration_ms = elapsed_ms(cache_started);
-    let parse_candidates: Vec<_> = cache_plan
-        .iter()
-        .filter(|entry| {
-            matches!(entry.planned.action, PlanAction::Parse(_))
-                && matches!(entry.cache_lookup, Some(CacheLookup::Miss(_)))
-        })
-        .map(|entry| entry.planned.clone())
-        .collect();
-    let parsed_item_count = parse_candidates.len() as u64;
-    let parse_started = Instant::now();
-    let parser = ParserScheduler::from_registry(profile, registry);
-    let parsed = match parser.parse_planned_files(&parse_candidates) {
-        Ok(value) => value,
-        Err(error) => {
-            let mut summary = elapsed_summary(started_at);
-            summary.source_file_count = cache_plan.len() as u64;
-            summary.discovery_duration_ms = discovery_duration_ms;
-            return finish_active_error(
-                request,
-                version,
-                store,
-                active,
-                heartbeat,
-                warnings,
-                error.diagnostic,
-                summary,
-            );
-        }
-    };
-    let parse_duration_ms = elapsed_ms(parse_started);
-    let rejected_hash = match rejected_profile_hash(1, &version.engine_build, profile) {
+    // ---- assemble + execute the deep-module scheduler ----
+    let classifier_command = document::worker_command(&request.adapters);
+    let classifier_port = ClassifierPort::new(classifier_command);
+    let parser_port = ProductionParser::new(profile, registry);
+    let cache_port = StoreCachePort::new(
+        PathBuf::from(&request.scan_db_path),
+        route_stacks,
+        profile.clone(),
+    );
+    let clock = RealClock::new();
+    let context_profile_hash = match context_profile_hash(1, &version.engine_build, profile) {
         Ok(value) => value,
         Err(message) => {
             return finish_active_error(
@@ -649,79 +622,6 @@ fn execute_active_build(
                 warnings,
                 diagnostic(
                     ErrorCode::InternalError,
-                    message,
-                    false,
-                    DiagnosticStage::Cache,
-                ),
-                elapsed_summary(started_at),
-            );
-        }
-    };
-    let local_parser = LocalParserFingerprint {
-        contract: version.contract.clone(),
-        version: version.engine_version.clone(),
-        build: version.engine_build.clone(),
-    };
-    let audit =
-        match assemble_scan_audit(cache_plan, parsed, work_dir, &rejected_hash, &local_parser) {
-            Ok(value) => value,
-            Err(message) => {
-                return finish_active_error(
-                    request,
-                    version,
-                    store,
-                    active,
-                    heartbeat,
-                    warnings,
-                    diagnostic(
-                        ErrorCode::InternalError,
-                        message,
-                        false,
-                        DiagnosticStage::Internal,
-                    ),
-                    elapsed_summary(started_at),
-                );
-            }
-        };
-    warnings.extend(audit.degradation_diagnostics.clone());
-    if warnings.len() > 100_000 {
-        return finish_active_error(
-            request,
-            version,
-            store,
-            active,
-            heartbeat,
-            Vec::new(),
-            diagnostic(
-                ErrorCode::InternalError,
-                "scanner produced too many diagnostics".to_string(),
-                false,
-                DiagnosticStage::Internal,
-            ),
-            elapsed_summary(started_at),
-        );
-    }
-
-    let ScanAuditBundle {
-        inventory,
-        cache_writes,
-        file_results,
-        context_evidence,
-        degradation_diagnostics: _,
-    } = audit;
-    let context_started = Instant::now();
-    let compressed = match build_context(context_evidence, &profile.context, request.report_mode) {
-        Ok(value) => value,
-        Err(message) => {
-            return finish_active_error(
-                request,
-                version,
-                store,
-                active,
-                heartbeat,
-                warnings,
-                diagnostic(
-                    ErrorCode::ContextBudgetInvalid,
                     message,
                     false,
                     DiagnosticStage::Context,
@@ -730,85 +630,82 @@ fn execute_active_build(
             );
         }
     };
-    let context_duration_ms = elapsed_ms(context_started);
-    heartbeat.stop();
-    if let Some(error) = heartbeat.take_background_error() {
-        warnings.push(diagnostic(
-            ErrorCode::CacheWriteFailed,
-            format!("lease heartbeat recovered after a transient failure: {error}"),
-            true,
-            DiagnosticStage::Cache,
-        ));
-    }
-
-    let extension_metrics = match extension_metrics(&inventory, &file_results) {
+    let started_at_ms = match current_time_millis() {
         Ok(value) => value,
-        Err(message) => {
-            return persist_active_error_without_heartbeat(
+        Err(error) => {
+            return finish_active_error(
                 request,
                 version,
                 store,
                 active,
+                heartbeat,
                 warnings,
-                diagnostic(
-                    ErrorCode::InternalError,
-                    message,
-                    false,
-                    DiagnosticStage::Internal,
-                ),
+                error.diagnostic(DiagnosticStage::Internal),
                 elapsed_summary(started_at),
             );
         }
     };
-    let stage_metrics = stage_metrics(StageMetricInputs {
-        source_file_count: inventory.len() as u64,
-        cache_item_count: inventory.len() as u64,
-        parsed_item_count,
-        context_item_count: compressed.decisions.len() as u64,
-        discovery_duration_ms,
-        cache_duration_ms,
-        parse_duration_ms,
-        context_duration_ms,
-    });
-    let total_duration_ms = elapsed_ms(started_at);
-    let summary = ContextSummary {
-        source_file_count: compressed.source_file_count,
-        success_count: compressed.success_count,
-        timeout_count: compressed.timeout_count,
-        included_file_count: compressed.included_file_count,
-        omitted_file_count: compressed.omitted_file_count,
-        error_file_count: compressed.error_file_count,
-        input_chars: compressed.input_chars,
-        output_chars: compressed.output_chars,
-        total_duration_ms,
-        discovery_duration_ms,
-        parse_duration_ms,
-        compression_duration_ms: context_duration_ms,
+    let worker_identities = WorkerIdentities {
+        office_contract: Some(office_worker.identity.worker_contract_version.clone()),
+        office_version: Some(office_worker.identity.worker_version.clone()),
+        office_build: Some(office_worker.identity.worker_build.clone()),
+        python_contract: Some(python_worker.identity.worker_contract_version.clone()),
+        python_version: Some(python_worker.identity.worker_version.clone()),
+        python_build: Some(python_worker.identity.worker_build.clone()),
+        classifier_build: Some(python_worker.identity.worker_build.clone()),
     };
-    let run_status = if warnings.is_empty() {
-        RunStatus::Success
-    } else {
-        RunStatus::Partial
+    let input = match ScheduledRunInput::new(
+        active.scan_run_id(),
+        started_at_ms,
+        work_dir.to_string_lossy().into_owned(),
+        discovery.files,
+        discovery.issues,
+        v2_profile.clone(),
+        worker_identities,
+        version.engine_version.clone(),
+        version.engine_build.clone(),
+        context_profile_hash,
+        &clock,
+    ) {
+        Ok(input) => input,
+        Err(failure) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                failure.diagnostic,
+                elapsed_summary(started_at),
+            );
+        }
     };
-    let engine_status = if run_status == RunStatus::Success {
-        EngineStatus::Ok
-    } else {
-        EngineStatus::Partial
+    let scheduler = BudgetedContextScheduler::new(
+        Box::new(classifier_port),
+        Box::new(parser_port),
+        Box::new(cache_port),
+        Box::new(clock),
+        Box::new(RealGuardVerifier),
+    );
+    let outcome = match scheduler.execute(input) {
+        Ok(outcome) => outcome,
+        Err(failure) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                failure.diagnostic,
+                elapsed_summary(started_at),
+            );
+        }
     };
-    let envelope = ContextEnvelope {
-        contract: "ai_daily_context".to_string(),
-        protocol_version: 1,
-        request_id: request.request_id.clone(),
-        engine_version: version.engine_version.clone(),
-        engine_build: version.engine_build.clone(),
-        status: engine_status,
-        file_context: compressed.content.clone(),
-        summary: summary.clone(),
-        scan_run_id: Nullable(Some(active.scan_run_id())),
-        context_run_id: Nullable(Some(active.context_run_id())),
-        warnings: warnings.clone(),
-        error: Nullable(None),
-    };
+
+    // ---- terminal finalization (the ONLY linearization point) ----
+    let (envelope, run_status) = scheduler_outcome_envelope(request, version, active, &outcome);
     let envelope_json = match canonical_envelope_json(&envelope) {
         Ok(value) => value,
         Err(error) => {
@@ -819,63 +716,34 @@ fn execute_active_build(
                 active,
                 warnings,
                 error.diagnostic(DiagnosticStage::Internal),
-                summary,
+                outcome
+                    .context
+                    .as_ref()
+                    .map(|context| context.summary.clone())
+                    .unwrap_or_else(empty_summary),
             );
         }
     };
-    let profile_hash = match context_profile_hash(1, &version.engine_build, profile) {
-        Ok(value) => value,
-        Err(message) => {
-            return persist_active_error_without_heartbeat(
-                request,
-                version,
-                store,
-                active,
-                warnings,
-                diagnostic(
-                    ErrorCode::InternalError,
-                    message,
-                    false,
-                    DiagnosticStage::Context,
-                ),
-                summary,
-            );
-        }
-    };
-    let context_decisions = compressed
-        .decisions
-        .into_iter()
-        .map(|record| ContextDecisionRecord {
-            file_identity: record.file_identity,
-            decision: record.decision,
-        })
-        .collect();
-    let diagnostics = warnings
-        .iter()
-        .cloned()
-        .map(|diagnostic| RunDiagnosticRecord {
-            severity: DiagnosticSeverity::Warning,
-            diagnostic,
-        })
-        .collect();
     let batch = FinalizationBatch {
         status: run_status,
         envelope_json: envelope_json.clone(),
-        inventory,
-        cache_writes,
-        file_results,
-        diagnostics,
-        stage_metrics,
-        extension_metrics,
-        context: Some(ContextRunRecord {
-            context_profile_hash: profile_hash,
-            status: run_status,
-            final_context: compressed.content.clone(),
-            context_sha256: crate::store::sha256_hex(compressed.content.as_bytes()),
-            summary,
-            decisions: context_decisions,
-        }),
+        inventory: outcome.inventory,
+        cache_writes: outcome.parse_cache_receipts,
+        file_results: outcome.file_results,
+        diagnostics: outcome.diagnostics,
+        stage_metrics: outcome.stage_metrics,
+        extension_metrics: outcome.extension_metrics,
+        context: outcome.context,
     };
+    heartbeat.stop();
+    if let Some(error) = heartbeat.take_background_error() {
+        warnings.push(diagnostic(
+            ErrorCode::CacheWriteFailed,
+            format!("lease heartbeat recovered after a transient failure: {error}"),
+            true,
+            DiagnosticStage::Cache,
+        ));
+    }
     let finalize_now_ms = match current_time_millis() {
         Ok(value) => value,
         Err(error) => {
@@ -893,8 +761,9 @@ fn execute_active_build(
             );
         }
     };
+    let exit_code = i32::from(run_status == RunStatus::Error);
     match store.finalize(active, &batch, finalize_now_ms) {
-        Ok(()) => CommandOutput::canonical_json(envelope_json, 0),
+        Ok(()) => CommandOutput::canonical_json(envelope_json, exit_code),
         Err(error) => build_error_output(
             request,
             version,
@@ -910,6 +779,63 @@ fn execute_active_build(
     }
 }
 
+/// Rebuilds the frozen `ContextEnvelope` from a scheduler outcome. The caller
+/// must not re-decide actions/counts/admission; this only projects the outcome
+/// onto the envelope shape and the terminal record.
+fn scheduler_outcome_envelope(
+    request: &BuildContextRequest,
+    version: &VersionResponse,
+    active: &ActiveRun,
+    outcome: &crate::scheduler::BudgetedScanOutcome,
+) -> (ContextEnvelope, RunStatus) {
+    let run_status = match outcome.terminal_intent {
+        crate::scheduler::TerminalIntent::Success => RunStatus::Success,
+        crate::scheduler::TerminalIntent::Partial => RunStatus::Partial,
+        crate::scheduler::TerminalIntent::Error => RunStatus::Error,
+    };
+    let engine_status = match run_status {
+        RunStatus::Success => EngineStatus::Ok,
+        RunStatus::Partial => EngineStatus::Partial,
+        RunStatus::Error => EngineStatus::Error,
+        RunStatus::Running | RunStatus::Abandoned => EngineStatus::Error,
+    };
+    let warnings: Vec<Diagnostic> = outcome
+        .diagnostics
+        .iter()
+        .filter(|record| record.severity == DiagnosticSeverity::Warning)
+        .map(|record| record.diagnostic.clone())
+        .take(100_000)
+        .collect();
+    let error: Option<Diagnostic> = outcome
+        .diagnostics
+        .iter()
+        .filter(|record| record.severity == DiagnosticSeverity::Error)
+        .map(|record| record.diagnostic.clone())
+        .next();
+    let (file_context, summary, context_run_id) = match &outcome.context {
+        Some(context) => (
+            context.final_context.clone(),
+            context.summary.clone(),
+            Some(active.context_run_id()),
+        ),
+        None => (String::new(), empty_summary(), None),
+    };
+    let envelope = ContextEnvelope {
+        contract: "ai_daily_context".to_string(),
+        protocol_version: 1,
+        request_id: request.request_id.clone(),
+        engine_version: version.engine_version.clone(),
+        engine_build: version.engine_build.clone(),
+        status: engine_status,
+        file_context,
+        summary,
+        scan_run_id: Nullable(Some(active.scan_run_id())),
+        context_run_id: Nullable(context_run_id),
+        warnings,
+        error: Nullable(error),
+    };
+    (envelope, run_status)
+}
 fn validate_build_work_dir(work_dir: &str) -> Result<PathBuf, Diagnostic> {
     let path = Path::new(work_dir);
     let metadata = fs::metadata(path).map_err(|error| {

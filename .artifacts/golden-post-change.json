@@ -1,0 +1,114 @@
+{
+  "tag": "post-change",
+  "corpus_manifest": {
+    "count": 4,
+    "files": [
+      "data\\over_budget.md",
+      "notes\\history.md",
+      "notes\\meeting.md",
+      "report.txt"
+    ],
+    "extensions": [
+      ".md",
+      ".txt"
+    ]
+  },
+  "context_sha256": "f5210073422440a667a3c3045bcce19a4c37aff3e91b387204476700ee709017",
+  "context_output_chars": 3152,
+  "summary": {
+    "source_file_count": 4,
+    "success_count": 3,
+    "timeout_count": 0,
+    "included_file_count": 3,
+    "omitted_file_count": 1,
+    "error_file_count": 0,
+    "input_chars": 2099300,
+    "output_chars": 3152
+  },
+  "included": [
+    "notes\\history.md",
+    "notes\\meeting.md",
+    "report.txt"
+  ],
+  "omitted": [
+    "data\\over_budget.md"
+  ],
+  "error_files": [],
+  "reason_sets": {
+    "included_reasons": [
+      "medium_text_compress",
+      "small_file_keep"
+    ],
+    "omitted_reasons": [
+      "file_size_policy"
+    ],
+    "error_reasons": []
+  },
+  "parse_order": [
+    "data\\over_budget.md",
+    "notes\\history.md",
+    "notes\\meeting.md",
+    "report.txt"
+  ],
+  "decisions": [
+    {
+      "identity_hash": "2af04ca25801882dda185d27bb6636bc1b7eae9be69bb3f962198305441195c8",
+      "relative_path": "data\\over_budget.md",
+      "action": "omit",
+      "reason": "file_size_policy",
+      "priority": 30,
+      "input_chars": 2097152,
+      "output_chars": 0,
+      "truncated": false,
+      "error_code": "",
+      "parse_status": "not_parsed",
+      "parser_backend": "not_parsed"
+    },
+    {
+      "identity_hash": "421714439a16d1173bfdf17c5c02b433e5ff29b658f8b83117ddaf92f6c5b974",
+      "relative_path": "notes\\history.md",
+      "action": "compress",
+      "reason": "medium_text_compress",
+      "priority": 30,
+      "input_chars": 2000,
+      "output_chars": 2000,
+      "truncated": true,
+      "error_code": "",
+      "parse_status": "success",
+      "parser_backend": "light_text_v1"
+    },
+    {
+      "identity_hash": "68a1a4fcfd436832937fcd46f88f9947efef909c2fa615a2f0cbd350225b53da",
+      "relative_path": "notes\\meeting.md",
+      "action": "keep",
+      "reason": "small_file_keep",
+      "priority": 30,
+      "input_chars": 74,
+      "output_chars": 74,
+      "truncated": false,
+      "error_code": "",
+      "parse_status": "success",
+      "parser_backend": "light_text_v1"
+    },
+    {
+      "identity_hash": "a88632934b1e19176967e92c8b9521d1d2ad4c5c406b5cf2d3ea76a8e4bb2093",
+      "relative_path": "report.txt",
+      "action": "keep",
+      "reason": "small_file_keep",
+      "priority": 30,
+      "input_chars": 74,
+      "output_chars": 74,
+      "truncated": false,
+      "error_code": "",
+      "parse_status": "success",
+      "parser_backend": "light_text_v1"
+    }
+  ],
+  "pre_change_order_evidence": {
+    "file": "data\\over_budget.md",
+    "parse_status": "not_parsed",
+    "assigned_priority": 30,
+    "bug": false,
+    "note": "legacy decide_files maps every non-Success status to priority 80"
+  }
+}

@@ -32,7 +32,15 @@ fn evidence(path: &str, extension: &str, content: &str) -> ContextFileEvidence {
         parse_status: ParseStatus::Success,
         truncated: false,
         error: None,
+        reason: None,
     }
+}
+
+fn not_parsed(path: &str, extension: &str, reason: &str) -> ContextFileEvidence {
+    let mut item = evidence(path, extension, "");
+    item.parse_status = ParseStatus::NotParsed;
+    item.reason = Some(reason.to_string());
+    item
 }
 
 fn parse_error(path: &str) -> ContextFileEvidence {
@@ -80,18 +88,23 @@ fn golden_keep_compress_metadata_only_and_error_actions_are_frozen() {
             )
         })
         .collect();
+    // spec Part 1.1: an Error file keeps its nominal priority (30 for .md), so
+    // broken.md sorts with the other priority-30 text files (broken < notes).
     assert_eq!(
         actions,
         vec![
             ("book.xlsx", ContextAction::MetadataOnly),
+            ("broken.md", ContextAction::Error),
             ("notes\\large.md", ContextAction::Compress),
             ("notes\\small.md", ContextAction::Keep),
-            ("broken.md", ContextAction::Error),
         ]
     );
     assert!(!result.content.contains("sensitive body"));
     assert!(result.content.contains("daily evidence"));
-    assert!(result.content.contains("synthetic parser failure"));
+    // spec Part 1.3: file_context renders only the bounded error code, never
+    // the arbitrary Diagnostic message.
+    assert!(result.content.contains("PARSER_FAILED"));
+    assert!(!result.content.contains("synthetic parser failure"));
     assert_eq!(result.included_file_count, 3);
     assert_eq!(result.omitted_file_count, 0);
     assert_eq!(result.error_file_count, 1);
@@ -165,12 +178,70 @@ fn golden_office_pdf_error_priority_and_path_tie_break_are_frozen() {
             "error.md",
         ]
     );
+    // spec Part 1.1/2.2: parse status NEVER changes the position; the error file
+    // keeps nominal priority 30 for .md (the legacy priority-80 jump is removed).
     let priorities: Vec<_> = result
         .decisions
         .iter()
         .map(|record| record.decision.priority)
         .collect();
-    assert_eq!(priorities, vec![20, 20, 30, 30, 80]);
+    assert_eq!(priorities, vec![20, 20, 30, 30, 30]);
+}
+
+#[test]
+fn golden_not_parsed_is_omit_with_reason_and_no_error() {
+    // spec Part 2.2: NotParsed (semantic/policy) -> omit + budget reason,
+    // no error Diagnostic, derived not_parsed count, nominal priority.
+    let result = build_context(
+        vec![
+            evidence("a.md", ".md", "a"),
+            not_parsed("b.md", ".md", "semantic_file_quota_exhausted"),
+            not_parsed("c.pdf", ".pdf", "pdf_classification_page_quota_exhausted"),
+        ],
+        &profile(4_000, 200),
+        ReportMode::Daily,
+    )
+    .expect("golden context");
+
+    let by_path: Vec<_> = result
+        .decisions
+        .iter()
+        .map(|record| {
+            (
+                record.decision.relative_path.as_str(),
+                record.decision.action,
+                record.decision.reason.as_str(),
+                record.decision.error_code.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        by_path,
+        vec![
+            (
+                "c.pdf",
+                ContextAction::Omit,
+                "pdf_classification_page_quota_exhausted",
+                ""
+            ),
+            ("a.md", ContextAction::Keep, "small_file_keep", ""),
+            (
+                "b.md",
+                ContextAction::Omit,
+                "semantic_file_quota_exhausted",
+                ""
+            ),
+        ]
+    );
+    assert_eq!(result.success_count, 1);
+    assert_eq!(result.included_file_count, 1);
+    assert_eq!(result.omitted_file_count, 2);
+    assert_eq!(result.error_file_count, 0);
+    assert_eq!(result.timeout_count, 0);
+    // omitted rows appear in the omitted summary
+    assert!(result.content.contains("## 省略文件摘要"));
+    assert!(result.content.contains("semantic_file_quota_exhausted"));
+    assert!(result.content.contains("pdf_classification_page_quota_exhausted"));
 }
 
 #[test]

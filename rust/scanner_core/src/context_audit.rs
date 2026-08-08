@@ -113,6 +113,7 @@ pub fn assemble_scan_audit(
                     parse_status: ParseStatus::NotParsed,
                     truncated: false,
                     error: Some(diagnostic.clone()),
+                    reason: None,
                 });
                 degradation_diagnostics.push(diagnostic);
             }
@@ -154,6 +155,7 @@ pub fn assemble_scan_audit(
                     parse_status: ParseStatus::Success,
                     truncated: cached.truncated,
                     error: None,
+                    reason: None,
                 });
             }
             (PlanAction::Parse(_), Some(CacheLookup::Miss(reason))) => {
@@ -353,6 +355,7 @@ fn normalize_parser_result(
         parse_status,
         truncated,
         error: final_error,
+        reason: None,
     };
     Ok(NormalizedParserResult {
         cache_write,
@@ -403,9 +406,13 @@ pub fn extension_metrics(
                 metric.timeout_count =
                     checked_add(metric.timeout_count, 1, "extension timeout count")?;
             }
-            ParseStatus::Error | ParseStatus::NotParsed => {
+            // spec Part 2.2: extension `error_count` counts ONLY ParseStatus::Error;
+            // NotParsed never enters the error metric. The derived not_parsed count
+            // is `file_count - success - error - timeout`.
+            ParseStatus::Error => {
                 metric.error_count = checked_add(metric.error_count, 1, "extension error count")?;
             }
+            ParseStatus::NotParsed => {}
         }
     }
     let metrics: Vec<_> = grouped.into_values().collect();
@@ -1137,7 +1144,19 @@ fn validate_relational_summary(
         .iter()
         .filter(|file| file.parse_status == ParseStatus::Timeout)
         .count() as u64;
-    let error_count = files.len() as u64 - success_count - timeout_count;
+    let error_count = files
+        .iter()
+        .filter(|file| file.parse_status == ParseStatus::Error)
+        .count() as u64;
+    let not_parsed_count = files
+        .len()
+        .checked_sub(success_count as usize)
+        .and_then(|value| value.checked_sub(timeout_count as usize))
+        .and_then(|value| value.checked_sub(error_count as usize))
+        .map(|value| value as u64)
+        .ok_or_else(|| {
+            InspectAuditError::RunCorrupt("file status counts overflow".to_string())
+        })?;
     let included_count = decisions
         .iter()
         .filter(|record| {
@@ -1184,6 +1203,11 @@ fn validate_relational_summary(
         || summary.error_file_count != error_count
         || summary.included_file_count != included_count
         || summary.omitted_file_count != omitted_count
+        // spec Part 2.2 count equations:
+        //   included = success, omitted = derived not_parsed,
+        //   decision_error = error + timeout, and every file has one decision.
+        || included_count != success_count
+        || omitted_count != not_parsed_count
         || decision_error_count != error_count + timeout_count
         || included_count + omitted_count + decision_error_count != decisions.len() as u64
         || summary.input_chars != input_chars
@@ -1316,7 +1340,7 @@ fn empty_context_summary() -> ContextSummary {
     }
 }
 
-fn relative_contract_path(work_dir: &Path, absolute_path: &str) -> Result<String, String> {
+pub(crate) fn relative_contract_path(work_dir: &Path, absolute_path: &str) -> Result<String, String> {
     let absolute = Path::new(absolute_path);
     let relative = absolute
         .strip_prefix(work_dir)

@@ -579,6 +579,7 @@ fn evidence(path: &str, extension: &str, content: &str) -> ai_daily_scanner_core
         parse_status: ParseStatus::Success,
         truncated: false,
         error: None,
+        reason: None,
     }
 }
 
@@ -646,12 +647,862 @@ fn compressor_still_renders_golden_keep_compress_metadata_error() {
         actions,
         vec![
             ("book.xlsx", ContextAction::MetadataOnly),
+            ("broken.md", ContextAction::Error),
             ("notes\\large.md", ContextAction::Compress),
             ("notes\\small.md", ContextAction::Keep),
-            ("broken.md", ContextAction::Error),
         ]
     );
     assert_eq!(result.included_file_count, 3);
     assert_eq!(result.omitted_file_count, 0);
     assert_eq!(result.error_file_count, 1);
+}
+
+// ===========================================================================
+// BudgetedContextScheduler (spec Solution/Part 2): cache-independent
+// determinism, NotParsed count equations, and deadline terminal states.
+// ===========================================================================
+
+use ai_daily_discovery::DiscoveredFileOut;
+use ai_daily_scanner_core::fallback::ParseFailure;
+use ai_daily_scanner_core::parsers::classifier::PdfClassifierPort;
+use ai_daily_scanner_core::scheduler::{
+    BudgetedContextScheduler, CachePort, CachePortError, Clock, GuardVerifier, ParseLookupOutcome,
+    ParseRequest, ParseResult, ParserPort, ScheduledRunInput, TerminalIntent, WorkerIdentities,
+};
+use ai_daily_scanner_core::store::{
+    CacheEntry, CacheWriteRecord, ClassificationCacheLookup, ClassificationCacheWriteRecord,
+    InventoryRecord,
+};
+use ai_daily_scanner_contract::{
+    CacheMissReason, PdfClassifierRequestV1, PdfClassifierResultStatus, PdfClassifierResultV1,
+};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+#[derive(Debug, Clone)]
+struct FakeClock {
+    now: Arc<Mutex<u64>>,
+}
+
+impl FakeClock {
+    fn new() -> Self {
+        Self {
+            now: Arc::new(Mutex::new(0)),
+        }
+    }
+    fn advance(&self, ms: u64) {
+        *self.now.lock().unwrap() += ms;
+    }
+}
+
+impl Clock for FakeClock {
+    fn now_ms(&self) -> u64 {
+        *self.now.lock().unwrap()
+    }
+}
+
+#[derive(Debug, Default)]
+struct TestCache {
+    parse: HashMap<String, CacheEntry>,
+    classification: HashMap<String, ClassificationCacheLookup>,
+    existed: HashSet<String>,
+    parse_lookups: Arc<Mutex<u64>>,
+}
+
+impl TestCache {
+    fn fresh_parse(identity: &str, content: &str) -> CacheEntry {
+        CacheEntry {
+            content: content.to_string(),
+            content_sha256: ai_daily_scanner_core::store::sha256_hex(content.as_bytes()),
+            parser_backend: "light_text_v1".to_string(),
+            worker_lane: "rust_core".to_string(),
+            truncated: false,
+            worker_contract_version: "ai_daily_worker_v1".to_string(),
+            worker_version: "0.1.0".to_string(),
+            worker_build: "engine-test".to_string(),
+        }
+    }
+}
+
+impl CachePort for TestCache {
+    fn prepare_inventory(
+        &self,
+        _scan_run_id: u64,
+        _now_ms: u64,
+        records: &[InventoryRecord],
+    ) -> Result<HashSet<String>, CachePortError> {
+        let existed = records
+            .iter()
+            .filter(|record| self.existed.contains(&record.file_identity))
+            .map(|record| record.file_identity.clone())
+            .collect();
+        Ok(existed)
+    }
+
+    fn lookup_parse(
+        &self,
+        file: &DiscoveredFileOut,
+        _route: ai_daily_scanner_core::budget_model::RouteKind,
+        _inventory_existed_before: bool,
+    ) -> Result<ParseLookupOutcome, CachePortError> {
+        *self.parse_lookups.lock().unwrap() += 1;
+        let profile_hash = "c".repeat(64);
+        let outcome = match self.parse.get(&file.file_identity) {
+            Some(entry) => ai_daily_scanner_core::store::CacheLookup::Fresh(entry.clone()),
+            None => ai_daily_scanner_core::store::CacheLookup::Miss(CacheMissReason::NewFile),
+        };
+        Ok(ParseLookupOutcome {
+            parse_profile_hash: profile_hash,
+            lookup: outcome,
+        })
+    }
+
+    fn lookup_classification(
+        &self,
+        file: &DiscoveredFileOut,
+        _classifier_profile_hash: &str,
+        _classifier_build: &str,
+        _inventory_existed_before: bool,
+    ) -> Result<ClassificationCacheLookup, CachePortError> {
+        Ok(self
+            .classification
+            .get(&file.file_identity)
+            .cloned()
+            .unwrap_or(ClassificationCacheLookup::Miss(
+                ai_daily_scanner_core::store::ClassificationCacheMissReason::NewFile,
+            )))
+    }
+
+    fn write_parse(
+        &self,
+        _now_ms: u64,
+        _records: &[CacheWriteRecord],
+    ) -> Result<(), CachePortError> {
+        Ok(())
+    }
+
+    fn write_classification(
+        &self,
+        _now_ms: u64,
+        _records: &[ClassificationCacheWriteRecord],
+    ) -> Result<(), CachePortError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TestParser {
+    results: HashMap<String, ParseResult>,
+}
+
+impl ParserPort for TestParser {
+    fn parse(&self, request: &ParseRequest) -> ParseResult {
+        self.results
+            .get(&request.file.file_identity)
+            .cloned()
+            .unwrap_or_else(|| ParseResult {
+                file_identity: request.file.file_identity.clone(),
+                content: String::new(),
+                parser_backend: "light_text_v1".to_string(),
+                worker_lane: "rust_core".to_string(),
+                truncated: false,
+                content_sha256: ai_daily_scanner_core::store::sha256_hex(b""),
+                parse_status: ParseStatus::Error,
+                error: Some(Diagnostic {
+                    error_code: ErrorCode::ParserFailed,
+                    message: "missing test parse result".to_string(),
+                    retryable: false,
+                    stage: DiagnosticStage::Parse,
+                    file_path: Nullable(Some(request.file.path.clone())),
+                    backend: Nullable(Some(request.route.backend().to_string())),
+                }),
+                failure_class: "deterministic".to_string(),
+                fallback_backend: String::new(),
+                fallback_reason_code: String::new(),
+                primary_duration_ms: 0,
+                fallback_duration_ms: 0,
+                parse_duration_ms: 0,
+            })
+    }
+}
+
+fn success_parse(identity: &str, path: &str, content: &str) -> ParseResult {
+    let _ = path;
+    ParseResult {
+        file_identity: identity.to_string(),
+        content: content.to_string(),
+        parser_backend: "light_text_v1".to_string(),
+        worker_lane: "rust_core".to_string(),
+        truncated: false,
+        content_sha256: ai_daily_scanner_core::store::sha256_hex(content.as_bytes()),
+        parse_status: ParseStatus::Success,
+        error: None,
+        failure_class: String::new(),
+        fallback_backend: String::new(),
+        fallback_reason_code: String::new(),
+        primary_duration_ms: 1,
+        fallback_duration_ms: 0,
+        parse_duration_ms: 1,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TestClassifier {
+    results: HashMap<String, PdfClassifierResultV1>,
+}
+
+impl PdfClassifierPort for TestClassifier {
+    fn classify_pdf(
+        &self,
+        request: &PdfClassifierRequestV1,
+        _timeout: Duration,
+    ) -> Result<PdfClassifierResultV1, ParseFailure> {
+        self.results
+            .get(&request.file_path)
+            .cloned()
+            .ok_or_else(|| ParseFailure {
+                class: ai_daily_scanner_core::fallback::FailureClass::Deterministic,
+                diagnostic: Diagnostic {
+                    error_code: ErrorCode::InternalError,
+                    message: "missing test classifier result".to_string(),
+                    retryable: false,
+                    stage: DiagnosticStage::Internal,
+                    file_path: Nullable(None),
+                    backend: Nullable(None),
+                },
+            })
+    }
+}
+
+#[derive(Debug)]
+struct PassGuard;
+
+impl GuardVerifier for PassGuard {
+    fn verify(
+        &self,
+        _path: &str,
+        _expected: &ai_daily_scanner_core::source_guard::SourceGuardV2,
+    ) -> bool {
+        true
+    }
+}
+
+fn discovered(rel: &str, ext: &str, size: u64) -> DiscoveredFileOut {
+    DiscoveredFileOut {
+        file_identity: format!("fixture:{rel}"),
+        path: format!("C:\\corpus\\{rel}"),
+        extension: ext.to_string(),
+        modified_at: "2026-08-05T10:00:00+08:00".to_string(),
+        size_bytes: size,
+        source_version: format!("mtime_ns=123:size={size}"),
+        source_guard_kind: Some("windows_file_id_change_time_v1".to_string()),
+        source_guard_sha256: Some("b".repeat(64)),
+    }
+}
+
+fn text_result(_path: &str) -> PdfClassifierResultV1 {
+    PdfClassifierResultV1 {
+        status: PdfClassifierResultStatus::TextInParseWindow,
+        page_count: ai_daily_scanner_contract::Nullable(Some(2)),
+        result_examined_pages: ai_daily_scanner_contract::Nullable(Some(2)),
+        diagnostic: ai_daily_scanner_contract::Nullable(None),
+    }
+}
+
+fn no_text_result(_path: &str) -> PdfClassifierResultV1 {
+    PdfClassifierResultV1 {
+        status: PdfClassifierResultStatus::NoTextInParseWindow,
+        page_count: ai_daily_scanner_contract::Nullable(Some(2)),
+        result_examined_pages: ai_daily_scanner_contract::Nullable(Some(2)),
+        diagnostic: ai_daily_scanner_contract::Nullable(None),
+    }
+}
+
+fn run_scheduler(
+    clock: &FakeClock,
+    cache: TestCache,
+    parser: TestParser,
+    classifier: TestClassifier,
+    discovery: Vec<DiscoveredFileOut>,
+    profile: ai_daily_scanner_contract::NormalizedScannerProfileV2,
+) -> Result<
+    ai_daily_scanner_core::scheduler::BudgetedScanOutcome,
+    ai_daily_scanner_core::scheduler::SchedulerFailure,
+> {
+    let input = ScheduledRunInput::new(
+        1,
+        0,
+        "C:\\corpus".to_string(),
+        discovery,
+        Vec::new(),
+        profile,
+        WorkerIdentities {
+            classifier_build: Some("a".repeat(64)),
+            ..WorkerIdentities::default()
+        },
+        "0.1.0".to_string(),
+        "engine-test".to_string(),
+        "c".repeat(64),
+        clock,
+    )
+    .expect("scheduled input");
+    let scheduler = BudgetedContextScheduler::new(
+        Box::new(classifier),
+        Box::new(parser),
+        Box::new(cache),
+        Box::new(clock.clone()),
+        Box::new(PassGuard),
+    );
+    scheduler.execute(input)
+}
+
+// ---------------------------------------------------------------------------
+// cache-independent determinism (spec Solution/Part 9.1)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cache_state_does_not_change_semantic_output() {
+    // Same discovery snapshot + profile: empty / partial / full parse +
+    // classification cache must produce the same ClassificationPlan,
+    // ContentAdmissionPlan, decisions, semantic summary and context hash.
+    let discovery = vec![
+        discovered("notes/a.md", ".md", 64),
+        discovered("notes/b.txt", ".txt", 128),
+        discovered("report.pdf", ".pdf", 256),
+    ];
+    let profile = v2_profile(ReportMode::Daily);
+    let parser = TestParser {
+        results: HashMap::from([
+            ("fixture:notes/a.md".to_string(), success_parse("fixture:notes/a.md", "", "evidence a")),
+            ("fixture:notes/b.txt".to_string(), success_parse("fixture:notes/b.txt", "", "evidence b")),
+            ("fixture:report.pdf".to_string(), success_parse("fixture:report.pdf", "", "pdf evidence")),
+        ]),
+    };
+    let classifier = TestClassifier {
+        results: HashMap::from([
+            ("C:\\corpus\\report.pdf".to_string(), text_result("report.pdf")),
+        ]),
+    };
+
+    // empty cache state
+    let clock = FakeClock::new();
+    let empty_cache = TestCache::default();
+    let empty = run_scheduler(&clock, empty_cache, parser.clone(), classifier.clone(), discovery.clone(), profile.clone())
+        .expect("empty cache outcome");
+
+    // partial cache state: report.pdf parse cached, b.txt classification n/a, a.md not cached
+    let clock = FakeClock::new();
+    let mut partial_cache = TestCache::default();
+    partial_cache
+        .parse
+        .insert("fixture:report.pdf".to_string(), TestCache::fresh_parse("fixture:report.pdf", "pdf evidence"));
+    partial_cache
+        .classification
+        .insert("fixture:report.pdf".to_string(), ClassificationCacheLookup::Fresh(
+            ai_daily_scanner_core::store::ClassificationCacheEntry {
+                status: "text_in_parse_window".to_string(),
+                page_count: 2,
+                result_examined_pages: 2,
+            },
+        ));
+    let partial = run_scheduler(&clock, partial_cache, parser.clone(), classifier.clone(), discovery.clone(), profile.clone())
+        .expect("partial cache outcome");
+
+    // full cache state: all parse + classification cached
+    let clock = FakeClock::new();
+    let mut full_cache = TestCache::default();
+    for (identity, content) in [
+        ("fixture:notes/a.md", "evidence a"),
+        ("fixture:notes/b.txt", "evidence b"),
+        ("fixture:report.pdf", "pdf evidence"),
+    ] {
+        full_cache
+            .parse
+            .insert(identity.to_string(), TestCache::fresh_parse(identity, content));
+    }
+    full_cache
+        .classification
+        .insert("fixture:report.pdf".to_string(), ClassificationCacheLookup::Fresh(
+            ai_daily_scanner_core::store::ClassificationCacheEntry {
+                status: "text_in_parse_window".to_string(),
+                page_count: 2,
+                result_examined_pages: 2,
+            },
+        ));
+    let full = run_scheduler(&clock, full_cache, parser.clone(), classifier.clone(), discovery, profile)
+        .expect("full cache outcome");
+
+    // Semantic fields must be identical across all three cache states.
+    for (name, other) in [("partial", &partial), ("full", &full)] {
+        assert_eq!(
+            empty.terminal_intent, other.terminal_intent,
+            "{name}: terminal intent differs"
+        );
+        assert_eq!(
+            empty.context.as_ref().map(|c| c.context_sha256.clone()),
+            other.context.as_ref().map(|c| c.context_sha256.clone()),
+            "{name}: context_sha256 differs"
+        );
+        assert_eq!(
+            empty.context.as_ref().map(|c| c.final_context.clone()),
+            other.context.as_ref().map(|c| c.final_context.clone()),
+            "{name}: final_context differs"
+        );
+        let empty_decisions: Vec<_> = empty
+            .context
+            .as_ref()
+            .map(|c| {
+                c.decisions
+                    .iter()
+                    .map(|d| {
+                        (
+                            d.decision.relative_path.clone(),
+                            d.decision.action,
+                            d.decision.reason.clone(),
+                            d.decision.priority,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let other_decisions: Vec<_> = other
+            .context
+            .as_ref()
+            .map(|c| {
+                c.decisions
+                    .iter()
+                    .map(|d| {
+                        (
+                            d.decision.relative_path.clone(),
+                            d.decision.action,
+                            d.decision.reason.clone(),
+                            d.decision.priority,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(empty_decisions, other_decisions, "{name}: decisions differ");
+        let empty_summary = empty.context.as_ref().map(|c| c.summary.clone());
+        let other_summary = other.context.as_ref().map(|c| c.summary.clone());
+        assert_eq!(empty_summary, other_summary, "{name}: summary differs");
+    }
+    // Context must be non-empty and Success (no errors in this corpus).
+    assert_eq!(empty.terminal_intent, TerminalIntent::Success);
+    let context = empty.context.expect("success context");
+    assert_eq!(context.summary.source_file_count, 3);
+    assert_eq!(context.summary.success_count, 3);
+    assert_eq!(context.summary.error_file_count, 0);
+    assert_eq!(context.summary.omitted_file_count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// NotParsed counts (spec Part 2.2)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn not_parsed_counts_are_derived_not_error() {
+    // NotParsed (semantic/policy) -> omit + no Diagnostic + derived
+    // not_parsed_count; it never enters the error metric.
+    let profile = v2_profile(ReportMode::Daily);
+    // Override the candidate quota so files 2 and 3 are semantically rejected.
+    let mut profile = profile;
+    profile.max_candidate_files = 1;
+
+    let discovery = vec![
+        discovered("notes/a.md", ".md", 64),
+        discovered("notes/b.md", ".md", 64),
+        discovered("notes/c.md", ".md", 64),
+    ];
+    let parser = TestParser {
+        results: HashMap::from([(
+            "fixture:notes/a.md".to_string(),
+            success_parse("fixture:notes/a.md", "", "evidence a"),
+        )]),
+    };
+    let classifier = TestClassifier { results: HashMap::new() };
+
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(&clock, TestCache::default(), parser, classifier, discovery, profile)
+        .expect("outcome");
+
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
+    let context = outcome.context.expect("success context");
+    assert_eq!(context.summary.source_file_count, 3);
+    assert_eq!(context.summary.success_count, 1);
+    assert_eq!(context.summary.included_file_count, 1);
+    assert_eq!(context.summary.omitted_file_count, 2);
+    assert_eq!(context.summary.error_file_count, 0);
+    assert_eq!(context.summary.timeout_count, 0);
+
+    let a = context
+        .decisions
+        .iter()
+        .find(|d| d.decision.relative_path == "notes\\a.md")
+        .expect("a.md decision");
+    assert_eq!(a.decision.action, ContextAction::Keep);
+    assert_eq!(a.decision.error_code, "");
+
+    for rel in ["notes\\b.md", "notes\\c.md"] {
+        let decision = context
+            .decisions
+            .iter()
+            .find(|d| d.decision.relative_path == rel)
+            .expect("omitted decision");
+        assert_eq!(decision.decision.action, ContextAction::Omit);
+        assert_eq!(decision.decision.reason, "semantic_file_quota_exhausted");
+        assert_eq!(decision.decision.error_code, "");
+    }
+
+    // NotParsed files never carry a per-file Diagnostic and never count as errors.
+    let b = outcome
+        .file_results
+        .iter()
+        .find(|r| r.relative_path == "notes\\b.md")
+        .expect("b file result");
+    assert_eq!(b.parse_status, ParseStatus::NotParsed);
+    assert!(b.error.is_none());
+    let error_count = outcome
+        .file_results
+        .iter()
+        .filter(|r| r.parse_status == ParseStatus::Error)
+        .count();
+    assert_eq!(error_count, 0);
+    let extension_error_count = outcome
+        .extension_metrics
+        .iter()
+        .map(|m| m.error_count)
+        .sum::<u64>();
+    assert_eq!(extension_error_count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// WorkDeadline terminal states (spec Part 2.3)
+// ---------------------------------------------------------------------------
+
+/// Parser that advances the fake clock while "parsing". When `advance_full`
+/// is true it consumes the whole effective timeout (so an in-flight parse that
+/// runs into the deadline becomes Timeout); otherwise it returns Success after
+/// advancing at most `step_ms`, so later queued files hit the deadline as
+/// runtime NotParsed in the scheduler.
+#[derive(Debug, Clone)]
+struct DeadlineParser {
+    clock: Arc<Mutex<u64>>,
+    work_deadline: u64,
+    advance_full: bool,
+    step_ms: u64,
+}
+
+impl ParserPort for DeadlineParser {
+    fn parse(&self, request: &ParseRequest) -> ParseResult {
+        let identity = request.file.file_identity.clone();
+        let path = request.file.path.clone();
+        let advance = if self.advance_full {
+            request.timeout_ms
+        } else {
+            request.timeout_ms.min(self.step_ms)
+        };
+        let mut now = self.clock.lock().unwrap();
+        *now += advance;
+        let finished_at = *now;
+        drop(now);
+        if self.advance_full && finished_at >= self.work_deadline {
+            // spec Part 2.3: in-flight work killed by the WorkDeadline -> Timeout.
+            ParseResult {
+                file_identity: identity,
+                content: String::new(),
+                parser_backend: request.route.backend().to_string(),
+                worker_lane: request.route.worker_lane().to_string(),
+                truncated: false,
+                content_sha256: ai_daily_scanner_core::store::sha256_hex(b""),
+                parse_status: ParseStatus::Timeout,
+                error: Some(Diagnostic {
+                    error_code: ErrorCode::ParserTimeout,
+                    message: "parse process exceeded its deadline".to_string(),
+                    retryable: true,
+                    stage: DiagnosticStage::Parse,
+                    file_path: Nullable(Some(path)),
+                    backend: Nullable(Some(request.route.backend().to_string())),
+                }),
+                failure_class: "deterministic".to_string(),
+                fallback_backend: String::new(),
+                fallback_reason_code: "parse_error".to_string(),
+                primary_duration_ms: advance,
+                fallback_duration_ms: 0,
+                parse_duration_ms: advance,
+            }
+        } else {
+            success_parse(&identity, &path, "evidence")
+        }
+    }
+}
+
+#[test]
+fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
+    // 3 text files; each parse advances the clock 2000ms. The first two
+    // complete before the WorkDeadline (3000ms); when the scheduler tries to
+    // start the third file the deadline has passed -> runtime NotParsed and the
+    // run-level trigger is recorded once. Run is Partial, NEVER snapshot.
+    let mut profile = v2_profile(ReportMode::Daily);
+    profile.total_deadline_ms = 5_000; // work deadline = 3_000
+    let discovery = vec![
+        discovered("notes/a.md", ".md", 64),
+        discovered("notes/b.md", ".md", 64),
+        discovered("notes/c.md", ".md", 64),
+    ];
+    let clock = FakeClock::new();
+    let input = ScheduledRunInput::new(
+        1,
+        0,
+        "C:\\corpus".to_string(),
+        discovery.clone(),
+        Vec::new(),
+        profile.clone(),
+        WorkerIdentities::default(),
+        "0.1.0".to_string(),
+        "engine-test".to_string(),
+        "c".repeat(64),
+        &clock,
+    )
+    .expect("input");
+    let parser = DeadlineParser {
+        clock: clock.now.clone(),
+        work_deadline: input.work_deadline_ms,
+        advance_full: false,
+        step_ms: 2_000,
+    };
+    let scheduler = BudgetedContextScheduler::new(
+        Box::new(TestClassifier { results: HashMap::new() }),
+        Box::new(parser),
+        Box::new(TestCache::default()),
+        Box::new(clock),
+        Box::new(PassGuard),
+    );
+    let outcome = scheduler.execute(input).expect("deadline outcome");
+
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+    assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
+    let context = outcome.context.expect("partial context");
+    assert_eq!(context.summary.success_count, 2);
+    assert_eq!(context.summary.timeout_count, 0);
+    assert_eq!(context.summary.error_file_count, 0);
+    assert_eq!(context.summary.omitted_file_count, 1);
+
+    // c.md was queued when the deadline hit -> runtime NotParsed, NO Diagnostic.
+    let c = outcome
+        .file_results
+        .iter()
+        .find(|r| r.relative_path == "notes\\c.md")
+        .expect("c file result");
+    assert_eq!(c.parse_status, ParseStatus::NotParsed);
+    assert!(c.error.is_none());
+    let c_decision = context
+        .decisions
+        .iter()
+        .find(|d| d.decision.relative_path == "notes\\c.md")
+        .expect("c decision");
+    assert_eq!(c_decision.decision.action, ContextAction::Omit);
+    assert_eq!(c_decision.decision.reason, "runtime_deadline_exhausted");
+
+    // a.md and b.md completed successfully.
+    let a = outcome
+        .file_results
+        .iter()
+        .find(|r| r.relative_path == "notes\\a.md")
+        .expect("a file result");
+    assert_eq!(a.parse_status, ParseStatus::Success);
+
+    // Partial run: no snapshot eligibility (spec Part 2.3).
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|record| record.diagnostic.error_code == ErrorCode::StageDeadlineExhausted));
+}
+
+#[test]
+fn work_deadline_before_any_parse_forms_error_run_without_snapshot() {
+    // Every in-flight parse consumes its full effective timeout, so the first
+    // parse runs into the WorkDeadline -> Timeout, and all queued files become
+    // runtime NotParsed. With no included files the run is Error and the
+    // context is empty.
+    let mut profile = v2_profile(ReportMode::Daily);
+    profile.total_deadline_ms = 5_000; // work deadline = 3_000
+    let discovery = vec![
+        discovered("notes/a.md", ".md", 64),
+        discovered("notes/b.md", ".md", 64),
+        discovered("notes/c.md", ".md", 64),
+    ];
+    let clock = FakeClock::new();
+    let input = ScheduledRunInput::new(
+        1,
+        0,
+        "C:\\corpus".to_string(),
+        discovery.clone(),
+        Vec::new(),
+        profile.clone(),
+        WorkerIdentities::default(),
+        "0.1.0".to_string(),
+        "engine-test".to_string(),
+        "c".repeat(64),
+        &clock,
+    )
+    .expect("input");
+    let parser = DeadlineParser {
+        clock: clock.now.clone(),
+        work_deadline: input.work_deadline_ms,
+        advance_full: true,
+        step_ms: 0,
+    };
+    let scheduler = BudgetedContextScheduler::new(
+        Box::new(TestClassifier { results: HashMap::new() }),
+        Box::new(parser),
+        Box::new(TestCache::default()),
+        Box::new(clock),
+        Box::new(PassGuard),
+    );
+    let outcome = scheduler.execute(input).expect("deadline outcome");
+
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Error);
+    assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
+    // Error run: no context payload, no snapshot.
+    assert!(outcome.context.is_none());
+    // a.md was in-flight -> Timeout; b/c queued -> runtime NotParsed.
+    let a = outcome
+        .file_results
+        .iter()
+        .find(|r| r.relative_path == "notes\\a.md")
+        .expect("a file result");
+    assert_eq!(a.parse_status, ParseStatus::Timeout);
+    for rel in ["notes\\b.md", "notes\\c.md"] {
+        let file = outcome
+            .file_results
+            .iter()
+            .find(|r| r.relative_path == rel)
+            .expect("file result");
+        assert_eq!(file.parse_status, ParseStatus::NotParsed);
+        assert!(file.error.is_none());
+    }
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|record| record.diagnostic.error_code == ErrorCode::StageDeadlineExhausted));
+}
+
+#[test]
+fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
+    // PDFs whose classification is still queued when the WorkDeadline hits are
+    // runtime NotParsed with NO classification result, NO per-file Diagnostic and
+    // NO snapshot. The run has no included files -> Error with the run-level
+    // deadline diagnostic as the envelope error.
+    let mut profile = v2_profile(ReportMode::Daily);
+    profile.total_deadline_ms = 5_000; // work deadline = 3_000
+    profile.parse.pdf.max_pages = 2;
+    let discovery = vec![
+        discovered("one.pdf", ".pdf", 128),
+        discovered("two.pdf", ".pdf", 128),
+        discovered("three.pdf", ".pdf", 128),
+    ];
+    let clock = FakeClock::new();
+    let input = ScheduledRunInput::new(
+        1,
+        0,
+        "C:\\corpus".to_string(),
+        discovery.clone(),
+        Vec::new(),
+        profile.clone(),
+        WorkerIdentities {
+            classifier_build: Some("a".repeat(64)),
+            ..WorkerIdentities::default()
+        },
+        "0.1.0".to_string(),
+        "engine-test".to_string(),
+        "c".repeat(64),
+        &clock,
+    )
+    .expect("input");
+    // The first classification advances the clock past the WorkDeadline, so the
+    // second and third PDFs' classifiers are never started.
+    let classifier = ClockAdvancingClassifier {
+        clock: clock.now.clone(),
+        work_deadline: input.work_deadline_ms,
+    };
+    let scheduler = BudgetedContextScheduler::new(
+        Box::new(classifier),
+        Box::new(TestParser { results: HashMap::new() }),
+        Box::new(TestCache::default()),
+        Box::new(clock),
+        Box::new(PassGuard),
+    );
+    let outcome = scheduler.execute(input).expect("deadline outcome");
+
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Error);
+    assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
+    // Error run: no context payload, no snapshot.
+    assert!(outcome.context.is_none());
+    for rel in ["one.pdf", "two.pdf", "three.pdf"] {
+        let file = outcome
+            .file_results
+            .iter()
+            .find(|r| r.relative_path == rel)
+            .expect("file result");
+        assert_eq!(file.parse_status, ParseStatus::NotParsed, "{rel}");
+        assert!(file.error.is_none(), "{rel}");
+    }
+    // The Error envelope carries the run-level deadline diagnostic.
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|record| record.diagnostic.error_code == ErrorCode::StageDeadlineExhausted
+            && record.severity
+                == ai_daily_scanner_core::store::DiagnosticSeverity::Error));
+}
+
+#[derive(Debug, Clone)]
+struct ClockAdvancingClassifier {
+    clock: Arc<Mutex<u64>>,
+    work_deadline: u64,
+}
+
+impl PdfClassifierPort for ClockAdvancingClassifier {
+    fn classify_pdf(
+        &self,
+        request: &PdfClassifierRequestV1,
+        _timeout: Duration,
+    ) -> Result<PdfClassifierResultV1, ParseFailure> {
+        let mut now = self.clock.lock().unwrap();
+        *now += 4_000;
+        drop(now);
+        Ok(text_result(&request.file_path))
+    }
+}
+
+#[test]
+fn cache_commit_skipped_after_work_deadline() {
+    // A successful parse after the WorkDeadline is not committed to the parse
+    // cache (the receipt is not authoritative), but a completed pre-deadline
+    // result keeps its state and the receipt list only carries pre-deadline
+    // writes. Here every parse completes before the deadline, so the receipt
+    // list is non-empty and the run is Success.
+    let profile = v2_profile(ReportMode::Daily);
+    let discovery = vec![discovered("notes/a.md", ".md", 64)];
+    let parser = TestParser {
+        results: HashMap::from([(
+            "fixture:notes/a.md".to_string(),
+            success_parse("fixture:notes/a.md", "", "evidence"),
+        )]),
+    };
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        TestCache::default(),
+        parser,
+        TestClassifier { results: HashMap::new() },
+        discovery,
+        profile,
+    )
+    .expect("outcome");
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
+    // One successful parse produced exactly one committed receipt.
+    assert_eq!(outcome.parse_cache_receipts.len(), 1);
 }

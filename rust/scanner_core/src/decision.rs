@@ -1,9 +1,65 @@
 //! Deterministic context action and priority decisions over scanner evidence.
+//!
+//! State matrix (spec Part 2.2): `has_error` is true ONLY for `ParseStatus::Error`;
+//! `Timeout` maps to the error action / timeout count; `NotParsed` (semantic /
+//! policy / runtime) maps to the Omit action with a frozen budget reason and never
+//! carries a per-file Diagnostic. Ordering is the single `NominalKey`
+//! implementation — a parse failure changes status/action/reason but never the
+//! position, so the decision output is cache-independent.
 
 use ai_daily_scanner_contract::{
-    AuditWorkerLane, CacheStatus, ContextAction, ContextDecision, ContextProfile, Diagnostic,
-    ParseStatus, Validate,
+    AuditWorkerLane, CacheStatus, ContextAction, ContextDecision, ContextProfile, ContextProfileV2,
+    Diagnostic, ParseStatus, Validate,
 };
+
+use crate::nominal::NominalKey;
+
+/// The minimal budget profile the decision layer and renderer need. Both the
+/// frozen v1 `ContextProfile` and the v2 `ContextProfileV2` implement it, so
+/// the decision/scheduler path never converts or duplicates the profile.
+pub trait BudgetProfile {
+    fn global_max_chars(&self) -> u64;
+    fn per_file_max_chars(&self) -> u64;
+    fn large_file_max_bytes(&self) -> u64;
+    fn profile_name(&self) -> &str;
+    fn compression_policy_version(&self) -> &str;
+}
+
+impl BudgetProfile for ContextProfile {
+    fn global_max_chars(&self) -> u64 {
+        self.global_max_chars
+    }
+    fn per_file_max_chars(&self) -> u64 {
+        self.per_file_max_chars
+    }
+    fn large_file_max_bytes(&self) -> u64 {
+        self.large_file_max_bytes
+    }
+    fn profile_name(&self) -> &str {
+        &self.profile_name
+    }
+    fn compression_policy_version(&self) -> &str {
+        &self.compression_policy_version
+    }
+}
+
+impl BudgetProfile for ContextProfileV2 {
+    fn global_max_chars(&self) -> u64 {
+        self.global_max_chars
+    }
+    fn per_file_max_chars(&self) -> u64 {
+        self.per_file_max_chars
+    }
+    fn large_file_max_bytes(&self) -> u64 {
+        self.large_file_max_bytes
+    }
+    fn profile_name(&self) -> &str {
+        &self.profile_name
+    }
+    fn compression_policy_version(&self) -> &str {
+        &self.compression_policy_version
+    }
+}
 
 const OFFICE_OR_PDF_EXTENSIONS: &[&str] = &[
     ".doc", ".docx", ".pdf", ".ppt", ".pptx", ".xls", ".xlsm", ".xlsx",
@@ -25,6 +81,14 @@ pub struct ContextFileEvidence {
     pub parse_status: ParseStatus,
     pub truncated: bool,
     pub error: Option<Diagnostic>,
+    /// Action reason override. NotParsed MUST carry its frozen budget reason
+    /// (`semantic_file_quota_exhausted`, `pdf_*_quota_exhausted`,
+    /// `global_context_budget_exceeded`, `file_size_policy`,
+    /// `legacy_extension_disabled`, `runtime_deadline_exhausted`); Error may
+    /// carry `profile_route_invariant` / `source_guard_unavailable` /
+    /// `source_version_changed`. `None` selects the default reason
+    /// (keep/compress/parse_error).
+    pub reason: Option<String>,
 }
 
 impl ContextFileEvidence {
@@ -53,10 +117,17 @@ impl ContextFileEvidence {
             ParseStatus::Success if self.error.is_some() => {
                 return Err("successful context evidence cannot carry an error".to_string());
             }
-            ParseStatus::Error | ParseStatus::Timeout | ParseStatus::NotParsed
-                if self.error.is_none() =>
-            {
+            ParseStatus::Error | ParseStatus::Timeout if self.error.is_none() => {
                 return Err("failed context evidence requires a diagnostic".to_string());
+            }
+            // spec Part 2.1/2.2: NotParsed (semantic/policy/runtime) never carries
+            // a fabricated per-file error; runtime NotParsed only references the
+            // run-level deadline Diagnostic.
+            ParseStatus::NotParsed if self.error.is_some() => {
+                return Err("not-parsed evidence cannot carry a per-file diagnostic".to_string());
+            }
+            ParseStatus::NotParsed if self.reason.is_none() => {
+                return Err("not-parsed evidence requires a budget reason".to_string());
             }
             _ => {}
         }
@@ -78,39 +149,70 @@ pub(crate) struct DecidedFile {
 
 pub(crate) fn decide_files(
     evidence: Vec<ContextFileEvidence>,
-    profile: &ContextProfile,
+    profile: &impl BudgetProfile,
 ) -> Result<Vec<DecidedFile>, String> {
-    profile.validate()?;
     let mut decided = Vec::with_capacity(evidence.len());
     for evidence in evidence {
         evidence.validate()?;
-        let has_error = evidence.parse_status != ParseStatus::Success;
-        let priority = priority_for(&evidence.relative_path, &evidence.extension, has_error);
-        let input_chars = evidence.content.chars().count() as u64;
+        let key = NominalKey::new(
+            &evidence.relative_path,
+            &evidence.extension,
+            &evidence.file_identity,
+        );
         let observed_size = evidence.size_bytes.unwrap_or(0);
-        let (action, reason) = if has_error {
-            (ContextAction::Error, "parse_error")
-        } else if observed_size > profile.large_file_max_bytes {
-            (ContextAction::MetadataOnly, "file_size_policy")
-        } else if input_chars <= profile.per_file_max_chars && !evidence.truncated {
-            (ContextAction::Keep, "small_file_keep")
-        } else {
-            (
-                ContextAction::Compress,
-                compression_reason(&evidence.extension),
-            )
+        let content_chars = evidence.content.chars().count() as u64;
+        let (action, reason) = match evidence.parse_status {
+            // spec Part 2.2: Timeout is the error action + timeout_count, never Keep.
+            ParseStatus::Error | ParseStatus::Timeout => (
+                ContextAction::Error,
+                evidence
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "parse_error".to_string()),
+            ),
+            ParseStatus::NotParsed => (
+                ContextAction::Omit,
+                evidence
+                    .reason
+                    .clone()
+                    .expect("not-parsed evidence must carry a budget reason"),
+            ),
+            ParseStatus::Success => {
+                if observed_size > profile.large_file_max_bytes() {
+                    (ContextAction::MetadataOnly, "file_size_policy".to_string())
+                } else if content_chars <= profile.per_file_max_chars() && !evidence.truncated {
+                    (ContextAction::Keep, "small_file_keep".to_string())
+                } else {
+                    (
+                        ContextAction::Compress,
+                        compression_reason(&evidence.extension).to_string(),
+                    )
+                }
+            }
         };
-        let error_code = evidence
-            .error
-            .as_ref()
-            .map(|error| enum_text(&error.error_code))
-            .unwrap_or_default();
+        // spec Part 2.2: `input_chars` for no-text metadata / NotParsed / Error /
+        // Timeout has no trusted body, so it uses the discovery size approximation
+        // and the renderer displays a `~` marker.
+        let input_chars = match action {
+            ContextAction::Keep | ContextAction::Compress => content_chars,
+            _ => observed_size,
+        };
+        // spec Part 2.2: `error_code` is fixed empty for Success and every
+        // NotParsed; Error/Timeout must equal the final Diagnostic code.
+        let error_code = match evidence.parse_status {
+            ParseStatus::Error | ParseStatus::Timeout => evidence
+                .error
+                .as_ref()
+                .map(|error| enum_text(&error.error_code))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
         decided.push(DecidedFile {
             decision: ContextDecision {
                 relative_path: evidence.relative_path.clone(),
                 action,
-                reason: reason.to_string(),
-                priority,
+                reason,
+                priority: key.priority,
                 input_chars,
                 output_chars: 0,
                 truncated: evidence.truncated,
@@ -119,52 +221,21 @@ pub(crate) fn decide_files(
             evidence,
         });
     }
+    // Single ordering implementation (spec Part 1.1): the full four-tuple key,
+    // unchanged by parse status.
     decided.sort_by(|left, right| {
-        left.decision
-            .priority
-            .cmp(&right.decision.priority)
-            .then_with(|| {
-                left.decision
-                    .relative_path
-                    .to_lowercase()
-                    .cmp(&right.decision.relative_path.to_lowercase())
-            })
-            .then_with(|| {
-                left.decision
-                    .relative_path
-                    .cmp(&right.decision.relative_path)
-            })
-            .then_with(|| {
-                left.evidence
-                    .file_identity
-                    .cmp(&right.evidence.file_identity)
-            })
+        NominalKey::new(
+            &left.evidence.relative_path,
+            &left.evidence.extension,
+            &left.evidence.file_identity,
+        )
+        .cmp(&NominalKey::new(
+            &right.evidence.relative_path,
+            &right.evidence.extension,
+            &right.evidence.file_identity,
+        ))
     });
     Ok(decided)
-}
-
-fn priority_for(relative_path: &str, extension: &str, has_error: bool) -> u64 {
-    if has_error {
-        return 80;
-    }
-    let path_key = format!(
-        "\\{}",
-        relative_path
-            .to_lowercase()
-            .replace('/', "\\")
-            .trim_matches('\\')
-    );
-    if path_key.contains("\\.pytest_cache\\") || path_key.contains("\\data\\benchmarks\\") {
-        70
-    } else if path_key.contains("\\logs\\") {
-        60
-    } else if OFFICE_OR_PDF_EXTENSIONS.contains(&extension) {
-        20
-    } else if TEXT_KEEP_EXTENSIONS.contains(&extension) {
-        30
-    } else {
-        50
-    }
 }
 
 fn compression_reason(extension: &str) -> &'static str {
@@ -202,3 +273,8 @@ fn is_extension(value: &str) -> bool {
             !character.is_ascii_uppercase() && !matches!(character, '\\' | '/' | ':' | '\0')
         })
 }
+
+// Keep TEXT_KEEP_EXTENSIONS referenced so the module documents the same route
+// table as `nominal.rs`; it is intentionally not a second ordering implementation.
+#[allow(dead_code)]
+const _TEXT_KEEP_EXTENSIONS_USED: &[&str] = TEXT_KEEP_EXTENSIONS;

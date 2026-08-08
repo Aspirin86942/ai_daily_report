@@ -14,6 +14,8 @@ pub mod parsers;
 pub mod planner;
 pub mod process;
 mod run;
+pub mod scheduler;
+pub mod scheduler_adapter;
 pub mod source_guard;
 pub mod store;
 

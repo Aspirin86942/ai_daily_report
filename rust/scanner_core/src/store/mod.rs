@@ -14,6 +14,7 @@ use ai_daily_scanner_contract::{
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -740,6 +741,7 @@ impl ScannerStore {
         file_identity: &str,
         source_version: &str,
         parse_profile_hash: &str,
+        inventory_existed_before: bool,
     ) -> Result<CacheLookup, StoreError> {
         if file_identity.is_empty()
             || source_version.is_empty()
@@ -755,8 +757,124 @@ impl ScannerStore {
             file_identity,
             source_version,
             parse_profile_hash,
+            inventory_existed_before,
         )
         .map_err(cache_open)
+    }
+
+    /// Upserts the global `file_inventory` in one bounded short transaction and
+    /// returns the set of file_identities that already existed before this round
+    /// (spec Part 4 miss-reason tree step 4). Only a completed receipt opens
+    /// cache lookup; a later terminal `finalize` re-upserts the same rows with
+    /// the active scan_run_id (idempotent ON CONFLICT DO UPDATE).
+    pub fn prepare_inventory(
+        &mut self,
+        records: &[InventoryRecord],
+        scan_run_id: i64,
+        now_ms: u64,
+    ) -> Result<HashSet<String>, StoreError> {
+        let now_ms = checked_i64(now_ms, "inventory timestamp")?;
+        let mut existed = std::collections::HashSet::new();
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(cache_write)?;
+        for record in records {
+            let already: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM file_inventory WHERE file_identity=?1)",
+                    [&record.file_identity],
+                    |row| row.get(0),
+                )
+                .map_err(cache_write)?;
+            if already {
+                existed.insert(record.file_identity.clone());
+            }
+        }
+        inventory::upsert_inventory(&transaction, scan_run_id, now_ms, records)
+            .map_err(cache_write)?;
+        transaction.commit().map_err(cache_write)?;
+        Ok(existed)
+    }
+
+    /// Successful parse-cache write in an independent short transaction
+    /// (spec Solution persistence boundary 2). Receipt-typed: the COMMIT is the
+    /// linearization point.
+    pub fn write_success_parse_cache(
+        &mut self,
+        records: &[CacheWriteRecord],
+        cached_at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let cached_at_ms = checked_i64(cached_at_ms, "cache write timestamp")?;
+        for record in records {
+            record
+                .validate()
+                .map_err(StoreError::InvalidRequest)?;
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(cache_write)?;
+        cache::write_success_cache(&transaction, cached_at_ms, records).map_err(cache_write)?;
+        transaction.commit().map_err(cache_write)
+    }
+
+    /// Typed classification-cache lookup (spec Part 3.2). The miss-reason tree
+    /// distinguishes `entry_absent_or_evicted` from `new_file` via
+    /// `inventory_existed_before` (returned by `prepare_inventory`).
+    pub fn lookup_classification_cache(
+        &self,
+        file_identity: &str,
+        source_version: &str,
+        source_guard_kind: &str,
+        source_guard_sha256: &str,
+        classifier_profile_hash: &str,
+        classifier_build: &str,
+        inventory_existed_before: bool,
+    ) -> Result<ClassificationCacheLookup, StoreError> {
+        if file_identity.is_empty()
+            || source_version.is_empty()
+            || inventory::parse_source_version(source_version).is_err()
+            || !inventory::is_sha256(classifier_profile_hash)
+            || !inventory::is_sha256(classifier_build)
+        {
+            return Err(StoreError::InvalidRequest(
+                "classification cache lookup key is invalid".to_string(),
+            ));
+        }
+        cache::lookup_classification_cache(
+            &self.connection,
+            file_identity,
+            source_version,
+            source_guard_kind,
+            source_guard_sha256,
+            classifier_profile_hash,
+            classifier_build,
+            inventory_existed_before,
+        )
+        .map_err(cache_open)
+    }
+
+    /// Success-only classification-cache write in an independent short
+    /// transaction (spec Part 3.2: no negative cache).
+    pub fn write_success_classification_cache(
+        &mut self,
+        records: &[ClassificationCacheWriteRecord],
+        cached_at_ms: u64,
+    ) -> Result<(), StoreError> {
+        let cached_at_ms = checked_i64(cached_at_ms, "classification cache write timestamp")?;
+        for record in records {
+            record
+                .validate()
+                .map_err(StoreError::InvalidRequest)?;
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(cache_write)?;
+        cache::write_success_classification_cache(&transaction, cached_at_ms, records)
+            .map_err(cache_write)?;
+        transaction.commit().map_err(cache_write)
     }
 
     pub fn attach_cache_evidence(
@@ -781,6 +899,7 @@ impl ScannerStore {
                         &planned.file.file_identity,
                         &planned.file.source_version,
                         &profile_hash,
+                        false,
                     )?;
                     Ok(CacheAwarePlanEntry {
                         planned,
@@ -2302,7 +2421,18 @@ fn validate_context_relations(
         .values()
         .filter(|result| result.parse_status == ParseStatus::Timeout)
         .count() as u64;
-    let error_count = file_results.len() as u64 - success_count - timeout_count;
+    let error_count = file_results
+        .values()
+        .filter(|result| result.parse_status == ParseStatus::Error)
+        .count() as u64;
+    // spec Part 2.2: `not_parsed_count` is DERIVED, not a stored counter.
+    let not_parsed_count = (file_results.len() as u64)
+        .checked_sub(success_count)
+        .and_then(|value| value.checked_sub(timeout_count))
+        .and_then(|value| value.checked_sub(error_count))
+        .ok_or_else(|| {
+            StoreError::InvalidRequest("file status counts overflow".to_string())
+        })?;
     let included_count = context
         .decisions
         .iter()
@@ -2345,6 +2475,10 @@ fn validate_context_relations(
         || summary.error_file_count != error_count
         || summary.included_file_count != included_count
         || summary.omitted_file_count != omitted_count
+        // spec Part 2.2 count equations: included = success, omitted = derived
+        // not_parsed, decision_error = error + timeout.
+        || included_count != success_count
+        || omitted_count != not_parsed_count
         || decision_error_count != error_count + timeout_count
         || included_count + omitted_count + decision_error_count != context.decisions.len() as u64
         || summary.input_chars != input_chars
@@ -2413,8 +2547,11 @@ fn validate_context_relations(
             })?;
         match result.parse_status {
             ParseStatus::Success => values.2 += 1,
-            ParseStatus::Error | ParseStatus::NotParsed => values.3 += 1,
+            // spec Part 2.2: extension `error_count` counts ONLY Error; NotParsed
+            // is derived as file_count - success - error - timeout.
+            ParseStatus::Error => values.3 += 1,
             ParseStatus::Timeout => values.4 += 1,
+            ParseStatus::NotParsed => {}
         }
     }
     if extension_metrics.len() != expected_extensions.len()
@@ -3279,7 +3416,7 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", source, &profile_hash)
+                .lookup_cache("file-a", source, &profile_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::NewFile)
         );
@@ -3306,28 +3443,28 @@ mod tests {
         assert!(matches!(
             harness
                 .store
-                .lookup_cache("file-a", source, &profile_hash)
+                .lookup_cache("file-a", source, &profile_hash, false)
                 .unwrap(),
             CacheLookup::Fresh(_)
         ));
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=101:size=6", &profile_hash)
+                .lookup_cache("file-a", "mtime_ns=101:size=6", &profile_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=100:size=6", &profile_hash)
+                .lookup_cache("file-a", "mtime_ns=100:size=6", &profile_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=101:size=5", &profile_hash)
+                .lookup_cache("file-a", "mtime_ns=101:size=5", &profile_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
@@ -3337,7 +3474,7 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", source, &changed_hash)
+                .lookup_cache("file-a", source, &changed_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::ParserProfileChanged)
         );
@@ -3389,11 +3526,11 @@ mod tests {
         let lookups = [
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=101:size=6", &profile_hash)
+                .lookup_cache("file-a", "mtime_ns=101:size=6", &profile_hash, false)
                 .unwrap(),
             harness
                 .store
-                .lookup_cache("file-b", source, &profile_hash)
+                .lookup_cache("file-b", source, &profile_hash, false)
                 .unwrap(),
         ];
         assert_eq!(
@@ -3463,7 +3600,7 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", source, &profile_hash)
+                .lookup_cache("file-a", source, &profile_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::ErrorCache)
         );

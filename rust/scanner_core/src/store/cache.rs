@@ -253,6 +253,7 @@ pub(crate) fn lookup_cache(
     file_identity: &str,
     source_version: &str,
     parse_profile_hash: &str,
+    inventory_existed_before: bool,
 ) -> rusqlite::Result<CacheLookup> {
     let fresh = connection
         .query_row(
@@ -308,9 +309,15 @@ pub(crate) fn lookup_cache(
         return Ok(CacheLookup::Miss(CacheMissReason::ParserProfileChanged));
     }
 
+    // spec Part 4 miss-reason tree steps 4-5: the global `file_inventory` is
+    // upserted by `prepare_inventory` BEFORE the lookup, so it cannot decide
+    // "same identity" (the current round's rows would make every new file look
+    // changed). Identity changes come only from prior cache/result rows, and the
+    // `entry_absent_or_evicted` / `new_file` branch uses the pre-round existence
+    // flag reported by `prepare_inventory`.
     let same_identity: bool = connection.query_row(
         "SELECT EXISTS(
-            SELECT 1 FROM file_inventory WHERE file_identity=?1
+            SELECT 1 FROM parse_cache WHERE file_identity=?1
             UNION ALL
             SELECT 1 FROM scan_file_results WHERE file_identity=?1
          )",
@@ -321,7 +328,13 @@ pub(crate) fn lookup_cache(
         return Ok(CacheLookup::Miss(CacheMissReason::SourceVersionChanged));
     }
 
-    Ok(CacheLookup::Miss(CacheMissReason::NewFile))
+    if inventory_existed_before {
+        // v1 lossy projection of the v2 `entry_absent_or_evicted` reason
+        // (spec Part 5: entry_absent_or_evicted can only project as new_file).
+        Ok(CacheLookup::Miss(CacheMissReason::NewFile))
+    } else {
+        Ok(CacheLookup::Miss(CacheMissReason::NewFile))
+    }
 }
 
 pub(crate) fn write_success_cache(

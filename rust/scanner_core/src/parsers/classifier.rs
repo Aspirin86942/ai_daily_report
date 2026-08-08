@@ -224,11 +224,14 @@ fn classifier_process_failure(error: ProcessError, file_path: &str) -> ParseFail
             },
             true,
         ),
+        // spec Part 3.2: a classifier killed by the per-file timeout or the
+        // remaining work-deadline is an `unknown` classification with
+        // retryable=true; the scheduler maps that unknown to Timeout/Error.
         ProcessError::TimedOut => (
-            FailureClass::Deterministic,
+            FailureClass::RecoverableParserFailure,
             ErrorCode::ParserTimeout,
             "classifier process exceeded its deadline",
-            false,
+            true,
         ),
         ProcessError::IoFailed | ProcessError::OutputTooLarge => (
             FailureClass::ContractFailure,
