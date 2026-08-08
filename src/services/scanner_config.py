@@ -144,3 +144,80 @@ def extract_scanner_profile(scanner_settings: Any) -> dict[str, Any]:
         if key in present:
             profile[key] = present[key]
     return profile
+
+
+# report-mode 冻结默认表（spec Part 8.1）：(max_candidate_files,
+# max_total_pdf_classification_pages, max_pdf_text_extractions, total_deadline_ms)。
+SCANNER_PROFILE_V2_QUOTA_DEFAULTS = {
+    "daily": (96, 80, 8, 10_000),
+    "weekly": (192, 100, 12, 15_000),
+    "monthly": (384, 370, 16, 25_000),
+}
+
+
+def normalize_scanner_profile_v2(
+    raw_profile: Mapping[str, Any],
+    report_mode: str,
+) -> dict[str, Any]:
+    """v1→v2 归一化镜像（spec Part 8.1）：为 v2-only 叶子填冻结默认值。
+
+    接受 `scanner_profile_v1` 或 `scanner_profile_v2` 输入；v1 输入（或 v2
+    省略的叶子）使用 report-mode 冻结默认表。PDF 页数默认与其余 v1 叶子仍
+    由 Rust 唯一归一化，生产默认值的唯一所有者是 Rust core；此函数只用于
+    测试/审计的等价性断言。
+    """
+    schema_version = raw_profile.get("schema_version")
+    if schema_version not in {"scanner_profile_v1", "scanner_profile_v2"}:
+        raise ValueError("unknown scanner profile schema_version")
+    if report_mode not in SCANNER_PROFILE_V2_QUOTA_DEFAULTS:
+        raise ValueError("unknown report mode")
+    (
+        default_max_candidate_files,
+        default_max_classification_pages,
+        default_max_extractions,
+        default_total_deadline_ms,
+    ) = SCANNER_PROFILE_V2_QUOTA_DEFAULTS[report_mode]
+    max_workers = raw_profile.get("max_workers")
+    if max_workers is None:
+        max_workers = 4
+    return {
+        "max_candidate_files": _leaf_or_default(
+            raw_profile, "max_candidate_files", default_max_candidate_files
+        ),
+        "max_total_pdf_classification_pages": _leaf_or_default(
+            raw_profile,
+            "max_total_pdf_classification_pages",
+            default_max_classification_pages,
+        ),
+        "max_pdf_text_extractions": _leaf_or_default(
+            raw_profile, "max_pdf_text_extractions", default_max_extractions
+        ),
+        "total_deadline_ms": _leaf_or_default(
+            raw_profile, "total_deadline_ms", default_total_deadline_ms
+        ),
+        "pdf_classification_timeout_ms": _leaf_or_default(
+            raw_profile, "pdf_classification_timeout_ms", 2_000
+        ),
+        "session_concurrency": _leaf_or_default(
+            raw_profile, "session_concurrency", min(max_workers, 4)
+        ),
+        "max_requests_per_session": _leaf_or_default(
+            raw_profile, "max_requests_per_session", 128
+        ),
+        "session_idle_ttl_ms": _leaf_or_default(
+            raw_profile, "session_idle_ttl_ms", 30_000
+        ),
+        "session_rss_limit_bytes": _leaf_or_default(
+            raw_profile, "session_rss_limit_bytes", 512 * 1024 * 1024
+        ),
+    }
+
+
+def _leaf_or_default(raw_profile: Mapping[str, Any], key: str, default: Any) -> Any:
+    """raw 叶子缺省或显式为 None 时返回默认值。
+
+    配置提取器不输出 None，但 pydantic model_dump 会把未设置的 Optional
+    叶子显式序列化为 None；两者都视为「未配置」。
+    """
+    value = raw_profile.get(key)
+    return default if value is None else value

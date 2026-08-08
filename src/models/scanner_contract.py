@@ -492,6 +492,12 @@ class NormalizedScannerProfileV2(ContractModel):
         return self
 
 
+ScannerProfile = Annotated[
+    RawScannerProfileV1 | RawScannerProfileV2,
+    Field(discriminator="schema_version"),
+]
+
+
 class BuildContextRequest(ContractModel):
     contract: Literal["ai_daily_context"]
     protocol_version: Literal[1]
@@ -506,7 +512,7 @@ class BuildContextRequest(ContractModel):
         "monthly_balanced_v1",
     ] | None
     scan_db_path: AbsolutePath
-    scanner_profile: RawScannerProfileV1
+    scanner_profile: ScannerProfile
     adapters: AdapterPaths
 
     @model_validator(mode="after")
@@ -1638,6 +1644,7 @@ __all__ = [
     "PdfClassificationAuditV1",
     "RawScannerProfileV1",
     "RawScannerProfileV2",
+    "ScannerProfile",
     "TransportErrorResponse",
     "UpgradeDatabaseRequestV1",
     "UpgradeDatabaseResponseV1",

@@ -2626,7 +2626,7 @@ where
 mod tests {
     use super::*;
     use crate::classifier::{ClassificationError, ParserRoute};
-    use crate::config::normalize_scanner_profile;
+    use crate::config::{normalize_scanner_profile, normalize_scanner_profile_for_request};
     use crate::planner::{PlanAction, PlannedFile};
     use ai_daily_discovery::DiscoveredFileOut;
     use ai_daily_scanner_contract::{
@@ -2669,7 +2669,7 @@ mod tests {
             python_module_root: directory.path().to_string_lossy().to_string(),
             python_document_worker_module: "src.workers.document_parser_worker".to_string(),
         };
-        let profile = normalize_scanner_profile(&request.scanner_profile, request.report_mode)
+        let profile = normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode)
             .expect("normalized scanner profile");
         let canonical =
             ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
@@ -3243,7 +3243,7 @@ mod tests {
 
         let mut changed_request = harness.request.clone();
         changed_request.end_date = "2099-12-31".to_string();
-        let changed_profile = normalize_scanner_profile(
+        let changed_profile = normalize_scanner_profile_for_request(
             &changed_request.scanner_profile,
             changed_request.report_mode,
         )

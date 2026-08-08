@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.models.scanner_contract import (
+    BuildContextRequest,
     Diagnostic,
     FileAuditV2,
     InspectRunResponseV2,
@@ -23,6 +24,7 @@ from src.models.scanner_contract import (
 from src.services.scanner_config import (
     SCANNER_PROFILE_V2_ONLY_FIELDS,
     extract_scanner_profile,
+    normalize_scanner_profile_v2,
 )
 
 
@@ -177,6 +179,88 @@ def test_v2_only_allowlist_is_exact() -> None:
             "session_rss_limit_bytes",
         }
     )
+
+
+def _build_context_request_payload(scanner_profile: dict) -> dict:
+    return {
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "123e4567-e89b-42d3-a456-426614174000",
+        "work_dir": "C:\\scanner-fixtures\\work",
+        "start_date": "2026-07-14",
+        "end_date": "2026-07-15",
+        "report_mode": "monthly",
+        "compression_profile": None,
+        "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
+        "scanner_profile": scanner_profile,
+        "adapters": {
+            "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+            "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+            "python_module_root": "C:\\scanner-fixtures\\repo",
+            "python_document_worker_module": "src.workers.document_parser_worker",
+        },
+    }
+
+
+def test_build_context_request_accepts_v1_profile() -> None:
+    request = BuildContextRequest.model_validate(
+        _build_context_request_payload(
+            {"schema_version": "scanner_profile_v1", "max_workers": 3}
+        )
+    )
+    assert request.scanner_profile.schema_version == "scanner_profile_v1"
+
+
+def test_build_context_request_accepts_v2_profile_with_v2_only_leaf() -> None:
+    request = BuildContextRequest.model_validate(
+        _build_context_request_payload(
+            {
+                "schema_version": "scanner_profile_v2",
+                "max_workers": 3,
+                "total_deadline_ms": 45_000,
+            }
+        )
+    )
+    assert request.scanner_profile.schema_version == "scanner_profile_v2"
+    assert request.scanner_profile.total_deadline_ms == 45_000
+
+
+def test_build_context_request_rejects_unknown_profile_schema_version() -> None:
+    with pytest.raises(ValueError, match="scanner_profile_v3"):
+        BuildContextRequest.model_validate(
+            _build_context_request_payload({"schema_version": "scanner_profile_v3"})
+        )
+
+
+def test_v1_and_v2_profiles_normalize_to_same_frozen_defaults() -> None:
+    v1_leaves = {"schema_version": "scanner_profile_v1", "max_workers": 3}
+    v2_leaves = {**v1_leaves, "schema_version": "scanner_profile_v2"}
+    normalized_v1 = normalize_scanner_profile_v2(v1_leaves, "monthly")
+    normalized_v2 = normalize_scanner_profile_v2(v2_leaves, "monthly")
+    assert normalized_v1 == normalized_v2
+    assert normalized_v1["total_deadline_ms"] == 25_000
+    assert normalized_v1["max_candidate_files"] == 384
+    assert normalized_v1["max_total_pdf_classification_pages"] == 370
+    assert normalized_v1["max_pdf_text_extractions"] == 16
+    assert normalized_v1["pdf_classification_timeout_ms"] == 2_000
+    assert normalized_v1["session_concurrency"] == min(3, 4)
+
+
+def test_v2_only_leaf_flows_through_request_mirror() -> None:
+    request = BuildContextRequest.model_validate(
+        _build_context_request_payload(
+            {
+                "schema_version": "scanner_profile_v2",
+                "total_deadline_ms": 45_000,
+            }
+        )
+    )
+    normalized = normalize_scanner_profile_v2(
+        request.scanner_profile.model_dump(mode="json"),
+        request.report_mode,
+    )
+    assert normalized["total_deadline_ms"] == 45_000
+    assert normalized["max_candidate_files"] == 384
 
 
 def test_maintenance_request_and_response_round_trip() -> None:

@@ -4,7 +4,9 @@
 //! leaf must parse under v2 with the same value, and the v2-only leaves must
 //! fall back to the frozen report-mode defaults during normalization.
 
-use ai_daily_scanner_contract::{RawScannerProfileV2, ReportMode, Validate};
+use ai_daily_scanner_contract::{
+    BuildContextRequest, RawScannerProfileV2, ReportMode, ScannerProfile, Validate,
+};
 
 #[test]
 fn raw_profile_v2_defaults_map_like_v1() {
@@ -144,8 +146,8 @@ fn normalize_v2_merges_frozen_report_mode_defaults() {
             "schema_version": "scanner_profile_v2"
         }))
         .expect("minimal raw profile should decode");
-        let normalized =
-            normalize_scanner_profile_v2(&raw, mode).expect("minimal raw profile should normalize");
+        let normalized = normalize_scanner_profile_v2(&ScannerProfile::V2(raw), mode)
+            .expect("minimal raw profile should normalize");
         normalized.validate().expect("normalized v2 must validate");
         assert_eq!(normalized.max_candidate_files, expected.0);
         assert_eq!(normalized.max_total_pdf_classification_pages, expected.1);
@@ -191,23 +193,151 @@ fn normalize_v2_keeps_report_mode_pdf_page_defaults() {
     }))
     .expect("minimal raw profile should decode");
 
-    let daily = normalize_scanner_profile_v2(&raw, ReportMode::Daily)
+    let daily = normalize_scanner_profile_v2(&ScannerProfile::V2(raw.clone()), ReportMode::Daily)
         .expect("daily profile should normalize");
     assert_eq!(daily.parse.pdf.max_pages, 5, "daily keeps pdf_max_pages=5");
 
-    let weekly = normalize_scanner_profile_v2(&raw, ReportMode::Weekly)
+    let weekly = normalize_scanner_profile_v2(&ScannerProfile::V2(raw.clone()), ReportMode::Weekly)
         .expect("weekly profile should normalize");
     assert_eq!(
         weekly.parse.pdf.max_pages, 2,
         "weekly keeps summary_pdf_max_pages=2"
     );
 
-    let monthly = normalize_scanner_profile_v2(&raw, ReportMode::Monthly)
+    let monthly = normalize_scanner_profile_v2(&ScannerProfile::V2(raw), ReportMode::Monthly)
         .expect("monthly profile should normalize");
     assert_eq!(
         monthly.parse.pdf.max_pages, 2,
         "monthly keeps summary_pdf_max_pages=2"
     );
+}
+
+#[test]
+fn scanner_profile_union_parses_both_variants() {
+    let v1 = serde_json::from_str::<ScannerProfile>(
+        r#"{"schema_version":"scanner_profile_v1","max_workers":3}"#,
+    )
+    .expect("v1 variant should parse");
+    assert_eq!(v1.schema_version(), "scanner_profile_v1");
+    v1.validate().expect("v1 variant must validate");
+
+    let v2 = serde_json::from_str::<ScannerProfile>(
+        r#"{"schema_version":"scanner_profile_v2","total_deadline_ms":25000}"#,
+    )
+    .expect("v2 variant should parse");
+    assert_eq!(v2.schema_version(), "scanner_profile_v2");
+    v2.validate().expect("v2 variant must validate");
+}
+
+#[test]
+fn scanner_profile_union_rejects_unknown_schema_version() {
+    let result = serde_json::from_str::<ScannerProfile>(
+        r#"{"schema_version":"scanner_profile_v3"}"#,
+    );
+    assert!(
+        result.is_err(),
+        "unknown schema_version must be rejected at the union boundary"
+    );
+}
+
+fn build_context_request_json(scanner_profile: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "contract": "ai_daily_context",
+        "protocol_version": 1,
+        "request_id": "11111111-1111-4111-8111-111111111111",
+        "work_dir": "C:\\scanner-fixtures\\工作 目录",
+        "start_date": "2026-07-14",
+        "end_date": "2026-07-15",
+        "report_mode": "monthly",
+        "compression_profile": null,
+        "scan_db_path": "C:\\scanner-fixtures\\state\\scan-index-v2.sqlite3",
+        "scanner_profile": scanner_profile,
+        "adapters": {
+            "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
+            "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
+            "python_module_root": "C:\\scanner-fixtures\\repo",
+            "python_document_worker_module": "src.workers.document_parser_worker"
+        }
+    })
+}
+
+#[test]
+fn v1_requests_are_normalized_to_v2_with_frozen_defaults() {
+    use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
+
+    let request: BuildContextRequest = serde_json::from_value(build_context_request_json(
+        serde_json::json!({"schema_version": "scanner_profile_v1"}),
+    ))
+    .expect("v1 request should decode");
+    request
+        .validate()
+        .expect("v1 build-context request must validate");
+    assert!(
+        matches!(request.scanner_profile, ScannerProfile::V1(_)),
+        "v1 request must carry the v1 union variant"
+    );
+
+    let normalized =
+        normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode)
+            .expect("v1 request should normalize to v2");
+    assert_eq!(
+        normalized.total_deadline_ms, 25_000,
+        "monthly v1 request fills the frozen monthly deadline"
+    );
+    assert_eq!(normalized.max_candidate_files, 384);
+    assert_eq!(normalized.max_total_pdf_classification_pages, 370);
+    assert_eq!(normalized.max_pdf_text_extractions, 16);
+    assert_eq!(
+        normalized.parse.pdf.max_pages, 2,
+        "monthly keeps summary_pdf_max_pages=2"
+    );
+    assert_eq!(
+        normalized.pdf_classification_timeout_ms, 2_000,
+        "classifier timeout defaults to 2,000ms"
+    );
+}
+
+#[test]
+fn v2_leaf_flows_through_request() {
+    use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
+
+    let request: BuildContextRequest = serde_json::from_value(build_context_request_json(
+        serde_json::json!({
+            "schema_version": "scanner_profile_v2",
+            "total_deadline_ms": 45_000
+        }),
+    ))
+    .expect("v2 request should decode");
+    request
+        .validate()
+        .expect("v2 build-context request must validate");
+    assert!(
+        matches!(request.scanner_profile, ScannerProfile::V2(_)),
+        "v2 request must carry the v2 union variant"
+    );
+
+    let normalized =
+        normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode)
+            .expect("v2 request should normalize");
+    assert_eq!(
+        normalized.total_deadline_ms, 45_000,
+        "v2-only leaf must survive normalization"
+    );
+    assert_eq!(
+        normalized.max_candidate_files, 384,
+        "other v2 leaves still fall back to the frozen monthly defaults"
+    );
+}
+
+#[test]
+fn build_context_request_round_trip_preserves_v1_profile_json() {
+    let fixture = include_str!("../../../tests/fixtures/scanner_contract/v1/request.json");
+    let value: serde_json::Value = serde_json::from_str(fixture).expect("fixture should parse");
+    let request: BuildContextRequest =
+        serde_json::from_value(value.clone()).expect("v1 fixture request should decode");
+    request.validate().expect("v1 fixture request must validate");
+    let round_trip = serde_json::to_value(&request).expect("request should serialize");
+    assert_eq!(round_trip, value, "v1 request JSON shape must not change");
 }
 
 fn inspect_v2_ok_json() -> serde_json::Value {

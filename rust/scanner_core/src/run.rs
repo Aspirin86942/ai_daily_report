@@ -20,7 +20,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::compressor::build_context;
-use crate::config::normalize_scanner_profile;
+use crate::config::normalize_scanner_profile_for_request;
 use crate::context_audit::{
     assemble_scan_audit, context_profile_hash, extension_metrics, rejected_profile_hash,
     stage_metrics, InspectAuditError, LocalParserFingerprint, ScanAuditBundle, StageMetricInputs,
@@ -343,7 +343,7 @@ fn build_context_command(request: &BuildContextRequest) -> Result<CommandOutput,
             return build_error_output(request, &version, error, Vec::new(), empty_summary(), None);
         }
     };
-    let profile = match normalize_scanner_profile(&request.scanner_profile, request.report_mode) {
+    let profile = match normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode) {
         Ok(profile) => profile,
         Err(message) => {
             return build_error_output(

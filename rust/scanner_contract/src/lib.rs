@@ -704,6 +704,23 @@ pub const PRIORITY_POLICY_VERSION: &str = "budget_nominal_v2";
 pub const COMPRESSION_POLICY_VERSION: &str = "markdown_context_v2";
 pub const MAX_SOURCE_FILES_PER_RUN: u64 = 1_000_000;
 
+/// v2-only leaves（spec Part 8.1 表）。v1 请求归一化为 v2 时这些叶子缺省，
+/// 由 report-mode 冻结默认表填充；v2→v1 投影（Plan 2 T4 接线前的生产路径）
+/// 删除它们，保证 v1 归一化不受 v2-only 叶子影响。
+pub const SCANNER_PROFILE_V2_ONLY_FIELDS: &[&str] = &[
+    "max_candidate_files",
+    "max_pdf_text_extractions",
+    "max_total_pdf_classification_pages",
+    "admission_policy_version",
+    "classifier_policy_version",
+    "pdf_classification_timeout_ms",
+    "total_deadline_ms",
+    "session_concurrency",
+    "max_requests_per_session",
+    "session_idle_ttl_ms",
+    "session_rss_limit_bytes",
+];
+
 /// report-mode 默认（spec Part 8.1 表）：
 /// daily   => (96, 80, 8, 10_000ms)
 /// weekly  => (192, 100, 12, 15_000ms)
@@ -1596,6 +1613,59 @@ impl Validate for NormalizedScannerProfileV2 {
     }
 }
 
+/// `scanner_profile` tagged union（spec Part 8.1）：按 `schema_version` 判别
+/// v1/v2 raw profile。未知 `schema_version` 在反序列化时拒绝；两个变体继续
+/// 走各自严格字段门禁。序列化保持内部对象原样（含 `schema_version`），因此
+/// `BuildContextRequest` 的 JSON 形状不变。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(untagged)]
+pub enum ScannerProfile {
+    V1(RawScannerProfileV1),
+    V2(RawScannerProfileV2),
+}
+
+impl<'de> Deserialize<'de> for ScannerProfile {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let schema_version = value
+            .get("schema_version")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        match schema_version {
+            "scanner_profile_v1" => serde_json::from_value(value)
+                .map(Self::V1)
+                .map_err(de::Error::custom),
+            "scanner_profile_v2" => serde_json::from_value(value)
+                .map(Self::V2)
+                .map_err(de::Error::custom),
+            _ => Err(de::Error::custom(
+                "scanner_profile schema_version must be scanner_profile_v1 or scanner_profile_v2",
+            )),
+        }
+    }
+}
+
+impl ScannerProfile {
+    pub fn schema_version(&self) -> &'static str {
+        match self {
+            Self::V1(_) => "scanner_profile_v1",
+            Self::V2(_) => "scanner_profile_v2",
+        }
+    }
+}
+
+impl Validate for ScannerProfile {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::V1(raw) => raw.validate(),
+            Self::V2(raw) => raw.validate(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BuildContextRequest {
@@ -1609,7 +1679,7 @@ pub struct BuildContextRequest {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub compression_profile: Nullable<CompressionProfile>,
     pub scan_db_path: String,
-    pub scanner_profile: RawScannerProfileV1,
+    pub scanner_profile: ScannerProfile,
     pub adapters: AdapterPaths,
 }
 

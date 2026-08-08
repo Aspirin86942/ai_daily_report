@@ -3,7 +3,8 @@ use ai_daily_scanner_contract::{
     COMPRESSION_POLICY_VERSION, ContextProfile, ContextProfileV2, DiscoveryProfile,
     ExecutionProfile, FallbackBackend, NormalizedScannerProfileV1, NormalizedScannerProfileV2,
     OfficeParseProfile, ParseProfile, PdfParseProfile, PRIORITY_POLICY_VERSION,
-    RawScannerProfileV1, RawScannerProfileV2, ReportMode, TextParseProfile, Validate,
+    RawScannerProfileV1, RawScannerProfileV2, ReportMode, SCANNER_PROFILE_V2_ONLY_FIELDS,
+    ScannerProfile, TextParseProfile, Validate,
 };
 use std::collections::BTreeMap;
 
@@ -221,12 +222,29 @@ fn seconds_to_millis(seconds: u64, field: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("{field} overflows milliseconds"))
 }
 
-/// Normalize a raw scanner profile v2 into the fully-required canonical v2
-/// profile. v1 requests keep flowing through [`normalize_scanner_profile`];
-/// the v2 path merges raw leaves with the frozen report-mode default table
-/// (spec Part 8.1) and keeps the existing PDF page defaults (daily=5,
-/// weekly/monthly=2).
+/// Normalize a tagged union scanner profile (v1 or v2) into the fully-required
+/// canonical v2 profile. v1 requests are converted to a raw v2 profile first,
+/// so the v2-only leaves fall back to the frozen report-mode default table
+/// (spec Part 8.1). PDF page defaults stay daily=5, weekly/monthly=2.
 pub fn normalize_scanner_profile_v2(
+    profile: &ScannerProfile,
+    report_mode: ReportMode,
+) -> Result<NormalizedScannerProfileV2, String> {
+    profile.validate()?;
+    match profile {
+        ScannerProfile::V1(raw) => {
+            let raw_v2 = raw_v1_to_v2(raw)?;
+            normalize_scanner_profile_v2_raw(&raw_v2, report_mode)
+        }
+        ScannerProfile::V2(raw) => normalize_scanner_profile_v2_raw(raw, report_mode),
+    }
+}
+
+/// Normalize a raw scanner profile v2 into the fully-required canonical v2
+/// profile. The v2 path merges raw leaves with the frozen report-mode default
+/// table (spec Part 8.1) and keeps the existing PDF page defaults (daily=5,
+/// weekly/monthly=2).
+fn normalize_scanner_profile_v2_raw(
     raw: &RawScannerProfileV2,
     report_mode: ReportMode,
 ) -> Result<NormalizedScannerProfileV2, String> {
@@ -289,7 +307,7 @@ pub fn normalize_scanner_profile_v2(
         .unwrap_or(50)
         .checked_mul(MIB)
         .ok_or_else(|| "max_file_size_mb overflows bytes".to_string())?;
-    let (max_candidate_files, max_total_pdf_classification_pages, max_pdf_text_extractions, total_deadline_ms) =
+    let (default_max_candidate_files, default_max_total_pdf_classification_pages, default_max_pdf_text_extractions, default_total_deadline_ms) =
         v2_quota_defaults(report_mode);
     let max_workers = raw.max_workers.unwrap_or(4);
 
@@ -387,11 +405,15 @@ pub fn normalize_scanner_profile_v2(
         },
         admission_policy_version: ADMISSION_POLICY_VERSION.to_string(),
         classifier_policy_version: CLASSIFIER_POLICY_VERSION.to_string(),
-        max_candidate_files,
-        max_pdf_text_extractions,
-        max_total_pdf_classification_pages,
+        max_candidate_files: raw.max_candidate_files.unwrap_or(default_max_candidate_files),
+        max_pdf_text_extractions: raw
+            .max_pdf_text_extractions
+            .unwrap_or(default_max_pdf_text_extractions),
+        max_total_pdf_classification_pages: raw
+            .max_total_pdf_classification_pages
+            .unwrap_or(default_max_total_pdf_classification_pages),
         pdf_classification_timeout_ms: raw.pdf_classification_timeout_ms.unwrap_or(2_000),
-        total_deadline_ms,
+        total_deadline_ms: raw.total_deadline_ms.unwrap_or(default_total_deadline_ms),
         session_concurrency: raw.session_concurrency.unwrap_or(max_workers.min(4)),
         max_requests_per_session: raw.max_requests_per_session.unwrap_or(128),
         session_idle_ttl_ms: raw.session_idle_ttl_ms.unwrap_or(30_000),
@@ -401,4 +423,41 @@ pub fn normalize_scanner_profile_v2(
     };
     profile.validate()?;
     Ok(profile)
+}
+
+/// v1 raw → v2 raw 投影（v2 是 v1 的严格超集，缺省的 v2-only 叶子在归一化
+/// 时由 report-mode 冻结默认表填充）。
+fn raw_v1_to_v2(raw: &RawScannerProfileV1) -> Result<RawScannerProfileV2, String> {
+    let mut value = serde_json::to_value(raw).map_err(|error| error.to_string())?;
+    value["schema_version"] = serde_json::json!("scanner_profile_v2");
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+/// v2 raw → v1 raw 投影：删除 v2-only 叶子并改回 v1 schema_version。
+/// 仅用于 Plan 2 T4 接线前的生产路径，保证 v1 请求行为不变。
+fn raw_v2_to_v1(raw: &RawScannerProfileV2) -> Result<RawScannerProfileV1, String> {
+    let mut value = serde_json::to_value(raw).map_err(|error| error.to_string())?;
+    value["schema_version"] = serde_json::json!("scanner_profile_v1");
+    if let Some(object) = value.as_object_mut() {
+        for field in SCANNER_PROFILE_V2_ONLY_FIELDS {
+            object.remove(*field);
+        }
+    }
+    serde_json::from_value(value).map_err(|error| error.to_string())
+}
+
+/// 生产 build-context 路径的归一化入口。v1 请求走原有 v1 归一化（行为不变）；
+/// v2 请求在 Plan 2 T4 接线前投影为 v1，保持现有生产行为，不消费 v2-only 叶子。
+pub fn normalize_scanner_profile_for_request(
+    profile: &ScannerProfile,
+    report_mode: ReportMode,
+) -> Result<NormalizedScannerProfileV1, String> {
+    profile.validate()?;
+    match profile {
+        ScannerProfile::V1(raw) => normalize_scanner_profile(raw, report_mode),
+        ScannerProfile::V2(raw) => {
+            let v1 = raw_v2_to_v1(raw)?;
+            normalize_scanner_profile(&v1, report_mode)
+        }
+    }
 }
