@@ -3191,6 +3191,162 @@ impl Validate for ClassifierVersionResponseV1 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ai_daily_python_session_v1 wire（spec Part 7）：长驻流式 PDF session
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PythonSessionOperation {
+    ClassifyPdfV1,
+    ParseV1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PythonSessionResponseStatus {
+    Ok,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PythonSessionVersionResponseV1 {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub session_contract_version: String,
+    pub worker_build: String,
+    pub classifier_build: String,
+    pub supported_operations: Vec<String>,
+}
+
+impl Validate for PythonSessionVersionResponseV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_python_session", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_const(
+            &self.session_contract_version,
+            "ai_daily_python_session_v1",
+            "session_contract_version",
+        )?;
+        require_sha256_hex(&self.worker_build, "worker_build")?;
+        require_sha256_hex(&self.classifier_build, "classifier_build")?;
+        if self.supported_operations != ["classify_pdf_v1", "parse_v1"] {
+            return Err(
+                "session supported_operations must be the frozen canonical set".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PythonSessionHelloV1 {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub frame: String,
+    pub session_contract_version: String,
+    pub worker_build: String,
+    pub classifier_build: String,
+    pub supported_operations: Vec<String>,
+}
+
+impl Validate for PythonSessionHelloV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_python_session", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_const(&self.frame, "hello", "frame")?;
+        require_const(
+            &self.session_contract_version,
+            "ai_daily_python_session_v1",
+            "session_contract_version",
+        )?;
+        require_sha256_hex(&self.worker_build, "worker_build")?;
+        require_sha256_hex(&self.classifier_build, "classifier_build")?;
+        if self.supported_operations != ["classify_pdf_v1", "parse_v1"] {
+            return Err(
+                "session hello supported_operations must be the frozen canonical set".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PythonSessionRequestV1 {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub operation: PythonSessionOperation,
+    pub payload: serde_json::Value,
+}
+
+impl Validate for PythonSessionRequestV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_python_session", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PythonSessionResultV1 {
+    Classify(PdfClassifierResultV1),
+    Parse(WorkerParseResponse),
+}
+
+impl Validate for PythonSessionResultV1 {
+    fn validate(&self) -> Result<(), String> {
+        match self {
+            Self::Classify(result) => result.validate(),
+            Self::Parse(response) => response.validate(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PythonSessionResponseV1 {
+    pub contract: String,
+    pub protocol_version: u64,
+    pub request_id: String,
+    pub operation: PythonSessionOperation,
+    pub status: PythonSessionResponseStatus,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub result: Nullable<PythonSessionResultV1>,
+    #[serde(deserialize_with = "deserialize_required_nullable")]
+    pub error: Nullable<PythonOperationDiagnosticV1>,
+}
+
+impl Validate for PythonSessionResponseV1 {
+    fn validate(&self) -> Result<(), String> {
+        require_const(&self.contract, "ai_daily_python_session", "contract")?;
+        require_range(self.protocol_version, 1, 1, "protocol_version")?;
+        require_request_id(&self.request_id)?;
+        match self.status {
+            PythonSessionResponseStatus::Ok => {
+                if self.result.0.is_none() || self.error.0.is_some() {
+                    return Err("ok session response requires a result and no error".to_string());
+                }
+                self.result.0.as_ref().expect("checked above").validate()?;
+            }
+            PythonSessionResponseStatus::Error => {
+                if self.result.0.is_some() || self.error.0.is_none() {
+                    return Err(
+                        "error session response requires an error and no result".to_string(),
+                    );
+                }
+                self.error.0.as_ref().expect("checked above").validate()?;
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileAuditV2 {

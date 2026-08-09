@@ -118,6 +118,42 @@ pub struct RegisteredWorker {
     pub identity: WorkerVersionResponse,
 }
 
+/// PDF classifier capability（spec Part 7.1）：`classifier-version` one-shot 握手。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredClassifier {
+    pub command: WorkerCommand,
+    pub identity: ai_daily_scanner_contract::ClassifierVersionResponseV1,
+}
+
+/// 长驻流式 session 能力（spec Part 7.1）：`session-version` 握手。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredSession {
+    pub command: WorkerCommand,
+    pub identity: ai_daily_scanner_contract::PythonSessionVersionResponseV1,
+}
+
+/// Python-only capability 聚合（classifier/session）。capability absent 时
+/// session 为 `None`，整轮使用 v1 one-shot，不计 degradation。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PythonCapabilities {
+    pub classifier: Option<RegisteredClassifier>,
+    pub session: Option<RegisteredSession>,
+}
+
+impl PythonCapabilities {
+    pub fn classifier_build(&self) -> Option<&str> {
+        self.classifier
+            .as_ref()
+            .map(|classifier| classifier.identity.classifier_build.as_str())
+    }
+
+    pub fn session_contract_version(&self) -> Option<&str> {
+        self.session
+            .as_ref()
+            .map(|session| session.identity.session_contract_version.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkerRegistry {
     pub office: Option<RegisteredWorker>,
@@ -555,6 +591,164 @@ pub fn register_worker(
     })
 }
 
+/// `classifier-version` 握手（spec Part 7.1）。profile 允许 PDF 时该命令缺失或
+/// 不匹配必须 preflight fail closed，不允许绕过分类直接批量提取。
+pub fn register_classifier_version(
+    command: &WorkerCommand,
+    timeout: Duration,
+) -> Result<RegisteredClassifier, ParseFailure> {
+    let spec = ProcessSpec {
+        program: command.program.clone(),
+        args: command.args_for("classifier-version"),
+        current_dir: command.current_dir.clone(),
+        stdin: Vec::new(),
+        timeout,
+        capture_limit: WORKER_HANDSHAKE_CAPTURE_LIMIT,
+    };
+    let output = run_process(&spec).map_err(|error| process_failure(error, None, None, true))?;
+    if output.exit_code != 0 {
+        return Err(contract_failure(
+            ErrorCode::WorkerHandshakeFailed,
+            "classifier version command returned nonzero",
+            None,
+            None,
+            DiagnosticStage::Process,
+        ));
+    }
+    let identity: ai_daily_scanner_contract::ClassifierVersionResponseV1 =
+        serde_json::from_slice(&output.stdout).map_err(|_| {
+            contract_failure(
+                ErrorCode::WorkerHandshakeFailed,
+                "classifier version stdout is not one strict JSON response",
+                None,
+                None,
+                DiagnosticStage::Process,
+            )
+        })?;
+    identity.validate().map_err(|_| {
+        contract_failure(
+            ErrorCode::WorkerHandshakeFailed,
+            "classifier version response violates the strict contract",
+            None,
+            None,
+            DiagnosticStage::Process,
+        )
+    })?;
+    if identity.classifier_build.len() != 64 {
+        return Err(contract_failure(
+            ErrorCode::WorkerHandshakeFailed,
+            "classifier version build is not a canonical SHA-256",
+            None,
+            None,
+            DiagnosticStage::Process,
+        ));
+    }
+    Ok(RegisteredClassifier {
+        command: command.clone(),
+        identity,
+    })
+}
+
+/// `session-version` 握手（spec Part 7.1）。旧 worker 返回 exit 2 + 严格
+/// `ai_daily_transport` INVALID_REQUEST 单帧时视为 capability absent
+/// （`Ok(None)`），整轮 v1 one-shot；其他非零/额外 stdout/坏 JSON/build 与
+/// v1 version 不一致均为 handshake failure，不静默降级。
+pub fn register_session_version(
+    command: &WorkerCommand,
+    timeout: Duration,
+) -> Result<Option<RegisteredSession>, ParseFailure> {
+    let spec = ProcessSpec {
+        program: command.program.clone(),
+        args: command.args_for("session-version"),
+        current_dir: command.current_dir.clone(),
+        stdin: Vec::new(),
+        timeout,
+        capture_limit: WORKER_HANDSHAKE_CAPTURE_LIMIT,
+    };
+    let output = run_process(&spec).map_err(|error| process_failure(error, None, None, true))?;
+    if output.exit_code == 2 {
+        // Capability absent: a strict single transport frame is the only
+        // acceptable exit-2 outcome. Anything extra is a handshake failure.
+        if let Ok(transport) =
+            serde_json::from_slice::<ai_daily_scanner_contract::TransportErrorResponse>(
+                &output.stdout,
+            ) {
+            if transport.validate().is_ok()
+                && transport.error.error_code
+                    == ai_daily_scanner_contract::WorkerDiagnosticV1ErrorCode::InvalidRequest
+            {
+                return Ok(None);
+            }
+        }
+        return Err(contract_failure(
+            ErrorCode::WorkerHandshakeFailed,
+            "session-version returned exit 2 without a strict INVALID_REQUEST transport frame",
+            None,
+            None,
+            DiagnosticStage::Process,
+        ));
+    }
+    if output.exit_code != 0 {
+        return Err(contract_failure(
+            ErrorCode::WorkerHandshakeFailed,
+            "session version command returned nonzero",
+            None,
+            None,
+            DiagnosticStage::Process,
+        ));
+    }
+    let identity: ai_daily_scanner_contract::PythonSessionVersionResponseV1 =
+        serde_json::from_slice(&output.stdout).map_err(|_| {
+            contract_failure(
+                ErrorCode::WorkerHandshakeFailed,
+                "session version stdout is not one strict JSON response",
+                None,
+                None,
+                DiagnosticStage::Process,
+            )
+        })?;
+    identity.validate().map_err(|_| {
+        contract_failure(
+            ErrorCode::WorkerHandshakeFailed,
+            "session version response violates the strict contract",
+            None,
+            None,
+            DiagnosticStage::Process,
+        )
+    })?;
+    Ok(Some(RegisteredSession {
+        command: command.clone(),
+        identity,
+    }))
+}
+
+/// 并行启动 `classifier-version` 与 `session-version`（spec Part 7.1 的
+/// bounded parallel preflight batch；逻辑校验顺序由调用方保证——仅 python v1
+/// version 成功后接受这两个结果）。
+pub fn preflight_python_capabilities(
+    python_command: &WorkerCommand,
+    timeout: Duration,
+) -> (
+    Result<RegisteredClassifier, ParseFailure>,
+    Result<Option<RegisteredSession>, ParseFailure>,
+) {
+    std::thread::scope(|scope| {
+        let classifier_task = scope
+            .spawn(|| register_classifier_version(python_command, timeout));
+        let session_result = register_session_version(python_command, timeout);
+        let classifier_result = classifier_task.join().unwrap_or_else(|_| {
+            Err(contract_failure(
+                ErrorCode::WorkerHandshakeFailed,
+                "classifier handshake thread failed",
+                None,
+                None,
+                DiagnosticStage::Process,
+            ))
+        });
+        (classifier_result, session_result)
+    })
+}
+
 pub fn execute_worker_request(
     worker: &RegisteredWorker,
     request: &WorkerParseRequest,
@@ -760,7 +954,7 @@ fn worker_response_character_budget(request: &WorkerParseRequest) -> u64 {
     }
 }
 
-fn worker_response_capture_limit(request: &WorkerParseRequest) -> Result<usize, ParseFailure> {
+pub(crate) fn worker_response_capture_limit(request: &WorkerParseRequest) -> Result<usize, ParseFailure> {
     // JSON permits one Unicode scalar to be represented by a surrogate pair
     // (12 ASCII bytes). Diagnostics may repeat only the request path because
     // response identity validation rejects any other path.

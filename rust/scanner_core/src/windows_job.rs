@@ -217,6 +217,26 @@ fn create_kill_on_close_job() -> Result<OwnedHandle, ProcessError> {
     }
 }
 
+/// Long-lived worker containment handle (spec Part 7.3). Each session/one-shot
+/// child gets its own kill-on-close Job Object, so terminating one request's
+/// process tree can never kill a sibling session in the same pool.
+pub(crate) struct SessionJob(OwnedHandle);
+
+impl SessionJob {
+    /// Assigns an already-spawned child process to a fresh kill-on-close job.
+    pub(crate) fn assign(process: std::os::windows::io::RawHandle) -> Result<Self, ProcessError> {
+        let job = create_kill_on_close_job()?;
+        if unsafe { AssignProcessToJobObject(job.raw(), process) } == 0 {
+            return Err(ProcessError::ContainmentFailed);
+        }
+        Ok(Self(job))
+    }
+
+    pub(crate) fn terminate(&self, exit_code: u32) -> bool {
+        (unsafe { TerminateJobObject(self.0.raw(), exit_code) }) != 0
+    }
+}
+
 /// Creates one anonymous pipe. `parent_reads` selects which endpoint stays in
 /// the parent; that endpoint is explicitly made non-inheritable.
 fn create_pipe(parent_reads: bool) -> Result<(OwnedHandle, OwnedHandle), ProcessError> {

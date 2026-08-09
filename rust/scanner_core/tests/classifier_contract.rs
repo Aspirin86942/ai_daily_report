@@ -1,5 +1,9 @@
 //! PDF 分类器 wire 与本地 port（spec Part 7.1 / Part 3.2）的测试。
 
+use ai_daily_scanner_core::session::{
+    build_classify_request, session_classify, session_parse, PythonSession, SessionParams,
+    SESSION_CONTRACT_VERSION,
+};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
@@ -7,11 +11,14 @@ use std::time::{Duration, UNIX_EPOCH};
 use ai_daily_scanner_contract::{
     ClassifierResponseStatus, ClassifierVersionResponseV1, PdfClassifierRequestV1,
     PdfClassifierResponseV1, PdfClassifierResultStatus, PdfClassifierResultV1,
-    PythonOperationDiagnosticV1, PythonOperationErrorCode, PythonOperationStage, Validate,
+    PythonOperationDiagnosticV1, PythonOperationErrorCode, PythonOperationStage,
+    PythonSessionHelloV1, PythonSessionOperation, PythonSessionRequestV1,
+    PythonSessionResponseStatus, PythonSessionResponseV1, PythonSessionResultV1,
+    PythonSessionVersionResponseV1, Validate,
 };
 use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
 use ai_daily_scanner_core::parsers::classifier::{classify_pdf_oneshot, PdfClassifierPort};
-use ai_daily_scanner_core::parsers::WorkerCommand;
+use ai_daily_scanner_core::parsers::{register_session_version, WorkerCommand};
 use ai_daily_scanner_core::store::classifier_profile_hash;
 use ai_daily_scanner_contract::{RawScannerProfileV2, ReportMode, ScannerProfile, WorkerKind};
 
@@ -329,4 +336,209 @@ fn classifier_oneshot_reports_deterministic_error_for_corrupt_pdf() {
     assert_eq!(result.status, PdfClassifierResultStatus::Error);
     let diagnostic = result.diagnostic.0.as_ref().expect("error diagnostic");
     assert!(!diagnostic.retryable);
+}
+
+#[test]
+fn session_wire_types_round_trip_and_validate() {
+    let version = PythonSessionVersionResponseV1 {
+        contract: "ai_daily_python_session".to_string(),
+        protocol_version: 1,
+        session_contract_version: "ai_daily_python_session_v1".to_string(),
+        worker_build: "a".repeat(64),
+        classifier_build: "b".repeat(64),
+        supported_operations: vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()],
+    };
+    version.validate().expect("session version validates");
+    let json = serde_json::to_string(&version).expect("serialize");
+    let parsed: PythonSessionVersionResponseV1 =
+        serde_json::from_str(&json).expect("deserialize");
+    parsed.validate().expect("round-trip validates");
+    assert_eq!(parsed, version);
+
+    let hello = PythonSessionHelloV1 {
+        contract: "ai_daily_python_session".to_string(),
+        protocol_version: 1,
+        frame: "hello".to_string(),
+        session_contract_version: "ai_daily_python_session_v1".to_string(),
+        worker_build: "a".repeat(64),
+        classifier_build: "b".repeat(64),
+        supported_operations: vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()],
+    };
+    hello.validate().expect("hello validates");
+    let parsed_hello: PythonSessionHelloV1 =
+        serde_json::from_str(&serde_json::to_string(&hello).expect("serialize"))
+            .expect("deserialize");
+    assert_eq!(parsed_hello, hello);
+
+    let request = PythonSessionRequestV1 {
+        contract: "ai_daily_python_session".to_string(),
+        protocol_version: 1,
+        request_id: request_id(),
+        operation: PythonSessionOperation::ClassifyPdfV1,
+        payload: serde_json::json!({"file_path": "C:\\x.pdf"}),
+    };
+    request.validate().expect("session request validates");
+
+    let response = PythonSessionResponseV1 {
+        contract: "ai_daily_python_session".to_string(),
+        protocol_version: 1,
+        request_id: request_id(),
+        operation: PythonSessionOperation::ClassifyPdfV1,
+        status: PythonSessionResponseStatus::Ok,
+        result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(
+            text_result(),
+        ))),
+        error: ai_daily_scanner_contract::Nullable(None),
+    };
+    response.validate().expect("session response validates");
+    let parsed_response: PythonSessionResponseV1 =
+        serde_json::from_str(&serde_json::to_string(&response).expect("serialize"))
+            .expect("deserialize");
+    assert_eq!(parsed_response, response);
+
+    let bad_response = PythonSessionResponseV1 {
+        contract: "ai_daily_python_session".to_string(),
+        protocol_version: 1,
+        request_id: request_id(),
+        operation: PythonSessionOperation::ClassifyPdfV1,
+        status: PythonSessionResponseStatus::Error,
+        result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(
+            text_result(),
+        ))),
+        error: ai_daily_scanner_contract::Nullable(None),
+    };
+    assert!(bad_response.validate().is_err());
+}
+
+#[test]
+fn session_contract_version_is_frozen() {
+    assert_eq!(SESSION_CONTRACT_VERSION, "ai_daily_python_session_v1");
+}
+
+#[test]
+fn capability_preflight_batch_registers_classifier_and_session() {
+    let Some(python) = python_executable() else {
+        return;
+    };
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let command = WorkerCommand {
+        program: python,
+        base_args: vec![
+            OsString::from("-m"),
+            OsString::from("src.workers.document_parser_worker"),
+        ],
+        current_dir: Some(repository_root),
+        expected_kind: WorkerKind::PythonDocument,
+        required_backends: vec!["pdf_text_v1".to_string()],
+        required_extensions: vec![".pdf".to_string()],
+    };
+    let (classifier, session) =
+        ai_daily_scanner_core::parsers::preflight_python_capabilities(
+            &command,
+            Duration::from_secs(20),
+        );
+    let classifier = classifier.expect("classifier-version preflight must succeed");
+    let session = session
+        .expect("session-version preflight must not fail")
+        .expect("real worker must advertise session capability");
+    assert_eq!(
+        classifier.identity.classifier_contract_version,
+        "ai_daily_pdf_classifier_v1"
+    );
+    assert_eq!(
+        session.identity.session_contract_version,
+        "ai_daily_python_session_v1"
+    );
+    assert_eq!(
+        session.identity.supported_operations,
+        vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()]
+    );
+    assert_eq!(
+        classifier.identity.classifier_build,
+        session.identity.classifier_build,
+        "classifier build must be shared by the classifier and session handshakes"
+    );
+}
+
+#[test]
+fn session_process_classifies_and_parses_text_pdf() {
+    let Some(python) = python_executable() else {
+        return;
+    };
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let fixture = repository_root
+        .join("tests")
+        .join("fixtures")
+        .join("pdf_benchmark")
+        .join("case_01.pdf");
+    if !fixture.is_file() {
+        return;
+    }
+    let command = WorkerCommand {
+        program: python,
+        base_args: vec![
+            OsString::from("-m"),
+            OsString::from("src.workers.document_parser_worker"),
+        ],
+        current_dir: Some(repository_root.clone()),
+        expected_kind: WorkerKind::PythonDocument,
+        required_backends: vec!["pdf_text_v1".to_string()],
+        required_extensions: vec![".pdf".to_string()],
+    };
+    let expected = register_session_version(&command, Duration::from_secs(20))
+        .expect("session-version preflight")
+        .expect("session capability must be present");
+
+    let metadata = std::fs::metadata(&fixture).expect("fixture metadata");
+    let modified = metadata
+        .modified()
+        .expect("fixture modified time")
+        .duration_since(UNIX_EPOCH)
+        .expect("fixture mtime after epoch");
+    let source_version =
+        ai_daily_discovery::build_source_version(modified.as_nanos(), metadata.len());
+
+    let mut session = PythonSession::start(
+        &command,
+        &expected.identity,
+        SessionParams::default(),
+        Duration::from_secs(20),
+    )
+    .expect("session starts and hello matches preflight");
+
+    let classify_request = build_classify_request(
+        request_id(),
+        &fixture,
+        &source_version,
+        5,
+    );
+    let classify_result =
+        session_classify(&mut session, &classify_request, Duration::from_secs(20))
+            .expect("session classify completes");
+    assert_eq!(classify_result.status, PdfClassifierResultStatus::TextInParseWindow);
+    assert_eq!(classify_result.page_count.0, Some(1));
+
+    let parse_request = ai_daily_scanner_contract::WorkerParseRequest {
+        contract: "ai_daily_worker".to_string(),
+        protocol_version: 1,
+        request_id: request_id(),
+        file_path: fixture.to_string_lossy().into_owned(),
+        file_type: ".pdf".to_string(),
+        backend: ai_daily_scanner_contract::WorkerBackend::PdfTextV1,
+        remaining_timeout_ms: 30_000,
+        max_file_size_bytes: 1_000_000,
+        parser_limits: ai_daily_scanner_contract::WorkerParserLimits::Pdf {
+            max_pages: 5,
+            excerpt_max_chars: 4000,
+        },
+        expected_source_version: source_version.clone(),
+    };
+    let parse_result = session_parse(&mut session, &parse_request, Duration::from_secs(20))
+        .expect("session parse completes");
+    assert_eq!(parse_result.status, ai_daily_scanner_contract::WorkerStatus::Ok);
+    assert_eq!(parse_result.parser_backend, ai_daily_scanner_contract::WorkerBackend::PdfTextV1);
+    assert_eq!(parse_result.observed_source_version, source_version);
+
+    session.kill();
+    assert!(!session.is_alive());
 }

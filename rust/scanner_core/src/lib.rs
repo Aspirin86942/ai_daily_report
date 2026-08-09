@@ -18,6 +18,7 @@ pub mod process;
 mod run;
 pub mod scheduler;
 pub mod scheduler_adapter;
+pub mod session;
 pub mod source_guard;
 pub mod store;
 

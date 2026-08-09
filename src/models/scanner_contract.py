@@ -1307,6 +1307,60 @@ class ClassifierVersionResponseV1(ContractModel):
     target_triple: NonEmpty1024
 
 
+# ---------------------------------------------------------------------------
+# ai_daily_python_session_v1 wire（spec Part 7.1/7.2）：长驻流式 PDF session
+# ---------------------------------------------------------------------------
+
+SessionOperation = Literal["classify_pdf_v1", "parse_v1"]
+
+
+class PythonSessionVersionResponseV1(ContractModel):
+    contract: Literal["ai_daily_python_session"]
+    protocol_version: Literal[1]
+    session_contract_version: Literal["ai_daily_python_session_v1"]
+    worker_build: Sha256Hex
+    classifier_build: Sha256Hex
+    supported_operations: Annotated[list[SessionOperation], Field(max_length=16)]
+
+
+class PythonSessionHelloV1(ContractModel):
+    contract: Literal["ai_daily_python_session"]
+    protocol_version: Literal[1]
+    frame: Literal["hello"]
+    session_contract_version: Literal["ai_daily_python_session_v1"]
+    worker_build: Sha256Hex
+    classifier_build: Sha256Hex
+    supported_operations: Annotated[list[SessionOperation], Field(max_length=16)]
+
+
+class PythonSessionRequestV1(ContractModel):
+    contract: Literal["ai_daily_python_session"]
+    protocol_version: Literal[1]
+    request_id: RequestId
+    operation: SessionOperation
+    payload: dict[str, object]
+
+
+class PythonSessionResponseV1(ContractModel):
+    contract: Literal["ai_daily_python_session"]
+    protocol_version: Literal[1]
+    request_id: RequestId
+    operation: SessionOperation
+    status: Literal["ok", "error"]
+    result: PdfClassifierResultV1 | WorkerParseResponse | None
+    error: PythonOperationDiagnosticV1 | None
+
+    @model_validator(mode="after")
+    def validate_status_invariants(self) -> "PythonSessionResponseV1":
+        if self.status == "ok":
+            if self.result is None or self.error is not None:
+                raise ValueError("ok session response requires a result and no error")
+        else:
+            if self.result is not None or self.error is None:
+                raise ValueError("error session response requires an error and no result")
+        return self
+
+
 class FileAuditV2(ContractModel):
     relative_path: RelativePath
     file_identity: NonEmpty4096
@@ -1745,6 +1799,10 @@ __all__ = [
     "PdfClassifierResponseV1",
     "PdfClassifierResultV1",
     "PythonOperationDiagnosticV1",
+    "PythonSessionHelloV1",
+    "PythonSessionRequestV1",
+    "PythonSessionResponseV1",
+    "PythonSessionVersionResponseV1",
     "RawScannerProfileV1",
     "RawScannerProfileV2",
     "ScannerProfile",

@@ -30,8 +30,9 @@ use crate::artifact::{
 use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
 use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
 use crate::parsers::{
-    document, office, register_worker, register_worker_pair, RegisteredWorker, WorkerCommand,
-    WorkerRegistry, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
+    document, office, preflight_python_capabilities, register_worker, register_worker_pair,
+    RegisteredWorker, WorkerCommand, WorkerRegistry, WORKER_CONTRACT_VERSION,
+    WORKER_HANDSHAKE_TIMEOUT,
 };
 use crate::parsers::classifier::ClassifierPort;
 use crate::scheduler::{
@@ -619,11 +620,75 @@ fn execute_active_build(
     let handshake_started = Instant::now();
     let office_command = office::worker_command(&request.adapters);
     let python_command = document::worker_command(&request.adapters);
-    let (office_result, python_result) =
-        register_worker_pair(&office_command, &python_command, WORKER_HANDSHAKE_TIMEOUT);
+    // spec Part 7.1：office v1 version、python v1 version、classifier-version、
+    // session-version 在一个 bounded parallel preflight batch 中启动，全部结束
+    // 后再做交叉 build/contract 校验；不得四次串行 spawn 拉高 warm path。
+    let profile_allows_pdf = profile
+        .discovery
+        .allowed_extensions
+        .iter()
+        .any(|extension| extension == ".pdf")
+        && profile.parse.pdf.backend == "pdf_text_v1";
+    let (office_python_pair, capability_pair) = std::thread::scope(|scope| {
+        let office_python = scope.spawn(|| {
+            register_worker_pair(&office_command, &python_command, WORKER_HANDSHAKE_TIMEOUT)
+        });
+        let capabilities = if profile_allows_pdf {
+            let pair = preflight_python_capabilities(&python_command, WORKER_HANDSHAKE_TIMEOUT);
+            (Some(pair.0), Some(pair.1))
+        } else {
+            (None, None)
+        };
+        let office_python = match office_python.join() {
+            Ok(pair) => pair,
+            Err(_) => (
+                Err(crate::fallback::ParseFailure {
+                    class: crate::fallback::FailureClass::ContractFailure,
+                    diagnostic: diagnostic(
+                        ErrorCode::WorkerHandshakeFailed,
+                        "office/python handshake thread failed".to_string(),
+                        false,
+                        DiagnosticStage::Process,
+                    ),
+                }),
+                Err(crate::fallback::ParseFailure {
+                    class: crate::fallback::FailureClass::ContractFailure,
+                    diagnostic: diagnostic(
+                        ErrorCode::WorkerHandshakeFailed,
+                        "office/python handshake thread failed".to_string(),
+                        false,
+                        DiagnosticStage::Process,
+                    ),
+                }),
+            ),
+        };
+        (office_python, capabilities)
+    });
     let worker_handshake_ms = elapsed_ms(handshake_started);
+    let (office_result, python_result) = office_python_pair;
+    let (classifier_result, session_result) = capability_pair;
     let (office_worker, office_error) = split_handshake(office_result, "rust_office_oxide_v1");
     let (python_worker, python_error) = split_handshake(python_result, "python_office_v1");
+    // 逻辑校验顺序固定：只有 python v1 version 成功后才接受 classifier/session
+    // 结果（spec Part 7.1）。profile 允许 PDF 时 classifier-version 缺失即
+    // preflight fail closed；session capability absent 走 v1 one-shot 不报错。
+    let mut classifier_worker: Option<crate::parsers::RegisteredClassifier> = None;
+    let mut capability_errors: Vec<Diagnostic> = Vec::new();
+    if python_worker.is_some() {
+        if let Some(result) = classifier_result {
+            match result {
+                Ok(classifier) => classifier_worker = Some(classifier),
+                Err(failure) => capability_errors.push(failure.diagnostic),
+            }
+        }
+        // spec Part 7.1：session capability absent（严格 exit-2 transport）→ 整轮
+        // v1 one-shot，不计 degradation；其他 handshake failure 才计入错误。
+        if let Some(result) = session_result {
+            if let Err(failure) = result {
+                capability_errors.push(failure.diagnostic);
+            }
+        }
+    }
     let office_fingerprint = office_worker.as_ref().map(worker_fingerprint);
     let python_fingerprint = python_worker.as_ref().map(worker_fingerprint);
     let fingerprint_now_ms = match current_time_millis() {
@@ -658,6 +723,7 @@ fn execute_active_build(
     }
     let mut handshake_errors: Vec<Diagnostic> =
         [office_error, python_error].into_iter().flatten().collect();
+    handshake_errors.extend(capability_errors);
     if !handshake_errors.is_empty() {
         let error = handshake_errors.remove(0);
         return finish_active_error(
@@ -813,7 +879,12 @@ fn execute_active_build(
         python_contract: Some(python_worker.identity.worker_contract_version.clone()),
         python_version: Some(python_worker.identity.worker_version.clone()),
         python_build: Some(python_worker.identity.worker_build.clone()),
-        classifier_build: Some(python_worker.identity.worker_build.clone()),
+        // carry：真实 `classifier-version` build（非 python-worker-build 占位）。
+        // PDF 被 profile 允许时 classifier-version 已由 preflight fail-closed
+        // 保证存在；未允许时没有分类动作，classifier build 保持 None。
+        classifier_build: classifier_worker
+            .as_ref()
+            .map(|classifier| classifier.identity.classifier_build.clone()),
     };
 
     // ---- snapshot fast path (spec Part 5.4) ----

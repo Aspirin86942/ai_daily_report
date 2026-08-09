@@ -641,17 +641,29 @@ impl BudgetedContextScheduler {
             .iter()
             .map(|file| (file.file_identity.clone(), file))
             .collect();
-        let (classifications, runtime_classification, classification_fresh_hits) =
-            self.run_classifications(
-                &classified,
-                &snapshot,
-                &profile,
-                &classifier_profile_hash,
-                &classifier_build,
-                &existed_before,
-                &mut metrics,
-                &executor,
-            )?;
+        let (
+            classifications,
+            runtime_classification,
+            classification_fresh_hits,
+            classification_cache_write_warnings,
+        ) = self.run_classifications(
+            &classified,
+            &snapshot,
+            &profile,
+            &classifier_profile_hash,
+            &classifier_build,
+            &existed_before,
+            &mut metrics,
+            &executor,
+        )?;
+        diagnostics.extend(
+            classification_cache_write_warnings
+                .into_iter()
+                .map(|diagnostic| RunDiagnosticRecord {
+                    severity: DiagnosticSeverity::Warning,
+                    diagnostic,
+                }),
+        );
 
         // ---- Fixed context sections + budget model ----
         let mut fixed =
@@ -1143,6 +1155,7 @@ impl BudgetedContextScheduler {
             BTreeMap<String, PdfClassificationResult>,
             HashSet<String>,
             Vec<String>,
+            Vec<Diagnostic>,
         ),
         SchedulerFailure,
     > {
@@ -1150,6 +1163,7 @@ impl BudgetedContextScheduler {
         let mut results = BTreeMap::new();
         let mut runtime_not_parsed = HashSet::new();
         let mut classification_fresh_hits = Vec::new();
+        let mut classification_cache_write_warnings: Vec<Diagnostic> = Vec::new();
         let mut any_lookup = false;
         let mut any_miss = false;
 
@@ -1260,12 +1274,18 @@ impl BudgetedContextScheduler {
                 work_deadline,
                 &mut results,
                 metrics,
+                &mut classification_cache_write_warnings,
             );
             index = wave_end;
         }
 
         metrics.classification_cache_all_hit = if any_lookup { Some(!any_miss) } else { None };
-        Ok((results, runtime_not_parsed, classification_fresh_hits))
+        Ok((
+            results,
+            runtime_not_parsed,
+            classification_fresh_hits,
+            classification_cache_write_warnings,
+        ))
     }
 
     /// Runs one wave of classifier invocations in parallel on the bounded pool
@@ -1279,6 +1299,7 @@ impl BudgetedContextScheduler {
         work_deadline: u64,
         results: &mut BTreeMap<String, PdfClassificationResult>,
         metrics: &mut ExecutionMetrics,
+        cache_write_warnings: &mut Vec<Diagnostic>,
     ) {
         let remaining = work_deadline.saturating_sub(self.clock.now_ms());
         let outputs: Vec<(String, Result<PdfClassifierResultV1, ParseFailure>)> =
@@ -1363,7 +1384,9 @@ impl BudgetedContextScheduler {
                 None => metrics.unobserved_classification_attempt_count += 1,
             }
             results.insert(identity.clone(), classification);
-            // Success-only classification cache write while remaining > 0.
+            // Success-only classification cache write while remaining > 0
+            // (carry): a failed write is a SKIPPED receipt warning like the
+            // parse path, never silently dropped.
             if self.clock.now_ms() < work_deadline {
                 if let Some(record) = classification_cache_record(
                     &task.file,
@@ -1373,9 +1396,22 @@ impl BudgetedContextScheduler {
                     page_count,
                     result_examined_pages,
                 ) {
-                    let _ = self
+                    if let Err(error) = self
                         .cache
-                        .write_classification(self.clock.now_ms(), &[record]);
+                        .write_classification(self.clock.now_ms(), &[record])
+                    {
+                        cache_write_warnings.push(Diagnostic {
+                            error_code: ErrorCode::CacheWriteFailed,
+                            message: format!(
+                                "classification cache write skipped: {}",
+                                error.diagnostic(DiagnosticStage::Cache).message
+                            ),
+                            retryable: true,
+                            stage: DiagnosticStage::Cache,
+                            file_path: Nullable(Some(task.file.path.clone())),
+                            backend: Nullable(Some("pdf_text_v1".to_string())),
+                        });
+                    }
                 }
             }
         }
