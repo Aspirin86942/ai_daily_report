@@ -3532,6 +3532,10 @@ fn run_maintenance_gc(
     // Count the deletions inside the transaction so a commit failure rolls back
     // everything and the reported deleted counts stay honest (zero on rollback).
     let after = table_counts(&transaction)?;
+    #[cfg(test)]
+    if TEST_FORCE_MAINTENANCE_GC_FAILURE.with(|flag| flag.get()) {
+        return Err(cache_write("forced maintenance GC transaction failure"));
+    }
     transaction.commit().map_err(cache_write)?;
     Ok(deleted_diff(&before, &after))
 }
@@ -4225,6 +4229,10 @@ fn delete_prepared_terminal_runs(
 }
 
 fn run_incremental_vacuum(connection: &Connection) -> Result<u64, StoreError> {
+    #[cfg(test)]
+    if TEST_FORCE_INCREMENTAL_VACUUM_FAILURE.with(|flag| flag.get()) {
+        return Err(cache_write("forced incremental vacuum failure"));
+    }
     let before_freelist: i64 = connection
         .query_row("PRAGMA freelist_count", [], |row| row.get(0))
         .map_err(cache_open)?;
@@ -4457,6 +4465,10 @@ fn restore_default_busy_timeout(connection: &Connection) -> rusqlite::Result<()>
 #[cfg(test)]
 thread_local! {
     static TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static TEST_FORCE_MAINTENANCE_GC_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static TEST_FORCE_INCREMENTAL_VACUUM_FAILURE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     static TEST_TERMINAL_DIAGNOSTIC_BATCHES_WRITTEN: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
@@ -9256,6 +9268,50 @@ mod tests {
         }
     }
 
+    fn seed_maintenance_terminal_run(
+        db_path: &Path,
+        request_id: &str,
+        finished_at_ms: i64,
+        final_envelope_json: &str,
+        audit_size_bytes: i64,
+    ) -> i64 {
+        let connection = rusqlite::Connection::open(db_path).unwrap();
+        connection
+            .execute(
+                "INSERT INTO scan_runs(
+                    request_id, canonical_request_json, request_hash_algorithm, request_hash,
+                    owner_id, status, created_at_ms, started_at_ms, updated_at_ms,
+                    finished_at_ms, final_envelope_json, audit_provenance_version, audit_size_bytes
+                 ) VALUES (?1, '{}', 'sha256-request-v1', ?2, 'owner', 'success',
+                            1, 1, 1, ?3, ?4, 'full_v2', ?5)",
+                params![
+                    request_id,
+                    cache::sha256_hex(request_id.as_bytes()),
+                    finished_at_ms,
+                    final_envelope_json,
+                    audit_size_bytes,
+                ],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    }
+
+    fn maintenance_terminal_state(
+        db_path: &Path,
+        scan_run_id: i64,
+    ) -> Option<(String, String, i64)> {
+        let connection = rusqlite::Connection::open(db_path).unwrap();
+        connection
+            .query_row(
+                "SELECT status, final_envelope_json, audit_size_bytes
+                 FROM scan_runs WHERE scan_run_id=?1",
+                params![scan_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .unwrap()
+    }
+
     #[test]
     fn maintenance_dry_run_ok_on_fresh_v2_db() {
         let harness = harness("00000000-0000-4000-8000-000000000101");
@@ -9320,6 +9376,107 @@ mod tests {
             MaintenancePostIntegrityCheck::Ok
         );
         assert!(response.error.0.is_none());
+    }
+
+    #[test]
+    fn maintenance_gc_failure_rolls_back_and_preserves_terminal_result() {
+        let harness = harness("00000000-0000-4000-8000-000000000103");
+        let aged_run_id = seed_maintenance_terminal_run(
+            &harness.db_path,
+            "maintenance-gc-failure-aged",
+            1,
+            r#"{"result":"aged"}"#,
+            10,
+        );
+        let recent_run_id = seed_maintenance_terminal_run(
+            &harness.db_path,
+            "maintenance-gc-failure-recent",
+            4_000_000_000_000,
+            r#"{"result":"recent"}"#,
+            20,
+        );
+        let recent_before = maintenance_terminal_state(&harness.db_path, recent_run_id);
+
+        TEST_FORCE_MAINTENANCE_GC_FAILURE.with(|flag| flag.set(true));
+        let response = ScannerStore::maintenance(&maintenance_request(
+            &harness.db_path,
+            MaintenanceMode::Gc,
+            false,
+        ));
+        TEST_FORCE_MAINTENANCE_GC_FAILURE.with(|flag| flag.set(false));
+        response.validate().expect("maintenance response validates");
+
+        assert_eq!(response.status, MaintenanceStatus::Error);
+        assert_eq!(response.deleted, zero_maintenance_deleted());
+        assert_eq!(
+            response.before.terminal_audit_logical_bytes,
+            response.after.terminal_audit_logical_bytes
+        );
+        assert!(response.after_complete);
+        assert_eq!(
+            response.post_integrity_check,
+            MaintenancePostIntegrityCheck::Ok
+        );
+        assert_eq!(response.vacuum.status, MaintenanceVacuumStatus::Error);
+        let error = response.error.0.as_ref().expect("error diagnostic");
+        assert_eq!(error.error_code, ErrorCode::CacheWriteFailed);
+        assert_eq!(error.stage, DiagnosticStage::Maintenance);
+
+        assert!(maintenance_terminal_state(&harness.db_path, aged_run_id).is_some());
+        assert_eq!(
+            maintenance_terminal_state(&harness.db_path, recent_run_id),
+            recent_before
+        );
+    }
+
+    #[test]
+    fn maintenance_vacuum_failure_keeps_committed_gc_and_terminal_result() {
+        let harness = harness("00000000-0000-4000-8000-000000000104");
+        let aged_run_id = seed_maintenance_terminal_run(
+            &harness.db_path,
+            "maintenance-vacuum-failure-aged",
+            1,
+            r#"{"result":"aged"}"#,
+            10,
+        );
+        let recent_run_id = seed_maintenance_terminal_run(
+            &harness.db_path,
+            "maintenance-vacuum-failure-recent",
+            4_000_000_000_000,
+            r#"{"result":"recent"}"#,
+            20,
+        );
+        let recent_before = maintenance_terminal_state(&harness.db_path, recent_run_id);
+
+        TEST_FORCE_INCREMENTAL_VACUUM_FAILURE.with(|flag| flag.set(true));
+        let response = ScannerStore::maintenance(&maintenance_request(
+            &harness.db_path,
+            MaintenanceMode::IncrementalVacuum,
+            false,
+        ));
+        TEST_FORCE_INCREMENTAL_VACUUM_FAILURE.with(|flag| flag.set(false));
+        response.validate().expect("maintenance response validates");
+
+        assert_eq!(response.status, MaintenanceStatus::Error);
+        assert_eq!(response.deleted.scan_runs_rows, 1);
+        assert_eq!(response.before.terminal_audit_logical_bytes, 30);
+        assert_eq!(response.after.terminal_audit_logical_bytes, 20);
+        assert!(response.after_complete);
+        assert_eq!(
+            response.post_integrity_check,
+            MaintenancePostIntegrityCheck::Ok
+        );
+        assert_eq!(response.vacuum.status, MaintenanceVacuumStatus::Error);
+        assert_eq!(response.vacuum.pages_changed, 0);
+        let error = response.error.0.as_ref().expect("error diagnostic");
+        assert_eq!(error.error_code, ErrorCode::CacheWriteFailed);
+        assert_eq!(error.stage, DiagnosticStage::Maintenance);
+
+        assert!(maintenance_terminal_state(&harness.db_path, aged_run_id).is_none());
+        assert_eq!(
+            maintenance_terminal_state(&harness.db_path, recent_run_id),
+            recent_before
+        );
     }
 
     #[test]
