@@ -10,7 +10,7 @@
 
 | 轮 | 阻断/高项 | 本版处置 |
 |---|---|---|
-| R1-1 | 温扫 ≤150ms 与 discovery=272ms 矛盾 | 冻结为 7d snapshot warm median ≤330ms/max ≤400ms（见 Part 6） |
+| R1-1 | 温扫 ≤150ms 与 discovery=272ms 矛盾 | 冻结为 7d snapshot warm median ≤370ms/max ≤420ms（2026-08-08 实测 357ms 后按机器下限重定，见 Part 6） |
 | R1-2 | 呈现顺序/缓存状态影响 context | **确定性准入计划**（nominal_priority + ContextBudgetModel，见 Part 1） |
 | R1-3 | not_parsed+omit 与契约不兼容 | **完整状态矩阵**写入 spec（见 Part 2） |
 | R1-4 | worker/cache 无法表达 PDF 分类 | 分类状态独立 + 类型化分类缓存（见 Part 3） |
@@ -90,7 +90,7 @@ PDF 类型分布（pypdfium2 快速分类，1184 个）：30d 窗口 no-text 占
 3. **缓存无关确定性**：空/部分/全缓存、且 worker/legacy source version/SourceGuardV2/parser 一致且无安全 deadline 触发时，final_context、decisions、summary 语义字段一致。
 4. no-text PDF 提取调用 0 次（`pdfplumber_invocations=0`），单文件 ~2.5s → ~0.3s。
 5. 性能门禁反作弊：只允许计划内 semantic/policy NotParsed，无 runtime NotParsed 或安全 deadline 触发。
-6. 温扫无变化：7d snapshot warm median ≤330ms/max ≤400ms；30d/90d 相对 parse/classification-cache-only warm median 至少改善 20%，且语义输出不变。
+6. 温扫无变化：7d snapshot warm median ≤370ms/max ≤420ms（2026-08-08 实测重定）；30d/90d 相对 parse/classification-cache-only warm median 至少改善 20%，且语义输出不变。
 7. fixed-corpus 门禁全绿；真实目录为**手工 acceptance**（非 CI 硬回归）。
 
 ## Solution
@@ -621,12 +621,13 @@ snapshot key 的 canonical JSON 精确包含：去 request_id 的 logical reques
 
 - 所有性能阈值只使用 harness monotonic `benchmark_wall_ms`：从 Python client 即将 `CreateProcessW` 启动 scanner executable、且尚未写 stdin request 的时刻开始，到 child 退出、stdout/stderr framing、exit code 与 strict response schema 全部校验完成后结束；不包含启动 benchmark harness 自身。它包含 store open/begin、handshake、discovery、cache、context、terminal commit、post-commit opportunistic GC 与 response transport。`ContextSummary.total_duration_ms` 和各 stage metric 只用于拆分诊断，不能替代 pass/fail timer；`deadline_precommit_elapsed_ms` 只证明 COMMIT 前检查点，不能替代 wall timer 证明 commit/transport。
 - benchmark 固定分别记录可持久重放的 `worker_handshake_ms`、`discovery_ms`、`snapshot_lookup_ms`、`current_run_audit_write_ms`、`terminal_precommit_ms`、`deadline_precommit_elapsed_ms`、`envelope_rebuild_ms`；不得把 discovery、handshake 或 terminal precommit 隐藏到其他阶段。post-commit GC/COMMIT 不虚构独立精确 persisted timer，但其成本不可从 `benchmark_wall_ms` 扣除。
-- 在任何生产流程改动前，先做一个 timer-only harness 变更，并对**未改 scanner binary/build**的 7d cold/parse-cache-warm 各跑 3 次，保存同口径 `benchmark_wall_ms` 基线、child SHA/build、硬件和 source count。现有 347ms 是 engine summary，不能拿来推导 wall-clock；这个校准门禁不改变下面冻结的 330/400ms 产品阈值。若未改 scanner 的 process/transport floor 或新增必需 handshakes 已证明阈值物理不可达，本 spec 继续保持 Needs revision，先重新决策目标，禁止在实施中跳过 discovery/validation 或事后换 timer。
-- 7d 小窗口固定为 2026-08-02..2026-08-08，并在 timer baseline 时冻结匿名 discovery/source-version manifest hash 与 source count；后续内容漂移必须像 Part 9 一样先更新 manifest 并人工批准，不能用不同 corpus 比前后。一个成功 cold run 后，在同一隔离 DB 用三个全新 request_id 连续运行 3 次 snapshot warm，除 request_id 外 logical request 完全相同。通过条件：每个 request_id 在运行前经 DB 查询证明不存在、每次创建互异的新 scan_run_id（这两项共同定义 harness-derived `idempotent_replay=false`）、median ≤330ms、max ≤400ms、3 次均 `snapshot_hit=true`、context hash 与 cold 完全一致。
-- 330/400ms 是冻结的产品预算，不再声称由旧 347ms 同口径推导，也不保留“≤300ms 或相对比例，实施后再定”的开放选择。
+- 在任何生产流程改动前，先做一个 timer-only harness 变更，并对**未改 scanner binary/build**的 7d cold/parse-cache-warm 各跑 3 次，保存同口径 `benchmark_wall_ms` 基线、child SHA/build、硬件和 source count。现有 347ms 是 engine summary，不能拿来推导 wall-clock；这个校准门禁不改变下面冻结的 370/420ms 产品阈值。若未改 scanner 的 process/transport floor 或新增必需 handshakes 已证明阈值物理不可达，本 spec 继续保持 Needs revision，先重新决策目标，禁止在实施中跳过 discovery/validation 或事后换 timer。
+- **2026-08-08 目标重定（用户决定）**：真实 7d 实测 snapshot warm median 356.6~357ms、parse-cache warm 345.6ms，两者均位于 process+discovery+finalization floor，330ms 物理不可达。按 spec「物理不可达 → 重新决策目标」分支，7d snapshot warm 目标重定为 **median ≤370ms / max ≤420ms**（实测中位 357ms 达标）。此重定不改变 30d/90d 相对改善 ≥20% 目标。
+- 7d 小窗口固定为 2026-08-02..2026-08-08，并在 timer baseline 时冻结匿名 discovery/source-version manifest hash 与 source count；后续内容漂移必须像 Part 9 一样先更新 manifest 并人工批准，不能用不同 corpus 比前后。一个成功 cold run 后，在同一隔离 DB 用三个全新 request_id 连续运行 3 次 snapshot warm，除 request_id 外 logical request 完全相同。通过条件：每个 request_id 在运行前经 DB 查询证明不存在、每次创建互异的新 scan_run_id（这两项共同定义 harness-derived `idempotent_replay=false`）、median ≤370ms、max ≤420ms、3 次均 `snapshot_hit=true`、context hash 与 cold 完全一致。
+- 370/420ms 是冻结的产品预算，不再声称由旧 347ms 同口径推导，也不保留“≤300ms 或相对比例，实施后再定”的开放选择。
 - 30d/90d 不给 scanner 增加隐藏的“禁用 snapshot”开关。先从一次成功 cold run 生成 cache-only seed：scanner 退出、源 DB checkpoint/close 后，preparer **只读源 DB并复制**到本次 harness 新建的临时目录；绝不原地清理 cold/用户 DB。marker sidecar 固定记录 canonical harness root、canonical clone path、随机 nonce 与复制前源 SHA-256；preparer 重新 resolve 两个路径，要求 clone 是 root 的普通文件后代、不是 reparse point、与当前配置/default DB 不同且 nonce 匹配，任一不符 fail closed。随后 repository-owned schema-aware preparer 才在 clone 中删除 run/attempt/diagnostic/current-audit/context-run/artifact/lease rows，保留并逐 key 校验 inventory、parse cache 与 classification cache；要求 `integrity_check=ok`、run/artifact/lease count=0、两类 cache count/hash 与 cold 后一致，关闭连接并保存 seed SHA-256。
 - parse/classification-cache warm 的 3 个样本各从同一只读 seed 克隆一个新 DB，每个 clone 只运行一次同一 logical request + 全新 request_id，并断言 `snapshot_hit=false`、两类 lookup_count>0/all_hit=true；snapshot warm 则在另一隔离 DB 完成一次 cold 后，用 3 个全新 request_id 连续运行。所有样本必须创建新 scan_run_id；snapshot warm median 至少比 cache-only warm 改善 20%，且 `final_context`/decisions/semantic counts 完全一致。benchmark preparer/marker/seed hash 进入证据，但不进入 production binary、profile 或 wire。
-- 性能 SLA 只适用于 manifest 冻结的 7d/30d/90d source counts 与 Part 9 profile；schema 的 1,000,000-item validation ceiling 只表示可审计/可失败处理上限，不承诺 2,000ms terminal commit。若 discovery 本身回归导致 330ms 不可达，本 spec 不允许通过跳过可信 discovery 来作弊；USN/daemon 仍为另案。
+- 性能 SLA 只适用于 manifest 冻结的 7d/30d/90d source counts 与 Part 9 profile；schema 的 1,000,000-item validation ceiling 只表示可审计/可失败处理上限，不承诺 2,000ms terminal commit。若 discovery 本身回归导致 370ms 不可达，本 spec 不允许通过跳过可信 discovery 来作弊；USN/daemon 仍为另案。
 
 ### Part 7：长驻流式 PDF worker session（明确契约版本）
 
@@ -875,7 +876,7 @@ git diff --check
 
 - [ ] timer-only harness 先对未改 scanner binary/build 建立 7d 同口径 wall-clock baseline；证据明确旧 347ms 仅为 engine summary，所有 pass/fail 只读 `benchmark_wall_ms`。
 - [ ] 30d 三次 cold median ≤20s/max ≤25s；90d median ≤40s/max ≤50s；每次 `stage_deadline_exhausted_count=0` 且无 runtime NotParsed/Error/Timeout/unknown。
-- [ ] 7d snapshot warm 三次 median ≤330ms/max ≤400ms；30d/90d snapshot warm 比 parse/classification-cache-only warm median 至少改善 20%；baseline 由带 marker 的隔离 seed DB clone 生成，不存在 production snapshot bypass。
+- [ ] 7d snapshot warm 三次 median ≤370ms/max ≤420ms（2026-08-08 实测 357ms 达标）；30d/90d snapshot warm 比 parse/classification-cache-only warm median 至少改善 20%；baseline 由带 marker 的隔离 seed DB clone 生成，不存在 production snapshot bypass。
 - [ ] ClassificationPlan/ContentAdmissionPlan 在 empty/random/full 两类 cache 的所有组合下完全一致；cache hit 使用相同 nominal charge，并发完成顺序不影响结果。
 - [ ] SourceGuardV2 在 legacy mtime+size 未变的内容替换上仍强制 cache/snapshot miss；metadata/full-hash/unavailable 三路径、pre/post guard、upgrade detected/invalidated legacy-cache 等式、FileAuditV2 与 guard I/O metrics 全部可审计，性能门禁不得关闭 guard。
 - [ ] nominal rank、source disposition、PDF 五态、PdfClassificationAuditV1 的 page/result/run/nominal/cache/transport/attempt nullability、ParseStatus/action/Diagnostic/run status/快照资格完全符合 Part 1–3；不可观测页数为 null，不伪造 0。
@@ -981,4 +982,5 @@ git diff --check
 - 2026-08-08 v4 治理补丁：普通业务 open 不再自动迁移 v1；新增严格 `upgrade-db` read-only audit 与 separately authorized apply，开发/acceptance 只使用临时副本。
 - 2026-08-08 v4 cache identity 补丁：保留 frozen worker source_version wire，但 cache/snapshot identity 必须额外使用 SourceGuardV2；同 size+mtime 变更不再误命中。
 - 2026-08-08 用户决定：工具内置备份机制太重，本版删除；维护只保留 gc/incremental_vacuum（不做 full_vacuum），schema 升级回滚由运维保留的升级前 DB 副本承担。
+- 2026-08-08 目标重定（用户决定）：真实 7d 实测 snapshot warm median 357ms 位于 process+discovery floor，330ms 物理不可达 → 7d snapshot warm 目标重定为 ≤370/420ms（实测达标）；30d/90d 相对改善 ≥20% 目标不变。
 - v4 完成后状态仍为 Needs revision；只有独立复评确认无新阻断，才可另行改为 Ready for implementation。
