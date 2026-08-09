@@ -1155,7 +1155,8 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
             |row| row.get(0),
         )?;
         if !has_guard || !has_size {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             transaction.execute_batch(PARSE_CACHE_GUARD_DDL)?;
             transaction.commit()?;
         }
@@ -1196,7 +1197,8 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
         // spec Part 4/5.2: databases whose `scan_file_results.cache_miss_reason`
         // CHECK predates the v2 reason set are rebuilt with the full set.
         if !scan_file_results_has_v2_miss_reason_check(connection)? {
-            let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
             rebuild_scan_file_results(&transaction)?;
             transaction.commit()?;
         }
@@ -1238,7 +1240,9 @@ pub fn upgrade_v1_to_v2(connection: &mut Connection, request_id: &str) -> Result
     migration
 }
 
-fn insert_created_empty_history(transaction: &rusqlite::Transaction<'_>) -> Result<(), SchemaError> {
+fn insert_created_empty_history(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), SchemaError> {
     transaction.execute(
         "INSERT INTO schema_migration_history(
             user_version, origin, upgrade_request_id, engine_build, committed_at_ms
@@ -1283,11 +1287,9 @@ fn migrate_v1_to_v2(
     // the cache can be rebuilt from source (spec Part 8.2). The table is rebuilt
     // with the SourceGuardV2-bound primary key so post-upgrade writes are
     // guard-bound (spec R3-29).
-    let invalidated: u64 = transaction
-        .query_row("SELECT count(*) FROM parse_cache", [], |row| {
-            row.get::<_, i64>(0)
-        })?
-        as u64;
+    let invalidated: u64 = transaction.query_row("SELECT count(*) FROM parse_cache", [], |row| {
+        row.get::<_, i64>(0)
+    })? as u64;
     transaction.execute_batch(PARSE_CACHE_GUARD_DDL)?;
 
     transaction.execute(
@@ -1390,8 +1392,8 @@ fn migrate_terminal_envelopes(transaction: &rusqlite::Transaction<'_>) -> Result
                 ))
             })?;
         metadata.remove("file_context");
-        let metadata_json = serde_json::to_string(&serde_json::Value::Object(metadata))
-            .map_err(|error| {
+        let metadata_json =
+            serde_json::to_string(&serde_json::Value::Object(metadata)).map_err(|error| {
                 SchemaError::MigrationFailed(format!(
                     "scan_run {scan_run_id}: envelope metadata could not be serialized: {error}"
                 ))
@@ -1416,11 +1418,12 @@ fn migrate_terminal_envelopes(transaction: &rusqlite::Transaction<'_>) -> Result
                 reserved_chars: envelope.summary.output_chars,
                 rendered_chars: envelope.summary.output_chars,
             };
-            let semantic_summary_json = serde_json::to_string(&semantic_summary).map_err(|error| {
-                SchemaError::MigrationFailed(format!(
-                    "scan_run {scan_run_id}: context summary could not be serialized: {error}"
-                ))
-            })?;
+            let semantic_summary_json =
+                serde_json::to_string(&semantic_summary).map_err(|error| {
+                    SchemaError::MigrationFailed(format!(
+                        "scan_run {scan_run_id}: context summary could not be serialized: {error}"
+                    ))
+                })?;
             // Parent + owned semantic rows only (spec Part 4 exact logical
             // bytes). The size definition is SHARED with the write path
             // (store/mod.rs artifact_size_bytes), so migrated payload artifacts
@@ -1528,7 +1531,10 @@ mod tests {
         assert_eq!(foreign_keys, 1);
         assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
         assert_eq!(synchronous, 1);
-        assert_eq!(auto_vacuum, 2, "fresh v2 database must be auto_vacuum=INCREMENTAL");
+        assert_eq!(
+            auto_vacuum, 2,
+            "fresh v2 database must be auto_vacuum=INCREMENTAL"
+        );
         require_durable_finalization(&connection).expect("durable finalization");
         let final_synchronous: i32 = connection
             .pragma_query_value(None, "synchronous", |row| row.get(0))
@@ -1601,7 +1607,9 @@ mod tests {
         connection
             .execute_batch(V1_DDL)
             .expect("v1 schema for the refused upgrade fixture");
-        connection.pragma_update(None, "user_version", 1).expect("seed version");
+        connection
+            .pragma_update(None, "user_version", 1)
+            .expect("seed version");
         configure_connection(&connection).expect("pragmas");
 
         assert!(matches!(
@@ -1613,9 +1621,11 @@ mod tests {
             .expect("user_version");
         assert_eq!(version, 1, "migrate must not touch a v1 database");
         let parse_cache_count: i64 = connection
-            .query_row("SELECT count(*) FROM sqlite_schema WHERE name='parse_cache'", [], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE name='parse_cache'",
+                [],
+                |row| row.get(0),
+            )
             .expect("schema count");
         assert_eq!(parse_cache_count, 1, "v1 schema must be left untouched");
     }

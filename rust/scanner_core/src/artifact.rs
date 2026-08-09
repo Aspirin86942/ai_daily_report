@@ -171,9 +171,7 @@ impl ArtifactDraft {
                 );
             }
         } else if !file_rows.is_empty() || !decision_rows.is_empty() {
-            return Err(
-                "ineligible artifact must carry no file or decision rows".to_string(),
-            );
+            return Err("ineligible artifact must carry no file or decision rows".to_string());
         }
         Ok(ArtifactDraft {
             snapshot_eligible,
@@ -501,38 +499,41 @@ mod tests {
             ReportMode::Daily,
         )
         .unwrap();
-        let request: BuildContextRequest =
-            serde_json::from_value(serde_json::json!({
-                "contract": "ai_daily_context",
-                "protocol_version": 1,
-                "request_id": "11111111-1111-4111-8111-111111111111",
-                "work_dir": "C:\\work",
-                "start_date": "2026-07-14",
-                "end_date": "2026-07-15",
-                "report_mode": "daily",
-                "compression_profile": null,
-                "scan_db_path": "C:\\state\\index.sqlite3",
-                "scanner_profile": {"schema_version": "scanner_profile_v2"},
-                "adapters": {
-                    "office_worker_path": "C:\\bin\\office.exe",
-                    "python_executable": "C:\\venv\\python.exe",
-                    "python_module_root": "C:\\repo",
-                    "python_document_worker_module": "src.workers.document_parser_worker"
-                }
-            }))
-            .unwrap();
+        let request: BuildContextRequest = serde_json::from_value(serde_json::json!({
+            "contract": "ai_daily_context",
+            "protocol_version": 1,
+            "request_id": "11111111-1111-4111-8111-111111111111",
+            "work_dir": "C:\\work",
+            "start_date": "2026-07-14",
+            "end_date": "2026-07-15",
+            "report_mode": "daily",
+            "compression_profile": null,
+            "scan_db_path": "C:\\state\\index.sqlite3",
+            "scanner_profile": {"schema_version": "scanner_profile_v2"},
+            "adapters": {
+                "office_worker_path": "C:\\bin\\office.exe",
+                "python_executable": "C:\\venv\\python.exe",
+                "python_module_root": "C:\\repo",
+                "python_document_worker_module": "src.workers.document_parser_worker"
+            }
+        }))
+        .unwrap();
         let workers = WorkerIdentities::default();
         let classifier = ClassifierIdentity {
             contract: CLASSIFIER_CONTRACT_VERSION.to_string(),
             build: "a".repeat(64),
             profile_hash: "b".repeat(64),
         };
-        let parts = snapshot_key_parts(&request, &[], &[], &profile, "build", &workers, &classifier)
-            .expect("key parts");
+        let parts =
+            snapshot_key_parts(&request, &[], &[], &profile, "build", &workers, &classifier)
+                .expect("key parts");
         let value: serde_json::Value =
             serde_json::from_str(&parts.canonical_json).expect("canonical json parses");
         assert_eq!(value["snapshot_key_version"], SNAPSHOT_KEY_VERSION);
-        assert!(value.get("logical_request").and_then(|v| v.get("request_id")).is_none());
+        assert!(value
+            .get("logical_request")
+            .and_then(|v| v.get("request_id"))
+            .is_none());
         assert_eq!(value["report_mode"], "daily");
     }
 }

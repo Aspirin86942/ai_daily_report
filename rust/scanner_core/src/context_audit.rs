@@ -12,8 +12,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use thiserror::Error;
 
-use crate::classifier::ClassificationError;
 use crate::artifact::PdfClassificationProvenanceV1;
+use crate::classifier::ClassificationError;
 use crate::decision::ContextFileEvidence;
 use crate::parsers::{worker_diagnostic_to_scanner, ParsedPayload, ScheduledFileParse};
 use crate::planner::PlanAction;
@@ -275,12 +275,7 @@ fn normalize_parser_result(
             )
         }
         Some(ParsedPayload::Worker(payload)) => {
-            diagnostics.extend(
-                payload
-                    .warnings
-                    .iter()
-                    .map(worker_diagnostic_to_scanner),
-            );
+            diagnostics.extend(payload.warnings.iter().map(worker_diagnostic_to_scanner));
             let content_hash = sha256_hex(payload.content.as_bytes());
             (
                 payload.content,
@@ -642,23 +637,25 @@ pub fn assemble_execution_metrics_v2(snapshot: &InspectSnapshot) -> ExecutionMet
     for file in &snapshot.files_v2 {
         match file.source_guard_kind.as_deref() {
             Some("content_sha256_v1") => {
-                source_guard_content_hash_file_count = source_guard_content_hash_file_count + 1;
+                source_guard_content_hash_file_count += 1;
                 // spec Part 5.3: a full-content hash attempt reads the entire
                 // file; the inventory size is the best persisted proxy.
                 source_guard_bytes_read = source_guard_bytes_read.saturating_add(file.size_bytes);
             }
-            Some("unavailable") => source_guard_unavailable_count = source_guard_unavailable_count + 1,
+            Some("unavailable") => {
+                source_guard_unavailable_count += 1;
+            }
             _ => {}
         }
         let cache_status = file.parse_cache_status.as_deref();
         if matches!(cache_status, Some("fresh") | Some("miss")) {
-            parse_cache_lookup_count = parse_cache_lookup_count + 1;
+            parse_cache_lookup_count += 1;
             if cache_status == Some("fresh") {
-                parse_cache_fresh_count = parse_cache_fresh_count + 1;
+                parse_cache_fresh_count += 1;
             }
         }
         if file.parser_backend == "pdf_text_v1" && cache_status == Some("miss") {
-            pdfplumber_invocations = pdfplumber_invocations + 1;
+            pdfplumber_invocations += 1;
         }
         if cache_status == Some("miss")
             && matches!(
@@ -666,7 +663,7 @@ pub fn assemble_execution_metrics_v2(snapshot: &InspectSnapshot) -> ExecutionMet
                 ParseStatus::Success | ParseStatus::Error | ParseStatus::Timeout
             )
         {
-            parse_attempt_count = parse_attempt_count + 1;
+            parse_attempt_count += 1;
         }
     }
     let parse_cache_all_hit = if parse_cache_lookup_count > 0 {
@@ -679,47 +676,54 @@ pub fn assemble_execution_metrics_v2(snapshot: &InspectSnapshot) -> ExecutionMet
     // snapshot-hit current run skips planning + classification + parse, so 0 is
     // the truthful value. For non-snapshot runs the derived values below are
     // best-effort reconstructions from the persisted per-file rows.
-    let (candidate_file_count, admitted_file_count, classification_slot_count, extraction_slot_count, nominal_charged_pages_total, classify_attempt_count, classification_lookup_count) =
-        if snapshot.snapshot_hit {
-            (0, 0, 0, 0, 0, 0, 0)
-        } else {
-            let mut admitted = 0_u64;
-            let mut classification_slot = 0_u64;
-            let mut extraction_slot = 0_u64;
-            let mut nominal = 0_u64;
-            let mut classify_attempt = 0_u64;
-            let mut classification_lookup = 0_u64;
-            for file in &snapshot.files_v2 {
-                let cache_status = file.parse_cache_status.as_deref();
-                if file.parser_backend != "not_parsed" || cache_status == Some("fresh") {
-                    admitted = admitted + 1;
+    let (
+        candidate_file_count,
+        admitted_file_count,
+        classification_slot_count,
+        extraction_slot_count,
+        nominal_charged_pages_total,
+        classify_attempt_count,
+        classification_lookup_count,
+    ) = if snapshot.snapshot_hit {
+        (0, 0, 0, 0, 0, 0, 0)
+    } else {
+        let mut admitted = 0_u64;
+        let mut classification_slot = 0_u64;
+        let mut extraction_slot = 0_u64;
+        let mut nominal = 0_u64;
+        let mut classify_attempt = 0_u64;
+        let mut classification_lookup = 0_u64;
+        for file in &snapshot.files_v2 {
+            let cache_status = file.parse_cache_status.as_deref();
+            if file.parser_backend != "not_parsed" || cache_status == Some("fresh") {
+                admitted += 1;
+            }
+            if let Some(classifier) = &file.classifier {
+                classification_slot += 1;
+                nominal = nominal.saturating_add(classifier.nominal_charged_pages);
+                if cache_status != Some("snapshot") {
+                    classification_lookup += 1;
+                    classify_attempt += 1;
                 }
-                if let Some(classifier) = &file.classifier {
-                    classification_slot = classification_slot + 1;
-                    nominal = nominal.saturating_add(classifier.nominal_charged_pages);
-                    if cache_status != Some("snapshot") {
-                        classification_lookup = classification_lookup + 1;
-                        classify_attempt = classify_attempt + 1;
-                    }
-                    if matches!(
-                        classifier.status,
-                        PdfClassificationStatus::TextInParseWindow
-                            | PdfClassificationStatus::NoTextInParseWindow
-                    ) {
-                        extraction_slot = extraction_slot + 1;
-                    }
+                if matches!(
+                    classifier.status,
+                    PdfClassificationStatus::TextInParseWindow
+                        | PdfClassificationStatus::NoTextInParseWindow
+                ) {
+                    extraction_slot += 1;
                 }
             }
-            (
-                snapshot.files_v2.len() as u64,
-                admitted,
-                classification_slot,
-                extraction_slot,
-                nominal,
-                classify_attempt,
-                classification_lookup,
-            )
-        };
+        }
+        (
+            snapshot.files_v2.len() as u64,
+            admitted,
+            classification_slot,
+            extraction_slot,
+            nominal,
+            classify_attempt,
+            classification_lookup,
+        )
+    };
     let classification_cache_all_hit = if classification_lookup_count > 0 {
         // Exact per-file classification cache status is not persisted; a
         // conservative false never fabricates an all-hit claim.
@@ -804,14 +808,15 @@ pub(crate) fn load_inspect_snapshot(
     scan_run_id: i64,
     include_content: bool,
 ) -> Result<InspectSnapshot, InspectLoadError> {
-    let run_row: Option<(
+    type InspectRunRow = (
         String,
         String,
         String,
         String,
         Option<String>,
         Option<String>,
-    )> = transaction
+    );
+    let run_row: Option<InspectRunRow> = transaction
         .query_row(
             "SELECT request_id, canonical_request_json, request_hash, status,
                     final_envelope_metadata_json, audit_provenance_version
@@ -870,9 +875,7 @@ pub(crate) fn load_inspect_snapshot(
         (RunStatus::Running | RunStatus::Abandoned, None) => None,
         (RunStatus::Running | RunStatus::Abandoned, Some(_)) => {
             return Err(InspectLoadError::after_status(
-                InspectAuditError::RunCorrupt(
-                    "nonterminal run has a final envelope".to_string(),
-                ),
+                InspectAuditError::RunCorrupt("nonterminal run has a final envelope".to_string()),
                 run_status,
             ));
         }
@@ -1072,8 +1075,10 @@ pub(crate) fn load_inspect_snapshot(
         }
         _ => (0, 0),
     };
-    let files_v2 = if matches!(run_status, RunStatus::Success | RunStatus::Partial | RunStatus::Error)
-    {
+    let files_v2 = if matches!(
+        run_status,
+        RunStatus::Success | RunStatus::Partial | RunStatus::Error
+    ) {
         let artifact_id = match artifact_id {
             Some(value) => Some(i64::try_from(value).map_err(|_| {
                 InspectLoadError::after_status(
@@ -1219,7 +1224,9 @@ fn load_execution_metrics(
     let parse_bool = |value: i64| match value {
         0 => Ok(false),
         1 => Ok(true),
-        _ => Err(InspectAuditError::RunCorrupt("persisted metric bool is invalid".to_string())),
+        _ => Err(InspectAuditError::RunCorrupt(
+            "persisted metric bool is invalid".to_string(),
+        )),
     };
     let metrics = ExecutionMetricsV2 {
         discovery_observed_file_count: to_u64(row.0, "discovery_observed_file_count")?,
@@ -1232,10 +1239,7 @@ fn load_execution_metrics(
         candidate_file_count: to_u64(row.4, "candidate_file_count")?,
         admitted_file_count: to_u64(row.5, "admitted_file_count")?,
         classification_slot_count: to_u64(row.6, "classification_slot_count")?,
-        confirmed_run_inspected_pages_total: to_u64(
-            row.7,
-            "confirmed_run_inspected_pages_total",
-        )?,
+        confirmed_run_inspected_pages_total: to_u64(row.7, "confirmed_run_inspected_pages_total")?,
         unobserved_classification_attempt_count: to_u64(
             row.8,
             "unobserved_classification_attempt_count",
@@ -1245,10 +1249,7 @@ fn load_execution_metrics(
         pdfplumber_invocations: to_u64(row.11, "pdfplumber_invocations")?,
         snapshot_hit: parse_bool(row.12)?,
         parse_cache_lookup_count: to_u64(row.13, "parse_cache_lookup_count")?,
-        classification_cache_lookup_count: to_u64(
-            row.14,
-            "classification_cache_lookup_count",
-        )?,
+        classification_cache_lookup_count: to_u64(row.14, "classification_cache_lookup_count")?,
         parse_cache_all_hit: Nullable(row.15.map(parse_bool).transpose()?),
         classification_cache_all_hit: Nullable(row.16.map(parse_bool).transpose()?),
         stage_deadline_exhausted_count: to_u64(row.17, "stage_deadline_exhausted_count")?,
@@ -1266,7 +1267,11 @@ fn load_execution_metrics(
         deadline_precommit_elapsed_ms: to_u64(row.29, "deadline_precommit_elapsed_ms")?,
         envelope_rebuild_ms: to_u64(row.30, "envelope_rebuild_ms")?,
         terminal_rows_written: to_u64(row.31, "terminal_rows_written")?,
-        peak_worker_rss_bytes: Nullable(row.32.map(|value| to_u64(value, "peak_worker_rss_bytes")).transpose()?),
+        peak_worker_rss_bytes: Nullable(
+            row.32
+                .map(|value| to_u64(value, "peak_worker_rss_bytes"))
+                .transpose()?,
+        ),
     };
     metrics
         .validate()
@@ -1307,13 +1312,7 @@ fn load_context_run_provenance(
             "SELECT artifact_id, reused_from_context_run_id, snapshot_hit
              FROM context_runs WHERE scan_run_id=?1",
             [scan_run_id],
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)?)),
         )
         .optional()
         .map_err(InspectAuditError::Sql)?;
@@ -1385,8 +1384,9 @@ fn load_file_audits_v2(
     artifact_id: Option<i64>,
 ) -> Result<Vec<FileAuditV2Source>, InspectAuditError> {
     #[allow(clippy::type_complexity)]
-    let mut statement = transaction.prepare(
-        "SELECT fr.relative_path, fr.file_identity, fr.source_version,
+    let mut statement = transaction
+        .prepare(
+            "SELECT fr.relative_path, fr.file_identity, fr.source_version,
                 fi.source_guard_kind, fi.source_guard_sha256, fi.file_type, fi.size_bytes,
                 fr.parse_status, fr.parser_backend, fr.worker_lane,
                 fr.parse_cache_status, fr.cache_miss_reason,
@@ -1412,8 +1412,8 @@ fn load_file_audits_v2(
              ON fx.scan_run_id = fr.scan_run_id AND fx.file_identity = fr.file_identity
          WHERE fr.scan_run_id = ?1
          ORDER BY lower(fr.relative_path), fr.relative_path, fr.file_identity",
-    )
-    .map_err(InspectAuditError::Sql)?;
+        )
+        .map_err(InspectAuditError::Sql)?;
     let raw = statement
         .query_map([scan_run_id, artifact_id.unwrap_or(-1)], |row| {
             #[allow(clippy::type_complexity)]
@@ -1477,20 +1477,15 @@ fn load_file_audits_v2(
         // and pre-classification reject) carry null. The reject diagnostic
         // stays in the ContextDecision row, not the file audit.
         let final_diagnostic = match parse_status {
-            ParseStatus::Error | ParseStatus::Timeout => assemble_final_diagnostic(
-                &row.18,
-                &row.19,
-                row.20,
-                &row.21,
-                &row.22,
-                &row.23,
-            )?,
+            ParseStatus::Error | ParseStatus::Timeout => {
+                assemble_final_diagnostic(&row.18, &row.19, row.20, &row.21, &row.22, &row.23)?
+            }
             ParseStatus::Success | ParseStatus::NotParsed => None,
         };
         if let Some(diagnostic) = &final_diagnostic {
-            diagnostic
-                .validate()
-                .map_err(|_| InspectAuditError::RunCorrupt("file final diagnostic is invalid".to_string()))?;
+            diagnostic.validate().map_err(|_| {
+                InspectAuditError::RunCorrupt("file final diagnostic is invalid".to_string())
+            })?;
         }
         if matches!(parse_status, ParseStatus::Error | ParseStatus::Timeout)
             && final_diagnostic.is_none()
@@ -1608,10 +1603,7 @@ fn load_file_audits_v2(
                             "classification execution duration is negative".to_string(),
                         )
                     })?,
-                    transport: parse_enum(
-                        transport,
-                        "classification execution transport",
-                    )?,
+                    transport: parse_enum(transport, "classification execution transport")?,
                     attempt_count: u64::try_from(attempt_count).map_err(|_| {
                         InspectAuditError::RunCorrupt(
                             "classification execution attempt count is negative".to_string(),
@@ -1702,19 +1694,19 @@ fn assemble_final_diagnostic(
 
 fn to_positive_u64(value: Option<i64>, field: &str) -> Result<Option<u64>, InspectAuditError> {
     value
-        .map(|value| u64::try_from(value).map_err(|_| {
-            InspectAuditError::RunCorrupt(format!("persisted {field} is negative"))
-        }))
+        .map(|value| {
+            u64::try_from(value).map_err(|_| {
+                InspectAuditError::RunCorrupt(format!("persisted {field} is negative"))
+            })
+        })
         .transpose()
 }
 
 fn to_u64_opt(value: Option<i64>, field: &str) -> Result<u64, InspectAuditError> {
-    let value = value.ok_or_else(|| {
-        InspectAuditError::RunCorrupt(format!("persisted {field} is missing"))
-    })?;
-    u64::try_from(value).map_err(|_| {
-        InspectAuditError::RunCorrupt(format!("persisted {field} is negative"))
-    })
+    let value = value
+        .ok_or_else(|| InspectAuditError::RunCorrupt(format!("persisted {field} is missing")))?;
+    u64::try_from(value)
+        .map_err(|_| InspectAuditError::RunCorrupt(format!("persisted {field} is negative")))
 }
 
 #[derive(Debug)]
@@ -2116,9 +2108,7 @@ fn validate_relational_summary(
         .and_then(|value| value.checked_sub(timeout_count as usize))
         .and_then(|value| value.checked_sub(error_count as usize))
         .map(|value| value as u64)
-        .ok_or_else(|| {
-            InspectAuditError::RunCorrupt("file status counts overflow".to_string())
-        })?;
+        .ok_or_else(|| InspectAuditError::RunCorrupt("file status counts overflow".to_string()))?;
     let included_count = decisions
         .iter()
         .filter(|record| {
@@ -2302,7 +2292,10 @@ fn empty_context_summary() -> ContextSummary {
     }
 }
 
-pub(crate) fn relative_contract_path(work_dir: &Path, absolute_path: &str) -> Result<String, String> {
+pub(crate) fn relative_contract_path(
+    work_dir: &Path,
+    absolute_path: &str,
+) -> Result<String, String> {
     let absolute = Path::new(absolute_path);
     let relative = absolute
         .strip_prefix(work_dir)

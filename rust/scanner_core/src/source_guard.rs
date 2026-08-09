@@ -427,7 +427,7 @@ mod tests {
     impl Read for FailAfterFirstRead {
         fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
             if self.emitted {
-                return Err(io::Error::new(io::ErrorKind::Other, "fixture failure"));
+                return Err(io::Error::other("fixture failure"));
             }
             self.emitted = true;
             buffer[..3].copy_from_slice(b"abc");

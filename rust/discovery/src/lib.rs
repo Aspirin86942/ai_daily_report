@@ -117,11 +117,7 @@ fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryRepo
             }
             if let Ok(modified_local) = metadata_modified_local(&metadata) {
                 let modified_naive = modified_local.naive_local();
-                if !is_within_date_range(
-                    modified_naive,
-                    request.start_date,
-                    request.end_date,
-                )? {
+                if !is_within_date_range(modified_naive, request.start_date, request.end_date)? {
                     continue;
                 }
             }

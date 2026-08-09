@@ -2467,7 +2467,7 @@ fn classification_lookup_failure_propagates_as_run_level() {
         profile,
     );
     assert!(result.is_err(), "lookup failure must be a SchedulerFailure");
-    let err = result.err().expect("err");
+    let err = result.expect_err("err");
     assert_eq!(err.diagnostic.error_code, ErrorCode::CacheWriteFailed);
     assert!(err.diagnostic.retryable);
 }

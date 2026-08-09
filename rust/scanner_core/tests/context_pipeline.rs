@@ -241,7 +241,9 @@ fn golden_not_parsed_is_omit_with_reason_and_no_error() {
     // omitted rows appear in the omitted summary
     assert!(result.content.contains("## 省略文件摘要"));
     assert!(result.content.contains("semantic_file_quota_exhausted"));
-    assert!(result.content.contains("pdf_classification_page_quota_exhausted"));
+    assert!(result
+        .content
+        .contains("pdf_classification_page_quota_exhausted"));
 }
 
 #[test]

@@ -8,9 +8,7 @@ mod windows {
     use serde_json::{json, Value};
 
     fn repository_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
     }
 
     fn local_runtime(root: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
@@ -75,9 +73,7 @@ mod windows {
         assert_eq!(build.exit_code, 0, "{}", build.json);
         let envelope: Value = serde_json::from_str(&build.json).expect("build response JSON");
         assert_eq!(envelope["status"], "ok", "{}", build.json);
-        let scan_run_id = envelope["scan_run_id"]
-            .as_u64()
-            .expect("successful run id");
+        let scan_run_id = envelope["scan_run_id"].as_u64().expect("successful run id");
 
         let inspect_request = json!({
             "contract": "ai_daily_context",
@@ -119,8 +115,7 @@ mod windows {
         assert_eq!(classification["attempt_count"], 1, "{}", inspect.json);
 
         let mut snapshot_request = request.clone();
-        snapshot_request["request_id"] =
-            json!("72333333-7233-4233-8233-723333333333");
+        snapshot_request["request_id"] = json!("72333333-7233-4233-8233-723333333333");
         let snapshot = dispatch(
             "build-context",
             &serde_json::to_vec(&snapshot_request).expect("serialize snapshot request"),
@@ -134,8 +129,7 @@ mod windows {
             .as_u64()
             .expect("snapshot run id");
         let mut snapshot_inspect_request = inspect_request.clone();
-        snapshot_inspect_request["request_id"] =
-            json!("72444444-7244-4244-8244-724444444444");
+        snapshot_inspect_request["request_id"] = json!("72444444-7244-4244-8244-724444444444");
         snapshot_inspect_request["scan_run_id"] = json!(snapshot_run_id);
         let snapshot_inspect = dispatch_with_response_version(
             "inspect-run",
@@ -148,7 +142,11 @@ mod windows {
         let snapshot_response: Value =
             serde_json::from_str(&snapshot_inspect.json).expect("snapshot inspect JSON");
         let snapshot_metrics = &snapshot_response["execution_metrics"];
-        assert_eq!(snapshot_metrics["snapshot_hit"], true, "{}", snapshot_inspect.json);
+        assert_eq!(
+            snapshot_metrics["snapshot_hit"], true,
+            "{}",
+            snapshot_inspect.json
+        );
         assert_eq!(snapshot_metrics["classify_attempt_count"], 0);
         assert_eq!(snapshot_metrics["parse_attempt_count"], 0);
         assert!(

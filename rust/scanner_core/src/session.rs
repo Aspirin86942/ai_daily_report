@@ -8,7 +8,7 @@
 //! `batch_size` 已删除。
 
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
@@ -25,9 +25,7 @@ use ai_daily_scanner_contract::{
 };
 
 use crate::fallback::ParseFailure;
-use crate::parsers::{
-    OneShotExecution, RegisteredSession, RegisteredWorker, WorkerCommand,
-};
+use crate::parsers::{OneShotExecution, RegisteredSession, RegisteredWorker, WorkerCommand};
 use crate::process::WorkerRssTracker;
 
 pub const SESSION_CONTRACT_VERSION: &str = "ai_daily_python_session_v1";
@@ -71,9 +69,10 @@ impl Default for SessionParams {
 impl SessionParams {
     /// spec Part 7.3 / Part 8.1：默认 `session_concurrency = min(max_workers, 4)`。
     pub fn with_default_concurrency(max_workers: u64) -> Self {
-        let mut params = Self::default();
-        params.concurrency = usize::try_from(max_workers.min(4)).unwrap_or(4).max(1);
-        params
+        Self {
+            concurrency: usize::try_from(max_workers.min(4)).unwrap_or(4).max(1),
+            ..Self::default()
+        }
     }
 
     pub fn from_profile_v2(profile: &NormalizedScannerProfileV2) -> Self {
@@ -213,9 +212,7 @@ impl SessionError {
                 message,
                 retryable,
                 stage: ai_daily_scanner_contract::DiagnosticStage::Process,
-                file_path: ai_daily_scanner_contract::Nullable(
-                    file_path.map(str::to_string),
-                ),
+                file_path: ai_daily_scanner_contract::Nullable(file_path.map(str::to_string)),
                 backend: ai_daily_scanner_contract::Nullable(None),
             },
         }
@@ -335,9 +332,7 @@ impl SessionChild {
             return Err(stderr_limit_error());
         }
         match self.lines.recv_timeout(timeout) {
-            Ok(LineEvent::Line(_)) if self.stderr_budget.overflowed() => {
-                Err(stderr_limit_error())
-            }
+            Ok(LineEvent::Line(_)) if self.stderr_budget.overflowed() => Err(stderr_limit_error()),
             Ok(LineEvent::Line(line)) => Ok(line),
             Ok(LineEvent::Eof) => Err(SessionError::Eof),
             Ok(LineEvent::Error(error)) => Err(error),
@@ -567,12 +562,11 @@ impl PythonSession {
         if line.len() > SESSION_HELLO_FRAME_LIMIT {
             return Err(SessionError::FrameTooLarge);
         }
-        let hello: PythonSessionHelloV1 =
-            serde_json::from_slice(&line).map_err(|_| {
-                SessionError::ProtocolCorruption(
-                    "session hello is not one strict JSON frame".to_string(),
-                )
-            })?;
+        let hello: PythonSessionHelloV1 = serde_json::from_slice(&line).map_err(|_| {
+            SessionError::ProtocolCorruption(
+                "session hello is not one strict JSON frame".to_string(),
+            )
+        })?;
         hello.validate().map_err(|message| {
             SessionError::ProtocolCorruption(format!(
                 "session hello violates the strict contract: {message}"
@@ -653,7 +647,8 @@ impl PythonSession {
         match response {
             PythonSessionResponseV1 {
                 status: PythonSessionResponseStatus::Ok,
-                result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(result))),
+                result:
+                    ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(result))),
                 ..
             } => {
                 result
@@ -670,16 +665,18 @@ impl PythonSession {
                 error: ai_daily_scanner_contract::Nullable(Some(diagnostic)),
                 ..
             } => Err(SessionError::Rejected(diagnostic)),
-            PythonSessionResponseV1 { result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Parse(_))), .. } => Err(
-                SessionError::ProtocolCorruption(
-                    "classify response carried a parse result".to_string(),
-                ),
-            ),
-            PythonSessionResponseV1 { result: ai_daily_scanner_contract::Nullable(None), .. } => {
-                Err(SessionError::ProtocolCorruption(
-                    "ok classify response is missing its typed result".to_string(),
-                ))
-            }
+            PythonSessionResponseV1 {
+                result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Parse(_))),
+                ..
+            } => Err(SessionError::ProtocolCorruption(
+                "classify response carried a parse result".to_string(),
+            )),
+            PythonSessionResponseV1 {
+                result: ai_daily_scanner_contract::Nullable(None),
+                ..
+            } => Err(SessionError::ProtocolCorruption(
+                "ok classify response is missing its typed result".to_string(),
+            )),
             _ => Err(SessionError::ProtocolCorruption(
                 "classify response violates the ok/error tagged union".to_string(),
             )),
@@ -718,7 +715,8 @@ impl PythonSession {
         match response {
             PythonSessionResponseV1 {
                 status: PythonSessionResponseStatus::Ok,
-                result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Parse(result))),
+                result:
+                    ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Parse(result))),
                 ..
             } => {
                 if result.request_id != request.request_id
@@ -729,23 +727,26 @@ impl PythonSession {
                         "session parse response identity does not match the request".to_string(),
                     ));
                 }
-                Ok(result)
+                Ok(*result)
             }
             PythonSessionResponseV1 {
                 status: PythonSessionResponseStatus::Error,
                 error: ai_daily_scanner_contract::Nullable(Some(diagnostic)),
                 ..
             } => Err(SessionError::Rejected(diagnostic)),
-            PythonSessionResponseV1 { result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(_))), .. } => Err(
-                SessionError::ProtocolCorruption(
-                    "parse response carried a classify result".to_string(),
-                ),
-            ),
-            PythonSessionResponseV1 { result: ai_daily_scanner_contract::Nullable(None), .. } => {
-                Err(SessionError::ProtocolCorruption(
-                    "ok parse response is missing its typed result".to_string(),
-                ))
-            }
+            PythonSessionResponseV1 {
+                result:
+                    ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(_))),
+                ..
+            } => Err(SessionError::ProtocolCorruption(
+                "parse response carried a classify result".to_string(),
+            )),
+            PythonSessionResponseV1 {
+                result: ai_daily_scanner_contract::Nullable(None),
+                ..
+            } => Err(SessionError::ProtocolCorruption(
+                "ok parse response is missing its typed result".to_string(),
+            )),
             _ => Err(SessionError::ProtocolCorruption(
                 "parse response violates the ok/error tagged union".to_string(),
             )),
@@ -863,7 +864,8 @@ struct PoolCounters {
 
 impl PoolCounters {
     fn observe_rss(&self, value: Option<u64>) {
-        self.rss_observation_attempted.store(true, Ordering::Relaxed);
+        self.rss_observation_attempted
+            .store(true, Ordering::Relaxed);
         match value {
             Some(value) => {
                 self.peak_worker_rss_bytes
@@ -956,8 +958,7 @@ impl PythonSessionPool {
         request: &PdfClassifierRequestV1,
         timeout: Duration,
     ) -> Result<SessionOperationOutcome<PdfClassifierResultV1>, SessionOperationFailure> {
-        if let Err(failure) =
-            crate::parsers::classifier::validate_classifier_source_before(request)
+        if let Err(failure) = crate::parsers::classifier::validate_classifier_source_before(request)
         {
             return Err(SessionOperationFailure {
                 failure,
@@ -979,8 +980,7 @@ impl PythonSessionPool {
                 )
             },
         )?;
-        if let Err(failure) =
-            crate::parsers::classifier::validate_classifier_source_after(request)
+        if let Err(failure) = crate::parsers::classifier::validate_classifier_source_after(request)
         {
             return Err(SessionOperationFailure {
                 failure,
@@ -1118,8 +1118,7 @@ impl PythonSessionPool {
                                 continue;
                             }
                             RetryAction::OneShot => {
-                                let remaining =
-                                    timeout.saturating_sub(deadline_origin.elapsed());
+                                let remaining = timeout.saturating_sub(deadline_origin.elapsed());
                                 if remaining.is_zero() {
                                     return Err(operation_failure(
                                         SessionError::Timeout.diagnostic(Some(file_path)),
@@ -1172,8 +1171,8 @@ impl PythonSessionPool {
                 remaining,
             );
             session_attempt_count = session_attempt_count.saturating_add(1);
-            session_duration_ms = session_duration_ms
-                .saturating_add(observed_duration_ms(attempt_started.elapsed()));
+            session_duration_ms =
+                session_duration_ms.saturating_add(observed_duration_ms(attempt_started.elapsed()));
             match outcome {
                 Ok(result) => {
                     if let Some(session) = slot.session.as_ref() {
@@ -1198,8 +1197,7 @@ impl PythonSessionPool {
                             transport_failure_index += 1;
                         }
                         RetryAction::OneShot => {
-                            let remaining =
-                                timeout.saturating_sub(deadline_origin.elapsed());
+                            let remaining = timeout.saturating_sub(deadline_origin.elapsed());
                             if remaining.is_zero() {
                                 return Err(operation_failure(
                                     SessionError::Timeout.diagnostic(Some(file_path)),
@@ -1211,7 +1209,7 @@ impl PythonSessionPool {
                             let one_shot = one_shot_call
                                 .take()
                                 .expect("one-shot fallback is attempted at most once")(
-                                remaining,
+                                remaining
                             );
                             return self.finish_one_shot_fallback(
                                 session_attempt_count,
@@ -1334,7 +1332,7 @@ fn duration_ms(duration: Duration) -> u64 {
 /// 构造一次 ``classify_pdf_v1`` 的 strict request（与 one-shot 逐字段相同）。
 pub fn build_classify_request(
     request_id: String,
-    file_path: &PathBuf,
+    file_path: &Path,
     source_version: &str,
     max_pages: u64,
 ) -> PdfClassifierRequestV1 {
@@ -1360,10 +1358,7 @@ mod tests {
         assert_eq!(params.max_requests_per_session, 128);
         assert_eq!(params.idle_ttl, Duration::from_secs(30));
         assert_eq!(params.rss_limit_bytes, 512 * 1024 * 1024);
-        assert_eq!(
-            SessionParams::with_default_concurrency(8).concurrency,
-            4
-        );
+        assert_eq!(SessionParams::with_default_concurrency(8).concurrency, 4);
         assert_eq!(SessionParams::with_default_concurrency(2).concurrency, 2);
         assert_eq!(SessionParams::with_default_concurrency(0).concurrency, 1);
     }
@@ -1396,8 +1391,7 @@ mod tests {
         assert_eq!(retry_action(&retryable, 1), RetryAction::OneShot);
 
         let source_changed = SessionError::Rejected(PythonOperationDiagnosticV1 {
-            error_code:
-                ai_daily_scanner_contract::PythonOperationErrorCode::SourceVersionChanged,
+            error_code: ai_daily_scanner_contract::PythonOperationErrorCode::SourceVersionChanged,
             message: "source changed".to_string(),
             retryable: true,
             stage: ai_daily_scanner_contract::PythonOperationStage::Parse,
@@ -1408,13 +1402,19 @@ mod tests {
         assert_eq!(retry_action(&source_changed, 1), RetryAction::GiveUp);
 
         // EOF/start/crash: rebuild once, then one-shot if retryable.
-        assert_eq!(retry_action(&SessionError::Eof, 0), RetryAction::RetrySession);
+        assert_eq!(
+            retry_action(&SessionError::Eof, 0),
+            RetryAction::RetrySession
+        );
         assert_eq!(retry_action(&SessionError::Eof, 1), RetryAction::OneShot);
         assert_eq!(
             retry_action(&SessionError::StartFailed, 0),
             RetryAction::RetrySession
         );
-        assert_eq!(retry_action(&SessionError::Crashed, 0), RetryAction::RetrySession);
+        assert_eq!(
+            retry_action(&SessionError::Crashed, 0),
+            RetryAction::RetrySession
+        );
 
         // Protocol corruption is never silently retried as one-shot.
         assert_eq!(
@@ -1448,10 +1448,7 @@ mod tests {
                 session_contract_version: SESSION_CONTRACT_VERSION.to_string(),
                 worker_build: worker_build.clone(),
                 classifier_build,
-                supported_operations: vec![
-                    "classify_pdf_v1".to_string(),
-                    "parse_v1".to_string(),
-                ],
+                supported_operations: vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()],
             },
         };
         let python_worker = RegisteredWorker {
@@ -1547,10 +1544,7 @@ mod tests {
             session_contract_version: SESSION_CONTRACT_VERSION.to_string(),
             worker_build,
             classifier_build,
-            supported_operations: vec![
-                "classify_pdf_v1".to_string(),
-                "parse_v1".to_string(),
-            ],
+            supported_operations: vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()],
         };
         let started = Instant::now();
 
@@ -1593,10 +1587,7 @@ mod tests {
             ai_daily_scanner_contract::ErrorCode::ParserTimeout
         );
         assert!(!failure.diagnostic.retryable);
-        assert_eq!(
-            failure.diagnostic.file_path.0.as_deref(),
-            Some("C:\\x.pdf")
-        );
+        assert_eq!(failure.diagnostic.file_path.0.as_deref(), Some("C:\\x.pdf"));
     }
 
     fn empty_session() -> PythonSession {

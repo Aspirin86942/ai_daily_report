@@ -14,7 +14,9 @@
 //! never change ParseStatus/action/reason/order/slots.
 
 use crate::budget_model::{ContextBudgetModel, RouteHint, RouteKind};
-use ai_daily_scanner_contract::{NormalizedScannerProfileV2, PdfClassificationStatus, SourceGuardKind};
+use ai_daily_scanner_contract::{
+    NormalizedScannerProfileV2, PdfClassificationStatus, SourceGuardKind,
+};
 use std::collections::BTreeMap;
 
 /// Frozen semantic/policy NotParsed reasons (spec Part 2.1). Omit action, no
@@ -100,7 +102,9 @@ pub enum PdfClassificationPlan {
     NotPdf,
     /// Candidate PDF that received a full page reservation; the actual
     /// text/no-text/unknown/error result is merged in before stage B.
-    Classify { charged_pages: u64 },
+    Classify {
+        charged_pages: u64,
+    },
     /// Candidate PDF that did not get a page reservation.
     NotClassifiedByBudget,
 }
@@ -190,7 +194,11 @@ impl ClassificationPlan {
 
         // 2) Candidate slots by nominal rank; PDFs reserve full pdf_max_pages.
         candidates.sort_by_key(|(file, _)| {
-            crate::nominal::NominalKey::new(&file.relative_path, &file.extension, &file.file_identity)
+            crate::nominal::NominalKey::new(
+                &file.relative_path,
+                &file.extension,
+                &file.file_identity,
+            )
         });
         let mut candidate_slots = profile.max_candidate_files;
         let mut page_remaining = page_budget;
@@ -255,7 +263,11 @@ impl ClassificationPlan {
 
         // Single ordering implementation: the whole plan is nominal-ordered.
         classified.sort_by_key(|plan| {
-            crate::nominal::NominalKey::new(&plan.relative_path, &plan.extension, &plan.file_identity)
+            crate::nominal::NominalKey::new(
+                &plan.relative_path,
+                &plan.extension,
+                &plan.file_identity,
+            )
         });
         classified
     }

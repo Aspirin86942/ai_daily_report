@@ -925,7 +925,8 @@ pub fn classifier_profile_hash(profile: &NormalizedScannerProfileV2) -> Result<S
 /// `prepare_inventory` 报告该 inventory 在本轮前已存在，用于区分
 /// `entry_absent_or_evicted` 与 `new_file`。
 // T2-4 Scheduler consumes the lookup path; until then only tests exercise it.
-#[allow(dead_code)]
+// The cache identity is frozen and each key component remains explicit.
+#[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn lookup_classification_cache(
     connection: &Connection,
     file_identity: &str,
@@ -1676,7 +1677,7 @@ mod tests {
             )
             .expect("sum");
         assert!(
-            remaining >= 1 && remaining <= 2,
+            (1..=2).contains(&remaining),
             "cap eviction must leave 1-2 rows"
         );
         assert!(total <= 1_000, "cap eviction must keep total <= cap");

@@ -547,17 +547,22 @@ fn office_fallback_counts_only_the_child_that_actually_started() {
     let execution =
         parse_with_fallback(&primary, Some(&fallback), &request, &office_profile(false));
 
-    assert!(execution.response.is_some(), "fallback child should succeed");
+    assert!(
+        execution.response.is_some(),
+        "fallback child should succeed"
+    );
     assert!(execution.primary_failure.is_some());
-    assert_eq!(execution.fallback_backend, Some(WorkerBackend::PythonOfficeV1));
+    assert_eq!(
+        execution.fallback_backend,
+        Some(WorkerBackend::PythonOfficeV1)
+    );
     assert_eq!(execution.attempt_count, 1);
     assert_eq!(execution.primary_duration_ms, 0);
 }
 
 #[test]
 fn unstarted_office_fallback_keeps_primary_parser_provenance() {
-    let Some((directory, primary)) =
-        fake_registered_worker("recoverable_slow", WorkerKind::Office)
+    let Some((directory, primary)) = fake_registered_worker("recoverable_slow", WorkerKind::Office)
     else {
         return;
     };

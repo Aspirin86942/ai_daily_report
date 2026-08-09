@@ -1,6 +1,4 @@
-use ai_daily_scanner_core::process::{
-    run_process, ProcessError, ProcessSpec, WorkerRssTracker,
-};
+use ai_daily_scanner_core::process::{run_process, ProcessError, ProcessSpec, WorkerRssTracker};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -77,9 +75,7 @@ fn windows_job_peak_is_recorded_in_the_shared_run_tracker() {
 
     assert_eq!(output.exit_code, 0);
     assert!(
-        tracker
-            .peak_worker_rss_bytes()
-            .is_some_and(|peak| peak > 0),
+        tracker.peak_worker_rss_bytes().is_some_and(|peak| peak > 0),
         "a started contained child must publish a non-zero Job peak"
     );
 }

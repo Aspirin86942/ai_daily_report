@@ -90,10 +90,7 @@ fn corrupt_docx_and_pptx_are_non_retryable_structured_failures() {
 
         assert_eq!(response.status, WorkerStatus::Error);
         let error = response.error.0.expect("error response needs a diagnostic");
-        assert_eq!(
-            error.error_code,
-            WorkerDiagnosticV1ErrorCode::ParserFailed
-        );
+        assert_eq!(error.error_code, WorkerDiagnosticV1ErrorCode::ParserFailed);
         assert!(!error.retryable, "{extension}");
     }
 }

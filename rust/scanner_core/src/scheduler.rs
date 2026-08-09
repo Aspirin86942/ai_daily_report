@@ -335,6 +335,8 @@ pub struct ScheduledRunInput {
 impl ScheduledRunInput {
     /// Constructs the deadline pair from the profile's `total_deadline_ms`
     /// (spec Solution: WorkDeadline = AbsoluteDeadline - 2,000ms, same origin).
+    // Keep the frozen run-input fields explicit at this production boundary.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         scan_run_id: u64,
         started_at_ms: u64,
@@ -1285,7 +1287,18 @@ fn next_request_id() -> String {
 // classification execution
 // ---------------------------------------------------------------------------
 
+type ClassificationOutputs = (
+    BTreeMap<String, PdfClassificationResult>,
+    BTreeMap<String, PdfClassificationAuditV1>,
+    HashSet<String>,
+    Vec<String>,
+    Vec<ClassificationCacheWriteRecord>,
+    Vec<Diagnostic>,
+);
+
 impl BudgetedContextScheduler {
+    // Inputs mirror the frozen classification phase and its audit accumulators.
+    #[allow(clippy::too_many_arguments)]
     fn run_classifications(
         &self,
         classified: &[ClassifiedPlan],
@@ -1296,17 +1309,7 @@ impl BudgetedContextScheduler {
         existed_before: &HashSet<String>,
         metrics: &mut ExecutionMetrics,
         executor: &WaveExecutor,
-    ) -> Result<
-        (
-            BTreeMap<String, PdfClassificationResult>,
-            BTreeMap<String, PdfClassificationAuditV1>,
-            HashSet<String>,
-            Vec<String>,
-            Vec<ClassificationCacheWriteRecord>,
-            Vec<Diagnostic>,
-        ),
-        SchedulerFailure,
-    > {
+    ) -> Result<ClassificationOutputs, SchedulerFailure> {
         let work_deadline = self.stored_work_deadline;
         let mut results = BTreeMap::new();
         let mut audits = BTreeMap::new();
@@ -1497,6 +1500,8 @@ impl BudgetedContextScheduler {
     /// and merges the typed results back in wave (nominal) order. The per-file
     /// effective timeout is `min(own, remaining_to_work_deadline)` computed at
     /// dispatch time (spec Solution / Part 7.3).
+    // Mutable outputs are explicit so wave-order audit updates stay reviewable.
+    #[allow(clippy::too_many_arguments)]
     fn execute_classification_wave(
         &self,
         executor: &WaveExecutor,
@@ -1726,6 +1731,8 @@ impl BudgetedContextScheduler {
         }
     }
 
+    // Inputs mirror the frozen parse phase and its cache/audit boundaries.
+    #[allow(clippy::too_many_arguments)]
     fn run_parses(
         &self,
         admission: &[AdmissionDecision],
@@ -2793,6 +2800,8 @@ fn build_file_results(
     Ok(records)
 }
 
+// Keep terminal stage counters explicit for direct audit-field reconciliation.
+#[allow(clippy::too_many_arguments)]
 fn build_stage_metrics(
     source_file_count: u64,
     context_item_count: u64,

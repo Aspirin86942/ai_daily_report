@@ -106,11 +106,8 @@ impl PdfClassifierPort for ClassifierPort {
                             ClassificationTransport::NotApplicable
                         }
                     };
-                    let validated = validate_classifier_result_for_request(
-                        request,
-                        &outcome.value,
-                    )
-                    .map(|()| outcome.value);
+                    let validated = validate_classifier_result_for_request(request, &outcome.value)
+                        .map(|()| outcome.value);
                     PdfClassifierExecution {
                         outcome: validated,
                         transport,
@@ -238,7 +235,10 @@ pub(crate) fn classify_pdf_oneshot_observed(
         Ok(output) => output,
         Err(process) => {
             return OneShotExecution {
-                outcome: Err(classifier_process_failure(process.error, &request.file_path)),
+                outcome: Err(classifier_process_failure(
+                    process.error,
+                    &request.file_path,
+                )),
                 attempt_count: u64::from(process.child_started),
                 duration_ms: if process.child_started {
                     elapsed_ms(started)
@@ -449,7 +449,10 @@ pub(crate) fn validate_classifier_source_after(
     request: &PdfClassifierRequestV1,
 ) -> Result<(), ParseFailure> {
     let (source_version, _) = current_source(&request.file_path).map_err(|_| {
-        classifier_source_failure(request, "file source became unavailable during classification")
+        classifier_source_failure(
+            request,
+            "file source became unavailable during classification",
+        )
     })?;
     if source_version != request.source_version {
         return Err(classifier_source_failure(

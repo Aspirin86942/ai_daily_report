@@ -9,9 +9,8 @@
 use ai_daily_scanner_contract::{
     ClassificationCacheStatus, ClassificationTransport, Diagnostic, DiagnosticStage, ErrorCode,
     FileAuditV2, InspectRunRequest, InspectRunResponseV2, InspectStatus, Nullable,
-    ParseCacheStatus,
-    PdfClassificationAuditV1, PdfClassificationStatus, ReuseKind, RunStatus, SourceGuardKind,
-    Validate,
+    ParseCacheStatus, PdfClassificationAuditV1, PdfClassificationStatus, ReuseKind, RunStatus,
+    SourceGuardKind, Validate,
 };
 
 use crate::artifact::PdfClassificationProvenanceV1;
@@ -69,9 +68,11 @@ pub fn assemble_inspect_v2(
     if snapshot.audit_provenance_version != Some(AuditProvenanceVersion::FullV2) {
         return Err("full_v2 provenance is required for inspect v2".to_string());
     }
-    if snapshot.files_v2.iter().any(|row| {
-        row.parse_transport.is_none() || row.parse_attempt_count.is_none()
-    }) {
+    if snapshot
+        .files_v2
+        .iter()
+        .any(|row| row.parse_transport.is_none() || row.parse_attempt_count.is_none())
+    {
         return Err("full_v2 file execution provenance is unavailable".to_string());
     }
     let files = snapshot
@@ -89,9 +90,9 @@ pub fn assemble_inspect_v2(
         // the derive reconstructs the mostly-zero object from the empty rows.
         None => assemble_execution_metrics_v2(snapshot),
     };
-    execution_metrics.validate().map_err(|message| {
-        format!("execution metrics are invalid: {message}")
-    })?;
+    execution_metrics
+        .validate()
+        .map_err(|message| format!("execution metrics are invalid: {message}"))?;
     let reuse_kind = determine_reuse_kind(snapshot, &execution_metrics);
     let response = InspectRunResponseV2 {
         contract: "ai_daily_context".to_string(),
@@ -241,9 +242,9 @@ fn assemble_file_audit_v2(row: &FileAuditV2Source) -> Result<FileAuditV2, String
         },
     };
     if let Some(classification) = &pdf_classification {
-        classification.validate().map_err(|message| {
-            format!("pdf classification audit is invalid: {message}")
-        })?;
+        classification
+            .validate()
+            .map_err(|message| format!("pdf classification audit is invalid: {message}"))?;
     }
     let file = FileAuditV2 {
         relative_path: row.relative_path.clone(),

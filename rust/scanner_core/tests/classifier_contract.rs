@@ -9,20 +9,20 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use ai_daily_scanner_contract::{
-    ClassificationTransport, ClassifierResponseStatus, ClassifierVersionResponseV1, PdfClassifierRequestV1,
-    PdfClassifierResponseV1, PdfClassifierResultStatus, PdfClassifierResultV1,
-    PythonOperationDiagnosticV1, PythonOperationErrorCode, PythonOperationStage,
-    PythonSessionHelloV1, PythonSessionOperation, PythonSessionRequestV1,
+    ClassificationTransport, ClassifierResponseStatus, ClassifierVersionResponseV1,
+    PdfClassifierRequestV1, PdfClassifierResponseV1, PdfClassifierResultStatus,
+    PdfClassifierResultV1, PythonOperationDiagnosticV1, PythonOperationErrorCode,
+    PythonOperationStage, PythonSessionHelloV1, PythonSessionOperation, PythonSessionRequestV1,
     PythonSessionResponseStatus, PythonSessionResponseV1, PythonSessionResultV1,
     PythonSessionVersionResponseV1, Validate,
 };
+use ai_daily_scanner_contract::{RawScannerProfileV2, ReportMode, ScannerProfile, WorkerKind};
 use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
 use ai_daily_scanner_core::parsers::classifier::{
     classify_pdf_oneshot, ClassifierPort, PdfClassifierExecution, PdfClassifierPort,
 };
 use ai_daily_scanner_core::parsers::{register_session_version, WorkerCommand};
 use ai_daily_scanner_core::store::classifier_profile_hash;
-use ai_daily_scanner_contract::{RawScannerProfileV2, ReportMode, ScannerProfile, WorkerKind};
 
 fn v2_profile(mode: ReportMode) -> ai_daily_scanner_contract::NormalizedScannerProfileV2 {
     let raw: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
@@ -69,8 +69,7 @@ fn classifier_wire_types_round_trip_and_validate() {
     };
     response.validate().expect("ok response validates");
     let json = serde_json::to_string(&response).expect("serialize");
-    let parsed: PdfClassifierResponseV1 =
-        serde_json::from_str(&json).expect("deserialize");
+    let parsed: PdfClassifierResponseV1 = serde_json::from_str(&json).expect("deserialize");
     parsed.validate().expect("round-trip validates");
     assert_eq!(parsed, response);
 }
@@ -425,8 +424,7 @@ fn session_wire_types_round_trip_and_validate() {
     };
     version.validate().expect("session version validates");
     let json = serde_json::to_string(&version).expect("serialize");
-    let parsed: PythonSessionVersionResponseV1 =
-        serde_json::from_str(&json).expect("deserialize");
+    let parsed: PythonSessionVersionResponseV1 = serde_json::from_str(&json).expect("deserialize");
     parsed.validate().expect("round-trip validates");
     assert_eq!(parsed, version);
 
@@ -518,9 +516,11 @@ fn session_recycles_on_idle_ttl_not_process_age() {
     let expected = register_session_version(&command, Duration::from_secs(20))
         .expect("session-version preflight")
         .expect("session capability must be present");
-    let mut params = SessionParams::default();
-    params.idle_ttl = Duration::from_millis(60);
-    params.max_requests_per_session = u64::MAX;
+    let params = SessionParams {
+        idle_ttl: Duration::from_millis(60),
+        max_requests_per_session: u64::MAX,
+        ..SessionParams::default()
+    };
     let mut session = PythonSession::start(
         &command,
         &expected.identity,
@@ -531,7 +531,10 @@ fn session_recycles_on_idle_ttl_not_process_age() {
     assert!(!session.recycle_due(), "fresh session must not be idle");
 
     std::thread::sleep(Duration::from_millis(120));
-    assert!(session.recycle_due(), "idle TTL must be measured from idle time");
+    assert!(
+        session.recycle_due(),
+        "idle TTL must be measured from idle time"
+    );
 
     // A completed request resets the idle clock. If recycle were process-age
     // based, it would still be due here (120ms > 60ms from spawn).
@@ -571,11 +574,10 @@ fn capability_preflight_batch_registers_classifier_and_session() {
         required_backends: vec!["pdf_text_v1".to_string()],
         required_extensions: vec![".pdf".to_string()],
     };
-    let (classifier, session) =
-        ai_daily_scanner_core::parsers::preflight_python_capabilities(
-            &command,
-            Duration::from_secs(20),
-        );
+    let (classifier, session) = ai_daily_scanner_core::parsers::preflight_python_capabilities(
+        &command,
+        Duration::from_secs(20),
+    );
     let classifier = classifier.expect("classifier-version preflight must succeed");
     let session = session
         .expect("session-version preflight must not fail")
@@ -593,8 +595,7 @@ fn capability_preflight_batch_registers_classifier_and_session() {
         vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()]
     );
     assert_eq!(
-        classifier.identity.classifier_build,
-        session.identity.classifier_build,
+        classifier.identity.classifier_build, session.identity.classifier_build,
         "classifier build must be shared by the classifier and session handshakes"
     );
 }
@@ -645,16 +646,14 @@ fn session_process_classifies_and_parses_text_pdf() {
     )
     .expect("session starts and hello matches preflight");
 
-    let classify_request = build_classify_request(
-        request_id(),
-        &fixture,
-        &source_version,
-        5,
-    );
+    let classify_request = build_classify_request(request_id(), &fixture, &source_version, 5);
     let classify_result =
         session_classify(&mut session, &classify_request, Duration::from_secs(20))
             .expect("session classify completes");
-    assert_eq!(classify_result.status, PdfClassifierResultStatus::TextInParseWindow);
+    assert_eq!(
+        classify_result.status,
+        PdfClassifierResultStatus::TextInParseWindow
+    );
     assert_eq!(classify_result.page_count.0, Some(1));
 
     let parse_request = ai_daily_scanner_contract::WorkerParseRequest {
@@ -674,8 +673,14 @@ fn session_process_classifies_and_parses_text_pdf() {
     };
     let parse_result = session_parse(&mut session, &parse_request, Duration::from_secs(20))
         .expect("session parse completes");
-    assert_eq!(parse_result.status, ai_daily_scanner_contract::WorkerStatus::Ok);
-    assert_eq!(parse_result.parser_backend, ai_daily_scanner_contract::WorkerBackend::PdfTextV1);
+    assert_eq!(
+        parse_result.status,
+        ai_daily_scanner_contract::WorkerStatus::Ok
+    );
+    assert_eq!(
+        parse_result.parser_backend,
+        ai_daily_scanner_contract::WorkerBackend::PdfTextV1
+    );
     assert_eq!(parse_result.observed_source_version, source_version);
 
     session.kill();

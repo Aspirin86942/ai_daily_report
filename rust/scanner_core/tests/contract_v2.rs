@@ -10,13 +10,13 @@ use ai_daily_scanner_contract::{
 
 #[test]
 fn raw_profile_v2_defaults_map_like_v1() {
-    let raw = serde_json::from_str::<RawScannerProfileV2>(
-        r#"{"schema_version":"scanner_profile_v2"}"#,
-    )
-    .expect("minimal v2 raw profile");
+    let raw =
+        serde_json::from_str::<RawScannerProfileV2>(r#"{"schema_version":"scanner_profile_v2"}"#)
+            .expect("minimal v2 raw profile");
     // v2 是 v1 严格超集：v1 的所有叶子在 v2 里同样解析
     assert_eq!(raw.schema_version, "scanner_profile_v2");
-    raw.validate().expect("minimal v2 raw profile must validate");
+    raw.validate()
+        .expect("minimal v2 raw profile must validate");
 }
 
 #[test]
@@ -92,7 +92,8 @@ fn every_v1_leaf_parses_under_v2_and_preserves_value() {
 
 #[test]
 fn v2_only_leaves_are_optional_and_validated() {
-    let raw = serde_json::from_str::<RawScannerProfileV2>(r#"{
+    let raw = serde_json::from_str::<RawScannerProfileV2>(
+        r#"{
         "schema_version": "scanner_profile_v2",
         "max_candidate_files": 1000000,
         "max_pdf_text_extractions": 0,
@@ -103,32 +104,43 @@ fn v2_only_leaves_are_optional_and_validated() {
         "max_requests_per_session": 10000,
         "session_idle_ttl_ms": 600000,
         "session_rss_limit_bytes": 8589934592
-    }"#)
+    }"#,
+    )
     .expect("v2-only leaves should be accepted at their range edges");
-    raw.validate().expect("v2-only leaves must validate at range edges");
+    raw.validate()
+        .expect("v2-only leaves must validate at range edges");
 
-    let out_of_range = serde_json::from_str::<RawScannerProfileV2>(r#"{
+    let out_of_range = serde_json::from_str::<RawScannerProfileV2>(
+        r#"{
         "schema_version": "scanner_profile_v2",
         "total_deadline_ms": 4999
-    }"#)
+    }"#,
+    )
     .expect("out-of-range v2 leaf should still decode");
     assert!(out_of_range.validate().is_err());
 
-    let wrong_policy = serde_json::from_str::<RawScannerProfileV2>(r#"{
+    let wrong_policy = serde_json::from_str::<RawScannerProfileV2>(
+        r#"{
         "schema_version": "scanner_profile_v2",
         "admission_policy_version": "budget_admission_v1"
-    }"#)
+    }"#,
+    )
     .expect("non-constant policy version should still decode");
     assert!(
         wrong_policy.validate().is_err(),
         "policy version leaves are constants and must reject other values"
     );
 
-    let unknown = serde_json::from_str::<RawScannerProfileV2>(r#"{
+    let unknown = serde_json::from_str::<RawScannerProfileV2>(
+        r#"{
         "schema_version": "scanner_profile_v2",
         "not_a_leaf": 1
-    }"#);
-    assert!(unknown.is_err(), "v2 raw profile must reject unknown fields");
+    }"#,
+    );
+    assert!(
+        unknown.is_err(),
+        "v2 raw profile must reject unknown fields"
+    );
 }
 
 #[test]
@@ -154,8 +166,7 @@ fn normalize_v2_merges_frozen_report_mode_defaults() {
         assert_eq!(normalized.max_pdf_text_extractions, expected.2);
         assert_eq!(normalized.total_deadline_ms, expected.3);
         assert_eq!(
-            normalized.pdf_classification_timeout_ms,
-            2_000,
+            normalized.pdf_classification_timeout_ms, 2_000,
             "classifier timeout defaults to 2,000ms for every report mode"
         );
         assert_eq!(
@@ -231,9 +242,8 @@ fn scanner_profile_union_parses_both_variants() {
 
 #[test]
 fn scanner_profile_union_rejects_unknown_schema_version() {
-    let result = serde_json::from_str::<ScannerProfile>(
-        r#"{"schema_version":"scanner_profile_v3"}"#,
-    );
+    let result =
+        serde_json::from_str::<ScannerProfile>(r#"{"schema_version":"scanner_profile_v3"}"#);
     assert!(
         result.is_err(),
         "unknown schema_version must be rejected at the union boundary"
@@ -277,9 +287,8 @@ fn v1_requests_are_normalized_to_v2_with_frozen_defaults() {
         "v1 request must carry the v1 union variant"
     );
 
-    let normalized =
-        normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode)
-            .expect("v1 request should normalize to v2");
+    let normalized = normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode)
+        .expect("v1 request should normalize to v2");
     assert_eq!(
         normalized.total_deadline_ms, 25_000,
         "monthly v1 request fills the frozen monthly deadline"
@@ -301,13 +310,12 @@ fn v1_requests_are_normalized_to_v2_with_frozen_defaults() {
 fn v2_leaf_flows_through_request() {
     use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
 
-    let request: BuildContextRequest = serde_json::from_value(build_context_request_json(
-        serde_json::json!({
+    let request: BuildContextRequest =
+        serde_json::from_value(build_context_request_json(serde_json::json!({
             "schema_version": "scanner_profile_v2",
             "total_deadline_ms": 45_000
-        }),
-    ))
-    .expect("v2 request should decode");
+        })))
+        .expect("v2 request should decode");
     request
         .validate()
         .expect("v2 build-context request must validate");
@@ -316,9 +324,8 @@ fn v2_leaf_flows_through_request() {
         "v2 request must carry the v2 union variant"
     );
 
-    let normalized =
-        normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode)
-            .expect("v2 request should normalize");
+    let normalized = normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode)
+        .expect("v2 request should normalize");
     assert_eq!(
         normalized.total_deadline_ms, 45_000,
         "v2-only leaf must survive normalization"
@@ -335,7 +342,9 @@ fn build_context_request_round_trip_preserves_v1_profile_json() {
     let value: serde_json::Value = serde_json::from_str(fixture).expect("fixture should parse");
     let request: BuildContextRequest =
         serde_json::from_value(value.clone()).expect("v1 fixture request should decode");
-    request.validate().expect("v1 fixture request must validate");
+    request
+        .validate()
+        .expect("v1 fixture request must validate");
     let round_trip = serde_json::to_value(&request).expect("request should serialize");
     assert_eq!(round_trip, value, "v1 request JSON shape must not change");
 }
@@ -454,11 +463,12 @@ fn maintenance_response_v1_json() -> serde_json::Value {
 #[test]
 fn maintenance_response_v1_dry_run_ok_round_trips() {
     let value = maintenance_response_v1_json();
-    let response = serde_json::from_value::<ai_daily_scanner_contract::MaintenanceResponseV1>(value)
-        .expect("dry-run ok maintenance response should decode");
-    response
-        .validate()
-        .expect("dry-run ok maintenance response must validate (post=not_run, after_complete=true)");
+    let response =
+        serde_json::from_value::<ai_daily_scanner_contract::MaintenanceResponseV1>(value)
+            .expect("dry-run ok maintenance response should decode");
+    response.validate().expect(
+        "dry-run ok maintenance response must validate (post=not_run, after_complete=true)",
+    );
 }
 
 #[test]
@@ -469,23 +479,18 @@ fn maintenance_response_v1_ok_rejects_invalid_post_or_missing_complete() {
         "post_integrity_check".to_string(),
         serde_json::Value::String("failed".to_string()),
     );
-    let response =
-        serde_json::from_value::<ai_daily_scanner_contract::MaintenanceResponseV1>(
-            serde_json::Value::Object(failed_post),
-        )
-        .expect("failed post should still decode");
+    let response = serde_json::from_value::<ai_daily_scanner_contract::MaintenanceResponseV1>(
+        serde_json::Value::Object(failed_post),
+    )
+    .expect("failed post should still decode");
     assert!(response.validate().is_err());
 
     let mut incomplete = value.as_object().unwrap().clone();
-    incomplete.insert(
-        "after_complete".to_string(),
-        serde_json::Value::Bool(false),
-    );
-    let response =
-        serde_json::from_value::<ai_daily_scanner_contract::MaintenanceResponseV1>(
-            serde_json::Value::Object(incomplete),
-        )
-        .expect("missing after_complete should still decode");
+    incomplete.insert("after_complete".to_string(), serde_json::Value::Bool(false));
+    let response = serde_json::from_value::<ai_daily_scanner_contract::MaintenanceResponseV1>(
+        serde_json::Value::Object(incomplete),
+    )
+    .expect("missing after_complete should still decode");
     assert!(response.validate().is_err());
 }
 
@@ -513,7 +518,10 @@ fn inspect_run_response_v2_ok_success_requires_artifact_id() {
 #[test]
 fn inspect_run_response_v2_error_sentinel_is_enforced() {
     let mut value = inspect_v2_ok_json().as_object().unwrap().clone();
-    value.insert("status".to_string(), serde_json::Value::String("error".to_string()));
+    value.insert(
+        "status".to_string(),
+        serde_json::Value::String("error".to_string()),
+    );
     value.insert("run_status".to_string(), serde_json::Value::Null);
     value.insert("context_run_id".to_string(), serde_json::Value::Null);
     value.insert("artifact_id".to_string(), serde_json::Value::Null);
@@ -537,7 +545,10 @@ fn inspect_run_response_v2_error_sentinel_is_enforced() {
         .expect("error sentinel shape with zero metrics must validate");
 
     let mut nonzero = inspect_v2_ok_json().as_object().unwrap().clone();
-    nonzero.insert("status".to_string(), serde_json::Value::String("error".to_string()));
+    nonzero.insert(
+        "status".to_string(),
+        serde_json::Value::String("error".to_string()),
+    );
     nonzero.insert("run_status".to_string(), serde_json::Value::Null);
     nonzero.insert("context_run_id".to_string(), serde_json::Value::Null);
     nonzero.insert("artifact_id".to_string(), serde_json::Value::Null);
@@ -659,19 +670,12 @@ fn file_audit_v2_final_diagnostic_nullability_is_enforced() {
         "parse_status".to_string(),
         serde_json::Value::String("error".to_string()),
     );
-    error_null.insert(
-        "final_diagnostic".to_string(),
-        serde_json::Value::Null,
-    );
-    error_null.insert(
-        "pdf_classification".to_string(),
-        serde_json::Value::Null,
-    );
-    let parsed =
-        serde_json::from_value::<ai_daily_scanner_contract::FileAuditV2>(serde_json::Value::Object(
-            error_null,
-        ))
-        .expect("error file audit with null diagnostic should decode");
+    error_null.insert("final_diagnostic".to_string(), serde_json::Value::Null);
+    error_null.insert("pdf_classification".to_string(), serde_json::Value::Null);
+    let parsed = serde_json::from_value::<ai_daily_scanner_contract::FileAuditV2>(
+        serde_json::Value::Object(error_null),
+    )
+    .expect("error file audit with null diagnostic should decode");
     assert!(
         parsed.validate().is_err(),
         "error/timeout file audit requires a final diagnostic"
@@ -683,15 +687,11 @@ fn file_audit_v2_final_diagnostic_nullability_is_enforced() {
         serde_json::Value::String("success".to_string()),
     );
     success_with_diag.insert("final_diagnostic".to_string(), diagnostic.clone());
-    success_with_diag.insert(
-        "pdf_classification".to_string(),
-        serde_json::Value::Null,
-    );
-    let parsed =
-        serde_json::from_value::<ai_daily_scanner_contract::FileAuditV2>(serde_json::Value::Object(
-            success_with_diag,
-        ))
-        .expect("success file audit with diagnostic should decode");
+    success_with_diag.insert("pdf_classification".to_string(), serde_json::Value::Null);
+    let parsed = serde_json::from_value::<ai_daily_scanner_contract::FileAuditV2>(
+        serde_json::Value::Object(success_with_diag),
+    )
+    .expect("success file audit with diagnostic should decode");
     assert!(
         parsed.validate().is_err(),
         "success/not_parsed file audit must not carry a final diagnostic"
@@ -703,15 +703,11 @@ fn file_audit_v2_final_diagnostic_nullability_is_enforced() {
         serde_json::Value::String("error".to_string()),
     );
     error_with_diag.insert("final_diagnostic".to_string(), diagnostic);
-    error_with_diag.insert(
-        "pdf_classification".to_string(),
-        serde_json::Value::Null,
-    );
-    let parsed =
-        serde_json::from_value::<ai_daily_scanner_contract::FileAuditV2>(serde_json::Value::Object(
-            error_with_diag,
-        ))
-        .expect("error file audit with diagnostic should decode");
+    error_with_diag.insert("pdf_classification".to_string(), serde_json::Value::Null);
+    let parsed = serde_json::from_value::<ai_daily_scanner_contract::FileAuditV2>(
+        serde_json::Value::Object(error_with_diag),
+    )
+    .expect("error file audit with diagnostic should decode");
     parsed
         .validate()
         .expect("error file audit with a final diagnostic must validate");
@@ -776,8 +772,8 @@ fn classification_and_parse_execution_matrices_reject_impossible_provenance() {
 #[test]
 fn v2_audit_page_miss_reason_and_backend_lane_matrices_are_strict() {
     use ai_daily_scanner_contract::{
-        ClassificationCacheStatus, ClassificationTransport, Nullable,
-        PdfClassificationAuditV1, PdfClassificationStatus,
+        ClassificationCacheStatus, ClassificationTransport, Nullable, PdfClassificationAuditV1,
+        PdfClassificationStatus,
     };
 
     let valid_classification = PdfClassificationAuditV1 {
@@ -800,7 +796,9 @@ fn v2_audit_page_miss_reason_and_backend_lane_matrices_are_strict() {
 
     let mut snapshot_classification = valid_classification.clone();
     snapshot_classification.classification_cache_status = ClassificationCacheStatus::Snapshot;
-    snapshot_classification.classification_cache_miss_reason.clear();
+    snapshot_classification
+        .classification_cache_miss_reason
+        .clear();
     snapshot_classification.run_inspected_pages = Nullable(Some(0));
     snapshot_classification.duration_ms = 0;
     snapshot_classification.transport = ClassificationTransport::Snapshot;

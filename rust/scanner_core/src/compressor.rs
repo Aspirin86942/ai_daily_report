@@ -512,13 +512,7 @@ mod tests {
             .map(|section| count_chars(section) + SECTION_SEPARATOR_CHARS)
             .sum::<u64>();
         // The real render with concrete counts never exceeds the worst-case.
-        let real = render_run_summary(
-            ReportMode::Daily,
-            &profile,
-            999,
-            &"3".to_string(),
-            &"1".to_string(),
-        );
+        let real = render_run_summary(ReportMode::Daily, &profile, 999, "3", "1");
         let real_chars = count_chars(&real) + SECTION_SEPARATOR_CHARS;
         assert!(real_chars <= worst_chars);
     }

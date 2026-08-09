@@ -41,12 +41,9 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     let started = Instant::now();
     let job = create_kill_on_close_job().map_err(ProcessFailure::before_start)?;
     let mut rss_observation = JobRssObservation::new(spec.rss_tracker.as_ref(), job.raw());
-    let (child_stdin, parent_stdin) =
-        create_pipe(false).map_err(ProcessFailure::before_start)?;
-    let (parent_stdout, child_stdout) =
-        create_pipe(true).map_err(ProcessFailure::before_start)?;
-    let (parent_stderr, child_stderr) =
-        create_pipe(true).map_err(ProcessFailure::before_start)?;
+    let (child_stdin, parent_stdin) = create_pipe(false).map_err(ProcessFailure::before_start)?;
+    let (parent_stdout, child_stdout) = create_pipe(true).map_err(ProcessFailure::before_start)?;
+    let (parent_stderr, child_stderr) = create_pipe(true).map_err(ProcessFailure::before_start)?;
 
     let application = wide_null(spec.program.as_os_str());
     let mut command_line = build_command_line(spec.program.as_os_str(), &spec.args);
@@ -97,9 +94,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     };
     let Some(thread_handle) = OwnedHandle::new(process_info.hThread) else {
         if !stop_uncontained_process(process.raw()) {
-            return Err(ProcessFailure::after_start(
-                ProcessError::ContainmentFailed,
-            ));
+            return Err(ProcessFailure::after_start(ProcessError::ContainmentFailed));
         }
         return Err(ProcessFailure::after_start(ProcessError::StartFailed));
     };
@@ -108,24 +103,16 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     drop(child_stderr);
     if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
         if !stop_uncontained_process(process.raw()) {
-            return Err(ProcessFailure::after_start(
-                ProcessError::ContainmentFailed,
-            ));
+            return Err(ProcessFailure::after_start(ProcessError::ContainmentFailed));
         }
-        return Err(ProcessFailure::after_start(
-            ProcessError::ContainmentFailed,
-        ));
+        return Err(ProcessFailure::after_start(ProcessError::ContainmentFailed));
     }
     rss_observation.mark_contained();
     if unsafe { ResumeThread(thread_handle.raw()) } == u32::MAX {
         if !terminate_and_wait(&job, &process) {
-            return Err(ProcessFailure::after_start(
-                ProcessError::ContainmentFailed,
-            ));
+            return Err(ProcessFailure::after_start(ProcessError::ContainmentFailed));
         }
-        return Err(ProcessFailure::after_start(
-            ProcessError::ContainmentFailed,
-        ));
+        return Err(ProcessFailure::after_start(ProcessError::ContainmentFailed));
     }
     drop(thread_handle);
 
@@ -157,9 +144,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     };
     if wait_result == WAIT_TIMEOUT {
         if !terminate_and_wait(&job, &process) {
-            return Err(ProcessFailure::after_start(
-                ProcessError::ContainmentFailed,
-            ));
+            return Err(ProcessFailure::after_start(ProcessError::ContainmentFailed));
         }
         let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
@@ -168,9 +153,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     }
     if wait_result != WAIT_OBJECT_0 {
         if !terminate_and_wait(&job, &process) {
-            return Err(ProcessFailure::after_start(
-                ProcessError::ContainmentFailed,
-            ));
+            return Err(ProcessFailure::after_start(ProcessError::ContainmentFailed));
         }
         let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
@@ -181,9 +164,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     let mut exit_code = 0_u32;
     if unsafe { GetExitCodeProcess(process.raw(), &mut exit_code) } == 0 {
         if !terminate_and_wait(&job, &process) {
-            return Err(ProcessFailure::after_start(
-                ProcessError::ContainmentFailed,
-            ));
+            return Err(ProcessFailure::after_start(ProcessError::ContainmentFailed));
         }
         let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
@@ -193,16 +174,13 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
 
     // The worker protocol never allows detached descendants. Clear any child
     // still alive after the primary process exits before releasing pipe readers.
-    let active = active_processes(job.raw()).ok_or_else(|| {
-        ProcessFailure::after_start(ProcessError::ContainmentFailed)
-    })?;
+    let active = active_processes(job.raw())
+        .ok_or_else(|| ProcessFailure::after_start(ProcessError::ContainmentFailed))?;
     if active > 0
         && (unsafe { TerminateJobObject(job.raw(), exit_code) } == 0
             || !wait_for_job_empty(job.raw(), TERMINATION_WAIT))
     {
-        return Err(ProcessFailure::after_start(
-            ProcessError::ContainmentFailed,
-        ));
+        return Err(ProcessFailure::after_start(ProcessError::ContainmentFailed));
     }
     join_optional_writer(&mut input_thread).map_err(ProcessFailure::after_start)?;
     let stdout = join_reader(stdout_thread).map_err(ProcessFailure::after_start)?;

@@ -1220,7 +1220,11 @@ impl Validate for RawScannerProfileV2 {
             require_const(value, ADMISSION_POLICY_VERSION, "admission_policy_version")?;
         }
         if let Some(value) = &self.classifier_policy_version {
-            require_const(value, CLASSIFIER_POLICY_VERSION, "classifier_policy_version")?;
+            require_const(
+                value,
+                CLASSIFIER_POLICY_VERSION,
+                "classifier_policy_version",
+            )?;
         }
         range!(pdf_classification_timeout_ms, 100, 60_000);
         range!(total_deadline_ms, 5_000, 3_600_000);
@@ -2758,7 +2762,12 @@ pub struct CacheRetentionPolicy {
 impl Validate for CacheRetentionPolicy {
     fn validate(&self) -> Result<(), String> {
         require_const(&self.policy_version, "cache_retention_v1", "policy_version")?;
-        require_range(self.parse_cache_max_bytes, 1, u64::MAX, "parse_cache_max_bytes")?;
+        require_range(
+            self.parse_cache_max_bytes,
+            1,
+            u64::MAX,
+            "parse_cache_max_bytes",
+        )?;
         require_range(
             self.classification_cache_max_bytes,
             1,
@@ -2777,7 +2786,12 @@ impl Validate for CacheRetentionPolicy {
             u64::MAX,
             "terminal_audit_max_bytes",
         )?;
-        require_range(self.terminal_run_max_count, 1, u64::MAX, "terminal_run_max_count")?;
+        require_range(
+            self.terminal_run_max_count,
+            1,
+            u64::MAX,
+            "terminal_run_max_count",
+        )?;
         require_range(
             self.terminal_run_max_age_days,
             1,
@@ -2964,7 +2978,10 @@ impl Validate for PdfClassificationAuditV1 {
                 || audit.transport != transport
                 || audit.attempt_count != 0
             {
-                Err("non-executing classification provenance has nonzero execution fields".to_string())
+                Err(
+                    "non-executing classification provenance has nonzero execution fields"
+                        .to_string(),
+                )
             } else {
                 Ok(())
             }
@@ -2980,11 +2997,13 @@ impl Validate for PdfClassificationAuditV1 {
                 })?;
                 if page_count == 0 {
                     return Err(
-                        "text/no-text classification page_count must be positive".to_string(),
+                        "text/no-text classification page_count must be positive".to_string()
                     );
                 }
                 if self.nominal_charged_pages == 0 {
-                    return Err("classified PDF requires a positive nominal page charge".to_string());
+                    return Err(
+                        "classified PDF requires a positive nominal page charge".to_string()
+                    );
                 }
                 let window_pages = page_count.min(self.nominal_charged_pages);
                 match self.status {
@@ -2992,14 +3011,14 @@ impl Validate for PdfClassificationAuditV1 {
                         if !(1..=window_pages).contains(&result_pages) =>
                     {
                         return Err(
-                            "text classification pages must fit the parse window".to_string(),
+                            "text classification pages must fit the parse window".to_string()
                         );
                     }
                     PdfClassificationStatus::NoTextInParseWindow
                         if result_pages != window_pages =>
                     {
                         return Err(
-                            "no-text classification must examine the complete window".to_string(),
+                            "no-text classification must examine the complete window".to_string()
                         );
                     }
                     _ => {}
@@ -3025,7 +3044,7 @@ impl Validate for PdfClassificationAuditV1 {
                     }
                     ClassificationCacheStatus::NotEligible => {
                         return Err(
-                            "text/no-text classification cannot be not_eligible".to_string(),
+                            "text/no-text classification cannot be not_eligible".to_string()
                         );
                     }
                 }
@@ -3047,14 +3066,14 @@ impl Validate for PdfClassificationAuditV1 {
                 if let Some(result_pages) = self.result_examined_pages.0 {
                     if result_pages > self.nominal_charged_pages {
                         return Err(
-                            "typed failure result pages exceed the nominal page charge".to_string(),
+                            "typed failure result pages exceed the nominal page charge".to_string()
                         );
                     }
                     if self.page_count.0.is_some_and(|page_count| {
                         result_pages > page_count.min(self.nominal_charged_pages)
                     }) {
                         return Err(
-                            "typed failure result pages exceed the parse window".to_string(),
+                            "typed failure result pages exceed the parse window".to_string()
                         );
                     }
                 }
@@ -3080,7 +3099,7 @@ impl Validate for PdfClassificationAuditV1 {
                 .ok_or_else(|| "classification attempt page budget overflows u64".to_string())?;
             if run_pages > max_run_pages {
                 return Err(
-                    "run inspected pages exceed the started attempt page budget".to_string(),
+                    "run inspected pages exceed the started attempt page budget".to_string()
                 );
             }
             if self.classification_cache_status == ClassificationCacheStatus::Miss
@@ -3089,9 +3108,7 @@ impl Validate for PdfClassificationAuditV1 {
                     .0
                     .is_some_and(|result_pages| run_pages < result_pages)
             {
-                return Err(
-                    "observable run pages cannot be smaller than result pages".to_string(),
-                );
+                return Err("observable run pages cannot be smaller than result pages".to_string());
             }
         }
         Ok(())
@@ -3143,12 +3160,7 @@ pub struct PythonOperationDiagnosticV1 {
 
 impl Validate for PythonOperationDiagnosticV1 {
     fn validate(&self) -> Result<(), String> {
-        require_range(
-            self.message.chars().count() as u64,
-            1,
-            4_096,
-            "message",
-        )?;
+        require_range(self.message.chars().count() as u64, 1, 4_096, "message")?;
         if let Some(path) = self.file_path.0.as_deref() {
             require_absolute_path(path, "file_path")?;
         }
@@ -3229,9 +3241,11 @@ impl Validate for PdfClassifierResultV1 {
                 }
             }
             PdfClassifierResultStatus::Unknown | PdfClassifierResultStatus::Error => {
-                let diagnostic = self.diagnostic.0.as_ref().ok_or_else(|| {
-                    "unknown/error result requires a diagnostic".to_string()
-                })?;
+                let diagnostic = self
+                    .diagnostic
+                    .0
+                    .as_ref()
+                    .ok_or_else(|| "unknown/error result requires a diagnostic".to_string())?;
                 diagnostic.validate()?;
                 if diagnostic.retryable != (self.status == PdfClassifierResultStatus::Unknown) {
                     return Err("unknown must be retryable and error must not be".to_string());
@@ -3264,7 +3278,8 @@ impl PdfClassifierResultV1 {
                     PdfClassifierResultStatus::NoTextInParseWindow
                         if result_pages != window_pages =>
                     {
-                        Err("no-text result did not inspect the complete request window".to_string())
+                        Err("no-text result did not inspect the complete request window"
+                            .to_string())
                     }
                     _ => Ok(()),
                 }
@@ -3321,7 +3336,7 @@ impl Validate for PdfClassifierResponseV1 {
             ClassifierResponseStatus::Error => {
                 if self.result.0.is_some() || self.error.0.is_none() {
                     return Err(
-                        "error classifier response requires an error and no result".to_string(),
+                        "error classifier response requires an error and no result".to_string()
                     );
                 }
                 self.error.0.as_ref().expect("checked above").validate()?;
@@ -3481,7 +3496,7 @@ impl Validate for PythonSessionRequestV1 {
 #[serde(untagged)]
 pub enum PythonSessionResultV1 {
     Classify(PdfClassifierResultV1),
-    Parse(WorkerParseResponse),
+    Parse(Box<WorkerParseResponse>),
 }
 
 impl Validate for PythonSessionResultV1 {
@@ -3522,7 +3537,7 @@ impl Validate for PythonSessionResponseV1 {
             PythonSessionResponseStatus::Error => {
                 if self.result.0.is_some() || self.error.0.is_none() {
                     return Err(
-                        "error session response requires an error and no result".to_string(),
+                        "error session response requires an error and no result".to_string()
                     );
                 }
                 self.error.0.as_ref().expect("checked above").validate()?;
@@ -3595,9 +3610,7 @@ pub fn validate_v2_parse_provenance(
         }
         _ => {}
     }
-    if metadata
-        && classification_status != Some(PdfClassificationStatus::NoTextInParseWindow)
-    {
+    if metadata && classification_status != Some(PdfClassificationStatus::NoTextInParseWindow) {
         return Err(
             "pdf_metadata_v1 is only valid for no-text classification provenance".to_string(),
         );
@@ -3616,10 +3629,7 @@ pub fn validate_v2_parse_provenance(
             Err("not_applicable Success requires pdf_metadata_v1/rust_core".to_string())
         }
         ParseCacheStatus::NotApplicable if parse_status != ParseStatus::Success && !not_parsed => {
-            Err(
-                "not_applicable NotParsed/Error/Timeout requires not_parsed provenance"
-                    .to_string(),
-            )
+            Err("not_applicable NotParsed/Error/Timeout requires not_parsed provenance".to_string())
         }
         _ => Ok(()),
     }
@@ -3737,7 +3747,7 @@ impl Validate for FileAuditV2 {
                     || self.parse_duration_ms != 0
                 {
                     return Err(
-                        "not_applicable parse provenance must have zero execution".to_string(),
+                        "not_applicable parse provenance must have zero execution".to_string()
                     );
                 }
             }
@@ -3745,9 +3755,7 @@ impl Validate for FileAuditV2 {
         match self.parse_status {
             ParseStatus::Error | ParseStatus::Timeout => {
                 if self.final_diagnostic.0.is_none() {
-                    return Err(
-                        "error/timeout file audit requires a final diagnostic".to_string(),
-                    );
+                    return Err("error/timeout file audit requires a final diagnostic".to_string());
                 }
             }
             ParseStatus::Success | ParseStatus::NotParsed => {
@@ -3837,7 +3845,9 @@ impl Validate for ExecutionMetricsV2 {
             "stage_deadline_exhausted_count",
         )?;
         if self.parse_cache_lookup_count == 0 && self.parse_cache_all_hit.0.is_some() {
-            return Err("parse_cache_all_hit must be null when no parse lookup occurred".to_string());
+            return Err(
+                "parse_cache_all_hit must be null when no parse lookup occurred".to_string(),
+            );
         }
         if self.parse_cache_lookup_count > 0 && self.parse_cache_all_hit.0.is_none() {
             return Err("parse_cache_all_hit is required after a parse lookup".to_string());
@@ -3978,23 +3988,21 @@ impl Validate for InspectRunResponseV2 {
         match self.status {
             InspectStatus::Ok => {
                 if self.run_status.0.is_none() || self.error.0.is_some() {
-                    return Err("ok inspect v2 response requires run status and no error".to_string());
+                    return Err(
+                        "ok inspect v2 response requires run status and no error".to_string()
+                    );
                 }
                 match self.run_status.0 {
                     Some(RunStatus::Success | RunStatus::Partial) => {
                         if self.artifact_id.0.is_none() {
                             return Err(
-                                "successful inspect v2 run requires artifact_id".to_string(),
+                                "successful inspect v2 run requires artifact_id".to_string()
                             );
                         }
                     }
-                    Some(RunStatus::Error) => {
-                        if self.artifact_id.0.is_some() {
-                            return Err(
-                                "error run inspect v2 response must have a null artifact_id"
-                                    .to_string(),
-                            );
-                        }
+                    Some(RunStatus::Error) if self.artifact_id.0.is_some() => {
+                        return Err("error run inspect v2 response must have a null artifact_id"
+                            .to_string());
                     }
                     _ => {}
                 }
@@ -4163,11 +4171,7 @@ pub struct MaintenanceRequestV1 {
 
 impl Validate for MaintenanceRequestV1 {
     fn validate(&self) -> Result<(), String> {
-        require_const(
-            &self.contract,
-            "ai_daily_scanner_maintenance",
-            "contract",
-        )?;
+        require_const(&self.contract, "ai_daily_scanner_maintenance", "contract")?;
         require_range(self.protocol_version, 1, 1, "protocol_version")?;
         require_request_id(&self.request_id)?;
         require_absolute_path(&self.scan_db_path, "scan_db_path")
@@ -4196,11 +4200,7 @@ pub struct MaintenanceResponseV1 {
 
 impl Validate for MaintenanceResponseV1 {
     fn validate(&self) -> Result<(), String> {
-        require_const(
-            &self.contract,
-            "ai_daily_scanner_maintenance",
-            "contract",
-        )?;
+        require_const(&self.contract, "ai_daily_scanner_maintenance", "contract")?;
         require_range(self.protocol_version, 1, 1, "protocol_version")?;
         require_request_id(&self.request_id)?;
         self.cache_retention_policy.validate()?;
@@ -4614,10 +4614,7 @@ mod tests {
             "not_applicable row with an empty miss reason must validate"
         );
         // The same holds for fresh/snapshot rows.
-        for status in [
-            ParseCacheStatus::Fresh,
-            ParseCacheStatus::Snapshot,
-        ] {
+        for status in [ParseCacheStatus::Fresh, ParseCacheStatus::Snapshot] {
             let mut row = audit("");
             row.parse_cache_status = status;
             row.cache_miss_reason = "new_file".to_string();
@@ -4679,7 +4676,8 @@ mod tests {
             "worker_build": "fixture-python-worker-build-v1",
             "observed_source_version": "mtime_ns=4000000001:size=1024"
         });
-        let result = validate_contract_payload("worker-parse-response-v1.schema.json", &payload, &[]);
+        let result =
+            validate_contract_payload("worker-parse-response-v1.schema.json", &payload, &[]);
         assert!(
             result.is_err(),
             "scanner-side error code must be rejected on the worker wire"

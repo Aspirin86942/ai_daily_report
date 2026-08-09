@@ -36,7 +36,11 @@ fn main() {
         exit_with_output(invalid_request_output());
     }
 
-    exit_with_output(dispatch_with_response_version(&command, &input, response_version));
+    exit_with_output(dispatch_with_response_version(
+        &command,
+        &input,
+        response_version,
+    ));
 }
 
 fn exit_with_output(result: Result<CommandOutput, EngineShellError>) -> ! {

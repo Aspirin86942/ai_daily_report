@@ -17,7 +17,9 @@ fn frozen_worker_diagnostic_translates_to_scanner_diagnostic() {
         message: "worker deadline exceeded".to_string(),
         retryable: true,
         stage: WorkerDiagnosticV1Stage::Parse,
-        file_path: Nullable(Some("C:\\scanner-fixtures\\工作 目录\\slow.pdf".to_string())),
+        file_path: Nullable(Some(
+            "C:\\scanner-fixtures\\工作 目录\\slow.pdf".to_string(),
+        )),
         backend: Nullable(Some("pdf_text_v1".to_string())),
     };
 
@@ -29,7 +31,9 @@ fn frozen_worker_diagnostic_translates_to_scanner_diagnostic() {
     assert!(translated.retryable);
     assert_eq!(
         translated.file_path,
-        Nullable(Some("C:\\scanner-fixtures\\工作 目录\\slow.pdf".to_string()))
+        Nullable(Some(
+            "C:\\scanner-fixtures\\工作 目录\\slow.pdf".to_string()
+        ))
     );
     assert_eq!(
         translated.backend,

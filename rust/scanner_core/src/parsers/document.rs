@@ -7,9 +7,7 @@ use ai_daily_scanner_contract::{
 
 use crate::fallback::ParseFailure;
 
-use super::{
-    execute_worker_request_observed, OneShotExecution, RegisteredWorker, WorkerCommand,
-};
+use super::{execute_worker_request_observed, OneShotExecution, RegisteredWorker, WorkerCommand};
 
 pub fn worker_command(adapters: &AdapterPaths) -> WorkerCommand {
     WorkerCommand {

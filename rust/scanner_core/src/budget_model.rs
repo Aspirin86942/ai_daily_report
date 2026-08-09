@@ -12,8 +12,7 @@
 use ai_daily_scanner_contract::{ContextProfileV2, NormalizedScannerProfileV2};
 
 pub const BUDGET_MODEL_MISMATCH_CODE: &str = "BUDGET_MODEL_MISMATCH";
-pub const CONTEXT_FIXED_SECTIONS_OVER_BUDGET_CODE: &str =
-    "CONTEXT_FIXED_SECTIONS_OVER_BUDGET";
+pub const CONTEXT_FIXED_SECTIONS_OVER_BUDGET_CODE: &str = "CONTEXT_FIXED_SECTIONS_OVER_BUDGET";
 
 pub const OMITTED_SUMMARY_RESERVATION_CAP: u64 = 12_000;
 pub const OMITTED_RESERVATION_FRACTION_PERCENT: u64 = 20;
@@ -130,7 +129,9 @@ impl RouteKind {
         match self {
             Self::LightText => "rust_core",
             Self::RustOffice | Self::RustXlsx => "rust_office_process",
-            Self::Pdf | Self::PythonOffice | Self::PythonSharepointText => "python_document_process",
+            Self::Pdf | Self::PythonOffice | Self::PythonSharepointText => {
+                "python_document_process"
+            }
         }
     }
 
@@ -236,8 +237,14 @@ impl OmittedSummaryPlan {
 /// single catch-all aggregate row, plus their newline separators and the
 /// `\n\n` section separator.
 fn omitted_summary_fixed_chars() -> u64 {
-    let header = format!("## 省略文件摘要\n- 省略文件数: {}\n", "9".repeat(MAX_U64_DIGITS as usize));
-    let catch_all = format!("- 其他 | action=omit | count={}\n", "9".repeat(MAX_U64_DIGITS as usize));
+    let header = format!(
+        "## 省略文件摘要\n- 省略文件数: {}\n",
+        "9".repeat(MAX_U64_DIGITS as usize)
+    );
+    let catch_all = format!(
+        "- 其他 | action=omit | count={}\n",
+        "9".repeat(MAX_U64_DIGITS as usize)
+    );
     count_chars(&header) + count_chars(&catch_all) + SECTION_SEPARATOR_CHARS
 }
 
@@ -263,11 +270,11 @@ impl ContextBudgetModel {
     /// `fixed_sections` are the pre-rendered sections that exist before any
     /// admitted file (header, run summary, notices, `## 文件证据`, and any
     /// preexisting bounded error sections frozen before `ContentAdmissionPlan`).
-    pub fn new(
-        profile: &ContextProfileV2,
-        fixed_sections: &[String],
-    ) -> Result<Self, BudgetError> {
-        let exact = fixed_sections.iter().map(|section| count_chars(section)).sum::<u64>()
+    pub fn new(profile: &ContextProfileV2, fixed_sections: &[String]) -> Result<Self, BudgetError> {
+        let exact = fixed_sections
+            .iter()
+            .map(|section| count_chars(section))
+            .sum::<u64>()
             + fixed_sections.len() as u64 * SECTION_SEPARATOR_CHARS;
         let omitted = omitted_summary_reservation(profile.global_max_chars);
         let base = exact
@@ -409,7 +416,10 @@ mod tests {
 
     #[test]
     fn error_codes_are_the_frozen_literals() {
-        assert_eq!(BudgetError::BudgetModelMismatch.error_code(), "BUDGET_MODEL_MISMATCH");
+        assert_eq!(
+            BudgetError::BudgetModelMismatch.error_code(),
+            "BUDGET_MODEL_MISMATCH"
+        );
         assert_eq!(
             BudgetError::ContextFixedSectionsOverBudget.error_code(),
             "CONTEXT_FIXED_SECTIONS_OVER_BUDGET"
@@ -420,6 +430,9 @@ mod tests {
     fn route_kind_backends_and_lanes_are_stable() {
         assert_eq!(RouteKind::Pdf.backend(), "pdf_text_v1");
         assert_eq!(RouteKind::RustOffice.worker_lane(), "rust_office_process");
-        assert_eq!(RouteKind::PythonSharepointText.backend(), "python_sharepoint_text_v1");
+        assert_eq!(
+            RouteKind::PythonSharepointText.backend(),
+            "python_sharepoint_text_v1"
+        );
     }
 }

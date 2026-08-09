@@ -102,8 +102,10 @@ pub struct WorkerCommand {
 impl WorkerCommand {
     fn args_for(&self, operation: &str) -> Vec<OsString> {
         let mut args = Vec::with_capacity(self.base_args.len() + 2);
-        if matches!(operation, "version" | "classifier-version" | "session-version")
-            && self.expected_kind == WorkerKind::PythonDocument
+        if matches!(
+            operation,
+            "version" | "classifier-version" | "session-version"
+        ) && self.expected_kind == WorkerKind::PythonDocument
             && !self.base_args.iter().any(|value| value == "-S")
         {
             args.push(OsString::from("-S"));
@@ -361,7 +363,12 @@ impl ParserScheduler {
                     |response| response.parser_backend.as_str().to_string(),
                 );
                 let actual_lane = execution.response.as_ref().map_or_else(
-                    || execution.last_started_backend.unwrap_or(request.backend).lane(),
+                    || {
+                        execution
+                            .last_started_backend
+                            .unwrap_or(request.backend)
+                            .lane()
+                    },
                     |response| response.worker_lane,
                 );
                 let primary_duration_ms = execution.primary_duration_ms;
@@ -558,12 +565,7 @@ pub(crate) fn register_worker_pair_observed(
     Result<RegisteredWorker, ParseFailure>,
     Result<RegisteredWorker, ParseFailure>,
 ) {
-    register_worker_pair_inner(
-        office_command,
-        python_command,
-        timeout,
-        Some(rss_tracker),
-    )
+    register_worker_pair_inner(office_command, python_command, timeout, Some(rss_tracker))
 }
 
 fn register_worker_pair_inner(
@@ -758,10 +760,10 @@ fn register_session_version_inner(
     if output.exit_code == 2 {
         // Capability absent: a strict single transport frame is the only
         // acceptable exit-2 outcome. Anything extra is a handshake failure.
-        if let Ok(transport) =
-            serde_json::from_slice::<ai_daily_scanner_contract::TransportErrorResponse>(
-                &output.stdout,
-            ) {
+        if let Ok(transport) = serde_json::from_slice::<
+            ai_daily_scanner_contract::TransportErrorResponse,
+        >(&output.stdout)
+        {
             if transport.validate().is_ok()
                 && transport.error.error_code
                     == ai_daily_scanner_contract::WorkerDiagnosticV1ErrorCode::InvalidRequest
@@ -844,9 +846,8 @@ fn preflight_python_capabilities_inner(
     Result<Option<RegisteredSession>, ParseFailure>,
 ) {
     std::thread::scope(|scope| {
-        let classifier_task = scope.spawn(|| {
-            register_classifier_version_inner(python_command, timeout, rss_tracker)
-        });
+        let classifier_task =
+            scope.spawn(|| register_classifier_version_inner(python_command, timeout, rss_tracker));
         let session_result = register_session_version_inner(python_command, timeout, rss_tracker);
         let classifier_result = classifier_task.join().unwrap_or_else(|_| {
             Err(contract_failure(
@@ -1076,13 +1077,9 @@ fn validate_response_identity(
         1
     };
     let source_matches = response.observed_source_version == request.expected_source_version
-        || response
-            .error
-            .0
-            .as_ref()
-            .is_some_and(|error| {
-                error.error_code == WorkerDiagnosticV1ErrorCode::SourceVersionChanged
-            });
+        || response.error.0.as_ref().is_some_and(|error| {
+            error.error_code == WorkerDiagnosticV1ErrorCode::SourceVersionChanged
+        });
     let error_identity_matches = response.error.0.as_ref().is_none_or(|error| {
         error.stage == WorkerDiagnosticV1Stage::Parse
             && error.file_path.0.as_deref() == Some(request.file_path.as_str())
@@ -1150,7 +1147,9 @@ fn worker_response_character_budget(request: &WorkerParseRequest) -> u64 {
     }
 }
 
-pub(crate) fn worker_response_capture_limit(request: &WorkerParseRequest) -> Result<usize, ParseFailure> {
+pub(crate) fn worker_response_capture_limit(
+    request: &WorkerParseRequest,
+) -> Result<usize, ParseFailure> {
     // JSON permits one Unicode scalar to be represented by a surrogate pair
     // (12 ASCII bytes). Diagnostics may repeat only the request path because
     // response identity validation rejects any other path.
@@ -1667,8 +1666,14 @@ mod tests {
         };
 
         for operation in ["version", "classifier-version", "session-version"] {
-            assert_eq!(command.args_for(operation).first(), Some(&OsString::from("-S")));
+            assert_eq!(
+                command.args_for(operation).first(),
+                Some(&OsString::from("-S"))
+            );
         }
-        assert_ne!(command.args_for("session").first(), Some(&OsString::from("-S")));
+        assert_ne!(
+            command.args_for("session").first(),
+            Some(&OsString::from("-S"))
+        );
     }
 }

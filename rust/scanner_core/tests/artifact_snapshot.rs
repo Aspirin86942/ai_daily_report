@@ -882,7 +882,7 @@ fn finalize_snapshot_for_test(
 fn snapshot_discovery() -> DiscoveredFileOut {
     DiscoveredFileOut {
         file_identity: "fixture:a.txt".to_string(),
-        path: format!("C:\\work\\a.txt"),
+        path: "C:\\work\\a.txt".to_string(),
         extension: ".txt".to_string(),
         modified_at: "2026-08-08T12:00:00.000000".to_string(),
         size_bytes: 5,
@@ -1179,7 +1179,7 @@ fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
         1_010,
     );
     let reader =
-        rusqlite::Connection::open(&_directory.path().join(SCAN_DB_FILENAME)).expect("open db");
+        rusqlite::Connection::open(_directory.path().join(SCAN_DB_FILENAME)).expect("open db");
     let artifact_id: i64 = reader
         .query_row(
             "SELECT artifact_id FROM context_artifacts WHERE snapshot_eligible=1",
@@ -1222,7 +1222,7 @@ fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
     );
 
     let connection =
-        rusqlite::Connection::open(&_directory.path().join(SCAN_DB_FILENAME)).expect("open db");
+        rusqlite::Connection::open(_directory.path().join(SCAN_DB_FILENAME)).expect("open db");
     let (r2_artifact, r2_snapshot_hit, r2_reused): (i64, i64, Option<i64>) = connection
         .query_row(
             "SELECT artifact_id, snapshot_hit, reused_from_context_run_id

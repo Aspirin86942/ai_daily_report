@@ -52,10 +52,7 @@ impl WorkerRssTracker {
             Some(value) => {
                 self.state.peak_bytes.fetch_max(value, Ordering::Relaxed);
             }
-            None => self
-                .state
-                .observation_failed
-                .store(true, Ordering::Relaxed),
+            None => self.state.observation_failed.store(true, Ordering::Relaxed),
         }
     }
 
@@ -141,9 +138,7 @@ pub fn run_process(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     run_process_observed(spec).map_err(|failure| failure.error)
 }
 
-pub(crate) fn run_process_observed(
-    spec: &ProcessSpec,
-) -> Result<ProcessOutput, ProcessFailure> {
+pub(crate) fn run_process_observed(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     if !spec.program.is_absolute()
         || os_has_nul(spec.program.as_os_str())
         || spec

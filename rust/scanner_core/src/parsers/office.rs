@@ -82,8 +82,7 @@ pub fn parse_with_fallback(
                     final_failure: Some(primary_failure),
                     primary_failure: None,
                     fallback_backend: None,
-                    last_started_backend: (primary_attempt_count > 0)
-                        .then_some(request.backend),
+                    last_started_backend: (primary_attempt_count > 0).then_some(request.backend),
                     primary_duration_ms,
                     fallback_duration_ms: 0,
                     attempt_count: primary_attempt_count,

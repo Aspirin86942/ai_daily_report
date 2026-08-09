@@ -210,19 +210,45 @@ const ERROR_ENVELOPE: &str = r##"{
 }"##;
 
 fn insert_success_run(connection: &rusqlite::Connection, request_id: &str) {
-    insert_scan_run(connection, request_id, "success", Some(2), Some(SUCCESS_ENVELOPE));
+    insert_scan_run(
+        connection,
+        request_id,
+        "success",
+        Some(2),
+        Some(SUCCESS_ENVELOPE),
+    );
     insert_common_rows(connection);
-    insert_context_run(connection, "success", "# daily report\n- shipped scanner foundation");
+    insert_context_run(
+        connection,
+        "success",
+        "# daily report\n- shipped scanner foundation",
+    );
 }
 
 fn insert_partial_run(connection: &rusqlite::Connection, request_id: &str) {
-    insert_scan_run(connection, request_id, "partial", Some(2), Some(PARTIAL_ENVELOPE));
+    insert_scan_run(
+        connection,
+        request_id,
+        "partial",
+        Some(2),
+        Some(PARTIAL_ENVELOPE),
+    );
     insert_common_rows(connection);
-    insert_context_run(connection, "partial", "# partial report\n- recovered context");
+    insert_context_run(
+        connection,
+        "partial",
+        "# partial report\n- recovered context",
+    );
 }
 
 fn insert_error_run(connection: &rusqlite::Connection, request_id: &str) {
-    insert_scan_run(connection, request_id, "error", Some(2), Some(ERROR_ENVELOPE));
+    insert_scan_run(
+        connection,
+        request_id,
+        "error",
+        Some(2),
+        Some(ERROR_ENVELOPE),
+    );
     insert_common_rows(connection);
 }
 
@@ -289,12 +315,18 @@ fn migrated_v1_rows_are_audited_as_migrated_and_caches_invalidated() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(migrated_count, 1, "terminal run must be audited as migrated_v1");
+    assert_eq!(
+        migrated_count, 1,
+        "terminal run must be audited as migrated_v1"
+    );
 
     let parse_cache_count: i64 = conn
         .query_row("SELECT count(*) FROM parse_cache", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(parse_cache_count, 0, "legacy parse cache rows must be deleted");
+    assert_eq!(
+        parse_cache_count, 0,
+        "legacy parse cache rows must be deleted"
+    );
 
     let history_count: i64 = conn
         .query_row(
@@ -339,7 +371,10 @@ fn migrated_v1_rows_are_audited_as_migrated_and_caches_invalidated() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(artifact_count, 1, "success run must produce one payload artifact");
+    assert_eq!(
+        artifact_count, 1,
+        "success run must produce one payload artifact"
+    );
     let artifact_id: Option<i64> = conn
         .query_row(
             "SELECT artifact_id FROM context_runs WHERE scan_run_id=1",
@@ -369,18 +404,18 @@ fn migrated_v1_rows_are_audited_as_migrated_and_caches_invalidated() {
     // Payload artifacts (snapshot_eligible=0) never carry semantic rows; the
     // body lives only in the artifact's final_context.
     let artifact_files_count: i64 = conn
-        .query_row("SELECT count(*) FROM context_artifact_files", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM context_artifact_files", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(
         artifact_files_count, 0,
         "migrated payload artifacts carry no artifact file rows"
     );
     let artifact_decisions_count: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM context_artifact_decisions",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT count(*) FROM context_artifact_decisions", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(
         artifact_decisions_count, 0,
@@ -391,7 +426,10 @@ fn migrated_v1_rows_are_audited_as_migrated_and_caches_invalidated() {
     let inventory_count: i64 = conn
         .query_row("SELECT count(*) FROM file_inventory", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(inventory_count, 1, "inventory rows must survive the rebuild");
+    assert_eq!(
+        inventory_count, 1,
+        "inventory rows must survive the rebuild"
+    );
 
     // The legacy cache evidence is moved to the nullable legacy columns.
     let legacy_status: Option<String> = conn
@@ -425,19 +463,28 @@ fn partial_run_migrates_to_payload_artifact_with_verbatim_warnings() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(artifact_count, 1, "partial run must produce one payload artifact");
+    assert_eq!(
+        artifact_count, 1,
+        "partial run must produce one payload artifact"
+    );
     let files_count: i64 = conn
-        .query_row("SELECT count(*) FROM context_artifact_files", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM context_artifact_files", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(files_count, 0, "payload artifacts carry no artifact file rows");
+    assert_eq!(
+        files_count, 0,
+        "payload artifacts carry no artifact file rows"
+    );
     let decisions_count: i64 = conn
-        .query_row(
-            "SELECT count(*) FROM context_artifact_decisions",
-            [],
-            |r| r.get(0),
-        )
+        .query_row("SELECT count(*) FROM context_artifact_decisions", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(decisions_count, 0, "payload artifacts carry no artifact decision rows");
+    assert_eq!(
+        decisions_count, 0,
+        "payload artifacts carry no artifact decision rows"
+    );
 
     // The old Envelope warnings are replayed verbatim in the metadata JSON.
     let metadata_json: Option<String> = conn
@@ -479,7 +526,10 @@ fn error_run_migrates_without_artifact() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(provenance, "migrated_v1", "error run must be audited as migrated_v1");
+    assert_eq!(
+        provenance, "migrated_v1",
+        "error run must be audited as migrated_v1"
+    );
 }
 
 #[test]
@@ -510,9 +560,14 @@ fn migrate_on_v2_database_is_idempotent() {
     migrate(&mut conn).unwrap();
 
     let history_before: i64 = conn
-        .query_row("SELECT count(*) FROM schema_migration_history", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM schema_migration_history", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(history_before, 1, "fresh v2 database has exactly one history row");
+    assert_eq!(
+        history_before, 1,
+        "fresh v2 database has exactly one history row"
+    );
 
     migrate(&mut conn).expect("migrate on an already-v2 database must be a no-op");
 
@@ -521,9 +576,14 @@ fn migrate_on_v2_database_is_idempotent() {
         .unwrap();
     assert_eq!(ver, LATEST_USER_VERSION);
     let history_after: i64 = conn
-        .query_row("SELECT count(*) FROM schema_migration_history", [], |r| r.get(0))
+        .query_row("SELECT count(*) FROM schema_migration_history", [], |r| {
+            r.get(0)
+        })
         .unwrap();
-    assert_eq!(history_after, 1, "idempotent migrate must not add a history row");
+    assert_eq!(
+        history_after, 1,
+        "idempotent migrate must not add a history row"
+    );
 }
 
 #[test]
@@ -546,7 +606,10 @@ fn corrupt_v1_envelope_aborts_migration_and_keeps_user_version() {
     let parse_cache_count: i64 = conn
         .query_row("SELECT count(*) FROM parse_cache", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(parse_cache_count, 1, "parse cache must not be deleted on rollback");
+    assert_eq!(
+        parse_cache_count, 1,
+        "parse cache must not be deleted on rollback"
+    );
     let history_table_count: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name='schema_migration_history'",

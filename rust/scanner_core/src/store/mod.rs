@@ -1326,6 +1326,8 @@ impl ScannerStore {
     /// Typed classification-cache lookup (spec Part 3.2). The miss-reason tree
     /// distinguishes `entry_absent_or_evicted` from `new_file` via
     /// `inventory_existed_before` (returned by `prepare_inventory`).
+    // The cache identity is frozen and each key component remains explicit.
+    #[allow(clippy::too_many_arguments)]
     pub fn lookup_classification_cache(
         &self,
         file_identity: &str,
@@ -3174,6 +3176,8 @@ fn maintenance_command(request: &MaintenanceRequestV1) -> MaintenanceResponseV1 
     maintenance_ok_response(request, before, after, true, deleted, pre, post, vacuum)
 }
 
+// Keep partial-failure accounting fields explicit at the response boundary.
+#[allow(clippy::too_many_arguments)]
 fn maintenance_ok_response(
     request: &MaintenanceRequestV1,
     before: MaintenanceSizeV1,
@@ -3814,7 +3818,7 @@ fn prepare_finalization_retention_plan(
         let mut rows = statement.query([]).map_err(cache_write)?;
         let mut index = 0_usize;
         loop {
-            if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            if index.is_multiple_of(TERMINAL_WRITE_BATCH_SIZE) {
                 ensure_deadline()?;
             }
             let Some(row) = rows.next().map_err(cache_write)? else {
@@ -3852,7 +3856,7 @@ fn prepare_finalization_retention_plan(
         let mut rows = statement.query([]).map_err(cache_write)?;
         let mut index = 0_usize;
         loop {
-            if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            if index.is_multiple_of(TERMINAL_WRITE_BATCH_SIZE) {
                 ensure_deadline()?;
             }
             let Some(row) = rows.next().map_err(cache_write)? else {
@@ -3893,7 +3897,7 @@ fn prepare_finalization_retention_plan(
         let mut rows = statement.query([]).map_err(cache_write)?;
         let mut index = 0_usize;
         loop {
-            if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            if index.is_multiple_of(TERMINAL_WRITE_BATCH_SIZE) {
                 ensure_deadline()?;
             }
             let Some(row) = rows.next().map_err(cache_write)? else {
@@ -5474,6 +5478,8 @@ fn insert_execution_metrics(
     Ok(())
 }
 
+// Arguments mirror one atomic context write plus its deadline hook.
+#[allow(clippy::too_many_arguments)]
 fn insert_context(
     transaction: &rusqlite::Transaction<'_>,
     scan_run_id: i64,
@@ -9161,10 +9167,10 @@ mod tests {
         response.validate().expect("audit response must validate");
 
         assert_eq!(response.status, UpgradeStatus::Ok);
-        assert_eq!(response.apply, false);
+        assert!(!response.apply);
         assert_eq!(response.source_user_version.0, Some(1));
-        assert_eq!(response.schema_migrated, false);
-        assert_eq!(response.auto_vacuum_converted, false);
+        assert!(!response.schema_migrated);
+        assert!(!response.auto_vacuum_converted);
         assert_eq!(response.legacy_parse_cache_rows_detected, 1);
         assert_eq!(response.invalidated_parse_cache_rows, 0);
         assert_eq!(response.post_integrity_check, UpgradeIntegrityCheck::NotRun);
@@ -9181,10 +9187,10 @@ mod tests {
         response.validate().expect("apply response must validate");
 
         assert_eq!(response.status, UpgradeStatus::Ok);
-        assert_eq!(response.apply, true);
+        assert!(response.apply);
         assert_eq!(response.source_user_version.0, Some(1));
-        assert_eq!(response.schema_migrated, true);
-        assert_eq!(response.auto_vacuum_converted, true);
+        assert!(response.schema_migrated);
+        assert!(response.auto_vacuum_converted);
         assert_eq!(response.legacy_parse_cache_rows_detected, 1);
         assert_eq!(response.invalidated_parse_cache_rows, 1);
         assert_eq!(response.post_integrity_check, UpgradeIntegrityCheck::Ok);
@@ -9220,10 +9226,10 @@ mod tests {
         response.validate().expect("partial response must validate");
 
         assert_eq!(response.status, UpgradeStatus::Partial);
-        assert_eq!(response.apply, true);
+        assert!(response.apply);
         assert_eq!(response.source_user_version.0, Some(1));
-        assert_eq!(response.schema_migrated, true);
-        assert_eq!(response.auto_vacuum_converted, false);
+        assert!(response.schema_migrated);
+        assert!(!response.auto_vacuum_converted);
         assert_eq!(response.legacy_parse_cache_rows_detected, 1);
         assert_eq!(response.invalidated_parse_cache_rows, 1);
         assert_eq!(response.post_integrity_check, UpgradeIntegrityCheck::Ok);
