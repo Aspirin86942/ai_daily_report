@@ -5,18 +5,19 @@
 //! text/no-text/unknown/error 四态），``Err(ParseFailure)`` 只表示进程/传输
 //! 层失败（timeout/crash/坏响应/外层 error），由调度器映射为 ``unknown``。
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use ai_daily_scanner_contract::{
-    ClassifierResponseStatus, Diagnostic, DiagnosticStage, ErrorCode, Nullable,
-    PdfClassifierRequestV1, PdfClassifierResponseV1, PdfClassifierResultV1,
+    ClassificationTransport, ClassifierResponseStatus, Diagnostic, DiagnosticStage, ErrorCode,
+    Nullable, PdfClassifierRequestV1, PdfClassifierResponseV1, PdfClassifierResultV1,
     PythonOperationDiagnosticV1, PythonOperationErrorCode, PythonOperationStage, Validate,
 };
 
 use crate::fallback::{FailureClass, ParseFailure};
-use crate::process::{run_process, ProcessError, ProcessSpec};
+use crate::process::{run_process_observed, ProcessError, ProcessSpec, WorkerRssTracker};
 
-use super::{contract_failure, current_source, WorkerCommand};
+use super::{contract_failure, current_source, OneShotExecution, WorkerCommand};
 
 pub const CLASSIFIER_CAPTURE_LIMIT: usize = 1024 * 1024;
 
@@ -26,18 +27,62 @@ pub trait PdfClassifierPort: Send + Sync {
         &self,
         request: &PdfClassifierRequestV1,
         timeout: Duration,
-    ) -> Result<PdfClassifierResultV1, ParseFailure>;
+    ) -> PdfClassifierExecution;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PdfClassifierExecution {
+    pub outcome: Result<PdfClassifierResultV1, ParseFailure>,
+    pub transport: ClassificationTransport,
+    pub attempt_count: u64,
+    pub duration_ms: u64,
+}
+
+impl PdfClassifierExecution {
+    pub fn test_oneshot(outcome: Result<PdfClassifierResultV1, ParseFailure>) -> Self {
+        Self {
+            outcome,
+            transport: ClassificationTransport::OneShot,
+            attempt_count: 1,
+            duration_ms: 0,
+        }
+    }
 }
 
 /// 生产实现：调用 Python worker 的 ``classify-pdf`` one-shot。
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ClassifierPort {
     command: WorkerCommand,
+    session: Option<Arc<crate::session::PythonSessionPool>>,
+    rss_tracker: Option<WorkerRssTracker>,
 }
 
 impl ClassifierPort {
     pub fn new(command: WorkerCommand) -> Self {
-        Self { command }
+        Self {
+            command,
+            session: None,
+            rss_tracker: None,
+        }
+    }
+
+    pub fn with_rss_tracker(command: WorkerCommand, rss_tracker: WorkerRssTracker) -> Self {
+        Self {
+            command,
+            session: None,
+            rss_tracker: Some(rss_tracker),
+        }
+    }
+
+    pub fn with_session(
+        command: WorkerCommand,
+        session: Arc<crate::session::PythonSessionPool>,
+    ) -> Self {
+        Self {
+            command,
+            session: Some(session),
+            rss_tracker: None,
+        }
     }
 }
 
@@ -46,9 +91,91 @@ impl PdfClassifierPort for ClassifierPort {
         &self,
         request: &PdfClassifierRequestV1,
         timeout: Duration,
-    ) -> Result<PdfClassifierResultV1, ParseFailure> {
-        classify_pdf_oneshot(&self.command, request, timeout)
+    ) -> PdfClassifierExecution {
+        match &self.session {
+            Some(session) => match session.classify_pdf(request, timeout) {
+                Ok(outcome) => {
+                    let transport = match outcome.transport {
+                        crate::session::PythonSessionTransport::Session => {
+                            ClassificationTransport::Session
+                        }
+                        crate::session::PythonSessionTransport::OneShot => {
+                            ClassificationTransport::OneShot
+                        }
+                        crate::session::PythonSessionTransport::NotApplicable => {
+                            ClassificationTransport::NotApplicable
+                        }
+                    };
+                    let validated = validate_classifier_result_for_request(
+                        request,
+                        &outcome.value,
+                    )
+                    .map(|()| outcome.value);
+                    PdfClassifierExecution {
+                        outcome: validated,
+                        transport,
+                        attempt_count: outcome.attempt_count,
+                        duration_ms: outcome.duration_ms,
+                    }
+                }
+                Err(failure) => PdfClassifierExecution {
+                    outcome: Err(failure.failure),
+                    transport: match failure.transport {
+                        crate::session::PythonSessionTransport::Session => {
+                            ClassificationTransport::Session
+                        }
+                        crate::session::PythonSessionTransport::OneShot => {
+                            ClassificationTransport::OneShot
+                        }
+                        crate::session::PythonSessionTransport::NotApplicable => {
+                            ClassificationTransport::NotApplicable
+                        }
+                    },
+                    attempt_count: failure.attempt_count,
+                    duration_ms: failure.duration_ms,
+                },
+            },
+            None => {
+                let execution = classify_pdf_oneshot_observed(
+                    &self.command,
+                    request,
+                    timeout,
+                    self.rss_tracker.as_ref(),
+                );
+                PdfClassifierExecution {
+                    outcome: execution.outcome,
+                    transport: if execution.attempt_count == 0 {
+                        ClassificationTransport::NotApplicable
+                    } else {
+                        ClassificationTransport::OneShot
+                    },
+                    attempt_count: execution.attempt_count,
+                    duration_ms: execution.duration_ms,
+                }
+            }
+        }
     }
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    started.elapsed().as_millis().min(u64::MAX as u128) as u64
+}
+
+fn validate_classifier_result_for_request(
+    request: &PdfClassifierRequestV1,
+    result: &PdfClassifierResultV1,
+) -> Result<(), ParseFailure> {
+    result
+        .validate_for_max_pages(request.max_pages)
+        .map_err(|_| {
+            contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "classifier result violates the request page window",
+                Some(&request.file_path),
+                None,
+                DiagnosticStage::Process,
+            )
+        })
 }
 
 /// 一次严格 ``classify-pdf`` one-shot 进程调用（spec Part 7.1/7.3）。
@@ -57,25 +184,46 @@ pub fn classify_pdf_oneshot(
     request: &PdfClassifierRequestV1,
     timeout: Duration,
 ) -> Result<PdfClassifierResultV1, ParseFailure> {
-    request.validate().map_err(|_| {
-        contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "classifier request violates the strict contract",
-            Some(&request.file_path),
-            None,
-            DiagnosticStage::Parse,
-        )
-    })?;
-    validate_classifier_source_before(request)?;
-    let stdin = serde_json::to_vec(request).map_err(|_| {
-        contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "classifier request could not be serialized",
-            Some(&request.file_path),
-            None,
-            DiagnosticStage::Parse,
-        )
-    })?;
+    classify_pdf_oneshot_observed(command, request, timeout, None).outcome
+}
+
+pub(crate) fn classify_pdf_oneshot_observed(
+    command: &WorkerCommand,
+    request: &PdfClassifierRequestV1,
+    timeout: Duration,
+    rss_tracker: Option<&WorkerRssTracker>,
+) -> OneShotExecution<PdfClassifierResultV1> {
+    let prepared = (|| {
+        request.validate().map_err(|_| {
+            contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "classifier request violates the strict contract",
+                Some(&request.file_path),
+                None,
+                DiagnosticStage::Parse,
+            )
+        })?;
+        validate_classifier_source_before(request)?;
+        serde_json::to_vec(request).map_err(|_| {
+            contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "classifier request could not be serialized",
+                Some(&request.file_path),
+                None,
+                DiagnosticStage::Parse,
+            )
+        })
+    })();
+    let stdin = match prepared {
+        Ok(stdin) => stdin,
+        Err(failure) => {
+            return OneShotExecution {
+                outcome: Err(failure),
+                attempt_count: 0,
+                duration_ms: 0,
+            };
+        }
+    };
     let spec = ProcessSpec {
         program: command.program.clone(),
         args: command.args_for("classify-pdf"),
@@ -83,85 +231,111 @@ pub fn classify_pdf_oneshot(
         stdin,
         timeout,
         capture_limit: CLASSIFIER_CAPTURE_LIMIT,
+        rss_tracker: rss_tracker.cloned(),
     };
-    let output = run_process(&spec)
-        .map_err(|error| classifier_process_failure(error, &request.file_path))?;
-    if output.exit_code > 2 {
-        return Err(contract_failure(
-            ErrorCode::ParserFailed,
-            "classifier process crashed before completing its response",
-            Some(&request.file_path),
-            None,
-            DiagnosticStage::Process,
-        ));
-    }
-    if output.exit_code == 2 {
-        return Err(contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "classifier rejected a validated request",
-            Some(&request.file_path),
-            None,
-            DiagnosticStage::Process,
-        ));
-    }
-    let response: PdfClassifierResponseV1 = serde_json::from_slice(&output.stdout).map_err(|_| {
-        contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "classifier stdout is not one strict JSON response",
-            Some(&request.file_path),
-            None,
-            DiagnosticStage::Process,
-        )
-    })?;
-    response.validate().map_err(|_| {
-        contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "classifier response violates the strict contract",
-            Some(&request.file_path),
-            None,
-            DiagnosticStage::Process,
-        )
-    })?;
-    let expected_exit = if response.status == ClassifierResponseStatus::Ok {
-        0
-    } else {
-        1
+    let started = std::time::Instant::now();
+    let output = match run_process_observed(&spec) {
+        Ok(output) => output,
+        Err(process) => {
+            return OneShotExecution {
+                outcome: Err(classifier_process_failure(process.error, &request.file_path)),
+                attempt_count: u64::from(process.child_started),
+                duration_ms: if process.child_started {
+                    elapsed_ms(started)
+                } else {
+                    0
+                },
+            };
+        }
     };
-    if output.exit_code != expected_exit || response.request_id != request.request_id {
-        return Err(contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "classifier response identity or exit status mismatch",
-            Some(&request.file_path),
-            None,
-            DiagnosticStage::Process,
-        ));
-    }
-    validate_classifier_source_after(request)?;
-    match response.status {
-        ClassifierResponseStatus::Ok => response.result.0.ok_or_else(|| {
-            contract_failure(
-                ErrorCode::ParserInvalidPayload,
-                "ok classifier response is missing its typed result",
+    let outcome = (|| {
+        if output.exit_code > 2 {
+            return Err(contract_failure(
+                ErrorCode::ParserFailed,
+                "classifier process crashed before completing its response",
                 Some(&request.file_path),
                 None,
                 DiagnosticStage::Process,
-            )
-        }),
-        ClassifierResponseStatus::Error => {
-            let diagnostic = response.error.0.ok_or_else(|| {
+            ));
+        }
+        if output.exit_code == 2 {
+            return Err(contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "classifier rejected a validated request",
+                Some(&request.file_path),
+                None,
+                DiagnosticStage::Process,
+            ));
+        }
+        let response: PdfClassifierResponseV1 =
+            serde_json::from_slice(&output.stdout).map_err(|_| {
                 contract_failure(
                     ErrorCode::ParserInvalidPayload,
-                    "error classifier response is missing its diagnostic",
+                    "classifier stdout is not one strict JSON response",
                     Some(&request.file_path),
                     None,
                     DiagnosticStage::Process,
                 )
             })?;
-            Err(classifier_diagnostic_failure(
-                &diagnostic,
-                &request.file_path,
-            ))
+        response.validate().map_err(|_| {
+            contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "classifier response violates the strict contract",
+                Some(&request.file_path),
+                None,
+                DiagnosticStage::Process,
+            )
+        })?;
+        let expected_exit = if response.status == ClassifierResponseStatus::Ok {
+            0
+        } else {
+            1
+        };
+        if output.exit_code != expected_exit || response.request_id != request.request_id {
+            return Err(contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "classifier response identity or exit status mismatch",
+                Some(&request.file_path),
+                None,
+                DiagnosticStage::Process,
+            ));
         }
+        validate_classifier_source_after(request)?;
+        match response.status {
+            ClassifierResponseStatus::Ok => {
+                let result = response.result.0.ok_or_else(|| {
+                    contract_failure(
+                        ErrorCode::ParserInvalidPayload,
+                        "ok classifier response is missing its typed result",
+                        Some(&request.file_path),
+                        None,
+                        DiagnosticStage::Process,
+                    )
+                })?;
+                validate_classifier_result_for_request(request, &result)?;
+                Ok(result)
+            }
+            ClassifierResponseStatus::Error => {
+                let diagnostic = response.error.0.ok_or_else(|| {
+                    contract_failure(
+                        ErrorCode::ParserInvalidPayload,
+                        "error classifier response is missing its diagnostic",
+                        Some(&request.file_path),
+                        None,
+                        DiagnosticStage::Process,
+                    )
+                })?;
+                Err(classifier_diagnostic_failure(
+                    &diagnostic,
+                    &request.file_path,
+                ))
+            }
+        }
+    })();
+    OneShotExecution {
+        outcome,
+        attempt_count: 1,
+        duration_ms: elapsed_ms(started),
     }
 }
 
@@ -253,7 +427,7 @@ fn classifier_process_failure(error: ProcessError, file_path: &str) -> ParseFail
     }
 }
 
-fn validate_classifier_source_before(
+pub(crate) fn validate_classifier_source_before(
     request: &PdfClassifierRequestV1,
 ) -> Result<(), ParseFailure> {
     let (source_version, _) = current_source(&request.file_path).map_err(|_| {
@@ -271,7 +445,9 @@ fn validate_classifier_source_before(
     Ok(())
 }
 
-fn validate_classifier_source_after(request: &PdfClassifierRequestV1) -> Result<(), ParseFailure> {
+pub(crate) fn validate_classifier_source_after(
+    request: &PdfClassifierRequestV1,
+) -> Result<(), ParseFailure> {
     let (source_version, _) = current_source(&request.file_path).map_err(|_| {
         classifier_source_failure(request, "file source became unavailable during classification")
     })?;

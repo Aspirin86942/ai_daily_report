@@ -205,6 +205,7 @@ def test_seed_clone_keeps_caches_and_zeroes_runs(tmp_path: Path) -> None:
             "scan_run_attempts",
             "run_diagnostics",
             "scan_file_results",
+            "scan_file_execution_v2",
             "scan_stage_metrics",
             "scan_extension_metrics",
             "scan_execution_metrics",

@@ -350,6 +350,7 @@ def _delete_run_artifact_lease(conn: sqlite3.Connection) -> None:
             "scan_run_attempts",
             "run_diagnostics",
             "scan_file_results",
+            "scan_file_execution_v2",
             "scan_stage_metrics",
             "scan_extension_metrics",
             "scan_execution_metrics",

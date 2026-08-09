@@ -4,10 +4,13 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
 
 use ai_daily_discovery::DiscoveredFileOut;
 use ai_daily_scanner_contract::{
     Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerProfileV1, Nullable, ParseStatus,
+    ParseTransport,
 };
 
 use crate::budget_model::RouteKind;
@@ -194,18 +197,136 @@ impl CachePort for StoreCachePort {
 /// Parser adapter that delegates to the existing v1 [`ParserScheduler`].
 pub struct ProductionParser {
     inner: ParserScheduler,
+    profile: NormalizedScannerProfileV1,
+    session: Option<Arc<crate::session::PythonSessionPool>>,
 }
 
 impl ProductionParser {
-    pub fn new(profile: &NormalizedScannerProfileV1, workers: WorkerRegistry) -> Self {
+    pub fn new(
+        profile: &NormalizedScannerProfileV1,
+        workers: WorkerRegistry,
+        session: Option<Arc<crate::session::PythonSessionPool>>,
+    ) -> Self {
         Self {
             inner: ParserScheduler::from_registry(profile, workers),
+            profile: profile.clone(),
+            session,
+        }
+    }
+
+    fn parse_pdf_with_session(
+        &self,
+        request: &ParseRequest,
+        session: &crate::session::PythonSessionPool,
+    ) -> ParseResult {
+        let worker_request = crate::parsers::worker_request(
+            &request.file,
+            ParserRoute::Pdf,
+            request.timeout_ms,
+            &self.profile,
+        );
+        match session.parse_pdf(
+            &worker_request,
+            Duration::from_millis(request.timeout_ms),
+        ) {
+            Ok(outcome) => {
+                let duration_ms = outcome.duration_ms;
+                let response = outcome.value;
+                let content_sha256 = crate::store::sha256_hex(response.content.as_bytes());
+                ParseResult {
+                    file_identity: request.file.file_identity.clone(),
+                    content: response.content,
+                    parser_backend: response.parser_backend.as_str().to_string(),
+                    worker_lane: request.route.worker_lane().to_string(),
+                    truncated: response.truncated,
+                    content_sha256,
+                    parse_status: ParseStatus::Success,
+                    error: None,
+                    warnings: Vec::new(),
+                    failure_class: String::new(),
+                    fallback_backend: String::new(),
+                    fallback_reason_code: String::new(),
+                    parse_transport: match outcome.transport {
+                        crate::session::PythonSessionTransport::Session => ParseTransport::Session,
+                        crate::session::PythonSessionTransport::OneShot => ParseTransport::OneShot,
+                        crate::session::PythonSessionTransport::NotApplicable => {
+                            ParseTransport::NotApplicable
+                        }
+                    },
+                    parse_attempt_count: outcome.attempt_count,
+                    primary_duration_ms: duration_ms,
+                    fallback_duration_ms: 0,
+                    parse_duration_ms: duration_ms,
+                }
+            }
+            Err(failure) => {
+                let parse_status = if failure.failure.is_timeout() {
+                    ParseStatus::Timeout
+                } else {
+                    ParseStatus::Error
+                };
+                let parser_started = failure.attempt_count > 0;
+                ParseResult {
+                    file_identity: request.file.file_identity.clone(),
+                    content: String::new(),
+                    parser_backend: if parser_started {
+                        request.route.backend().to_string()
+                    } else {
+                        "not_parsed".to_string()
+                    },
+                    worker_lane: if parser_started {
+                        request.route.worker_lane().to_string()
+                    } else {
+                        "not_parsed".to_string()
+                    },
+                    truncated: false,
+                    content_sha256: crate::store::sha256_hex(b""),
+                    parse_status,
+                    error: Some(failure.failure.diagnostic),
+                    warnings: Vec::new(),
+                    failure_class: failure.failure.class.as_str().to_string(),
+                    fallback_backend: String::new(),
+                    fallback_reason_code: String::new(),
+                    parse_transport: if parser_started {
+                        match failure.transport {
+                            crate::session::PythonSessionTransport::Session => {
+                                ParseTransport::Session
+                            }
+                            crate::session::PythonSessionTransport::OneShot => {
+                                ParseTransport::OneShot
+                            }
+                            crate::session::PythonSessionTransport::NotApplicable => {
+                                ParseTransport::NotApplicable
+                            }
+                        }
+                    } else {
+                        ParseTransport::NotApplicable
+                    },
+                    parse_attempt_count: failure.attempt_count,
+                    primary_duration_ms: if parser_started {
+                        failure.duration_ms
+                    } else {
+                        0
+                    },
+                    fallback_duration_ms: 0,
+                    parse_duration_ms: if parser_started {
+                        failure.duration_ms
+                    } else {
+                        0
+                    },
+                }
+            }
         }
     }
 }
 
 impl ParserPort for ProductionParser {
     fn parse(&self, request: &ParseRequest) -> ParseResult {
+        if request.route == RouteKind::Pdf {
+            if let Some(session) = &self.session {
+                return self.parse_pdf_with_session(request, session);
+            }
+        }
         let planned = crate::planner::PlannedFile {
             file: request.file.clone(),
             action: PlanAction::Parse(parser_route(request.route)),
@@ -219,8 +340,8 @@ impl ParserPort for ProductionParser {
             Err(failure) => ParseResult {
                 file_identity: request.file.file_identity.clone(),
                 content: String::new(),
-                parser_backend: request.route.backend().to_string(),
-                worker_lane: request.route.worker_lane().to_string(),
+                parser_backend: "not_parsed".to_string(),
+                worker_lane: "not_parsed".to_string(),
                 truncated: false,
                 content_sha256: crate::store::sha256_hex(b""),
                 parse_status: if failure.is_timeout() {
@@ -233,6 +354,8 @@ impl ParserPort for ProductionParser {
                 failure_class: String::new(),
                 fallback_backend: String::new(),
                 fallback_reason_code: String::new(),
+                parse_transport: ParseTransport::NotApplicable,
+                parse_attempt_count: 0,
                 primary_duration_ms: 0,
                 fallback_duration_ms: 0,
                 parse_duration_ms: 0,
@@ -298,17 +421,26 @@ fn to_parse_result(parsed: ScheduledFileParse, file_identity: &str) -> ParseResu
     } else {
         Vec::new()
     };
+    let parser_started = parsed.attempt_count > 0;
     ParseResult {
         file_identity: file_identity.to_string(),
         content,
-        parser_backend: parsed
-            .parser_backend
-            .clone()
-            .unwrap_or_else(|| "not_parsed".to_string()),
-        worker_lane: parsed
-            .worker_lane
-            .clone()
-            .unwrap_or_else(|| "not_parsed".to_string()),
+        parser_backend: if parser_started {
+            parsed
+                .parser_backend
+                .clone()
+                .unwrap_or_else(|| "not_parsed".to_string())
+        } else {
+            "not_parsed".to_string()
+        },
+        worker_lane: if parser_started {
+            parsed
+                .worker_lane
+                .clone()
+                .unwrap_or_else(|| "not_parsed".to_string())
+        } else {
+            "not_parsed".to_string()
+        },
         truncated,
         content_sha256,
         parse_status,
@@ -317,9 +449,33 @@ fn to_parse_result(parsed: ScheduledFileParse, file_identity: &str) -> ParseResu
         failure_class,
         fallback_backend,
         fallback_reason_code,
-        primary_duration_ms: parsed.primary_duration_ms,
-        fallback_duration_ms: parsed.fallback_duration_ms,
-        parse_duration_ms: parsed.total_duration_ms,
+        parse_transport: if parser_started {
+            match parsed.worker_lane.as_deref() {
+                Some("rust_core") => ParseTransport::RustInProcess,
+                Some("rust_office_process") | Some("python_document_process") => {
+                    ParseTransport::OneShot
+                }
+                _ => ParseTransport::NotApplicable,
+            }
+        } else {
+            ParseTransport::NotApplicable
+        },
+        parse_attempt_count: parsed.attempt_count,
+        primary_duration_ms: if parser_started {
+            parsed.primary_duration_ms
+        } else {
+            0
+        },
+        fallback_duration_ms: if parser_started {
+            parsed.fallback_duration_ms
+        } else {
+            0
+        },
+        parse_duration_ms: if parser_started {
+            parsed.total_duration_ms
+        } else {
+            0
+        },
     }
 }
 
@@ -327,8 +483,8 @@ fn internal_parse_error(request: &ParseRequest) -> ParseResult {
     ParseResult {
         file_identity: request.file.file_identity.clone(),
         content: String::new(),
-        parser_backend: request.route.backend().to_string(),
-        worker_lane: request.route.worker_lane().to_string(),
+        parser_backend: "not_parsed".to_string(),
+        worker_lane: "not_parsed".to_string(),
         truncated: false,
         content_sha256: crate::store::sha256_hex(b""),
         parse_status: ParseStatus::Error,
@@ -344,8 +500,99 @@ fn internal_parse_error(request: &ParseRequest) -> ParseResult {
         failure_class: String::new(),
         fallback_backend: String::new(),
         fallback_reason_code: String::new(),
+        parse_transport: ParseTransport::NotApplicable,
+        parse_attempt_count: 0,
         primary_duration_ms: 0,
         fallback_duration_ms: 0,
         parse_duration_ms: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fallback::{FailureClass, ParseFailure};
+    use crate::parsers::light_text::ParsedLightText;
+
+    fn discovered_file() -> DiscoveredFileOut {
+        DiscoveredFileOut {
+            file_identity: "fixture:a".to_string(),
+            path: "C:\\corpus\\a.md".to_string(),
+            extension: ".md".to_string(),
+            modified_at: "2026-08-09T00:00:00+08:00".to_string(),
+            size_bytes: 1,
+            source_version: "mtime_ns=1:size=1".to_string(),
+            source_guard_kind: Some("windows_file_id_change_time_v1".to_string()),
+            source_guard_sha256: Some("a".repeat(64)),
+        }
+    }
+
+    #[test]
+    fn to_parse_result_preserves_actual_attempts_and_durations() {
+        let parsed = ScheduledFileParse {
+            file: discovered_file(),
+            payload: Some(ParsedPayload::LightText(ParsedLightText {
+                content: "evidence".to_string(),
+                parser_backend: "light_text_v1".to_string(),
+                truncated: false,
+                warnings: Vec::new(),
+            })),
+            primary_failure: None,
+            error: None,
+            fallback_backend: None,
+            parser_backend: Some("light_text_v1".to_string()),
+            worker_lane: Some("rust_core".to_string()),
+            primary_duration_ms: 3,
+            fallback_duration_ms: 4,
+            total_duration_ms: 7,
+            attempt_count: 2,
+            partial: false,
+        };
+
+        let result = to_parse_result(parsed, "fixture:a");
+
+        assert_eq!(result.parse_attempt_count, 2);
+        assert_eq!(result.primary_duration_ms, 3);
+        assert_eq!(result.fallback_duration_ms, 4);
+        assert_eq!(result.parse_duration_ms, 7);
+        assert_eq!(result.parse_transport, ParseTransport::RustInProcess);
+    }
+
+    #[test]
+    fn to_parse_result_normalizes_pre_start_failure_to_zero_execution() {
+        let parsed = ScheduledFileParse {
+            file: discovered_file(),
+            payload: None,
+            primary_failure: None,
+            error: Some(ParseFailure {
+                class: FailureClass::EnvironmentUnavailable,
+                diagnostic: Diagnostic {
+                    error_code: ErrorCode::ParserStartFailed,
+                    message: "not started".to_string(),
+                    retryable: true,
+                    stage: DiagnosticStage::Process,
+                    file_path: Nullable(Some("C:\\corpus\\a.md".to_string())),
+                    backend: Nullable(Some("light_text_v1".to_string())),
+                },
+            }),
+            fallback_backend: None,
+            parser_backend: Some("light_text_v1".to_string()),
+            worker_lane: Some("rust_core".to_string()),
+            primary_duration_ms: 9,
+            fallback_duration_ms: 8,
+            total_duration_ms: 17,
+            attempt_count: 0,
+            partial: true,
+        };
+
+        let result = to_parse_result(parsed, "fixture:a");
+
+        assert_eq!(result.parser_backend, "not_parsed");
+        assert_eq!(result.worker_lane, "not_parsed");
+        assert_eq!(result.parse_transport, ParseTransport::NotApplicable);
+        assert_eq!(result.parse_attempt_count, 0);
+        assert_eq!(result.primary_duration_ms, 0);
+        assert_eq!(result.fallback_duration_ms, 0);
+        assert_eq!(result.parse_duration_ms, 0);
     }
 }

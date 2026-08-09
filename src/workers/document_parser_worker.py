@@ -121,6 +121,15 @@ def _handle_session() -> int:
             return 2
         try:
             response = _session_dispatch(envelope)
+        except _SessionOperationError as error:
+            _emit_session_frame(
+                _session_rejected_error(
+                    request_id=envelope.request_id,
+                    operation=envelope.operation,
+                    error=error,
+                ).model_dump(mode="json")
+            )
+            return 1
         except _SessionProtocolError as error:
             _emit_session_frame(
                 _session_operation_error(
@@ -276,25 +285,34 @@ def _session_classify_error(
     error_code: str,
     message: str,
     retryable: bool,
-) -> "PdfClassifierResultV1":
-    from src.models.scanner_contract import (
-        PdfClassifierResultV1,
-        PythonOperationDiagnosticV1,
+) -> None:
+    # A source/metadata race means no typed classifier result can be trusted.
+    # Surface it through the outer operation error instead of fabricating the
+    # forbidden typed shape `status=error, retryable=true`.
+    raise _SessionOperationError(
+        error_code=error_code,
+        message=message,
+        retryable=retryable,
+        file_path=request.file_path,
     )
 
-    return PdfClassifierResultV1(
-        status="error",
-        page_count=None,
-        result_examined_pages=None,
-        diagnostic=PythonOperationDiagnosticV1(
-            error_code=error_code,
-            message=message[:4096],
-            retryable=retryable,
-            stage="parse",
-            file_path=request.file_path,
-            backend=None,
-        ),
-    )
+
+class _SessionOperationError(Exception):
+    """Operation failed before it could form a trustworthy typed result."""
+
+    def __init__(
+        self,
+        *,
+        error_code: str,
+        message: str,
+        retryable: bool,
+        file_path: str | None,
+    ) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+        self.message = message
+        self.retryable = retryable
+        self.file_path = file_path
 
 
 class _SessionProtocolError(Exception):
@@ -353,6 +371,34 @@ def _session_operation_error(
             retryable=False,
             stage="request",
             file_path=None,
+            backend=None,
+        ),
+    )
+
+
+def _session_rejected_error(
+    request_id: str,
+    operation: str,
+    error: _SessionOperationError,
+) -> "PythonSessionResponseV1":
+    from src.models.scanner_contract import (
+        PythonOperationDiagnosticV1,
+        PythonSessionResponseV1,
+    )
+
+    return PythonSessionResponseV1(
+        contract="ai_daily_python_session",
+        protocol_version=1,
+        request_id=request_id,
+        operation=operation,
+        status="error",
+        result=None,
+        error=PythonOperationDiagnosticV1(
+            error_code=error.error_code,
+            message=error.message[:4096],
+            retryable=error.retryable,
+            stage="parse",
+            file_path=error.file_path,
             backend=None,
         ),
     )

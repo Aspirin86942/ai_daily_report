@@ -20,7 +20,9 @@ use rayon::prelude::*;
 use crate::classifier::{ClassificationError, ParserRoute};
 use crate::fallback::{FailureClass, ParseFailure};
 use crate::planner::{PlanAction, PlannedFile};
-use crate::process::{run_process, ProcessError, ProcessSpec};
+use crate::process::{
+    run_process, run_process_observed, ProcessError, ProcessSpec, WorkerRssTracker,
+};
 
 pub const WORKER_CONTRACT_VERSION: &str = "ai_daily_worker_v1";
 pub const WORKER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -116,6 +118,7 @@ impl WorkerCommand {
 pub struct RegisteredWorker {
     pub command: WorkerCommand,
     pub identity: WorkerVersionResponse,
+    pub rss_tracker: Option<WorkerRssTracker>,
 }
 
 /// PDF classifier capability（spec Part 7.1）：`classifier-version` one-shot 握手。
@@ -178,7 +181,17 @@ pub struct ScheduledFileParse {
     pub primary_duration_ms: u64,
     pub fallback_duration_ms: u64,
     pub total_duration_ms: u64,
+    /// Actual body-parser attempts started for this file. Pre-parser source or
+    /// route failures are 0; an Office primary+fallback execution is 2.
+    pub attempt_count: u64,
     pub partial: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct OneShotExecution<T> {
+    pub outcome: Result<T, ParseFailure>,
+    pub attempt_count: u64,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -254,6 +267,7 @@ impl ParserScheduler {
                 None,
                 None,
                 0,
+                0,
             ),
             PlanAction::Parse(ParserRoute::LightText) => {
                 let started = std::time::Instant::now();
@@ -267,6 +281,7 @@ impl ParserScheduler {
                             Some("light_text_v1".to_string()),
                             Some("rust_core".to_string()),
                             elapsed_ms(started),
+                            0,
                         );
                     }
                 };
@@ -277,6 +292,7 @@ impl ParserScheduler {
                         Some("light_text_v1".to_string()),
                         Some("rust_core".to_string()),
                         elapsed_ms(started),
+                        0,
                     );
                 }
                 match light_text::parse_light_text(
@@ -294,6 +310,7 @@ impl ParserScheduler {
                                 Some("light_text_v1".to_string()),
                                 Some("rust_core".to_string()),
                                 elapsed_ms(started),
+                                1,
                             );
                         }
                         ScheduledFileParse::success(
@@ -302,6 +319,7 @@ impl ParserScheduler {
                             "rust_core".to_string(),
                             ParsedPayload::LightText(parsed),
                             elapsed_ms(started),
+                            1,
                         )
                     }
                     Err(error) => ScheduledFileParse::failed(
@@ -310,6 +328,7 @@ impl ParserScheduler {
                         Some("light_text_v1".to_string()),
                         Some("rust_core".to_string()),
                         elapsed_ms(started),
+                        1,
                     ),
                 }
             }
@@ -320,6 +339,7 @@ impl ParserScheduler {
                         missing_preflight_failure(&file, route.backend()),
                         Some(route.backend().to_string()),
                         Some(route.worker_lane().to_string()),
+                        0,
                         0,
                     );
                 };
@@ -333,7 +353,7 @@ impl ParserScheduler {
                 let actual_backend = execution.response.as_ref().map_or_else(
                     || {
                         execution
-                            .fallback_backend
+                            .last_started_backend
                             .unwrap_or(request.backend)
                             .as_str()
                             .to_string()
@@ -341,11 +361,12 @@ impl ParserScheduler {
                     |response| response.parser_backend.as_str().to_string(),
                 );
                 let actual_lane = execution.response.as_ref().map_or_else(
-                    || execution.fallback_backend.unwrap_or(request.backend).lane(),
+                    || execution.last_started_backend.unwrap_or(request.backend).lane(),
                     |response| response.worker_lane,
                 );
                 let primary_duration_ms = execution.primary_duration_ms;
                 let fallback_duration_ms = execution.fallback_duration_ms;
+                let attempt_count = execution.attempt_count;
                 ScheduledFileParse {
                     file,
                     payload: execution
@@ -359,6 +380,7 @@ impl ParserScheduler {
                     primary_duration_ms,
                     fallback_duration_ms,
                     total_duration_ms: primary_duration_ms.saturating_add(fallback_duration_ms),
+                    attempt_count,
                     partial: execution.partial,
                 }
             }
@@ -374,24 +396,29 @@ impl ParserScheduler {
                         Some(route.backend().to_string()),
                         Some(route.worker_lane().to_string()),
                         0,
+                        0,
                     );
                 };
                 let request = worker_request(&file, route, planned.timeout_ms, &self.profile);
-                let started = std::time::Instant::now();
-                match document::parse(worker, &request) {
+                let execution = document::parse_observed(worker, &request);
+                let duration_ms = execution.duration_ms;
+                let attempt_count = execution.attempt_count;
+                match execution.outcome {
                     Ok(response) => ScheduledFileParse::success(
                         file,
                         response.parser_backend.as_str().to_string(),
                         worker_lane_name(response.worker_lane).to_string(),
                         ParsedPayload::Worker(Box::new(response)),
-                        elapsed_ms(started),
+                        duration_ms,
+                        attempt_count,
                     ),
                     Err(error) => ScheduledFileParse::failed(
                         file,
                         error,
                         Some(route.backend().to_string()),
                         Some(route.worker_lane().to_string()),
-                        elapsed_ms(started),
+                        duration_ms,
+                        attempt_count,
                     ),
                 }
             }
@@ -406,6 +433,7 @@ impl ScheduledFileParse {
         worker_lane: String,
         payload: ParsedPayload,
         duration_ms: u64,
+        attempt_count: u64,
     ) -> Self {
         Self {
             file,
@@ -418,6 +446,7 @@ impl ScheduledFileParse {
             primary_duration_ms: duration_ms,
             fallback_duration_ms: 0,
             total_duration_ms: duration_ms,
+            attempt_count,
             partial: false,
         }
     }
@@ -428,6 +457,7 @@ impl ScheduledFileParse {
         parser_backend: Option<String>,
         worker_lane: Option<String>,
         duration_ms: u64,
+        attempt_count: u64,
     ) -> Self {
         Self {
             file,
@@ -440,6 +470,7 @@ impl ScheduledFileParse {
             primary_duration_ms: duration_ms,
             fallback_duration_ms: 0,
             total_duration_ms: duration_ms,
+            attempt_count,
             partial: true,
         }
     }
@@ -515,9 +546,39 @@ pub fn register_worker_pair(
     Result<RegisteredWorker, ParseFailure>,
     Result<RegisteredWorker, ParseFailure>,
 ) {
+    register_worker_pair_inner(office_command, python_command, timeout, None)
+}
+
+pub(crate) fn register_worker_pair_observed(
+    office_command: &WorkerCommand,
+    python_command: &WorkerCommand,
+    timeout: Duration,
+    rss_tracker: &WorkerRssTracker,
+) -> (
+    Result<RegisteredWorker, ParseFailure>,
+    Result<RegisteredWorker, ParseFailure>,
+) {
+    register_worker_pair_inner(
+        office_command,
+        python_command,
+        timeout,
+        Some(rss_tracker),
+    )
+}
+
+fn register_worker_pair_inner(
+    office_command: &WorkerCommand,
+    python_command: &WorkerCommand,
+    timeout: Duration,
+    rss_tracker: Option<&WorkerRssTracker>,
+) -> (
+    Result<RegisteredWorker, ParseFailure>,
+    Result<RegisteredWorker, ParseFailure>,
+) {
     std::thread::scope(|scope| {
-        let office_task = scope.spawn(|| register_worker(office_command, timeout));
-        let python_result = register_worker(python_command, timeout);
+        let office_task =
+            scope.spawn(|| register_worker_inner(office_command, timeout, rss_tracker));
+        let python_result = register_worker_inner(python_command, timeout, rss_tracker);
         let office_result = office_task.join().unwrap_or_else(|_| {
             Err(contract_failure(
                 ErrorCode::WorkerHandshakeFailed,
@@ -535,6 +596,14 @@ pub fn register_worker(
     command: &WorkerCommand,
     timeout: Duration,
 ) -> Result<RegisteredWorker, ParseFailure> {
+    register_worker_inner(command, timeout, None)
+}
+
+fn register_worker_inner(
+    command: &WorkerCommand,
+    timeout: Duration,
+    rss_tracker: Option<&WorkerRssTracker>,
+) -> Result<RegisteredWorker, ParseFailure> {
     let spec = ProcessSpec {
         program: command.program.clone(),
         args: command.args_for("version"),
@@ -542,6 +611,7 @@ pub fn register_worker(
         stdin: Vec::new(),
         timeout,
         capture_limit: WORKER_HANDSHAKE_CAPTURE_LIMIT,
+        rss_tracker: rss_tracker.cloned(),
     };
     let output = run_process(&spec).map_err(|error| process_failure(error, None, None, true))?;
     if output.exit_code != 0 {
@@ -588,6 +658,7 @@ pub fn register_worker(
     Ok(RegisteredWorker {
         command: command.clone(),
         identity,
+        rss_tracker: rss_tracker.cloned(),
     })
 }
 
@@ -597,6 +668,14 @@ pub fn register_classifier_version(
     command: &WorkerCommand,
     timeout: Duration,
 ) -> Result<RegisteredClassifier, ParseFailure> {
+    register_classifier_version_inner(command, timeout, None)
+}
+
+fn register_classifier_version_inner(
+    command: &WorkerCommand,
+    timeout: Duration,
+    rss_tracker: Option<&WorkerRssTracker>,
+) -> Result<RegisteredClassifier, ParseFailure> {
     let spec = ProcessSpec {
         program: command.program.clone(),
         args: command.args_for("classifier-version"),
@@ -604,6 +683,7 @@ pub fn register_classifier_version(
         stdin: Vec::new(),
         timeout,
         capture_limit: WORKER_HANDSHAKE_CAPTURE_LIMIT,
+        rss_tracker: rss_tracker.cloned(),
     };
     let output = run_process(&spec).map_err(|error| process_failure(error, None, None, true))?;
     if output.exit_code != 0 {
@@ -657,6 +737,14 @@ pub fn register_session_version(
     command: &WorkerCommand,
     timeout: Duration,
 ) -> Result<Option<RegisteredSession>, ParseFailure> {
+    register_session_version_inner(command, timeout, None)
+}
+
+fn register_session_version_inner(
+    command: &WorkerCommand,
+    timeout: Duration,
+    rss_tracker: Option<&WorkerRssTracker>,
+) -> Result<Option<RegisteredSession>, ParseFailure> {
     let spec = ProcessSpec {
         program: command.program.clone(),
         args: command.args_for("session-version"),
@@ -664,6 +752,7 @@ pub fn register_session_version(
         stdin: Vec::new(),
         timeout,
         capture_limit: WORKER_HANDSHAKE_CAPTURE_LIMIT,
+        rss_tracker: rss_tracker.cloned(),
     };
     let output = run_process(&spec).map_err(|error| process_failure(error, None, None, true))?;
     if output.exit_code == 2 {
@@ -732,10 +821,33 @@ pub fn preflight_python_capabilities(
     Result<RegisteredClassifier, ParseFailure>,
     Result<Option<RegisteredSession>, ParseFailure>,
 ) {
+    preflight_python_capabilities_inner(python_command, timeout, None)
+}
+
+pub(crate) fn preflight_python_capabilities_observed(
+    python_command: &WorkerCommand,
+    timeout: Duration,
+    rss_tracker: &WorkerRssTracker,
+) -> (
+    Result<RegisteredClassifier, ParseFailure>,
+    Result<Option<RegisteredSession>, ParseFailure>,
+) {
+    preflight_python_capabilities_inner(python_command, timeout, Some(rss_tracker))
+}
+
+fn preflight_python_capabilities_inner(
+    python_command: &WorkerCommand,
+    timeout: Duration,
+    rss_tracker: Option<&WorkerRssTracker>,
+) -> (
+    Result<RegisteredClassifier, ParseFailure>,
+    Result<Option<RegisteredSession>, ParseFailure>,
+) {
     std::thread::scope(|scope| {
-        let classifier_task = scope
-            .spawn(|| register_classifier_version(python_command, timeout));
-        let session_result = register_session_version(python_command, timeout);
+        let classifier_task = scope.spawn(|| {
+            register_classifier_version_inner(python_command, timeout, rss_tracker)
+        });
+        let session_result = register_session_version_inner(python_command, timeout, rss_tracker);
         let classifier_result = classifier_task.join().unwrap_or_else(|_| {
             Err(contract_failure(
                 ErrorCode::WorkerHandshakeFailed,
@@ -753,6 +865,120 @@ pub fn execute_worker_request(
     worker: &RegisteredWorker,
     request: &WorkerParseRequest,
 ) -> Result<WorkerParseResponse, ParseFailure> {
+    execute_worker_request_observed(worker, request).outcome
+}
+
+pub(crate) fn execute_worker_request_observed(
+    worker: &RegisteredWorker,
+    request: &WorkerParseRequest,
+) -> OneShotExecution<WorkerParseResponse> {
+    let prepared = (|| {
+        validate_worker_request(worker, request)?;
+        let stdin = serde_json::to_vec(request).map_err(|_| {
+            contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "worker request could not be serialized",
+                Some(&request.file_path),
+                Some(request.backend.as_str()),
+                DiagnosticStage::Parse,
+            )
+        })?;
+        let capture_limit = worker_response_capture_limit(request)?;
+        Ok::<_, ParseFailure>((stdin, capture_limit))
+    })();
+    let (stdin, capture_limit) = match prepared {
+        Ok(prepared) => prepared,
+        Err(failure) => {
+            return OneShotExecution {
+                outcome: Err(failure),
+                attempt_count: 0,
+                duration_ms: 0,
+            };
+        }
+    };
+    let spec = ProcessSpec {
+        program: worker.command.program.clone(),
+        args: worker.command.args_for("parse"),
+        current_dir: worker.command.current_dir.clone(),
+        stdin,
+        timeout: Duration::from_millis(request.remaining_timeout_ms),
+        capture_limit,
+        rss_tracker: worker.rss_tracker.clone(),
+    };
+    let started = std::time::Instant::now();
+    let output = match run_process_observed(&spec) {
+        Ok(output) => output,
+        Err(process) => {
+            return OneShotExecution {
+                outcome: Err(process_failure(
+                    process.error,
+                    Some(&request.file_path),
+                    Some(request.backend.as_str()),
+                    false,
+                )),
+                attempt_count: u64::from(process.child_started),
+                duration_ms: if process.child_started {
+                    elapsed_ms(started)
+                } else {
+                    0
+                },
+            };
+        }
+    };
+    let outcome = (|| {
+        if output.exit_code > 2 {
+            return Err(parser_failure(
+                FailureClass::RecoverableParserFailure,
+                ErrorCode::ParserFailed,
+                "worker process crashed before completing its response",
+                true,
+                request,
+            ));
+        }
+        if output.exit_code == 2 {
+            return Err(contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "worker rejected a validated parse request",
+                Some(&request.file_path),
+                Some(request.backend.as_str()),
+                DiagnosticStage::Parse,
+            ));
+        }
+        let response: WorkerParseResponse =
+            serde_json::from_slice(&output.stdout).map_err(|_| {
+                contract_failure(
+                    ErrorCode::ParserInvalidPayload,
+                    "worker stdout is not one strict JSON response",
+                    Some(&request.file_path),
+                    Some(request.backend.as_str()),
+                    DiagnosticStage::Parse,
+                )
+            })?;
+        response.validate().map_err(|_| {
+            contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "worker response violates the strict contract",
+                Some(&request.file_path),
+                Some(request.backend.as_str()),
+                DiagnosticStage::Parse,
+            )
+        })?;
+        finish_worker_response(worker, request, response, output.exit_code)
+    })();
+    OneShotExecution {
+        outcome,
+        attempt_count: 1,
+        duration_ms: elapsed_ms(started),
+    }
+}
+
+/// Shared pre-dispatch validation for one-shot and session transports. Worker
+/// v1 capability and legacy source-version checks remain identical across both
+/// process seams.
+pub(crate) fn validate_worker_request(
+    worker: &RegisteredWorker,
+    request: &WorkerParseRequest,
+) -> Result<(), ParseFailure> {
     request.validate().map_err(|_| {
         contract_failure(
             ErrorCode::ParserInvalidPayload,
@@ -781,60 +1007,16 @@ pub fn execute_worker_request(
             DiagnosticStage::Parse,
         ));
     }
-    validate_worker_source_before(request)?;
-    let stdin = serde_json::to_vec(request).map_err(|_| {
-        contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "worker request could not be serialized",
-            Some(&request.file_path),
-            Some(request.backend.as_str()),
-            DiagnosticStage::Parse,
-        )
-    })?;
-    let capture_limit = worker_response_capture_limit(request)?;
-    let spec = ProcessSpec {
-        program: worker.command.program.clone(),
-        args: worker.command.args_for("parse"),
-        current_dir: worker.command.current_dir.clone(),
-        stdin,
-        timeout: Duration::from_millis(request.remaining_timeout_ms),
-        capture_limit,
-    };
-    let output = run_process(&spec).map_err(|error| {
-        process_failure(
-            error,
-            Some(&request.file_path),
-            Some(request.backend.as_str()),
-            false,
-        )
-    })?;
-    if output.exit_code > 2 {
-        return Err(parser_failure(
-            FailureClass::RecoverableParserFailure,
-            ErrorCode::ParserFailed,
-            "worker process crashed before completing its response",
-            true,
-            request,
-        ));
-    }
-    if output.exit_code == 2 {
-        return Err(contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "worker rejected a validated parse request",
-            Some(&request.file_path),
-            Some(request.backend.as_str()),
-            DiagnosticStage::Parse,
-        ));
-    }
-    let response: WorkerParseResponse = serde_json::from_slice(&output.stdout).map_err(|_| {
-        contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "worker stdout is not one strict JSON response",
-            Some(&request.file_path),
-            Some(request.backend.as_str()),
-            DiagnosticStage::Parse,
-        )
-    })?;
+    validate_worker_source_before(request)
+}
+
+/// Validates a nested worker-v1 response returned through the session and then
+/// applies the same source, identity, and domain-error mapping as one-shot.
+pub(crate) fn validate_session_worker_response(
+    worker: &RegisteredWorker,
+    request: &WorkerParseRequest,
+    response: WorkerParseResponse,
+) -> Result<WorkerParseResponse, ParseFailure> {
     response.validate().map_err(|_| {
         contract_failure(
             ErrorCode::ParserInvalidPayload,
@@ -844,8 +1026,22 @@ pub fn execute_worker_request(
             DiagnosticStage::Parse,
         )
     })?;
+    let synthetic_exit_code = if response.status == WorkerStatus::Ok {
+        0
+    } else {
+        1
+    };
+    finish_worker_response(worker, request, response, synthetic_exit_code)
+}
+
+fn finish_worker_response(
+    worker: &RegisteredWorker,
+    request: &WorkerParseRequest,
+    response: WorkerParseResponse,
+    exit_code: u32,
+) -> Result<WorkerParseResponse, ParseFailure> {
     validate_worker_source_after(request, &response)?;
-    validate_response_identity(worker, request, &response, output.exit_code)?;
+    validate_response_identity(worker, request, &response, exit_code)?;
 
     if let Some(error) = response.error.0.clone() {
         let class = match error.error_code {
@@ -1175,7 +1371,7 @@ fn contains_every(actual: &[String], required: &[String]) -> bool {
         .all(|required_item| actual.iter().any(|item| item == required_item))
 }
 
-fn worker_request(
+pub(crate) fn worker_request(
     file: &ai_daily_discovery::DiscoveredFileOut,
     route: ParserRoute,
     timeout_ms: u64,

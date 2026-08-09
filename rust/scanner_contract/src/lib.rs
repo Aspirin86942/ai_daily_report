@@ -1761,6 +1761,7 @@ pub enum ErrorCode {
     CacheMissReasonProjectedAsNewFile,
     SourceGuardNotProjected,
     InspectV2ProvenanceUnavailable,
+    WorkerRssUnavailable,
     InternalError,
 }
 
@@ -2943,13 +2944,155 @@ impl Validate for PdfClassificationAuditV1 {
         require_sha256_hex(&self.classifier_profile_hash, "classifier_profile_hash")?;
         require_range(self.attempt_count, 0, 3, "attempt_count")?;
         if self.classification_cache_status == ClassificationCacheStatus::Miss {
-            require_non_empty(
-                &self.classification_cache_miss_reason,
-                1024,
-                "classification_cache_miss_reason",
-            )?;
+            if !matches!(
+                self.classification_cache_miss_reason.as_str(),
+                "new_file"
+                    | "source_version_changed"
+                    | "classifier_identity_changed"
+                    | "entry_absent_or_evicted"
+            ) {
+                return Err(
+                    "classification cache miss reason is not in the v2 allowlist".to_string(),
+                );
+            }
         } else if !self.classification_cache_miss_reason.is_empty() {
             return Err("non-miss classification cache must have an empty miss reason".to_string());
+        }
+        let zero_execution = |audit: &Self, transport: ClassificationTransport| {
+            if audit.run_inspected_pages.0 != Some(0)
+                || audit.duration_ms != 0
+                || audit.transport != transport
+                || audit.attempt_count != 0
+            {
+                Err("non-executing classification provenance has nonzero execution fields".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        match self.status {
+            PdfClassificationStatus::TextInParseWindow
+            | PdfClassificationStatus::NoTextInParseWindow => {
+                let page_count = self.page_count.0.ok_or_else(|| {
+                    "text/no-text classification requires page provenance".to_string()
+                })?;
+                let result_pages = self.result_examined_pages.0.ok_or_else(|| {
+                    "text/no-text classification requires examined-page provenance".to_string()
+                })?;
+                if page_count == 0 {
+                    return Err(
+                        "text/no-text classification page_count must be positive".to_string(),
+                    );
+                }
+                if self.nominal_charged_pages == 0 {
+                    return Err("classified PDF requires a positive nominal page charge".to_string());
+                }
+                let window_pages = page_count.min(self.nominal_charged_pages);
+                match self.status {
+                    PdfClassificationStatus::TextInParseWindow
+                        if !(1..=window_pages).contains(&result_pages) =>
+                    {
+                        return Err(
+                            "text classification pages must fit the parse window".to_string(),
+                        );
+                    }
+                    PdfClassificationStatus::NoTextInParseWindow
+                        if result_pages != window_pages =>
+                    {
+                        return Err(
+                            "no-text classification must examine the complete window".to_string(),
+                        );
+                    }
+                    _ => {}
+                }
+                match self.classification_cache_status {
+                    ClassificationCacheStatus::Fresh => {
+                        zero_execution(self, ClassificationTransport::NotApplicable)?
+                    }
+                    ClassificationCacheStatus::Snapshot => {
+                        zero_execution(self, ClassificationTransport::Snapshot)?
+                    }
+                    ClassificationCacheStatus::Miss => {
+                        if !matches!(
+                            self.transport,
+                            ClassificationTransport::Session | ClassificationTransport::OneShot
+                        ) || self.attempt_count == 0
+                        {
+                            return Err(
+                                "executed classification miss requires session/one_shot and 1..3 attempts"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                    ClassificationCacheStatus::NotEligible => {
+                        return Err(
+                            "text/no-text classification cannot be not_eligible".to_string(),
+                        );
+                    }
+                }
+            }
+            PdfClassificationStatus::Unknown | PdfClassificationStatus::Error => {
+                if self.classification_cache_status != ClassificationCacheStatus::Miss
+                    || !matches!(
+                        self.transport,
+                        ClassificationTransport::Session | ClassificationTransport::OneShot
+                    )
+                    || self.attempt_count == 0
+                    || self.nominal_charged_pages == 0
+                {
+                    return Err(
+                        "unknown/error classification requires an executed miss with a nominal charge"
+                            .to_string(),
+                    );
+                }
+                if let Some(result_pages) = self.result_examined_pages.0 {
+                    if result_pages > self.nominal_charged_pages {
+                        return Err(
+                            "typed failure result pages exceed the nominal page charge".to_string(),
+                        );
+                    }
+                    if self.page_count.0.is_some_and(|page_count| {
+                        result_pages > page_count.min(self.nominal_charged_pages)
+                    }) {
+                        return Err(
+                            "typed failure result pages exceed the parse window".to_string(),
+                        );
+                    }
+                }
+            }
+            PdfClassificationStatus::NotClassifiedByBudget => {
+                if self.page_count.0.is_some()
+                    || self.result_examined_pages.0 != Some(0)
+                    || self.nominal_charged_pages != 0
+                    || self.classification_cache_status != ClassificationCacheStatus::NotEligible
+                {
+                    return Err(
+                        "not_classified_by_budget must carry the frozen not_eligible zero-page shape"
+                            .to_string(),
+                    );
+                }
+                zero_execution(self, ClassificationTransport::NotApplicable)?;
+            }
+        }
+        if let Some(run_pages) = self.run_inspected_pages.0 {
+            let max_run_pages = self
+                .attempt_count
+                .checked_mul(self.nominal_charged_pages)
+                .ok_or_else(|| "classification attempt page budget overflows u64".to_string())?;
+            if run_pages > max_run_pages {
+                return Err(
+                    "run inspected pages exceed the started attempt page budget".to_string(),
+                );
+            }
+            if self.classification_cache_status == ClassificationCacheStatus::Miss
+                && self
+                    .result_examined_pages
+                    .0
+                    .is_some_and(|result_pages| run_pages < result_pages)
+            {
+                return Err(
+                    "observable run pages cannot be smaller than result pages".to_string(),
+                );
+            }
         }
         Ok(())
     }
@@ -3076,6 +3219,14 @@ impl Validate for PdfClassifierResultV1 {
                 if self.page_count.0.is_none() || self.result_examined_pages.0.is_none() {
                     return Err("text/no-text result requires page counts".to_string());
                 }
+                let page_count = self.page_count.0.expect("checked above");
+                let result_pages = self.result_examined_pages.0.expect("checked above");
+                if page_count == 0 || result_pages == 0 {
+                    return Err("text/no-text result page counts must be positive".to_string());
+                }
+                if result_pages > page_count {
+                    return Err("result examined pages cannot exceed page_count".to_string());
+                }
             }
             PdfClassifierResultStatus::Unknown | PdfClassifierResultStatus::Error => {
                 let diagnostic = self.diagnostic.0.as_ref().ok_or_else(|| {
@@ -3087,17 +3238,51 @@ impl Validate for PdfClassifierResultV1 {
                 }
             }
         }
-        if let Some(page_count) = self.page_count.0 {
-            if page_count == 0 {
-                return Err("page_count must be positive".to_string());
-            }
-        }
-        if let Some(pages) = self.result_examined_pages.0 {
-            if pages == 0 && self.status != PdfClassifierResultStatus::NoTextInParseWindow {
-                return Err("result_examined_pages must be positive".to_string());
-            }
-        }
         Ok(())
+    }
+}
+
+impl PdfClassifierResultV1 {
+    /// Validate the typed result against the request-specific classifier window.
+    pub fn validate_for_max_pages(&self, max_pages: u64) -> Result<(), String> {
+        self.validate()?;
+        if max_pages == 0 {
+            return Err("classifier max_pages must be positive".to_string());
+        }
+        match self.status {
+            PdfClassifierResultStatus::TextInParseWindow
+            | PdfClassifierResultStatus::NoTextInParseWindow => {
+                let page_count = self.page_count.0.expect("validated above");
+                let result_pages = self.result_examined_pages.0.expect("validated above");
+                let window_pages = page_count.min(max_pages);
+                match self.status {
+                    PdfClassifierResultStatus::TextInParseWindow
+                        if !(1..=window_pages).contains(&result_pages) =>
+                    {
+                        Err("text result pages exceed the request parse window".to_string())
+                    }
+                    PdfClassifierResultStatus::NoTextInParseWindow
+                        if result_pages != window_pages =>
+                    {
+                        Err("no-text result did not inspect the complete request window".to_string())
+                    }
+                    _ => Ok(()),
+                }
+            }
+            PdfClassifierResultStatus::Unknown | PdfClassifierResultStatus::Error => {
+                if self.result_examined_pages.0.is_some_and(|result_pages| {
+                    result_pages > max_pages
+                        || self
+                            .page_count
+                            .0
+                            .is_some_and(|page_count| result_pages > page_count.min(max_pages))
+                }) {
+                    Err("typed failure result pages exceed the request parse window".to_string())
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 }
 
@@ -3347,6 +3532,97 @@ impl Validate for PythonSessionResponseV1 {
     }
 }
 
+/// Shared full-v2 parser provenance matrix used by the wire validator and the
+/// store's pre-persistence seam. Keeping it here prevents the two gates from
+/// accepting different backend/lane combinations.
+pub fn validate_v2_parse_provenance(
+    parse_status: ParseStatus,
+    parser_backend: &str,
+    worker_lane: AuditWorkerLane,
+    parse_cache_status: ParseCacheStatus,
+    classification_status: Option<PdfClassificationStatus>,
+) -> Result<(), String> {
+    let metadata = parser_backend == "pdf_metadata_v1" && worker_lane == AuditWorkerLane::RustCore;
+    let not_parsed = parser_backend == "not_parsed" && worker_lane == AuditWorkerLane::NotParsed;
+    let body_parser = matches!(
+        (parser_backend, worker_lane),
+        ("light_text_v1", AuditWorkerLane::RustCore)
+            | ("rust_office_oxide_v1", AuditWorkerLane::RustOfficeProcess)
+            | ("rust_xlsx_bounded_v1", AuditWorkerLane::RustOfficeProcess)
+            | ("pdf_text_v1", AuditWorkerLane::PythonDocumentProcess)
+            | ("python_office_v1", AuditWorkerLane::PythonDocumentProcess)
+            | (
+                "python_sharepoint_text_v1",
+                AuditWorkerLane::PythonDocumentProcess
+            )
+    );
+    if !(metadata || not_parsed || body_parser) {
+        return Err("parser backend and worker lane are not a frozen v2 route".to_string());
+    }
+
+    match classification_status {
+        Some(PdfClassificationStatus::NoTextInParseWindow)
+            if parse_status != ParseStatus::Success || !metadata =>
+        {
+            return Err(
+                "no-text classification requires metadata-only success provenance".to_string(),
+            );
+        }
+        Some(status @ (PdfClassificationStatus::Unknown | PdfClassificationStatus::Error)) => {
+            let status_matches = if status == PdfClassificationStatus::Unknown {
+                matches!(parse_status, ParseStatus::Error | ParseStatus::Timeout)
+            } else {
+                parse_status == ParseStatus::Error
+            };
+            if !status_matches
+                || !not_parsed
+                || parse_cache_status != ParseCacheStatus::NotApplicable
+            {
+                return Err(
+                    "classifier failure must map to not_parsed provenance and Error/Timeout"
+                        .to_string(),
+                );
+            }
+        }
+        Some(PdfClassificationStatus::NotClassifiedByBudget)
+            if parse_status != ParseStatus::NotParsed || !not_parsed =>
+        {
+            return Err(
+                "classification budget exclusion must map to not_parsed provenance".to_string(),
+            );
+        }
+        _ => {}
+    }
+    if metadata
+        && classification_status != Some(PdfClassificationStatus::NoTextInParseWindow)
+    {
+        return Err(
+            "pdf_metadata_v1 is only valid for no-text classification provenance".to_string(),
+        );
+    }
+
+    match parse_cache_status {
+        ParseCacheStatus::Fresh | ParseCacheStatus::Miss if !body_parser => {
+            Err("fresh/miss parse provenance requires a body parser".to_string())
+        }
+        ParseCacheStatus::Snapshot => match parse_status {
+            ParseStatus::Success if body_parser || metadata => Ok(()),
+            ParseStatus::NotParsed if not_parsed => Ok(()),
+            _ => Err("snapshot parse status does not match its semantic provenance".to_string()),
+        },
+        ParseCacheStatus::NotApplicable if parse_status == ParseStatus::Success && !metadata => {
+            Err("not_applicable Success requires pdf_metadata_v1/rust_core".to_string())
+        }
+        ParseCacheStatus::NotApplicable if parse_status != ParseStatus::Success && !not_parsed => {
+            Err(
+                "not_applicable NotParsed/Error/Timeout requires not_parsed provenance"
+                    .to_string(),
+            )
+        }
+        _ => Ok(()),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileAuditV2 {
@@ -3398,9 +3674,71 @@ impl Validate for FileAuditV2 {
             }
         }
         if self.parse_cache_status == ParseCacheStatus::Miss {
-            require_non_empty(&self.cache_miss_reason, 1024, "cache_miss_reason")?;
+            if !matches!(
+                self.cache_miss_reason.as_str(),
+                "new_file"
+                    | "source_version_changed"
+                    | "parser_identity_changed"
+                    | "entry_absent_or_evicted"
+            ) {
+                return Err("parse cache miss reason is not in the v2 allowlist".to_string());
+            }
         } else if !self.cache_miss_reason.is_empty() {
             return Err("non-miss parse cache must have an empty miss reason".to_string());
+        }
+        require_range(self.parse_attempt_count, 0, 3, "parse_attempt_count")?;
+        match self.parse_cache_status {
+            ParseCacheStatus::Fresh => {
+                if self.parse_status != ParseStatus::Success
+                    || self.parse_transport != ParseTransport::NotApplicable
+                    || self.parse_attempt_count != 0
+                    || self.parse_duration_ms != 0
+                {
+                    return Err(
+                        "fresh parse-cache provenance must be Success with zero execution"
+                            .to_string(),
+                    );
+                }
+            }
+            ParseCacheStatus::Snapshot => {
+                if matches!(self.parse_status, ParseStatus::Error | ParseStatus::Timeout)
+                    || self.parse_transport != ParseTransport::Snapshot
+                    || self.parse_attempt_count != 0
+                    || self.parse_duration_ms != 0
+                {
+                    return Err(
+                        "snapshot parse provenance must have zero execution and no Error/Timeout"
+                            .to_string(),
+                    );
+                }
+            }
+            ParseCacheStatus::Miss => {
+                if !matches!(
+                    self.parse_status,
+                    ParseStatus::Success | ParseStatus::Error | ParseStatus::Timeout
+                ) || !matches!(
+                    self.parse_transport,
+                    ParseTransport::Session
+                        | ParseTransport::OneShot
+                        | ParseTransport::RustInProcess
+                ) || self.parse_attempt_count == 0
+                {
+                    return Err(
+                        "parse miss requires a started parser transport and 1..3 attempts"
+                            .to_string(),
+                    );
+                }
+            }
+            ParseCacheStatus::NotApplicable => {
+                if self.parse_transport != ParseTransport::NotApplicable
+                    || self.parse_attempt_count != 0
+                    || self.parse_duration_ms != 0
+                {
+                    return Err(
+                        "not_applicable parse provenance must have zero execution".to_string(),
+                    );
+                }
+            }
         }
         match self.parse_status {
             ParseStatus::Error | ParseStatus::Timeout => {
@@ -3425,6 +3763,16 @@ impl Validate for FileAuditV2 {
         if let Some(classification) = &self.pdf_classification.0 {
             classification.validate()?;
         }
+        validate_v2_parse_provenance(
+            self.parse_status,
+            &self.parser_backend,
+            self.worker_lane,
+            self.parse_cache_status,
+            self.pdf_classification
+                .0
+                .as_ref()
+                .map(|classification| classification.status),
+        )?;
         Ok(())
     }
 }

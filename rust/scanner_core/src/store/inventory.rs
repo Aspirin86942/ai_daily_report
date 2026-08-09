@@ -2,7 +2,8 @@
 
 use ai_daily_discovery::DiscoveredFileOut;
 use ai_daily_scanner_contract::{
-    AuditWorkerLane, CacheMissReason, CacheStatus, Diagnostic, FileAudit, ParseStatus, Validate,
+    validate_v2_parse_provenance, AuditWorkerLane, CacheMissReason, CacheStatus, Diagnostic,
+    FileAudit, ParseCacheStatus, ParseStatus, ParseTransport, PdfClassificationAuditV1, Validate,
 };
 use rusqlite::{params, Transaction};
 
@@ -117,11 +118,19 @@ pub struct FileResultRecord {
     pub failure_class: String,
     pub fallback_backend: String,
     pub fallback_reason_code: String,
+    pub parse_transport: ParseTransport,
+    pub parse_attempt_count: u64,
+    pub pdf_classification: Option<PdfClassificationAuditV1>,
     pub error: Option<Diagnostic>,
 }
 
 impl FileResultRecord {
+    #[cfg(test)]
     pub(crate) fn validate(&self) -> Result<(), String> {
+        self.validate_for_persistence(false)
+    }
+
+    pub(crate) fn validate_for_persistence(&self, snapshot_rows: bool) -> Result<(), String> {
         let durations_fit = [
             self.primary_duration_ms,
             self.fallback_duration_ms,
@@ -133,17 +142,73 @@ impl FileResultRecord {
             (self.cache_status, self.cache_miss_reason),
             (CacheStatus::Fresh, CacheMissReason::None)
                 | (CacheStatus::Miss, CacheMissReason::NewFile)
-                | (CacheStatus::Miss, CacheMissReason::ErrorCache)
                 | (CacheStatus::Miss, CacheMissReason::SourceVersionChanged)
-                | (CacheStatus::Miss, CacheMissReason::ParserProfileChanged)
                 | (CacheStatus::Miss, CacheMissReason::ParserIdentityChanged)
                 | (CacheStatus::Miss, CacheMissReason::EntryAbsentOrEvicted)
         );
         let error_consistent = match self.parse_status {
             ParseStatus::Success => self.error.is_none(),
             ParseStatus::Error | ParseStatus::Timeout => self.error.is_some(),
-            ParseStatus::NotParsed => true,
+            ParseStatus::NotParsed => self.error.is_none(),
         };
+        let execution_consistent = if snapshot_rows {
+            !matches!(self.parse_status, ParseStatus::Error | ParseStatus::Timeout)
+                && self.parse_transport == ParseTransport::Snapshot
+                && self.parse_attempt_count == 0
+                && self.primary_duration_ms == 0
+                && self.fallback_duration_ms == 0
+                && self.parse_duration_ms == 0
+        } else {
+            match parse_cache_status_text(self) {
+                "fresh" => {
+                    self.parse_status == ParseStatus::Success
+                        && self.parse_transport == ParseTransport::NotApplicable
+                        && self.parse_attempt_count == 0
+                        && self.primary_duration_ms == 0
+                        && self.fallback_duration_ms == 0
+                        && self.parse_duration_ms == 0
+                }
+                "miss" => {
+                    matches!(
+                        self.parse_status,
+                        ParseStatus::Success | ParseStatus::Error | ParseStatus::Timeout
+                    ) && matches!(
+                        self.parse_transport,
+                        ParseTransport::Session
+                            | ParseTransport::OneShot
+                            | ParseTransport::RustInProcess
+                    ) && (1..=3).contains(&self.parse_attempt_count)
+                }
+                "not_applicable" => {
+                    self.parse_transport == ParseTransport::NotApplicable
+                        && self.parse_attempt_count == 0
+                        && self.primary_duration_ms == 0
+                        && self.fallback_duration_ms == 0
+                        && self.parse_duration_ms == 0
+                }
+                _ => false,
+            }
+        };
+        let parse_cache_status = if snapshot_rows {
+            ParseCacheStatus::Snapshot
+        } else {
+            match parse_cache_status_text(self) {
+                "fresh" => ParseCacheStatus::Fresh,
+                "miss" => ParseCacheStatus::Miss,
+                "not_applicable" => ParseCacheStatus::NotApplicable,
+                _ => return Err("invalid scan file result".to_string()),
+            }
+        };
+        let provenance_consistent = validate_v2_parse_provenance(
+            self.parse_status,
+            &self.parser_backend,
+            self.worker_lane,
+            parse_cache_status,
+            self.pdf_classification
+                .as_ref()
+                .map(|classification| classification.status),
+        )
+        .is_ok();
         let audit = FileAudit {
             relative_path: self.relative_path.clone(),
             file_identity: self.file_identity.clone(),
@@ -169,6 +234,13 @@ impl FileResultRecord {
             || !durations_fit
             || !cache_consistent
             || !error_consistent
+            || self.parse_attempt_count > 3
+            || !execution_consistent
+            || !provenance_consistent
+            || self
+                .pdf_classification
+                .as_ref()
+                .is_some_and(|audit| audit.validate().is_err())
             || audit.validate().is_err()
             || self
                 .error
@@ -272,6 +344,19 @@ pub(crate) fn insert_file_results(
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12,
             ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25
+        )",
+    )?;
+    let mut execution_statement = transaction.prepare_cached(
+        "INSERT INTO scan_file_execution_v2(
+            scan_run_id, file_identity, parse_transport, parse_attempt_count,
+            classification_status, classification_page_count,
+            classification_cache_status, classification_cache_miss_reason,
+            classification_result_examined_pages, classification_run_inspected_pages,
+            classification_nominal_charged_pages, classification_duration_ms,
+            classification_transport, classification_attempt_count,
+            classifier_build, classifier_profile_hash
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16
          )",
     )?;
     for record in records {
@@ -339,8 +424,106 @@ pub(crate) fn insert_file_results(
             error_backend,
             parse_cache_status,
         ])?;
+        let parse_transport = if snapshot_rows {
+            "snapshot".to_string()
+        } else {
+            enum_text(&record.parse_transport)
+        };
+        let parse_attempt_count = if snapshot_rows {
+            0
+        } else {
+            record.parse_attempt_count as i64
+        };
+        let classification = record.pdf_classification.as_ref();
+        let classification_status = classification.map(|value| enum_text(&value.status));
+        let classification_page_count = classification
+            .and_then(|value| value.page_count.0)
+            .map(|value| value as i64);
+        let classification_cache_status = classification
+            .map(|value| persisted_classification_cache_status(value, snapshot_rows));
+        let classification_cache_miss_reason = classification.map(|value| {
+            if snapshot_rows {
+                String::new()
+            } else {
+                value.classification_cache_miss_reason.clone()
+            }
+        });
+        let classification_result_examined_pages = classification
+            .and_then(|value| value.result_examined_pages.0)
+            .map(|value| value as i64);
+        let classification_run_inspected_pages = classification.map(|value| {
+            if snapshot_rows {
+                Some(0_i64)
+            } else {
+                value.run_inspected_pages.0.map(|pages| pages as i64)
+            }
+        }).flatten();
+        let classification_nominal_charged_pages = classification
+            .map(|value| value.nominal_charged_pages as i64);
+        let classification_duration_ms = classification.map(|value| {
+            if snapshot_rows {
+                0_i64
+            } else {
+                value.duration_ms as i64
+            }
+        });
+        let classification_transport = classification
+            .map(|value| persisted_classification_transport(value, snapshot_rows));
+        let classification_attempt_count = classification.map(|value| {
+            if snapshot_rows {
+                0_i64
+            } else {
+                value.attempt_count as i64
+            }
+        });
+        execution_statement.execute(params![
+            scan_run_id,
+            record.file_identity,
+            parse_transport,
+            parse_attempt_count,
+            classification_status,
+            classification_page_count,
+            classification_cache_status,
+            classification_cache_miss_reason,
+            classification_result_examined_pages,
+            classification_run_inspected_pages,
+            classification_nominal_charged_pages,
+            classification_duration_ms,
+            classification_transport,
+            classification_attempt_count,
+            classification.map(|value| value.classifier_build.as_str()),
+            classification.map(|value| value.classifier_profile_hash.as_str()),
+        ])?;
     }
     Ok(())
+}
+
+fn persisted_classification_cache_status(
+    classification: &PdfClassificationAuditV1,
+    snapshot_rows: bool,
+) -> String {
+    if snapshot_rows
+        && classification.status
+            != ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget
+    {
+        "snapshot".to_string()
+    } else {
+        enum_text(&classification.classification_cache_status)
+    }
+}
+
+fn persisted_classification_transport(
+    classification: &PdfClassificationAuditV1,
+    snapshot_rows: bool,
+) -> String {
+    if snapshot_rows
+        && classification.status
+            != ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget
+    {
+        "snapshot".to_string()
+    } else {
+        enum_text(&classification.transport)
+    }
 }
 
 /// spec Part 5.2 current-run `parse_cache_status`: `fresh` for an exact
@@ -435,6 +618,88 @@ pub(crate) fn worker_lane_text(value: AuditWorkerLane) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_body_parse_result() -> FileResultRecord {
+        FileResultRecord {
+            file_identity: "fixture:evidence.txt".to_string(),
+            relative_path: "evidence.txt".to_string(),
+            source_version: "mtime_ns=1:size=1".to_string(),
+            parse_profile_hash: "a".repeat(64),
+            cache_status: CacheStatus::Miss,
+            cache_miss_reason: CacheMissReason::NewFile,
+            parse_status: ParseStatus::Success,
+            parser_backend: "light_text_v1".to_string(),
+            worker_lane: AuditWorkerLane::RustCore,
+            truncated: false,
+            content_sha256: "b".repeat(64),
+            primary_duration_ms: 1,
+            fallback_duration_ms: 0,
+            parse_duration_ms: 1,
+            failure_class: String::new(),
+            fallback_backend: String::new(),
+            fallback_reason_code: String::new(),
+            parse_transport: ParseTransport::RustInProcess,
+            parse_attempt_count: 1,
+            pdf_classification: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn full_v2_persistence_rejects_legacy_miss_reasons_and_impossible_lanes() {
+        let valid = valid_body_parse_result();
+        valid
+            .validate_for_persistence(false)
+            .expect("baseline body parse result must persist");
+
+        for reason in [
+            CacheMissReason::ErrorCache,
+            CacheMissReason::ParserProfileChanged,
+        ] {
+            let mut legacy = valid.clone();
+            legacy.cache_miss_reason = reason;
+            assert!(
+                legacy.validate_for_persistence(false).is_err(),
+                "legacy v1 miss reasons must not enter full-v2 audit rows"
+            );
+        }
+
+        let mut no_body_parser = valid;
+        no_body_parser.parser_backend = "not_parsed".to_string();
+        no_body_parser.worker_lane = AuditWorkerLane::NotParsed;
+        assert!(
+            no_body_parser.validate_for_persistence(false).is_err(),
+            "a parse miss must retain an actual body parser provenance"
+        );
+    }
+
+    #[test]
+    fn snapshot_budget_exclusion_preserves_zero_execution_classification_shape() {
+        let classification = PdfClassificationAuditV1 {
+            status: ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget,
+            page_count: ai_daily_scanner_contract::Nullable(None),
+            classification_cache_status:
+                ai_daily_scanner_contract::ClassificationCacheStatus::NotEligible,
+            classification_cache_miss_reason: String::new(),
+            result_examined_pages: ai_daily_scanner_contract::Nullable(Some(0)),
+            run_inspected_pages: ai_daily_scanner_contract::Nullable(Some(0)),
+            nominal_charged_pages: 0,
+            duration_ms: 0,
+            transport: ai_daily_scanner_contract::ClassificationTransport::NotApplicable,
+            attempt_count: 0,
+            classifier_build: "a".repeat(64),
+            classifier_profile_hash: "b".repeat(64),
+        };
+
+        assert_eq!(
+            persisted_classification_cache_status(&classification, true),
+            "not_eligible"
+        );
+        assert_eq!(
+            persisted_classification_transport(&classification, true),
+            "not_applicable"
+        );
+    }
 
     #[test]
     fn discovered_inventory_requires_source_size_to_agree() {

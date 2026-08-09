@@ -260,10 +260,10 @@ pub fn snapshot_key_parts(
         .ok_or_else(|| "logical request is not a JSON object".to_string())?
         .remove("request_id");
 
-    let session = if worker_ids.python_contract.is_some() {
+    let session = if worker_ids.python_session_contract.is_some() {
         SessionCanonical {
             capability: "session",
-            contract: worker_ids.python_contract.as_deref(),
+            contract: worker_ids.python_session_contract.as_deref(),
             version: worker_ids.python_version.as_deref(),
             build: worker_ids.python_build.as_deref(),
         }

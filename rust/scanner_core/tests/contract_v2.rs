@@ -716,3 +716,225 @@ fn file_audit_v2_final_diagnostic_nullability_is_enforced() {
         .validate()
         .expect("error file audit with a final diagnostic must validate");
 }
+
+#[test]
+fn classification_and_parse_execution_matrices_reject_impossible_provenance() {
+    use ai_daily_scanner_contract::{
+        ClassificationCacheStatus, ClassificationTransport, PdfClassificationAuditV1,
+        PdfClassificationStatus,
+    };
+
+    let impossible_snapshot = PdfClassificationAuditV1 {
+        status: PdfClassificationStatus::NotClassifiedByBudget,
+        page_count: ai_daily_scanner_contract::Nullable(None),
+        classification_cache_status: ClassificationCacheStatus::Snapshot,
+        classification_cache_miss_reason: String::new(),
+        result_examined_pages: ai_daily_scanner_contract::Nullable(Some(0)),
+        run_inspected_pages: ai_daily_scanner_contract::Nullable(Some(0)),
+        nominal_charged_pages: 0,
+        duration_ms: 0,
+        transport: ClassificationTransport::Snapshot,
+        attempt_count: 0,
+        classifier_build: "a".repeat(64),
+        classifier_profile_hash: "b".repeat(64),
+    };
+    assert!(
+        impossible_snapshot.validate().is_err(),
+        "not_classified_by_budget is not_eligible/not_applicable, never snapshot"
+    );
+
+    let impossible_fresh_parse = serde_json::json!({
+        "relative_path": "evidence.pdf",
+        "file_identity": "fixture:evidence.pdf",
+        "source_version": "mtime_ns=1:size=1",
+        "source_guard_kind": "content_sha256_v1",
+        "source_guard_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parse_status": "success",
+        "parser_backend": "pdf_text_v1",
+        "worker_lane": "python_document_process",
+        "parse_cache_status": "fresh",
+        "cache_miss_reason": "",
+        "truncated": false,
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parse_duration_ms": 0,
+        "failure_class": "",
+        "fallback_backend": "",
+        "fallback_reason_code": "",
+        "parse_transport": "one_shot",
+        "parse_attempt_count": 1,
+        "final_diagnostic": null,
+        "pdf_classification": null
+    });
+    let parsed: ai_daily_scanner_contract::FileAuditV2 =
+        serde_json::from_value(impossible_fresh_parse).expect("fixture decodes");
+    assert!(
+        parsed.validate().is_err(),
+        "an exact parse-cache hit performs no parser transport or attempt"
+    );
+}
+
+#[test]
+fn v2_audit_page_miss_reason_and_backend_lane_matrices_are_strict() {
+    use ai_daily_scanner_contract::{
+        ClassificationCacheStatus, ClassificationTransport, Nullable,
+        PdfClassificationAuditV1, PdfClassificationStatus,
+    };
+
+    let valid_classification = PdfClassificationAuditV1 {
+        status: PdfClassificationStatus::TextInParseWindow,
+        page_count: Nullable(Some(2)),
+        classification_cache_status: ClassificationCacheStatus::Miss,
+        classification_cache_miss_reason: "new_file".to_string(),
+        result_examined_pages: Nullable(Some(1)),
+        run_inspected_pages: Nullable(Some(1)),
+        nominal_charged_pages: 2,
+        duration_ms: 1,
+        transport: ClassificationTransport::OneShot,
+        attempt_count: 1,
+        classifier_build: "a".repeat(64),
+        classifier_profile_hash: "b".repeat(64),
+    };
+    valid_classification
+        .validate()
+        .expect("baseline classification audit validates");
+
+    let mut snapshot_classification = valid_classification.clone();
+    snapshot_classification.classification_cache_status = ClassificationCacheStatus::Snapshot;
+    snapshot_classification.classification_cache_miss_reason.clear();
+    snapshot_classification.run_inspected_pages = Nullable(Some(0));
+    snapshot_classification.duration_ms = 0;
+    snapshot_classification.transport = ClassificationTransport::Snapshot;
+    snapshot_classification.attempt_count = 0;
+    snapshot_classification
+        .validate()
+        .expect("snapshot keeps result pages but has zero current-run pages");
+
+    let mut text_beyond_window = valid_classification.clone();
+    text_beyond_window.result_examined_pages = Nullable(Some(3));
+    assert!(text_beyond_window.validate().is_err());
+
+    let mut no_text_short_window = valid_classification.clone();
+    no_text_short_window.status = PdfClassificationStatus::NoTextInParseWindow;
+    assert!(no_text_short_window.validate().is_err());
+
+    let mut excessive_run_pages = valid_classification.clone();
+    excessive_run_pages.attempt_count = 2;
+    excessive_run_pages.run_inspected_pages = Nullable(Some(5));
+    assert!(excessive_run_pages.validate().is_err());
+
+    let mut legacy_classification_reason = valid_classification.clone();
+    legacy_classification_reason.classification_cache_miss_reason = "error_cache".to_string();
+    assert!(legacy_classification_reason.validate().is_err());
+
+    let base = serde_json::json!({
+        "relative_path": "evidence.pdf",
+        "file_identity": "fixture:evidence.pdf",
+        "source_version": "mtime_ns=1:size=1",
+        "source_guard_kind": "content_sha256_v1",
+        "source_guard_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parse_status": "error",
+        "parser_backend": "pdf_text_v1",
+        "worker_lane": "python_document_process",
+        "parse_cache_status": "miss",
+        "cache_miss_reason": "new_file",
+        "truncated": false,
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parse_duration_ms": 1,
+        "failure_class": "",
+        "fallback_backend": "",
+        "fallback_reason_code": "",
+        "parse_transport": "one_shot",
+        "parse_attempt_count": 1,
+        "final_diagnostic": {
+            "error_code": "PARSER_FAILED",
+            "message": "synthetic failure",
+            "retryable": false,
+            "stage": "parse",
+            "file_path": null,
+            "backend": null
+        },
+        "pdf_classification": null
+    });
+    let parsed: ai_daily_scanner_contract::FileAuditV2 =
+        serde_json::from_value(base.clone()).expect("baseline file audit decodes");
+    parsed.validate().expect("baseline file audit validates");
+
+    let mut legacy_reason = base.as_object().unwrap().clone();
+    legacy_reason.insert(
+        "cache_miss_reason".to_string(),
+        serde_json::Value::String("error_cache".to_string()),
+    );
+    let parsed: ai_daily_scanner_contract::FileAuditV2 =
+        serde_json::from_value(serde_json::Value::Object(legacy_reason))
+            .expect("legacy reason fixture decodes");
+    assert!(parsed.validate().is_err());
+
+    let mut miss_not_parsed = base.as_object().unwrap().clone();
+    miss_not_parsed.insert(
+        "parser_backend".to_string(),
+        serde_json::Value::String("not_parsed".to_string()),
+    );
+    miss_not_parsed.insert(
+        "worker_lane".to_string(),
+        serde_json::Value::String("not_parsed".to_string()),
+    );
+    let parsed: ai_daily_scanner_contract::FileAuditV2 =
+        serde_json::from_value(serde_json::Value::Object(miss_not_parsed))
+            .expect("miss/not-parsed fixture decodes");
+    assert!(parsed.validate().is_err());
+
+    let metadata = serde_json::json!({
+        "relative_path": "no-text.pdf",
+        "file_identity": "fixture:no-text.pdf",
+        "source_version": "mtime_ns=1:size=1",
+        "source_guard_kind": "content_sha256_v1",
+        "source_guard_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parse_status": "success",
+        "parser_backend": "pdf_metadata_v1",
+        "worker_lane": "rust_core",
+        "parse_cache_status": "not_applicable",
+        "cache_miss_reason": "",
+        "truncated": false,
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "parse_duration_ms": 0,
+        "failure_class": "",
+        "fallback_backend": "",
+        "fallback_reason_code": "",
+        "parse_transport": "not_applicable",
+        "parse_attempt_count": 0,
+        "final_diagnostic": null,
+        "pdf_classification": {
+            "status": "no_text_in_parse_window",
+            "page_count": 2,
+            "classification_cache_status": "miss",
+            "classification_cache_miss_reason": "new_file",
+            "result_examined_pages": 2,
+            "run_inspected_pages": 2,
+            "nominal_charged_pages": 2,
+            "duration_ms": 1,
+            "transport": "one_shot",
+            "attempt_count": 1,
+            "classifier_build": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "classifier_profile_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        }
+    });
+    let parsed: ai_daily_scanner_contract::FileAuditV2 =
+        serde_json::from_value(metadata.clone()).expect("metadata fixture decodes");
+    parsed
+        .validate()
+        .expect("no-text metadata provenance validates");
+
+    let mut no_text_body = metadata.as_object().unwrap().clone();
+    no_text_body.insert(
+        "parser_backend".to_string(),
+        serde_json::Value::String("pdf_text_v1".to_string()),
+    );
+    no_text_body.insert(
+        "worker_lane".to_string(),
+        serde_json::Value::String("python_document_process".to_string()),
+    );
+    let parsed: ai_daily_scanner_contract::FileAuditV2 =
+        serde_json::from_value(serde_json::Value::Object(no_text_body))
+            .expect("no-text body-parser fixture decodes");
+    assert!(parsed.validate().is_err());
+}

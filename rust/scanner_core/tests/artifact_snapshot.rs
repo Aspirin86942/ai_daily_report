@@ -6,7 +6,7 @@
 use ai_daily_discovery::{DiscoveredFileOut, DiscoveryIssue, DiscoveryIssueKind};
 use ai_daily_scanner_contract::{
     BuildContextRequest, ContextAction, ContextSummary, EngineStatus, NormalizedScannerProfileV2,
-    Nullable, ParseStatus, ReportMode, ScannerProfile, Validate,
+    Nullable, ParseStatus, ParseTransport, ReportMode, ScannerProfile, Validate,
 };
 use ai_daily_scanner_core::artifact::{
     rebuild_envelope, snapshot_key, snapshot_key_parts, ArtifactDecisionRow, ArtifactDraft,
@@ -70,6 +70,7 @@ fn workers(office_build: &str, python_build: &str) -> WorkerIdentities {
         python_version: Some("1.0".to_string()),
         python_build: Some(python_build.to_string()),
         classifier_build: Some(python_build.to_string()),
+        python_session_contract: Some("ai_daily_python_session_v1".to_string()),
     }
 }
 
@@ -202,6 +203,48 @@ fn snapshot_key_changes_when_classifier_identity_changes() {
     let changed = snapshot_key(&request, &[], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("classifier-b"))
         .unwrap();
     assert_ne!(base, changed, "classifier build must change the snapshot key");
+}
+
+#[test]
+fn snapshot_key_records_real_session_capability_and_one_shot_absence() {
+    let profile = v2_profile(ReportMode::Daily);
+    let request = request(ReportMode::Daily, REQUEST_ID_A);
+    let session_workers = workers("office-a", "python-a");
+    let session = snapshot_key_parts(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &session_workers,
+        &classifier("classifier-a"),
+    )
+    .expect("session snapshot key");
+    let session_json: serde_json::Value =
+        serde_json::from_str(&session.canonical_json).expect("canonical session JSON");
+    assert_eq!(session_json["session"]["capability"], "session");
+    assert_eq!(
+        session_json["session"]["contract"],
+        "ai_daily_python_session_v1"
+    );
+
+    let mut one_shot_workers = session_workers;
+    one_shot_workers.python_session_contract = None;
+    let one_shot = snapshot_key_parts(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &one_shot_workers,
+        &classifier("classifier-a"),
+    )
+    .expect("one-shot snapshot key");
+    let one_shot_json: serde_json::Value =
+        serde_json::from_str(&one_shot.canonical_json).expect("canonical one-shot JSON");
+    assert_eq!(one_shot_json["session"]["capability"], "one_shot");
+    assert!(one_shot_json["session"]["contract"].is_null());
+    assert_ne!(session.sha256, one_shot.sha256);
 }
 
 #[test]
@@ -838,6 +881,13 @@ fn snapshot_file_result(parse_duration_ms: u64, snapshot: bool) -> FileResultRec
         failure_class: String::new(),
         fallback_backend: String::new(),
         fallback_reason_code: String::new(),
+        parse_transport: if snapshot {
+            ParseTransport::Snapshot
+        } else {
+            ParseTransport::RustInProcess
+        },
+        parse_attempt_count: u64::from(!snapshot),
+        pdf_classification: None,
         error: None,
     }
 }

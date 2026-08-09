@@ -7,7 +7,9 @@ use ai_daily_scanner_contract::{
 
 use crate::fallback::ParseFailure;
 
-use super::{execute_worker_request, RegisteredWorker, WorkerCommand};
+use super::{
+    execute_worker_request_observed, OneShotExecution, RegisteredWorker, WorkerCommand,
+};
 
 pub fn worker_command(adapters: &AdapterPaths) -> WorkerCommand {
     WorkerCommand {
@@ -39,5 +41,12 @@ pub fn parse(
     worker: &RegisteredWorker,
     request: &WorkerParseRequest,
 ) -> Result<WorkerParseResponse, ParseFailure> {
-    execute_worker_request(worker, request)
+    parse_observed(worker, request).outcome
+}
+
+pub(crate) fn parse_observed(
+    worker: &RegisteredWorker,
+    request: &WorkerParseRequest,
+) -> OneShotExecution<WorkerParseResponse> {
+    execute_worker_request_observed(worker, request)
 }

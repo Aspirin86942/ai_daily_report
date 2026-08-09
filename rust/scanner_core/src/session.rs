@@ -10,7 +10,9 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,7 +24,11 @@ use ai_daily_scanner_contract::{
     WorkerParseResponse,
 };
 
-use crate::parsers::WorkerCommand;
+use crate::fallback::ParseFailure;
+use crate::parsers::{
+    OneShotExecution, RegisteredSession, RegisteredWorker, WorkerCommand,
+};
+use crate::process::WorkerRssTracker;
 
 pub const SESSION_CONTRACT_VERSION: &str = "ai_daily_python_session_v1";
 pub const SESSION_PROTOCOL_VERSION: u64 = 1;
@@ -231,6 +237,14 @@ pub enum RetryAction {
 pub fn retry_action(error: &SessionError, session_attempt: u32) -> RetryAction {
     match error {
         SessionError::Timeout => RetryAction::GiveUp,
+        SessionError::Rejected(diagnostic)
+            if diagnostic.error_code
+                == ai_daily_scanner_contract::PythonOperationErrorCode::SourceVersionChanged =>
+        {
+            // The request embeds the stale source version. Rebuilding a
+            // session and replaying the same request cannot make it valid.
+            RetryAction::GiveUp
+        }
         SessionError::Rejected(diagnostic) if !diagnostic.retryable => RetryAction::GiveUp,
         _ if session_attempt == 0 => RetryAction::RetrySession,
         _ if error.is_retryable_transport() => RetryAction::OneShot,
@@ -254,6 +268,8 @@ struct SessionChild {
     stdout_thread: Option<thread::JoinHandle<()>>,
     #[allow(dead_code)]
     stderr_thread: Option<thread::JoinHandle<()>>,
+    stderr_budget: Arc<StderrBudget>,
+    rss_tracker: WorkerRssTracker,
     #[cfg(windows)]
     job: Option<crate::windows_job::SessionJob>,
     /// 上次请求完成时刻；idle TTL 按“空闲时间”回收（spec 7.3/8.1），不是
@@ -262,7 +278,10 @@ struct SessionChild {
 }
 
 impl SessionChild {
-    fn spawn(command: &WorkerCommand) -> Result<Self, SessionError> {
+    fn spawn(
+        command: &WorkerCommand,
+        rss_tracker: &WorkerRssTracker,
+    ) -> Result<Self, SessionError> {
         let mut builder = Command::new(&command.program);
         builder
             .args(&command.base_args)
@@ -282,6 +301,7 @@ impl SessionChild {
                 Err(_) => {
                     let _ = child.kill();
                     let _ = child.wait();
+                    rss_tracker.observe_started_child(None);
                     return Err(SessionError::StartFailed);
                 }
             }
@@ -290,14 +310,20 @@ impl SessionChild {
         let stdout = child.stdout.take().ok_or(SessionError::IoFailed)?;
         let stderr = child.stderr.take().ok_or(SessionError::IoFailed)?;
         let (sender, receiver) = mpsc::channel();
-        let stdout_thread = thread::spawn(move || read_stdout_lines(stdout, sender));
-        let stderr_thread = thread::spawn(move || drain_stderr(stderr));
+        let stdout_sender = sender.clone();
+        let stdout_thread = thread::spawn(move || read_stdout_lines(stdout, stdout_sender));
+        let stderr_budget = Arc::new(StderrBudget::default());
+        let stderr_reader_budget = stderr_budget.clone();
+        let stderr_thread =
+            thread::spawn(move || drain_stderr(stderr, sender, stderr_reader_budget));
         Ok(Self {
             child,
             stdin,
             lines: receiver,
             stdout_thread: Some(stdout_thread),
             stderr_thread: Some(stderr_thread),
+            stderr_budget,
+            rss_tracker: rss_tracker.clone(),
             #[cfg(windows)]
             job,
             last_activity: Instant::now(),
@@ -305,7 +331,13 @@ impl SessionChild {
     }
 
     fn read_line(&self, timeout: Duration) -> Result<Vec<u8>, SessionError> {
+        if self.stderr_budget.overflowed() {
+            return Err(stderr_limit_error());
+        }
         match self.lines.recv_timeout(timeout) {
+            Ok(LineEvent::Line(_)) if self.stderr_budget.overflowed() => {
+                Err(stderr_limit_error())
+            }
             Ok(LineEvent::Line(line)) => Ok(line),
             Ok(LineEvent::Eof) => Err(SessionError::Eof),
             Ok(LineEvent::Error(error)) => Err(error),
@@ -315,6 +347,9 @@ impl SessionChild {
     }
 
     fn write_line(&mut self, frame: &[u8]) -> Result<(), SessionError> {
+        // stderr accounting is per in-flight request. Hello uses the initial
+        // zeroed budget; every subsequent request starts a fresh 1 MiB window.
+        self.stderr_budget.reset();
         self.stdin.write_all(frame).map_err(|_| SessionError::Eof)?;
         self.stdin.write_all(b"\n").map_err(|_| SessionError::Eof)?;
         self.stdin.flush().map_err(|_| SessionError::Eof)
@@ -322,11 +357,23 @@ impl SessionChild {
 
     fn recycle_due(&self, params: &SessionParams) -> bool {
         // Idle TTL measures elapsed time since the last completed request, not
-        // process age. RSS recycle (`params.rss_limit_bytes`, spec 7.3) is a
-        // pending item for the pool-wiring task: it needs per-session process
-        // memory accounting (Windows Job Object PeakJobProcessUsedMemory) and
-        // is intentionally surfaced here rather than silently dropped.
+        // process age. Peak Job memory is monotonic for one session generation,
+        // which makes it a deterministic recycle signal after a full response.
         self.last_activity.elapsed() >= params.idle_ttl
+            || self
+                .peak_rss_bytes()
+                .is_some_and(|rss| rss >= params.rss_limit_bytes)
+    }
+
+    fn peak_rss_bytes(&self) -> Option<u64> {
+        #[cfg(windows)]
+        {
+            self.job.as_ref()?.peak_memory_bytes()
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
     }
 
     fn touch_activity(&mut self) {
@@ -346,6 +393,8 @@ impl SessionChild {
 
 impl Drop for SessionChild {
     fn drop(&mut self) {
+        self.rss_tracker
+            .observe_started_child(self.peak_rss_bytes());
         #[cfg(windows)]
         if let Some(job) = self.job.as_ref() {
             let _ = job.terminate(124);
@@ -403,20 +452,53 @@ fn read_line_bounded(
     }
 }
 
-fn drain_stderr(stderr: std::process::ChildStderr) {
+#[derive(Default)]
+struct StderrBudget {
+    bytes: AtomicUsize,
+    overflowed: AtomicBool,
+}
+
+impl StderrBudget {
+    fn reset(&self) {
+        self.bytes.store(0, Ordering::Release);
+        self.overflowed.store(false, Ordering::Release);
+    }
+
+    /// Returns true exactly once for the request that crosses the hard limit.
+    fn observe(&self, count: usize) -> bool {
+        let previous = self.bytes.fetch_add(count, Ordering::AcqRel);
+        previous.saturating_add(count) > SESSION_STDERR_LIMIT
+            && !self.overflowed.swap(true, Ordering::AcqRel)
+    }
+
+    fn overflowed(&self) -> bool {
+        self.overflowed.load(Ordering::Acquire)
+    }
+}
+
+fn stderr_limit_error() -> SessionError {
+    SessionError::ProtocolCorruption(
+        "worker session stderr exceeded the per-request 1 MiB limit".to_string(),
+    )
+}
+
+fn drain_stderr(
+    stderr: std::process::ChildStderr,
+    sender: Sender<LineEvent>,
+    budget: Arc<StderrBudget>,
+) {
     let mut reader = stderr;
-    let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0_u8; 16 * 1024];
     loop {
         match reader.read(&mut chunk) {
             Ok(0) => break,
             Ok(count) => {
-                let available = SESSION_STDERR_LIMIT.saturating_sub(buffer.len());
-                let accepted = available.min(count);
-                buffer.extend_from_slice(&chunk[..accepted]);
-                // 溢出只计数，不阻塞；任一 request 失败时由 diagnostic 体现。
-                if accepted < count {
-                    break;
+                if budget.observe(count) {
+                    // Wake the in-flight reader immediately. Continue draining
+                    // (discarding) until the pool receives this event and kills
+                    // the Job child, so the worker cannot block on a full pipe
+                    // and masquerade as a timeout.
+                    let _ = sender.send(LineEvent::Error(stderr_limit_error()));
                 }
             }
             Err(_) => break,
@@ -441,7 +523,23 @@ impl PythonSession {
         params: SessionParams,
         timeout: Duration,
     ) -> Result<Self, SessionError> {
-        let child = SessionChild::spawn(command)?;
+        Self::start_observed(
+            command,
+            expected,
+            params,
+            &WorkerRssTracker::default(),
+            timeout,
+        )
+    }
+
+    pub(crate) fn start_observed(
+        command: &WorkerCommand,
+        expected: &PythonSessionVersionResponseV1,
+        params: SessionParams,
+        rss_tracker: &WorkerRssTracker,
+        timeout: Duration,
+    ) -> Result<Self, SessionError> {
+        let child = SessionChild::spawn(command, rss_tracker)?;
         let mut session = Self {
             child: Some(child),
             params,
@@ -493,6 +591,11 @@ impl PythonSession {
 
     pub fn requests_served(&self) -> u64 {
         self.requests_served
+    }
+
+    /// Peak memory for this session generation's contained process tree.
+    pub fn peak_rss_bytes(&self) -> Option<u64> {
+        self.child.as_ref().and_then(SessionChild::peak_rss_bytes)
     }
 
     /// 达到任一 recycle 条件（request 数 / idle TTL）时在当前 response 完整
@@ -552,7 +655,16 @@ impl PythonSession {
                 status: PythonSessionResponseStatus::Ok,
                 result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(result))),
                 ..
-            } => Ok(result),
+            } => {
+                result
+                    .validate_for_max_pages(request.max_pages)
+                    .map_err(|message| {
+                        SessionError::ProtocolCorruption(format!(
+                            "session classifier result violates the request page window: {message}"
+                        ))
+                    })?;
+                Ok(result)
+            }
             PythonSessionResponseV1 {
                 status: PythonSessionResponseStatus::Error,
                 error: ai_daily_scanner_contract::Nullable(Some(diagnostic)),
@@ -705,6 +817,520 @@ pub fn session_parse(
     session.dispatch_parse(request, timeout)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PythonSessionTransport {
+    Session,
+    OneShot,
+    NotApplicable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionOperationOutcome<T> {
+    pub value: T,
+    pub transport: PythonSessionTransport,
+    pub attempt_count: u64,
+    pub duration_ms: u64,
+}
+
+#[derive(Debug)]
+pub struct SessionOperationFailure {
+    pub failure: ParseFailure,
+    pub transport: PythonSessionTransport,
+    pub attempt_count: u64,
+    pub duration_ms: u64,
+}
+
+/// Run-level lifecycle counters owned by the shared Python session pool.
+/// Operation attempts stay on each outcome/failure so scheduler metrics and
+/// per-file provenance share one exact source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionPoolStats {
+    pub session_restart_count: u64,
+    pub session_fallback_count: u64,
+    /// `Some(0)` means no session child was started; `None` means Windows Job
+    /// accounting was attempted and failed for at least one child.
+    pub peak_worker_rss_bytes: Option<u64>,
+}
+
+#[derive(Default)]
+struct PoolCounters {
+    session_restart_count: AtomicU64,
+    session_fallback_count: AtomicU64,
+    peak_worker_rss_bytes: AtomicU64,
+    rss_observation_attempted: AtomicBool,
+    rss_observation_failed: AtomicBool,
+}
+
+impl PoolCounters {
+    fn observe_rss(&self, value: Option<u64>) {
+        self.rss_observation_attempted.store(true, Ordering::Relaxed);
+        match value {
+            Some(value) => {
+                self.peak_worker_rss_bytes
+                    .fetch_max(value, Ordering::Relaxed);
+            }
+            None => self.rss_observation_failed.store(true, Ordering::Relaxed),
+        }
+    }
+
+    fn snapshot(&self) -> SessionPoolStats {
+        let attempted = self.rss_observation_attempted.load(Ordering::Relaxed);
+        let failed = self.rss_observation_failed.load(Ordering::Relaxed);
+        SessionPoolStats {
+            session_restart_count: self.session_restart_count.load(Ordering::Relaxed),
+            session_fallback_count: self.session_fallback_count.load(Ordering::Relaxed),
+            peak_worker_rss_bytes: if failed {
+                None
+            } else if attempted {
+                Some(self.peak_worker_rss_bytes.load(Ordering::Relaxed))
+            } else {
+                Some(0)
+            },
+        }
+    }
+}
+
+#[derive(Default)]
+struct SessionSlot {
+    session: Option<PythonSession>,
+    /// A prior generation was retired or failed and the next successful start
+    /// must be counted as one actual replacement.
+    replacement_pending: bool,
+}
+
+/// Shared, bounded pool used by both PDF classification and PDF body parsing.
+/// A slot is checked out for one complete logical operation, preserving the
+/// frozen single-in-flight session contract while classifier/parser waves may
+/// run concurrently across different slots.
+pub struct PythonSessionPool {
+    command: WorkerCommand,
+    expected: PythonSessionVersionResponseV1,
+    python_worker: RegisteredWorker,
+    params: SessionParams,
+    slots: Vec<Mutex<SessionSlot>>,
+    available: Mutex<Vec<usize>>,
+    available_changed: Condvar,
+    counters: PoolCounters,
+    rss_tracker: WorkerRssTracker,
+}
+
+impl PythonSessionPool {
+    pub fn new(
+        registered: RegisteredSession,
+        python_worker: RegisteredWorker,
+        params: SessionParams,
+        rss_tracker: WorkerRssTracker,
+    ) -> Arc<Self> {
+        let concurrency = params.concurrency.max(1);
+        Arc::new(Self {
+            command: registered.command,
+            expected: registered.identity,
+            python_worker,
+            params,
+            slots: (0..concurrency)
+                .map(|_| Mutex::new(SessionSlot::default()))
+                .collect(),
+            available: Mutex::new((0..concurrency).rev().collect()),
+            available_changed: Condvar::new(),
+            counters: PoolCounters::default(),
+            rss_tracker,
+        })
+    }
+
+    pub fn stats(&self) -> SessionPoolStats {
+        for slot in &self.slots {
+            if let Some(session) = lock_unpoison(slot).session.as_ref() {
+                self.observe_rss(session.peak_rss_bytes());
+            }
+        }
+        self.counters.snapshot()
+    }
+
+    fn observe_rss(&self, value: Option<u64>) {
+        self.counters.observe_rss(value);
+        self.rss_tracker.observe_started_child(value);
+    }
+
+    pub fn classify_pdf(
+        &self,
+        request: &PdfClassifierRequestV1,
+        timeout: Duration,
+    ) -> Result<SessionOperationOutcome<PdfClassifierResultV1>, SessionOperationFailure> {
+        if let Err(failure) =
+            crate::parsers::classifier::validate_classifier_source_before(request)
+        {
+            return Err(SessionOperationFailure {
+                failure,
+                transport: PythonSessionTransport::NotApplicable,
+                attempt_count: 0,
+                duration_ms: 0,
+            });
+        }
+        let result = self.execute_operation(
+            &request.file_path,
+            timeout,
+            |session, remaining| session_classify(session, request, remaining),
+            |remaining| {
+                crate::parsers::classifier::classify_pdf_oneshot_observed(
+                    &self.command,
+                    request,
+                    remaining,
+                    Some(&self.rss_tracker),
+                )
+            },
+        )?;
+        if let Err(failure) =
+            crate::parsers::classifier::validate_classifier_source_after(request)
+        {
+            return Err(SessionOperationFailure {
+                failure,
+                transport: result.transport,
+                attempt_count: result.attempt_count,
+                duration_ms: result.duration_ms,
+            });
+        }
+        Ok(result)
+    }
+
+    pub fn parse_pdf(
+        &self,
+        request: &WorkerParseRequest,
+        timeout: Duration,
+    ) -> Result<SessionOperationOutcome<WorkerParseResponse>, SessionOperationFailure> {
+        if let Err(failure) = crate::parsers::validate_worker_request(&self.python_worker, request)
+        {
+            return Err(SessionOperationFailure {
+                failure,
+                transport: PythonSessionTransport::NotApplicable,
+                attempt_count: 0,
+                duration_ms: 0,
+            });
+        }
+        let response = self.execute_operation(
+            &request.file_path,
+            timeout,
+            |session, remaining| {
+                let mut attempt_request = request.clone();
+                attempt_request.remaining_timeout_ms = duration_ms(remaining);
+                session_parse(session, &attempt_request, remaining)
+            },
+            |remaining| {
+                let mut attempt_request = request.clone();
+                attempt_request.remaining_timeout_ms = duration_ms(remaining);
+                crate::parsers::execute_worker_request_observed(
+                    &self.python_worker,
+                    &attempt_request,
+                )
+            },
+        )?;
+        let value = match crate::parsers::validate_session_worker_response(
+            &self.python_worker,
+            request,
+            response.value,
+        ) {
+            Ok(value) => value,
+            Err(failure) => {
+                return Err(SessionOperationFailure {
+                    failure,
+                    transport: response.transport,
+                    attempt_count: response.attempt_count,
+                    duration_ms: response.duration_ms,
+                });
+            }
+        };
+        Ok(SessionOperationOutcome { value, ..response })
+    }
+
+    fn execute_operation<T, SessionCall, OneShotCall>(
+        &self,
+        file_path: &str,
+        timeout: Duration,
+        mut session_call: SessionCall,
+        one_shot_call: OneShotCall,
+    ) -> Result<SessionOperationOutcome<T>, SessionOperationFailure>
+    where
+        SessionCall: FnMut(&mut PythonSession, Duration) -> Result<T, SessionError>,
+        OneShotCall: FnOnce(Duration) -> OneShotExecution<T>,
+    {
+        let deadline_origin = Instant::now();
+        let permit = self.checkout();
+        let mut slot = lock_unpoison(&self.slots[permit.index]);
+        let mut transport_failure_index = 0_u32;
+        let mut session_attempt_count = 0_u64;
+        let mut session_duration_ms = 0_u64;
+        let mut one_shot_call = Some(one_shot_call);
+
+        loop {
+            let remaining = timeout.saturating_sub(deadline_origin.elapsed());
+            if remaining.is_zero() {
+                if let Some(session) = slot.session.as_mut() {
+                    self.observe_rss(session.peak_rss_bytes());
+                    session.kill();
+                    slot.replacement_pending = true;
+                }
+                return Err(operation_failure(
+                    SessionError::Timeout.diagnostic(Some(file_path)),
+                    transport_for_attempts(session_attempt_count, 0),
+                    session_attempt_count,
+                    session_duration_ms,
+                ));
+            }
+
+            if slot
+                .session
+                .as_ref()
+                .is_some_and(PythonSession::recycle_due)
+            {
+                if let Some(session) = slot.session.as_mut() {
+                    self.observe_rss(session.peak_rss_bytes());
+                    session.kill();
+                }
+                slot.session = None;
+                slot.replacement_pending = true;
+            }
+
+            if slot.session.is_none() {
+                match PythonSession::start_observed(
+                    &self.command,
+                    &self.expected,
+                    self.params,
+                    &self.rss_tracker,
+                    remaining,
+                ) {
+                    Ok(session) => {
+                        self.observe_rss(session.peak_rss_bytes());
+                        if slot.replacement_pending {
+                            self.counters
+                                .session_restart_count
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        slot.replacement_pending = false;
+                        slot.session = Some(session);
+                    }
+                    Err(error) => {
+                        // A failed initial spawn/hello is not a replacement and
+                        // did not start the file's logical operation. Preserve
+                        // an existing replacement_pending bit only when a
+                        // previously validated session was actually retired.
+                        match retry_action(&error, transport_failure_index) {
+                            RetryAction::RetrySession => {
+                                transport_failure_index += 1;
+                                continue;
+                            }
+                            RetryAction::OneShot => {
+                                let remaining =
+                                    timeout.saturating_sub(deadline_origin.elapsed());
+                                if remaining.is_zero() {
+                                    return Err(operation_failure(
+                                        SessionError::Timeout.diagnostic(Some(file_path)),
+                                        transport_for_attempts(session_attempt_count, 0),
+                                        session_attempt_count,
+                                        session_duration_ms,
+                                    ));
+                                }
+                                let one_shot = one_shot_call
+                                    .take()
+                                    .expect("one-shot fallback is attempted at most once")(
+                                    remaining,
+                                );
+                                return self.finish_one_shot_fallback(
+                                    session_attempt_count,
+                                    session_duration_ms,
+                                    one_shot,
+                                );
+                            }
+                            RetryAction::GiveUp => {
+                                return Err(operation_failure(
+                                    error.diagnostic(Some(file_path)),
+                                    transport_for_attempts(session_attempt_count, 0),
+                                    session_attempt_count,
+                                    session_duration_ms,
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
+            let remaining = timeout.saturating_sub(deadline_origin.elapsed());
+            if remaining.is_zero() {
+                if let Some(session) = slot.session.as_mut() {
+                    self.observe_rss(session.peak_rss_bytes());
+                    session.kill();
+                    slot.replacement_pending = true;
+                }
+                return Err(operation_failure(
+                    SessionError::Timeout.diagnostic(Some(file_path)),
+                    transport_for_attempts(session_attempt_count, 0),
+                    session_attempt_count,
+                    session_duration_ms,
+                ));
+            }
+            let attempt_started = Instant::now();
+            let outcome = session_call(
+                slot.session.as_mut().expect("session was started above"),
+                remaining,
+            );
+            session_attempt_count = session_attempt_count.saturating_add(1);
+            session_duration_ms = session_duration_ms
+                .saturating_add(observed_duration_ms(attempt_started.elapsed()));
+            match outcome {
+                Ok(result) => {
+                    if let Some(session) = slot.session.as_ref() {
+                        self.observe_rss(session.peak_rss_bytes());
+                    }
+                    return Ok(SessionOperationOutcome {
+                        value: result,
+                        transport: PythonSessionTransport::Session,
+                        attempt_count: session_attempt_count,
+                        duration_ms: session_duration_ms,
+                    });
+                }
+                Err(error) => {
+                    if let Some(session) = slot.session.as_mut() {
+                        self.observe_rss(session.peak_rss_bytes());
+                        session.kill();
+                    }
+                    slot.session = None;
+                    slot.replacement_pending = true;
+                    match retry_action(&error, transport_failure_index) {
+                        RetryAction::RetrySession => {
+                            transport_failure_index += 1;
+                        }
+                        RetryAction::OneShot => {
+                            let remaining =
+                                timeout.saturating_sub(deadline_origin.elapsed());
+                            if remaining.is_zero() {
+                                return Err(operation_failure(
+                                    SessionError::Timeout.diagnostic(Some(file_path)),
+                                    PythonSessionTransport::Session,
+                                    session_attempt_count,
+                                    session_duration_ms,
+                                ));
+                            }
+                            let one_shot = one_shot_call
+                                .take()
+                                .expect("one-shot fallback is attempted at most once")(
+                                remaining,
+                            );
+                            return self.finish_one_shot_fallback(
+                                session_attempt_count,
+                                session_duration_ms,
+                                one_shot,
+                            );
+                        }
+                        RetryAction::GiveUp => {
+                            return Err(operation_failure(
+                                error.diagnostic(Some(file_path)),
+                                PythonSessionTransport::Session,
+                                session_attempt_count,
+                                session_duration_ms,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish_one_shot_fallback<T>(
+        &self,
+        session_attempt_count: u64,
+        session_duration_ms: u64,
+        one_shot: OneShotExecution<T>,
+    ) -> Result<SessionOperationOutcome<T>, SessionOperationFailure> {
+        if one_shot.attempt_count > 0 {
+            self.counters
+                .session_fallback_count
+                .fetch_add(1, Ordering::Relaxed);
+        }
+        let attempt_count = session_attempt_count.saturating_add(one_shot.attempt_count);
+        let duration_ms = session_duration_ms.saturating_add(one_shot.duration_ms);
+        let transport = transport_for_attempts(session_attempt_count, one_shot.attempt_count);
+        match one_shot.outcome {
+            Ok(value) => Ok(SessionOperationOutcome {
+                value,
+                transport,
+                attempt_count,
+                duration_ms,
+            }),
+            Err(failure) => Err(SessionOperationFailure {
+                failure,
+                transport,
+                attempt_count,
+                duration_ms,
+            }),
+        }
+    }
+
+    fn checkout(&self) -> SlotPermit<'_> {
+        let mut available = lock_unpoison(&self.available);
+        loop {
+            if let Some(index) = available.pop() {
+                return SlotPermit { pool: self, index };
+            }
+            available = self
+                .available_changed
+                .wait(available)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+}
+
+fn operation_failure(
+    failure: ParseFailure,
+    transport: PythonSessionTransport,
+    attempt_count: u64,
+    duration_ms: u64,
+) -> SessionOperationFailure {
+    SessionOperationFailure {
+        failure,
+        transport,
+        attempt_count,
+        duration_ms,
+    }
+}
+
+fn transport_for_attempts(
+    session_attempt_count: u64,
+    one_shot_attempt_count: u64,
+) -> PythonSessionTransport {
+    if one_shot_attempt_count > 0 {
+        PythonSessionTransport::OneShot
+    } else if session_attempt_count > 0 {
+        PythonSessionTransport::Session
+    } else {
+        PythonSessionTransport::NotApplicable
+    }
+}
+
+fn observed_duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+struct SlotPermit<'a> {
+    pool: &'a PythonSessionPool,
+    index: usize,
+}
+
+impl Drop for SlotPermit<'_> {
+    fn drop(&mut self) {
+        let mut available = lock_unpoison(&self.pool.available);
+        available.push(self.index);
+        self.pool.available_changed.notify_one();
+    }
+}
+
+fn lock_unpoison<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn duration_ms(duration: Duration) -> u64 {
+    duration.as_millis().max(1).min(u64::MAX as u128) as u64
+}
+
 /// 构造一次 ``classify_pdf_v1`` 的 strict request（与 one-shot 逐字段相同）。
 pub fn build_classify_request(
     request_id: String,
@@ -769,6 +1395,18 @@ mod tests {
         assert_eq!(retry_action(&retryable, 0), RetryAction::RetrySession);
         assert_eq!(retry_action(&retryable, 1), RetryAction::OneShot);
 
+        let source_changed = SessionError::Rejected(PythonOperationDiagnosticV1 {
+            error_code:
+                ai_daily_scanner_contract::PythonOperationErrorCode::SourceVersionChanged,
+            message: "source changed".to_string(),
+            retryable: true,
+            stage: ai_daily_scanner_contract::PythonOperationStage::Parse,
+            file_path: ai_daily_scanner_contract::Nullable(None),
+            backend: ai_daily_scanner_contract::Nullable(None),
+        });
+        assert_eq!(retry_action(&source_changed, 0), RetryAction::GiveUp);
+        assert_eq!(retry_action(&source_changed, 1), RetryAction::GiveUp);
+
         // EOF/start/crash: rebuild once, then one-shot if retryable.
         assert_eq!(retry_action(&SessionError::Eof, 0), RetryAction::RetrySession);
         assert_eq!(retry_action(&SessionError::Eof, 1), RetryAction::OneShot);
@@ -787,6 +1425,147 @@ mod tests {
             retry_action(&SessionError::ProtocolCorruption("x".to_string()), 1),
             RetryAction::GiveUp
         );
+    }
+
+    #[test]
+    fn start_failures_and_unstarted_oneshot_do_not_fabricate_attempts() {
+        let directory = tempfile::tempdir().expect("temporary session root");
+        let command = WorkerCommand {
+            program: directory.path().join("missing-worker.exe"),
+            base_args: Vec::new(),
+            current_dir: None,
+            expected_kind: ai_daily_scanner_contract::WorkerKind::PythonDocument,
+            required_backends: vec!["pdf_text_v1".to_string()],
+            required_extensions: vec![".pdf".to_string()],
+        };
+        let worker_build = "a".repeat(64);
+        let classifier_build = "b".repeat(64);
+        let registered = RegisteredSession {
+            command: command.clone(),
+            identity: PythonSessionVersionResponseV1 {
+                contract: "ai_daily_python_session".to_string(),
+                protocol_version: 1,
+                session_contract_version: SESSION_CONTRACT_VERSION.to_string(),
+                worker_build: worker_build.clone(),
+                classifier_build,
+                supported_operations: vec![
+                    "classify_pdf_v1".to_string(),
+                    "parse_v1".to_string(),
+                ],
+            },
+        };
+        let python_worker = RegisteredWorker {
+            command,
+            identity: ai_daily_scanner_contract::WorkerVersionResponse {
+                contract: "ai_daily_worker".to_string(),
+                protocol_version: 1,
+                worker_kind: ai_daily_scanner_contract::WorkerKind::PythonDocument,
+                worker_contract_version: "ai_daily_worker_v1".to_string(),
+                worker_version: "0.1.0".to_string(),
+                worker_build,
+                supported_backends: vec!["pdf_text_v1".to_string()],
+                supported_extensions: vec![".pdf".to_string()],
+            },
+            rss_tracker: None,
+        };
+        let pool = PythonSessionPool::new(
+            registered,
+            python_worker,
+            SessionParams {
+                concurrency: 1,
+                ..SessionParams::default()
+            },
+            WorkerRssTracker::default(),
+        );
+        let fallback_failure = SessionError::StartFailed.diagnostic(Some("C:\\fixture.pdf"));
+
+        let failure = pool
+            .execute_operation(
+                "C:\\fixture.pdf",
+                Duration::from_secs(1),
+                |_, _| Ok(()),
+                |_| OneShotExecution {
+                    outcome: Err(fallback_failure),
+                    attempt_count: 0,
+                    duration_ms: 0,
+                },
+            )
+            .expect_err("both transports fail before a logical operation starts");
+
+        assert_eq!(failure.transport, PythonSessionTransport::NotApplicable);
+        assert_eq!(failure.attempt_count, 0);
+        assert_eq!(failure.duration_ms, 0);
+        assert_eq!(pool.stats().session_restart_count, 0);
+        assert_eq!(pool.stats().session_fallback_count, 0);
+    }
+
+    #[test]
+    fn stderr_budget_is_per_request_and_reports_the_first_overflow() {
+        let budget = StderrBudget::default();
+        assert!(!budget.observe(SESSION_STDERR_LIMIT));
+        assert!(budget.observe(1));
+        assert!(budget.overflowed());
+        assert!(!budget.observe(1));
+
+        budget.reset();
+        assert!(!budget.overflowed());
+        assert!(!budget.observe(SESSION_STDERR_LIMIT));
+    }
+
+    #[test]
+    fn hello_stderr_overflow_is_reported_without_pipe_deadlock() {
+        let python = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join(if cfg!(windows) {
+                ".venv/Scripts/python.exe"
+            } else {
+                ".venv/bin/python"
+            });
+        if !python.is_file() {
+            return;
+        }
+        let worker_build = "a".repeat(64);
+        let classifier_build = "b".repeat(64);
+        let script = format!(
+            "import json,sys,time; sys.stderr.write('x'*{}); sys.stderr.flush(); time.sleep(0.1); print(json.dumps({{'contract':'ai_daily_python_session','protocol_version':1,'frame':'hello','session_contract_version':'ai_daily_python_session_v1','worker_build':'{}','classifier_build':'{}','supported_operations':['classify_pdf_v1','parse_v1']}}), flush=True); time.sleep(30)",
+            SESSION_STDERR_LIMIT + 1,
+            worker_build,
+            classifier_build,
+        );
+        let command = WorkerCommand {
+            program: python,
+            base_args: vec!["-c".into(), script.into()],
+            current_dir: None,
+            expected_kind: ai_daily_scanner_contract::WorkerKind::PythonDocument,
+            required_backends: Vec::new(),
+            required_extensions: Vec::new(),
+        };
+        let expected = PythonSessionVersionResponseV1 {
+            contract: "ai_daily_python_session".to_string(),
+            protocol_version: 1,
+            session_contract_version: SESSION_CONTRACT_VERSION.to_string(),
+            worker_build,
+            classifier_build,
+            supported_operations: vec![
+                "classify_pdf_v1".to_string(),
+                "parse_v1".to_string(),
+            ],
+        };
+        let started = Instant::now();
+
+        let error = match PythonSession::start(
+            &command,
+            &expected,
+            SessionParams::default(),
+            Duration::from_secs(10),
+        ) {
+            Ok(_) => panic!("stderr overflow must terminate the session handshake"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, SessionError::ProtocolCorruption(_)));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]

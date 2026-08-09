@@ -30,11 +30,12 @@ use crate::artifact::{
 use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
 use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
 use crate::parsers::{
-    document, office, preflight_python_capabilities, register_worker, register_worker_pair,
-    RegisteredWorker, WorkerCommand, WorkerRegistry, WORKER_CONTRACT_VERSION,
-    WORKER_HANDSHAKE_TIMEOUT,
+    document, office, preflight_python_capabilities_observed, register_worker,
+    register_worker_pair_observed, RegisteredWorker, WorkerCommand, WorkerRegistry,
+    WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
 };
 use crate::parsers::classifier::ClassifierPort;
+use crate::process::WorkerRssTracker;
 use crate::scheduler::{
     BudgetedContextScheduler, BudgetedScanOutcome, RealClock, RealGuardVerifier,
     ScheduledRunInput, TerminalIntent, WorkerIdentities,
@@ -399,7 +400,19 @@ fn inspect_run_command_v2(request: &InspectRunRequest) -> Result<CommandOutput, 
                     )
                 }
                 Some(crate::context_audit::AuditProvenanceVersion::FullV2) => {
-                    match crate::inspect::assemble_inspect_v2(request, &snapshot) {
+                    if snapshot.files_v2.iter().any(|row| {
+                        row.parse_transport.is_none() || row.parse_attempt_count.is_none()
+                    }) {
+                        crate::inspect::inspect_v2_error(
+                            request,
+                            ErrorCode::InspectV2ProvenanceUnavailable,
+                            "historical full-v2 run lacks per-file execution provenance"
+                                .to_string(),
+                            false,
+                            Some(snapshot.run_status),
+                        )
+                    } else {
+                        match crate::inspect::assemble_inspect_v2(request, &snapshot) {
                         Ok(response) => return CommandOutput::success(&response),
                         Err(message) => crate::inspect::inspect_v2_error(
                             request,
@@ -408,6 +421,7 @@ fn inspect_run_command_v2(request: &InspectRunRequest) -> Result<CommandOutput, 
                             false,
                             Some(snapshot.run_status),
                         ),
+                        }
                     }
                 }
                 None => crate::inspect::inspect_v2_error(
@@ -614,6 +628,7 @@ fn execute_active_build(
     heartbeat: &mut LeaseHeartbeat,
     started_at: Instant,
 ) -> Result<CommandOutput, EngineShellError> {
+    let rss_tracker = WorkerRssTracker::default();
     // ---- bounded parallel worker handshakes (spec Solution run.rs order) ----
     // spec Part 5.3: `worker_handshake_ms` is the whole-batch parallel preflight
     // wall span from one monotonic clock.
@@ -631,10 +646,19 @@ fn execute_active_build(
         && profile.parse.pdf.backend == "pdf_text_v1";
     let (office_python_pair, capability_pair) = std::thread::scope(|scope| {
         let office_python = scope.spawn(|| {
-            register_worker_pair(&office_command, &python_command, WORKER_HANDSHAKE_TIMEOUT)
+            register_worker_pair_observed(
+                &office_command,
+                &python_command,
+                WORKER_HANDSHAKE_TIMEOUT,
+                &rss_tracker,
+            )
         });
         let capabilities = if profile_allows_pdf {
-            let pair = preflight_python_capabilities(&python_command, WORKER_HANDSHAKE_TIMEOUT);
+            let pair = preflight_python_capabilities_observed(
+                &python_command,
+                WORKER_HANDSHAKE_TIMEOUT,
+                &rss_tracker,
+            );
             (Some(pair.0), Some(pair.1))
         } else {
             (None, None)
@@ -673,6 +697,7 @@ fn execute_active_build(
     // 结果（spec Part 7.1）。profile 允许 PDF 时 classifier-version 缺失即
     // preflight fail closed；session capability absent 走 v1 one-shot 不报错。
     let mut classifier_worker: Option<crate::parsers::RegisteredClassifier> = None;
+    let mut session_worker: Option<crate::parsers::RegisteredSession> = None;
     let mut capability_errors: Vec<Diagnostic> = Vec::new();
     if python_worker.is_some() {
         if let Some(result) = classifier_result {
@@ -684,8 +709,9 @@ fn execute_active_build(
         // spec Part 7.1：session capability absent（严格 exit-2 transport）→ 整轮
         // v1 one-shot，不计 degradation；其他 handshake failure 才计入错误。
         if let Some(result) = session_result {
-            if let Err(failure) = result {
-                capability_errors.push(failure.diagnostic);
+            match result {
+                Ok(session) => session_worker = session,
+                Err(failure) => capability_errors.push(failure.diagnostic),
             }
         }
     }
@@ -734,7 +760,9 @@ fn execute_active_build(
             heartbeat,
             handshake_errors,
             error,
-            elapsed_summary(started_at), worker_handshake_ms
+            elapsed_summary(started_at),
+            worker_handshake_ms,
+            &rss_tracker,
         );
     }
     let (Some(office_worker), Some(python_worker)) = (office_worker, python_worker) else {
@@ -751,9 +779,38 @@ fn execute_active_build(
                 false,
                 DiagnosticStage::Process,
             ),
-            elapsed_summary(started_at), worker_handshake_ms
+            elapsed_summary(started_at),
+            worker_handshake_ms,
+            &rss_tracker,
         );
     };
+    if let Some(session) = &session_worker {
+        let classifier_build_matches = classifier_worker.as_ref().is_some_and(|classifier| {
+            session.identity.classifier_build == classifier.identity.classifier_build
+        });
+        if session.identity.worker_build != python_worker.identity.worker_build
+            || !classifier_build_matches
+        {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                Vec::new(),
+                diagnostic(
+                    ErrorCode::WorkerHandshakeFailed,
+                    "session capability build does not match python/classifier preflight"
+                        .to_string(),
+                    false,
+                    DiagnosticStage::Process,
+                ),
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
+            );
+        }
+    }
     let registry = WorkerRegistry {
         office: Some(office_worker.clone()),
         python_document: Some(python_worker.clone()),
@@ -775,7 +832,9 @@ fn execute_active_build(
                     false,
                     DiagnosticStage::Cache,
                 ),
-                elapsed_summary(started_at), worker_handshake_ms
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
             );
         }
     };
@@ -795,7 +854,9 @@ fn execute_active_build(
                 heartbeat,
                 Vec::new(),
                 error,
-                summary, worker_handshake_ms
+                summary,
+                worker_handshake_ms,
+                &rss_tracker,
             );
         }
     };
@@ -809,8 +870,19 @@ fn execute_active_build(
 
     // ---- assemble + execute the deep-module scheduler ----
     let classifier_command = document::worker_command(&request.adapters);
-    let classifier_port = ClassifierPort::new(classifier_command);
-    let parser_port = ProductionParser::new(profile, registry);
+    let session_pool = session_worker.clone().map(|registered| {
+        crate::session::PythonSessionPool::new(
+            registered,
+            python_worker.clone(),
+            crate::session::SessionParams::from_profile_v2(v2_profile),
+            rss_tracker.clone(),
+        )
+    });
+    let classifier_port = match &session_pool {
+        Some(session) => ClassifierPort::with_session(classifier_command, session.clone()),
+        None => ClassifierPort::with_rss_tracker(classifier_command, rss_tracker.clone()),
+    };
+    let parser_port = ProductionParser::new(profile, registry, session_pool.clone());
     let cache_port = StoreCachePort::new(
         PathBuf::from(&request.scan_db_path),
         route_stacks,
@@ -833,7 +905,9 @@ fn execute_active_build(
                     false,
                     DiagnosticStage::Context,
                 ),
-                elapsed_summary(started_at), worker_handshake_ms
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
             );
         }
     };
@@ -853,7 +927,9 @@ fn execute_active_build(
                     false,
                     DiagnosticStage::Cache,
                 ),
-                elapsed_summary(started_at), worker_handshake_ms
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
             );
         }
     };
@@ -868,7 +944,9 @@ fn execute_active_build(
                 heartbeat,
                 warnings,
                 error.diagnostic(DiagnosticStage::Internal),
-                elapsed_summary(started_at), worker_handshake_ms
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
             );
         }
     };
@@ -885,6 +963,9 @@ fn execute_active_build(
         classifier_build: classifier_worker
             .as_ref()
             .map(|classifier| classifier.identity.classifier_build.clone()),
+        python_session_contract: session_worker
+            .as_ref()
+            .map(|session| session.identity.session_contract_version.clone()),
     };
 
     // ---- snapshot fast path (spec Part 5.4) ----
@@ -915,7 +996,9 @@ fn execute_active_build(
                         false,
                         DiagnosticStage::Cache,
                     ),
-                    elapsed_summary(started_at), worker_handshake_ms
+                    elapsed_summary(started_at),
+                    worker_handshake_ms,
+                    &rss_tracker,
                 );
             }
         },
@@ -944,7 +1027,9 @@ fn execute_active_build(
                     false,
                     DiagnosticStage::Cache,
                 ),
-                elapsed_summary(started_at), worker_handshake_ms
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
             );
         }
     };
@@ -961,7 +1046,9 @@ fn execute_active_build(
                 heartbeat,
                 warnings,
                 error.diagnostic(DiagnosticStage::Cache),
-                elapsed_summary(started_at), worker_handshake_ms
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
             );
         }
     };
@@ -975,10 +1062,12 @@ fn execute_active_build(
             heartbeat,
             &discovery,
             &context_profile_hash,
+            &classifier_identity,
             hit,
             discovery_duration_ms,
             snapshot_lookup_ms,
             worker_handshake_ms,
+            &rss_tracker,
             started_at,
         );
     }
@@ -1008,7 +1097,9 @@ fn execute_active_build(
                 heartbeat,
                 warnings,
                 failure.diagnostic,
-                elapsed_summary(started_at), worker_handshake_ms
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
             );
         }
     };
@@ -1020,7 +1111,7 @@ fn execute_active_build(
         Box::new(clock),
         Box::new(RealGuardVerifier),
     );
-    let outcome = match scheduler.execute(input) {
+    let mut outcome = match scheduler.execute(input) {
         Ok(outcome) => outcome,
         Err(failure) => {
             return finish_active_error(
@@ -1031,10 +1122,15 @@ fn execute_active_build(
                 heartbeat,
                 warnings,
                 failure.diagnostic,
-                elapsed_summary(started_at), worker_handshake_ms
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
             );
         }
     };
+    let session_stats = session_pool.as_ref().map(|session| session.stats());
+    let peak_worker_rss_bytes = rss_tracker.peak_worker_rss_bytes();
+    apply_worker_rss_observation(&mut outcome, peak_worker_rss_bytes);
 
     // ---- terminal finalization (the ONLY linearization point) ----
     // spec Part 2.3: a committed Error run MUST carry a context_runs row
@@ -1069,6 +1165,7 @@ fn execute_active_build(
                     .unwrap_or_else(empty_summary),
                 worker_handshake_ms,
                 discovery_duration_ms,
+                &rss_tracker,
             );
         }
     };
@@ -1097,6 +1194,7 @@ fn execute_active_build(
                     .unwrap_or_else(empty_summary),
                 worker_handshake_ms,
                 discovery_duration_ms,
+                &rss_tracker,
             );
         }
     };
@@ -1123,6 +1221,8 @@ fn execute_active_build(
         snapshot_hit: None,
         execution_metrics: Some(assemble_scheduler_execution_metrics(
             &outcome.execution_metrics,
+            session_stats.as_ref(),
+            peak_worker_rss_bytes,
             worker_handshake_ms,
             discovery_duration_ms,
             snapshot_lookup_ms,
@@ -1185,6 +1285,28 @@ fn execute_active_build(
             Some(active.scan_run_id()),
         ),
     }
+}
+
+fn apply_worker_rss_observation(
+    outcome: &mut BudgetedScanOutcome,
+    peak_worker_rss_bytes: Option<u64>,
+) {
+    if peak_worker_rss_bytes.is_some() {
+        return;
+    }
+    outcome.diagnostics.push(RunDiagnosticRecord {
+        severity: DiagnosticSeverity::Warning,
+        diagnostic: worker_rss_unavailable_diagnostic(),
+    });
+}
+
+fn worker_rss_unavailable_diagnostic() -> Diagnostic {
+    diagnostic(
+        ErrorCode::WorkerRssUnavailable,
+        "worker peak RSS could not be observed".to_string(),
+        false,
+        DiagnosticStage::Process,
+    )
 }
 
 /// Rebuilds the frozen `ContextEnvelope` from a scheduler outcome. The caller
@@ -1367,6 +1489,8 @@ fn build_error_context_record(
 /// `envelope_rebuild_ms`/`terminal_rows_written` are filled by `store.finalize`.
 fn assemble_scheduler_execution_metrics(
     metrics: &crate::scheduler::ExecutionMetrics,
+    session: Option<&crate::session::SessionPoolStats>,
+    peak_worker_rss_bytes: Option<u64>,
     worker_handshake_ms: u64,
     discovery_ms: u64,
     snapshot_lookup_ms: u64,
@@ -1390,8 +1514,8 @@ fn assemble_scheduler_execution_metrics(
         parse_cache_all_hit: Nullable(metrics.parse_cache_all_hit),
         classification_cache_all_hit: Nullable(metrics.classification_cache_all_hit),
         stage_deadline_exhausted_count: metrics.stage_deadline_exhausted_count,
-        session_restart_count: 0,
-        session_fallback_count: 0,
+        session_restart_count: session.map_or(0, |stats| stats.session_restart_count),
+        session_fallback_count: session.map_or(0, |stats| stats.session_fallback_count),
         classify_attempt_count: metrics.classify_attempt_count,
         parse_attempt_count: metrics.parse_attempt_count,
         reserved_chars: metrics.reserved_chars,
@@ -1404,7 +1528,7 @@ fn assemble_scheduler_execution_metrics(
         deadline_precommit_elapsed_ms: metrics.deadline_precommit_elapsed_ms,
         envelope_rebuild_ms: 0,
         terminal_rows_written: 0,
-        peak_worker_rss_bytes: Nullable(None),
+        peak_worker_rss_bytes: Nullable(peak_worker_rss_bytes),
     }
 }
 
@@ -1421,6 +1545,7 @@ fn assemble_snapshot_execution_metrics(
     discovery_ms: u64,
     snapshot_lookup_ms: u64,
     deadline_precommit_elapsed_ms: u64,
+    peak_worker_rss_bytes: Option<u64>,
 ) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
     let guards = crate::scheduler::source_guard_metrics(discovery);
     ai_daily_scanner_contract::ExecutionMetricsV2 {
@@ -1456,7 +1581,7 @@ fn assemble_snapshot_execution_metrics(
         deadline_precommit_elapsed_ms,
         envelope_rebuild_ms: 0,
         terminal_rows_written: 0,
-        peak_worker_rss_bytes: Nullable(None),
+        peak_worker_rss_bytes: Nullable(peak_worker_rss_bytes),
     }
 }
 
@@ -1468,6 +1593,7 @@ fn assemble_engine_error_execution_metrics(
     worker_handshake_ms: u64,
     discovery_ms: u64,
     discovery_observed_file_count: u64,
+    peak_worker_rss_bytes: Option<u64>,
 ) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
     ai_daily_scanner_contract::ExecutionMetricsV2 {
         discovery_observed_file_count,
@@ -1502,7 +1628,7 @@ fn assemble_engine_error_execution_metrics(
         deadline_precommit_elapsed_ms: 0,
         envelope_rebuild_ms: 0,
         terminal_rows_written: 0,
-        peak_worker_rss_bytes: Nullable(None),
+        peak_worker_rss_bytes: Nullable(peak_worker_rss_bytes),
     }
 }
 
@@ -1521,10 +1647,12 @@ fn finalize_snapshot_hit(
     heartbeat: &mut LeaseHeartbeat,
     discovery: &DiscoveryReport,
     context_profile_hash: &str,
+    classifier_identity: &ClassifierIdentity,
     hit: SnapshotHit,
     discovery_duration_ms: u64,
     snapshot_lookup_ms: u64,
     worker_handshake_ms: u64,
+    rss_tracker: &WorkerRssTracker,
     started_at: Instant,
 ) -> Result<CommandOutput, EngineShellError> {
     let artifact = match store.load_artifact(hit.artifact_id) {
@@ -1560,7 +1688,7 @@ fn finalize_snapshot_hit(
             );
         }
     };
-    let file_results = snapshot_file_results(&artifact);
+    let file_results = snapshot_file_results(&artifact, Some(classifier_identity));
     let decisions: Vec<ContextDecisionRecord> = artifact
         .decision_rows
         .iter()
@@ -1635,6 +1763,12 @@ fn finalize_snapshot_hit(
                 );
             }
         };
+    let peak_worker_rss_bytes = rss_tracker.peak_worker_rss_bytes();
+    let warnings: Vec<Diagnostic> = peak_worker_rss_bytes
+        .is_none()
+        .then(worker_rss_unavailable_diagnostic)
+        .into_iter()
+        .collect();
     let envelope = ContextEnvelope {
         contract: "ai_daily_context".to_string(),
         protocol_version: 1,
@@ -1646,7 +1780,7 @@ fn finalize_snapshot_hit(
         summary: summary.clone(),
         scan_run_id: Nullable(Some(active.scan_run_id())),
         context_run_id: Nullable(Some(active.context_run_id())),
-        warnings: Vec::new(),
+        warnings: warnings.clone(),
         error: Nullable(None),
     };
     let envelope_json = match canonical_envelope_json(&envelope) {
@@ -1677,7 +1811,13 @@ fn finalize_snapshot_hit(
         inventory,
         cache_writes: Vec::new(),
         file_results,
-        diagnostics: Vec::new(),
+        diagnostics: warnings
+            .into_iter()
+            .map(|diagnostic| RunDiagnosticRecord {
+                severity: DiagnosticSeverity::Warning,
+                diagnostic,
+            })
+            .collect(),
         stage_metrics,
         extension_metrics,
         context: Some(context),
@@ -1695,6 +1835,7 @@ fn finalize_snapshot_hit(
             discovery_duration_ms,
             snapshot_lookup_ms,
             elapsed_ms(started_at),
+            peak_worker_rss_bytes,
         )),
     };
     heartbeat.stop();
@@ -1828,7 +1969,13 @@ fn artifact_file_rows(
                     status: classification.status,
                     page_count: classification.page_count,
                     result_examined_pages: classification.result_examined_pages,
-                    nominal_charged_pages: v2_profile.parse.pdf.max_pages,
+                    nominal_charged_pages: if classification.status
+                        == ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget
+                    {
+                        0
+                    } else {
+                        v2_profile.parse.pdf.max_pages
+                    },
                     classifier_build: classifier_build.clone(),
                     classifier_profile_hash: classifier_profile_hash.to_string(),
                 });
@@ -1894,7 +2041,15 @@ fn snapshot_inventory(
 /// Current-run rows for a snapshot hit (spec Part 5.2): `parse_cache_status`
 /// becomes `snapshot`, `cache_miss_reason=''`, durations/attempts 0 — never the
 /// source run's miss/hit or old timings.
-fn snapshot_file_results(artifact: &ArtifactDraft) -> Vec<FileResultRecord> {
+fn snapshot_file_results(
+    artifact: &ArtifactDraft,
+    classifier_identity: Option<&ClassifierIdentity>,
+) -> Vec<FileResultRecord> {
+    let decision_reason_by_identity: std::collections::HashMap<&str, &str> = artifact
+        .decision_rows
+        .iter()
+        .map(|row| (row.file_identity.as_str(), row.reason.as_str()))
+        .collect();
     artifact
         .file_rows
         .iter()
@@ -1916,9 +2071,66 @@ fn snapshot_file_results(artifact: &ArtifactDraft) -> Vec<FileResultRecord> {
             failure_class: String::new(),
             fallback_backend: String::new(),
             fallback_reason_code: String::new(),
+            parse_transport: ai_daily_scanner_contract::ParseTransport::Snapshot,
+            parse_attempt_count: 0,
+            pdf_classification: snapshot_classification_audit(
+                row.classifier.as_ref(),
+                decision_reason_by_identity
+                    .get(row.file_identity.as_str())
+                    .copied(),
+                classifier_identity,
+            ),
             error: None,
         })
         .collect()
+}
+
+fn snapshot_classification_audit(
+    provenance: Option<&PdfClassificationProvenanceV1>,
+    decision_reason: Option<&str>,
+    classifier_identity: Option<&ClassifierIdentity>,
+) -> Option<ai_daily_scanner_contract::PdfClassificationAuditV1> {
+    let reconstructed;
+    let provenance = match provenance {
+        Some(value) => value,
+        None if decision_reason == Some("pdf_classification_page_quota_exhausted") => {
+            let identity = classifier_identity?;
+            reconstructed = PdfClassificationProvenanceV1 {
+                status: ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget,
+                page_count: None,
+                result_examined_pages: Some(0),
+                nominal_charged_pages: 0,
+                classifier_build: identity.build.clone(),
+                classifier_profile_hash: identity.profile_hash.clone(),
+            };
+            &reconstructed
+        }
+        None => return None,
+    };
+    let not_eligible = provenance.status
+        == ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget;
+    Some(ai_daily_scanner_contract::PdfClassificationAuditV1 {
+        status: provenance.status,
+        page_count: Nullable(provenance.page_count),
+        classification_cache_status: if not_eligible {
+            ai_daily_scanner_contract::ClassificationCacheStatus::NotEligible
+        } else {
+            ai_daily_scanner_contract::ClassificationCacheStatus::Snapshot
+        },
+        classification_cache_miss_reason: String::new(),
+        result_examined_pages: Nullable(provenance.result_examined_pages),
+        run_inspected_pages: Nullable(Some(0)),
+        nominal_charged_pages: provenance.nominal_charged_pages,
+        duration_ms: 0,
+        transport: if not_eligible {
+            ai_daily_scanner_contract::ClassificationTransport::NotApplicable
+        } else {
+            ai_daily_scanner_contract::ClassificationTransport::Snapshot
+        },
+        attempt_count: 0,
+        classifier_build: provenance.classifier_build.clone(),
+        classifier_profile_hash: provenance.classifier_profile_hash.clone(),
+    })
 }
 
 fn snapshot_worker_lane(lane: &str) -> AuditWorkerLane {
@@ -2137,6 +2349,7 @@ fn finish_active_error(
     error: Diagnostic,
     summary: ContextSummary,
     worker_handshake_ms: u64,
+    rss_tracker: &WorkerRssTracker,
 ) -> Result<CommandOutput, EngineShellError> {
     heartbeat.stop();
     if let Some(background_error) = heartbeat.take_background_error() {
@@ -2158,6 +2371,7 @@ fn finish_active_error(
         summary,
         worker_handshake_ms,
         discovery_ms,
+        rss_tracker,
     )
 }
 
@@ -2172,7 +2386,16 @@ fn persist_active_error_without_heartbeat(
     summary: ContextSummary,
     worker_handshake_ms: u64,
     discovery_ms: u64,
+    rss_tracker: &WorkerRssTracker,
 ) -> Result<CommandOutput, EngineShellError> {
+    let peak_worker_rss_bytes = rss_tracker.peak_worker_rss_bytes();
+    if peak_worker_rss_bytes.is_none()
+        && !warnings
+            .iter()
+            .any(|warning| warning.error_code == ErrorCode::WorkerRssUnavailable)
+    {
+        warnings.push(worker_rss_unavailable_diagnostic());
+    }
     warnings.truncate(100_000);
     let envelope = ContextEnvelope {
         contract: "ai_daily_context".to_string(),
@@ -2233,6 +2456,7 @@ fn persist_active_error_without_heartbeat(
             worker_handshake_ms,
             discovery_ms,
             summary.source_file_count,
+            peak_worker_rss_bytes,
         )),
     };
     let now_ms = match current_time_millis() {
@@ -2588,5 +2812,171 @@ mod tests {
                     .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')));
             }
         }
+    }
+
+    #[test]
+    fn snapshot_reports_the_live_handshake_peak_rss() {
+        let metrics =
+            assemble_snapshot_execution_metrics(&[], 0, 0, 1, 2, 3, 4, Some(64 * 1024));
+        assert_eq!(metrics.peak_worker_rss_bytes.0, Some(64 * 1024));
+    }
+
+    fn successful_outcome_for_rss_test() -> BudgetedScanOutcome {
+        BudgetedScanOutcome {
+            scan_run_id: 1,
+            terminal_intent: TerminalIntent::Success,
+            inventory: Vec::new(),
+            file_results: Vec::new(),
+            parse_cache_receipts: Vec::new(),
+            classification_cache_receipts: Vec::new(),
+            classifications: std::collections::BTreeMap::new(),
+            diagnostics: Vec::new(),
+            stage_metrics: Vec::new(),
+            extension_metrics: Vec::new(),
+            context: Some(ContextRunRecord {
+                context_profile_hash: "a".repeat(64),
+                status: RunStatus::Success,
+                final_context: String::new(),
+                context_sha256: crate::store::sha256_hex(b""),
+                summary: empty_summary(),
+                decisions: Vec::new(),
+            }),
+            execution_metrics: crate::scheduler::ExecutionMetrics::default(),
+        }
+    }
+
+    #[test]
+    fn unavailable_worker_rss_adds_warning_without_changing_success() {
+        let mut outcome = successful_outcome_for_rss_test();
+
+        apply_worker_rss_observation(&mut outcome, None);
+
+        assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
+        assert_eq!(
+            outcome.context.as_ref().map(|context| context.status),
+            Some(RunStatus::Success)
+        );
+        assert_eq!(outcome.diagnostics.len(), 1);
+        assert_eq!(
+            outcome.diagnostics[0].severity,
+            DiagnosticSeverity::Warning
+        );
+        assert_eq!(
+            outcome.diagnostics[0].diagnostic.error_code,
+            ErrorCode::WorkerRssUnavailable
+        );
+        assert_eq!(
+            outcome.diagnostics[0].diagnostic.stage,
+            DiagnosticStage::Process
+        );
+    }
+
+    #[test]
+    fn observed_worker_rss_keeps_success_without_warning() {
+        for peak_worker_rss_bytes in [0, 64 * 1024 * 1024] {
+            let mut outcome = successful_outcome_for_rss_test();
+
+            apply_worker_rss_observation(&mut outcome, Some(peak_worker_rss_bytes));
+
+            assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
+            assert_eq!(
+                outcome.context.as_ref().map(|context| context.status),
+                Some(RunStatus::Success)
+            );
+            assert!(outcome.diagnostics.is_empty());
+        }
+    }
+
+    #[test]
+    fn snapshot_not_classified_by_budget_stays_not_eligible() {
+        let classifier = PdfClassificationProvenanceV1 {
+            status: ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget,
+            page_count: None,
+            result_examined_pages: Some(0),
+            nominal_charged_pages: 0,
+            classifier_build: "a".repeat(64),
+            classifier_profile_hash: "b".repeat(64),
+        };
+        let artifact = ArtifactDraft::new(
+            true,
+            String::new(),
+            SemanticSummary {
+                source_file_count: 1,
+                success_count: 0,
+                timeout_count: 0,
+                included_file_count: 0,
+                omitted_file_count: 1,
+                error_file_count: 0,
+                input_chars: 0,
+                output_chars: 0,
+                reserved_chars: 0,
+                rendered_chars: 0,
+            },
+            vec![ArtifactFileRow {
+                file_identity: "fixture:budget.pdf".to_string(),
+                relative_path: "budget.pdf".to_string(),
+                legacy_source_version: "mtime_ns=1:size=1".to_string(),
+                source_guard_kind: Some("content_sha256_v1".to_string()),
+                source_guard_sha256: Some("c".repeat(64)),
+                parse_profile_hash: "d".repeat(64),
+                parse_status: ParseStatus::NotParsed,
+                parser_backend: "not_parsed".to_string(),
+                worker_lane: "not_parsed".to_string(),
+                truncated: false,
+                content_sha256: crate::store::sha256_hex(b""),
+                classifier: Some(classifier),
+            }],
+            vec![ArtifactDecisionRow {
+                file_identity: "fixture:budget.pdf".to_string(),
+                relative_path: "budget.pdf".to_string(),
+                action: ai_daily_scanner_contract::ContextAction::Omit,
+                reason: "pdf_classification_page_quota_exhausted".to_string(),
+                priority: 0,
+                input_chars: 0,
+                output_chars: 0,
+                truncated: false,
+                error_code: String::new(),
+            }],
+        )
+        .expect("eligible artifact");
+
+        let rows = snapshot_file_results(&artifact, None);
+        let audit = rows[0]
+            .pdf_classification
+            .as_ref()
+            .expect("snapshot classification audit");
+        assert_eq!(
+            audit.classification_cache_status,
+            ai_daily_scanner_contract::ClassificationCacheStatus::NotEligible
+        );
+        assert_eq!(
+            audit.transport,
+            ai_daily_scanner_contract::ClassificationTransport::NotApplicable
+        );
+        assert_eq!(audit.attempt_count, 0);
+
+        // Historical eligible artifacts created before zero-execution
+        // provenance was stored can be reconstructed only from the frozen
+        // quota decision and the current preflight classifier identity.
+        let mut historical = artifact.clone();
+        historical.file_rows[0].classifier = None;
+        let identity = ClassifierIdentity {
+            contract: CLASSIFIER_CONTRACT_VERSION.to_string(),
+            build: "a".repeat(64),
+            profile_hash: "b".repeat(64),
+        };
+        let rows = snapshot_file_results(&historical, Some(&identity));
+        let audit = rows[0]
+            .pdf_classification
+            .as_ref()
+            .expect("quota decision permits controlled reconstruction");
+        assert_eq!(audit.status, ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget);
+
+        historical.decision_rows[0].reason = "semantic_file_quota_exhausted".to_string();
+        let rows = snapshot_file_results(&historical, Some(&identity));
+        assert!(
+            rows[0].pdf_classification.is_none(),
+            "a generic unclassified PDF must never be guessed as budget-excluded"
+        );
     }
 }

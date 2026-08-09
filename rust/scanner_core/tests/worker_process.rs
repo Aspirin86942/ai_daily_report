@@ -1,4 +1,6 @@
-use ai_daily_scanner_core::process::{run_process, ProcessError, ProcessSpec};
+use ai_daily_scanner_core::process::{
+    run_process, ProcessError, ProcessSpec, WorkerRssTracker,
+};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,6 +57,31 @@ fn worker_stdout_stderr_and_exit_code_are_captured() {
     assert_eq!(output.exit_code, 7);
     assert_eq!(output.stdout, "中文 payload".as_bytes());
     assert_eq!(output.stderr, b"audit");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_job_peak_is_recorded_in_the_shared_run_tracker() {
+    let Some(python) = python_executable() else {
+        return;
+    };
+    let tracker = WorkerRssTracker::default();
+    let mut spec = ProcessSpec::new(python, Duration::from_secs(5));
+    spec.args = vec![
+        OsString::from("-c"),
+        OsString::from("payload=bytearray(4*1024*1024); print(len(payload))"),
+    ];
+    spec.rss_tracker = Some(tracker.clone());
+
+    let output = run_process(&spec).expect("tracked worker should complete");
+
+    assert_eq!(output.exit_code, 0);
+    assert!(
+        tracker
+            .peak_worker_rss_bytes()
+            .is_some_and(|peak| peak > 0),
+        "a started contained child must publish a non-zero Job peak"
+    );
 }
 
 #[test]

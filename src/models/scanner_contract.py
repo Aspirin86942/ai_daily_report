@@ -567,6 +567,7 @@ class Diagnostic(ContractModel):
         "CACHE_MISS_REASON_PROJECTED_AS_NEW_FILE",
         "SOURCE_GUARD_NOT_PROJECTED",
         "INSPECT_V2_PROVENANCE_UNAVAILABLE",
+        "WORKER_RSS_UNAVAILABLE",
         "INTERNAL_ERROR",
     ]
     message: NonEmpty4096
@@ -1121,6 +1122,31 @@ ClassificationTransport = Literal["session", "one_shot", "snapshot", "not_applic
 ReuseKind = Literal["context_snapshot", "parse_cache", "none"]
 Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
+_PARSE_CACHE_MISS_REASONS_V2 = frozenset(
+    {
+        "new_file",
+        "source_version_changed",
+        "parser_identity_changed",
+        "entry_absent_or_evicted",
+    }
+)
+_CLASSIFICATION_CACHE_MISS_REASONS_V2 = frozenset(
+    {
+        "new_file",
+        "source_version_changed",
+        "classifier_identity_changed",
+        "entry_absent_or_evicted",
+    }
+)
+_BODY_PARSER_LANES = {
+    "light_text_v1": "rust_core",
+    "rust_office_oxide_v1": "rust_office_process",
+    "rust_xlsx_bounded_v1": "rust_office_process",
+    "pdf_text_v1": "python_document_process",
+    "python_office_v1": "python_document_process",
+    "python_sharepoint_text_v1": "python_document_process",
+}
+
 
 class CacheRetentionPolicy(ContractModel):
     policy_version: Literal["cache_retention_v1"]
@@ -1205,10 +1231,101 @@ class PdfClassificationAuditV1(ContractModel):
 
     @model_validator(mode="after")
     def validate_cache_miss_reason(self) -> "PdfClassificationAuditV1":
-        if self.classification_cache_status == "miss" and not self.classification_cache_miss_reason:
-            raise ValueError("classification cache miss requires a miss reason")
+        if self.classification_cache_status == "miss":
+            if (
+                self.classification_cache_miss_reason
+                not in _CLASSIFICATION_CACHE_MISS_REASONS_V2
+            ):
+                raise ValueError(
+                    "classification cache miss reason is not in the v2 allowlist"
+                )
         if self.classification_cache_status != "miss" and self.classification_cache_miss_reason:
             raise ValueError("non-miss classification cache must have an empty miss reason")
+
+        def require_zero_execution(transport: ClassificationTransport) -> None:
+            if (
+                self.run_inspected_pages != 0
+                or self.duration_ms != 0
+                or self.transport != transport
+                or self.attempt_count != 0
+            ):
+                raise ValueError(
+                    "non-executing classification provenance must have zero execution"
+                )
+
+        if self.status in {"text_in_parse_window", "no_text_in_parse_window"}:
+            if self.page_count is None or self.result_examined_pages is None:
+                raise ValueError("text/no-text classification requires page provenance")
+            if self.page_count == 0:
+                raise ValueError("text/no-text classification page_count must be positive")
+            if self.nominal_charged_pages == 0:
+                raise ValueError("classified PDF requires a positive nominal page charge")
+            window_pages = min(self.page_count, self.nominal_charged_pages)
+            if self.status == "text_in_parse_window":
+                if not 1 <= self.result_examined_pages <= window_pages:
+                    raise ValueError("text classification pages must fit the parse window")
+            elif self.result_examined_pages != window_pages:
+                raise ValueError("no-text classification must examine the complete window")
+            if self.classification_cache_status == "fresh":
+                require_zero_execution("not_applicable")
+            elif self.classification_cache_status == "snapshot":
+                require_zero_execution("snapshot")
+            elif self.classification_cache_status == "miss":
+                if self.transport not in {"session", "one_shot"} or self.attempt_count == 0:
+                    raise ValueError(
+                        "executed classification miss requires a started transport"
+                    )
+            else:
+                raise ValueError("text/no-text classification cannot be not_eligible")
+        elif self.status in {"unknown", "error"}:
+            if (
+                self.classification_cache_status != "miss"
+                or self.transport not in {"session", "one_shot"}
+                or self.attempt_count == 0
+                or self.nominal_charged_pages == 0
+            ):
+                raise ValueError(
+                    "unknown/error classification requires an executed miss"
+                )
+            if (
+                self.result_examined_pages is not None
+                and self.result_examined_pages > self.nominal_charged_pages
+            ):
+                raise ValueError(
+                    "typed failure result pages exceed the nominal page charge"
+                )
+            if (
+                self.page_count is not None
+                and self.result_examined_pages is not None
+                and self.result_examined_pages
+                > min(self.page_count, self.nominal_charged_pages)
+            ):
+                raise ValueError("typed failure result pages exceed the parse window")
+        else:
+            if (
+                self.page_count is not None
+                or self.result_examined_pages != 0
+                or self.nominal_charged_pages != 0
+                or self.classification_cache_status != "not_eligible"
+            ):
+                raise ValueError(
+                    "not_classified_by_budget requires the not_eligible zero-page shape"
+                )
+            require_zero_execution("not_applicable")
+        if self.run_inspected_pages is not None:
+            max_run_pages = self.attempt_count * self.nominal_charged_pages
+            if self.run_inspected_pages > max_run_pages:
+                raise ValueError(
+                    "run inspected pages exceed the started attempt page budget"
+                )
+            if (
+                self.classification_cache_status == "miss"
+                and self.result_examined_pages is not None
+                and self.run_inspected_pages < self.result_examined_pages
+            ):
+                raise ValueError(
+                    "observable run pages cannot be smaller than result pages"
+                )
         return self
 
 
@@ -1255,8 +1372,8 @@ class PdfClassifierRequestV1(ContractModel):
 
 class PdfClassifierResultV1(ContractModel):
     status: PdfClassifierStatus
-    page_count: PositiveInt | None
-    result_examined_pages: PositiveInt | None
+    page_count: NonNegativeInt | None
+    result_examined_pages: NonNegativeInt | None
     diagnostic: PythonOperationDiagnosticV1 | None
 
     @model_validator(mode="after")
@@ -1266,6 +1383,10 @@ class PdfClassifierResultV1(ContractModel):
                 raise ValueError("text/no-text result must not carry a diagnostic")
             if self.page_count is None or self.result_examined_pages is None:
                 raise ValueError("text/no-text result requires page counts")
+            if self.page_count == 0 or self.result_examined_pages == 0:
+                raise ValueError("text/no-text result page counts must be positive")
+            if self.result_examined_pages > self.page_count:
+                raise ValueError("result examined pages cannot exceed page_count")
         else:
             if self.diagnostic is None:
                 raise ValueError("unknown/error result requires a diagnostic")
@@ -1361,6 +1482,68 @@ class PythonSessionResponseV1(ContractModel):
         return self
 
 
+def _validate_v2_parse_provenance(
+    *,
+    parse_status: str,
+    parser_backend: str,
+    worker_lane: str,
+    parse_cache_status: str,
+    classification_status: str | None,
+) -> None:
+    metadata = parser_backend == "pdf_metadata_v1" and worker_lane == "rust_core"
+    not_parsed = parser_backend == "not_parsed" and worker_lane == "not_parsed"
+    body_parser = _BODY_PARSER_LANES.get(parser_backend) == worker_lane
+    if not (metadata or not_parsed or body_parser):
+        raise ValueError("parser backend and worker lane are not a frozen v2 route")
+
+    if classification_status == "no_text_in_parse_window":
+        if parse_status != "success" or not metadata:
+            raise ValueError(
+                "no-text classification requires metadata-only success provenance"
+            )
+    elif classification_status in {"unknown", "error"}:
+        allowed_status = (
+            parse_status in {"error", "timeout"}
+            if classification_status == "unknown"
+            else parse_status == "error"
+        )
+        if (
+            not allowed_status
+            or not not_parsed
+            or parse_cache_status != "not_applicable"
+        ):
+            raise ValueError(
+                "classifier failure must map to not_parsed provenance and Error/Timeout"
+            )
+    elif classification_status == "not_classified_by_budget":
+        if parse_status != "not_parsed" or not not_parsed:
+            raise ValueError(
+                "classification budget exclusion must map to not_parsed provenance"
+            )
+    if metadata and classification_status != "no_text_in_parse_window":
+        raise ValueError(
+            "pdf_metadata_v1 is only valid for no-text classification provenance"
+        )
+
+    if parse_cache_status in {"fresh", "miss"}:
+        if not body_parser:
+            raise ValueError("fresh/miss parse provenance requires a body parser")
+    elif parse_cache_status == "snapshot":
+        if parse_status == "success" and not (body_parser or metadata):
+            raise ValueError("snapshot success requires parser or metadata provenance")
+        if parse_status == "not_parsed" and not not_parsed:
+            raise ValueError("snapshot NotParsed requires not_parsed provenance")
+    elif parse_status == "success":
+        if not metadata:
+            raise ValueError(
+                "not_applicable Success requires pdf_metadata_v1/rust_core"
+            )
+    elif not not_parsed:
+        raise ValueError(
+            "not_applicable NotParsed/Error/Timeout requires not_parsed provenance"
+        )
+
+
 class FileAuditV2(ContractModel):
     relative_path: RelativePath
     file_identity: NonEmpty4096
@@ -1384,7 +1567,7 @@ class FileAuditV2(ContractModel):
     fallback_backend: Annotated[str, Field(max_length=1024)]
     fallback_reason_code: Annotated[str, Field(max_length=1024)]
     parse_transport: ParseTransport
-    parse_attempt_count: NonNegativeInt
+    parse_attempt_count: Annotated[int, Field(ge=0, le=3)]
     final_diagnostic: Diagnostic | None
     pdf_classification: PdfClassificationAuditV1 | None
 
@@ -1395,10 +1578,54 @@ class FileAuditV2(ContractModel):
                 raise ValueError("unavailable source guard must have a null hash")
         elif self.source_guard_sha256 is None:
             raise ValueError("source guard kind requires a sha256")
-        if self.parse_cache_status == "miss" and not self.cache_miss_reason:
-            raise ValueError("parse cache miss requires a miss reason")
+        if self.parse_cache_status == "miss":
+            if self.cache_miss_reason not in _PARSE_CACHE_MISS_REASONS_V2:
+                raise ValueError("parse cache miss reason is not in the v2 allowlist")
         if self.parse_cache_status != "miss" and self.cache_miss_reason:
             raise ValueError("non-miss parse cache must have an empty miss reason")
+        if self.parse_cache_status == "fresh":
+            if (
+                self.parse_status != "success"
+                or self.parse_transport != "not_applicable"
+                or self.parse_attempt_count != 0
+                or self.parse_duration_ms != 0
+            ):
+                raise ValueError(
+                    "fresh parse-cache provenance must have zero execution"
+                )
+        elif self.parse_cache_status == "snapshot":
+            if (
+                self.parse_status in {"error", "timeout"}
+                or self.parse_transport != "snapshot"
+                or self.parse_attempt_count != 0
+                or self.parse_duration_ms != 0
+            ):
+                raise ValueError("snapshot parse provenance must have zero execution")
+        elif self.parse_cache_status == "miss":
+            if (
+                self.parse_status not in {"success", "error", "timeout"}
+                or self.parse_transport
+                not in {"session", "one_shot", "rust_in_process"}
+                or self.parse_attempt_count == 0
+            ):
+                raise ValueError("parse miss requires a started parser transport")
+        elif (
+            self.parse_transport != "not_applicable"
+            or self.parse_attempt_count != 0
+            or self.parse_duration_ms != 0
+        ):
+            raise ValueError("not_applicable parse provenance must have zero execution")
+        _validate_v2_parse_provenance(
+            parse_status=self.parse_status,
+            parser_backend=self.parser_backend,
+            worker_lane=self.worker_lane,
+            parse_cache_status=self.parse_cache_status,
+            classification_status=(
+                self.pdf_classification.status
+                if self.pdf_classification is not None
+                else None
+            ),
+        )
         if self.parse_status in {"error", "timeout"} and self.final_diagnostic is None:
             raise ValueError("error/timeout file audit requires a final diagnostic")
         if self.parse_status in {"success", "not_parsed"} and self.final_diagnostic is not None:

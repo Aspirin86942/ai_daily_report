@@ -7,9 +7,9 @@
 //! projection warnings (output-only, never written back to full diagnostics).
 
 use ai_daily_scanner_contract::{
-    AuditWorkerLane, ClassificationCacheStatus, ClassificationTransport, Diagnostic,
-    DiagnosticStage, ErrorCode, FileAuditV2, InspectRunRequest, InspectRunResponseV2,
-    InspectStatus, Nullable, ParseCacheStatus, ParseStatus, ParseTransport,
+    ClassificationCacheStatus, ClassificationTransport, Diagnostic, DiagnosticStage, ErrorCode,
+    FileAuditV2, InspectRunRequest, InspectRunResponseV2, InspectStatus, Nullable,
+    ParseCacheStatus,
     PdfClassificationAuditV1, PdfClassificationStatus, ReuseKind, RunStatus, SourceGuardKind,
     Validate,
 };
@@ -69,28 +69,15 @@ pub fn assemble_inspect_v2(
     if snapshot.audit_provenance_version != Some(AuditProvenanceVersion::FullV2) {
         return Err("full_v2 provenance is required for inspect v2".to_string());
     }
-    // Run-level classifier identity (spec Part 3): every non-null
-    // `pdf_classification` must carry the current preflight-verified classifier
-    // build/profile hash. For `not_classified_by_budget` files there is no
-    // artifact classifier row, so the first classified file's identity is used
-    // (it is constant for the whole run).
-    let run_classifier_identity = snapshot
-        .files_v2
-        .iter()
-        .find_map(|row| {
-            row.classifier
-                .as_ref()
-                .map(|classifier| {
-                    (
-                        classifier.classifier_build.clone(),
-                        classifier.classifier_profile_hash.clone(),
-                    )
-                })
-        });
+    if snapshot.files_v2.iter().any(|row| {
+        row.parse_transport.is_none() || row.parse_attempt_count.is_none()
+    }) {
+        return Err("full_v2 file execution provenance is unavailable".to_string());
+    }
     let files = snapshot
         .files_v2
         .iter()
-        .map(|row| assemble_file_audit_v2(row, run_classifier_identity.as_ref()))
+        .map(assemble_file_audit_v2)
         .collect::<Result<Vec<_>, _>>()?;
     for file in &files {
         file.validate()
@@ -219,12 +206,8 @@ fn empty_summary() -> ai_daily_scanner_contract::ContextSummary {
 }
 
 /// Assembles one strict `FileAuditV2` from the persisted full_v2 row
-/// (spec Part 5.3 field/order + nullability). `run_classifier_identity` is the
-/// run-level classifier build/profile for `not_classified_by_budget` files.
-fn assemble_file_audit_v2(
-    row: &FileAuditV2Source,
-    run_classifier_identity: Option<&(String, String)>,
-) -> Result<FileAuditV2, String> {
+/// (spec Part 5.3 field/order + nullability).
+fn assemble_file_audit_v2(row: &FileAuditV2Source) -> Result<FileAuditV2, String> {
     let source_guard_kind = match row.source_guard_kind.as_deref() {
         Some(kind) => parse_source_guard_kind(kind)?,
         None => SourceGuardKind::Unavailable,
@@ -237,38 +220,25 @@ fn assemble_file_audit_v2(
         Some(value) => return Err(format!("unknown parse_cache_status: {value}")),
         None => return Err("full_v2 file row has no parse_cache_status".to_string()),
     };
-    let parse_transport = match row.parse_cache_status.as_deref() {
-        Some("snapshot") => ParseTransport::Snapshot,
-        _ if row.parse_status == ParseStatus::NotParsed => ParseTransport::NotApplicable,
-        _ => match row.worker_lane {
-            AuditWorkerLane::RustCore => ParseTransport::RustInProcess,
-            AuditWorkerLane::RustOfficeProcess | AuditWorkerLane::PythonDocumentProcess => {
-                ParseTransport::OneShot
-            }
-            AuditWorkerLane::NotParsed => ParseTransport::NotApplicable,
-        },
-    };
-    let parse_attempt_count = match row.parse_cache_status.as_deref() {
-        Some("snapshot") | Some("fresh") => 0,
-        _ if matches!(
-            row.parse_status,
-            ParseStatus::Success | ParseStatus::Error | ParseStatus::Timeout
-        ) =>
-        {
-            1
-        }
-        _ => 0,
-    };
+    let parse_transport = row
+        .parse_transport
+        .ok_or_else(|| "full_v2 file execution provenance is unavailable".to_string())?;
+    let parse_attempt_count = row
+        .parse_attempt_count
+        .ok_or_else(|| "full_v2 file execution provenance is unavailable".to_string())?;
     // spec Part 5.3/Part 3: the immutable artifact provenance only maps to a
     // snapshot audit when THIS current row is actually a snapshot row. A cold
     // run's own inspect must never stamp snapshot identity onto real execution
     // (its run pages/duration are not persisted), so `pdf_classification` is
     // null for miss/not_applicable rows.
-    let pdf_classification = match row.classifier.as_ref() {
-        Some(provenance) if row.parse_cache_status.as_deref() == Some("snapshot") => {
-            assemble_snapshot_classification(provenance)
-        }
-        _ => assemble_not_classified(row, run_classifier_identity),
+    let pdf_classification = match row.classification_execution.as_ref() {
+        Some(execution) => Some(execution.clone()),
+        None => match row.classifier.as_ref() {
+            Some(provenance) if row.parse_cache_status.as_deref() == Some("snapshot") => {
+                assemble_snapshot_classification(provenance)
+            }
+            _ => None,
+        },
     };
     if let Some(classification) = &pdf_classification {
         classification.validate().map_err(|message| {
@@ -324,43 +294,22 @@ fn assemble_snapshot_classification(
             classifier_build: provenance.classifier_build.clone(),
             classifier_profile_hash: provenance.classifier_profile_hash.clone(),
         }),
-        _ => None,
+        PdfClassificationStatus::NotClassifiedByBudget => Some(PdfClassificationAuditV1 {
+            status: provenance.status,
+            page_count: Nullable(None),
+            classification_cache_status: ClassificationCacheStatus::NotEligible,
+            classification_cache_miss_reason: String::new(),
+            result_examined_pages: Nullable(Some(0)),
+            run_inspected_pages: Nullable(Some(0)),
+            nominal_charged_pages: 0,
+            duration_ms: 0,
+            transport: ClassificationTransport::NotApplicable,
+            attempt_count: 0,
+            classifier_build: provenance.classifier_build.clone(),
+            classifier_profile_hash: provenance.classifier_profile_hash.clone(),
+        }),
+        PdfClassificationStatus::Unknown | PdfClassificationStatus::Error => None,
     }
-}
-
-/// A PDF with no classifier provenance row on the snapshot artifact was not
-/// granted a classification page slot (`not_classified_by_budget`, spec Part 3).
-/// Identity fields come from the run-level classifier identity; if that is not
-/// available the audit is left null rather than fabricating an identity.
-fn assemble_not_classified(
-    row: &FileAuditV2Source,
-    run_classifier_identity: Option<&(String, String)>,
-) -> Option<PdfClassificationAuditV1> {
-    if row.file_type != ".pdf" || row.classifier.is_some() {
-        return None;
-    }
-    // Snapshot rows carry the run context; non-snapshot rows leave
-    // pdf_classification null (no persisted classification provenance).
-    if row.parse_cache_status.as_deref() != Some("snapshot") {
-        return None;
-    }
-    let Some((build, profile)) = run_classifier_identity else {
-        return None;
-    };
-    Some(PdfClassificationAuditV1 {
-        status: PdfClassificationStatus::NotClassifiedByBudget,
-        page_count: Nullable(None),
-        classification_cache_status: ClassificationCacheStatus::NotEligible,
-        classification_cache_miss_reason: String::new(),
-        result_examined_pages: Nullable(Some(0)),
-        run_inspected_pages: Nullable(Some(0)),
-        nominal_charged_pages: 0,
-        duration_ms: 0,
-        transport: ClassificationTransport::NotApplicable,
-        attempt_count: 0,
-        classifier_build: build.clone(),
-        classifier_profile_hash: profile.clone(),
-    })
 }
 
 fn parse_source_guard_kind(value: &str) -> Result<SourceGuardKind, String> {

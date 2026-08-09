@@ -3003,6 +3003,7 @@ fn compute_terminal_rows_written(batch: &FinalizationBatch) -> u64 {
     rows = rows.saturating_add(batch.inventory.len() as u64);
     rows = rows.saturating_add(batch.cache_writes.len() as u64);
     rows = rows.saturating_add(batch.file_results.len() as u64);
+    rows = rows.saturating_add(batch.file_results.len() as u64); // scan_file_execution_v2
     rows = rows.saturating_add(batch.diagnostics.len() as u64);
     rows = rows.saturating_add(batch.stage_metrics.len() as u64);
     rows = rows.saturating_add(batch.extension_metrics.len() as u64);
@@ -3031,6 +3032,7 @@ fn compute_audit_size(batch: &FinalizationBatch) -> i64 {
     total += batch.inventory.len() as i64 * 256;
     for record in &batch.file_results {
         total += record.relative_path.len() as i64 + 256;
+        total += file_execution_audit_size(record, batch.snapshot_hit.is_some());
     }
     for record in &batch.diagnostics {
         total += record.diagnostic.message.len() as i64 + 160;
@@ -3045,6 +3047,73 @@ fn compute_audit_size(batch: &FinalizationBatch) -> i64 {
             total += record.decision.relative_path.len() as i64 + 160;
         }
     }
+    total
+}
+
+fn file_execution_audit_size(record: &FileResultRecord, snapshot_rows: bool) -> i64 {
+    const INTEGER_BYTES: i64 = 8;
+    const NULL_MARKER_BYTES: i64 = 1;
+
+    let text_bytes = |value: &str| i64::try_from(value.len()).unwrap_or(i64::MAX);
+    let nullable_integer_bytes = |value: Option<u64>| {
+        if value.is_some() {
+            INTEGER_BYTES
+        } else {
+            NULL_MARKER_BYTES
+        }
+    };
+    let parse_transport = if snapshot_rows {
+        "snapshot".to_string()
+    } else {
+        inventory::enum_text(&record.parse_transport)
+    };
+    let mut total = 64_i64
+        .saturating_add(INTEGER_BYTES)
+        .saturating_add(text_bytes(&record.file_identity))
+        .saturating_add(text_bytes(&parse_transport))
+        .saturating_add(INTEGER_BYTES);
+
+    let Some(classification) = record.pdf_classification.as_ref() else {
+        return total.saturating_add(12 * NULL_MARKER_BYTES);
+    };
+    let classification_cache_status = if snapshot_rows
+        && classification.status
+            != ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget
+    {
+        "snapshot".to_string()
+    } else {
+        inventory::enum_text(&classification.classification_cache_status)
+    };
+    let classification_miss_reason = if snapshot_rows {
+        ""
+    } else {
+        classification.classification_cache_miss_reason.as_str()
+    };
+    let classification_transport = if snapshot_rows
+        && classification.status
+            != ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget
+    {
+        "snapshot".to_string()
+    } else {
+        inventory::enum_text(&classification.transport)
+    };
+    total = total
+        .saturating_add(text_bytes(&inventory::enum_text(&classification.status)))
+        .saturating_add(nullable_integer_bytes(classification.page_count.0))
+        .saturating_add(text_bytes(&classification_cache_status))
+        .saturating_add(text_bytes(classification_miss_reason))
+        .saturating_add(nullable_integer_bytes(
+            classification.result_examined_pages.0,
+        ))
+        .saturating_add(nullable_integer_bytes(
+            classification.run_inspected_pages.0,
+        ))
+        .saturating_add(INTEGER_BYTES)
+        .saturating_add(INTEGER_BYTES)
+        .saturating_add(text_bytes(&classification_transport))
+        .saturating_add(INTEGER_BYTES)
+        .saturating_add(text_bytes(&classification.classifier_build))
+        .saturating_add(text_bytes(&classification.classifier_profile_hash));
     total
 }
 
@@ -3737,7 +3806,9 @@ fn validate_finalization(
     }
     let mut file_results_by_identity = std::collections::HashMap::new();
     for record in &batch.file_results {
-        record.validate().map_err(StoreError::InvalidRequest)?;
+        record
+            .validate_for_persistence(batch.snapshot_hit.is_some())
+            .map_err(StoreError::InvalidRequest)?;
         let inventory = inventory_by_identity
             .get(record.file_identity.as_str())
             .ok_or_else(|| {
@@ -4817,7 +4888,9 @@ mod tests {
     use ai_daily_discovery::DiscoveredFileOut;
     use ai_daily_scanner_contract::{
         AdapterPaths, AuditWorkerLane, CacheMissReason, CacheStatus, ContextAction,
-        ContextDecision, DiagnosticStage, ParseStatus, RawScannerProfileV1, ReportMode,
+        ClassificationCacheStatus, ClassificationTransport, ContextDecision, DiagnosticStage,
+        ParseStatus, ParseTransport, PdfClassificationAuditV1, PdfClassificationStatus,
+        RawScannerProfileV1, ReportMode,
     };
     use tempfile::TempDir;
 
@@ -4989,8 +5062,70 @@ mod tests {
             failure_class: String::new(),
             fallback_backend: String::new(),
             fallback_reason_code: String::new(),
+            parse_transport: ParseTransport::RustInProcess,
+            parse_attempt_count: 1,
+            pdf_classification: None,
             error: None,
         }
+    }
+
+    #[test]
+    fn file_result_validation_rejects_impossible_execution_provenance() {
+        let source = "mtime_ns=100:size=5";
+        let profile_hash = "a".repeat(64);
+
+        let mut fresh_with_execution =
+            success_file_result("file-a", source, &profile_hash, "hello");
+        fresh_with_execution.cache_status = CacheStatus::Fresh;
+        fresh_with_execution.cache_miss_reason = CacheMissReason::None;
+        fresh_with_execution.parse_transport = ParseTransport::OneShot;
+        assert!(fresh_with_execution.validate().is_err());
+
+        let mut miss_without_execution =
+            success_file_result("file-a", source, &profile_hash, "hello");
+        miss_without_execution.parse_transport = ParseTransport::NotApplicable;
+        miss_without_execution.parse_attempt_count = 0;
+        miss_without_execution.primary_duration_ms = 0;
+        miss_without_execution.parse_duration_ms = 0;
+        assert!(miss_without_execution.validate().is_err());
+    }
+
+    #[test]
+    fn audit_size_counts_the_execution_child_payload() {
+        let source = "mtime_ns=100:size=5";
+        let profile_hash = "a".repeat(64);
+        let mut batch = error_batch(&ActiveRun {
+            scan_run_id: 1,
+            attempt_number: 1,
+            owner_id: "owner".to_string(),
+            request_id: "00000000-0000-4000-8000-000000000099".to_string(),
+        });
+        batch.file_results = vec![success_file_result(
+            "file-a",
+            source,
+            &profile_hash,
+            "hello",
+        )];
+        let parse_only_size = compute_audit_size(&batch);
+        batch.file_results[0].pdf_classification = Some(PdfClassificationAuditV1 {
+            status: PdfClassificationStatus::TextInParseWindow,
+            page_count: Nullable(Some(2)),
+            classification_cache_status: ClassificationCacheStatus::Miss,
+            classification_cache_miss_reason: "classifier_identity_changed".to_string(),
+            result_examined_pages: Nullable(Some(1)),
+            run_inspected_pages: Nullable(Some(1)),
+            nominal_charged_pages: 2,
+            duration_ms: 3,
+            transport: ClassificationTransport::Session,
+            attempt_count: 1,
+            classifier_build: "b".repeat(64),
+            classifier_profile_hash: "c".repeat(64),
+        });
+
+        assert!(
+            compute_audit_size(&batch) > parse_only_size,
+            "classification execution child fields must contribute to audit_size_bytes"
+        );
     }
 
     fn cache_record(
@@ -5659,6 +5794,9 @@ mod tests {
                 failure_class: "parser_failed".to_string(),
                 fallback_backend: String::new(),
                 fallback_reason_code: String::new(),
+                parse_transport: ParseTransport::RustInProcess,
+                parse_attempt_count: 1,
+                pdf_classification: None,
                 error: Some(file_error),
             }],
             diagnostics: vec![RunDiagnosticRecord {
@@ -5765,6 +5903,50 @@ mod tests {
         assert_eq!(v2.artifact_id.0, None, "error run has no artifact");
         assert_eq!(v2.execution_metrics.worker_handshake_ms, 5);
         assert_eq!(v2.execution_metrics.discovery_ms, 2);
+
+        let rows_written: i64 = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT terminal_rows_written FROM scan_execution_metrics WHERE scan_run_id=?1",
+                [active.scan_run_id() as i64],
+                |row| row.get(0),
+            )
+            .expect("terminal row count");
+        assert_eq!(
+            rows_written, 14,
+            "one scan_file_execution_v2 child row must be included"
+        );
+
+        // A historical full-v2 database amended with an empty execution child
+        // table must keep default v1 inspect usable. V2 fails closed with the
+        // dedicated provenance-unavailable code instead of fabricating values
+        // or classifying the otherwise valid run as corrupt.
+        harness
+            .store
+            .connection
+            .execute(
+                "DELETE FROM scan_file_execution_v2 WHERE scan_run_id=?1",
+                [active.scan_run_id() as i64],
+            )
+            .expect("simulate pre-amendment full-v2 run");
+        let historical = harness
+            .store
+            .inspect_run(active.scan_run_id(), false)
+            .expect("v1 inspect remains available");
+        assert_eq!(historical.files.len(), 1);
+        assert_eq!(historical.files_v2[0].parse_transport, None);
+        assert_eq!(historical.files_v2[0].parse_attempt_count, None);
+
+        let input = serde_json::to_vec(&request).expect("inspect request JSON");
+        let output = crate::dispatch_with_response_version("inspect-run", &input, 2)
+            .expect("v2 inspect response");
+        assert_eq!(output.exit_code, 1);
+        let value: serde_json::Value = serde_json::from_str(&output.json).expect("v2 JSON");
+        assert_eq!(
+            value.pointer("/error/error_code").and_then(serde_json::Value::as_str),
+            Some("INSPECT_V2_PROVENANCE_UNAVAILABLE")
+        );
     }
 
     #[test]
@@ -6180,6 +6362,9 @@ mod tests {
             failure_class: "parser_failed".to_string(),
             fallback_backend: String::new(),
             fallback_reason_code: String::new(),
+            parse_transport: ParseTransport::RustInProcess,
+            parse_attempt_count: 1,
+            pdf_classification: None,
             error: Some(diagnostic),
         });
         harness.store.finalize(&active, &batch, 2).unwrap();
@@ -6309,6 +6494,9 @@ mod tests {
             failure_class: String::new(),
             fallback_backend: String::new(),
             fallback_reason_code: String::new(),
+            parse_transport: ParseTransport::NotApplicable,
+            parse_attempt_count: 0,
+            pdf_classification: None,
             error: None,
         });
         harness.store.finalize(&active, &batch, 2).unwrap();

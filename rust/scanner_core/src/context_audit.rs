@@ -1,10 +1,10 @@
 //! Scanner evidence normalization, persistence DTO assembly, and inspect snapshots.
 
 use ai_daily_scanner_contract::{
-    AuditWorkerLane, CacheMissReason, CacheStatus, ContextAction, ContextDecision,
-    ContextProfile, ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode,
-    ExecutionMetricsV2, ExtensionMetric, FileAudit, NormalizedScannerProfileV1, Nullable,
-    ParseStatus, PdfClassificationStatus, RunStatus, StageMetric, StageName, Validate,
+    AuditWorkerLane, CacheMissReason, CacheStatus, ContextAction, ContextDecision, ContextProfile,
+    ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, ExecutionMetricsV2,
+    ExtensionMetric, FileAudit, NormalizedScannerProfileV1, Nullable, ParseStatus, ParseTransport,
+    PdfClassificationAuditV1, PdfClassificationStatus, RunStatus, StageMetric, StageName, Validate,
 };
 use rusqlite::{OptionalExtension, Transaction};
 use serde::Serialize;
@@ -99,6 +99,9 @@ pub fn assemble_scan_audit(
                     failure_class: "deterministic".to_string(),
                     fallback_backend: String::new(),
                     fallback_reason_code: String::new(),
+                    parse_transport: ParseTransport::NotApplicable,
+                    parse_attempt_count: 0,
+                    pdf_classification: None,
                     error: Some(diagnostic.clone()),
                 });
                 context_evidence.push(ContextFileEvidence {
@@ -141,6 +144,9 @@ pub fn assemble_scan_audit(
                     failure_class: String::new(),
                     fallback_backend: String::new(),
                     fallback_reason_code: String::new(),
+                    parse_transport: ParseTransport::NotApplicable,
+                    parse_attempt_count: 0,
+                    pdf_classification: None,
                     error: None,
                 });
                 context_evidence.push(ContextFileEvidence {
@@ -351,6 +357,15 @@ fn normalize_parser_result(
         failure_class,
         fallback_backend,
         fallback_reason_code,
+        parse_transport: match worker_lane {
+            AuditWorkerLane::RustCore => ParseTransport::RustInProcess,
+            AuditWorkerLane::RustOfficeProcess | AuditWorkerLane::PythonDocumentProcess => {
+                ParseTransport::OneShot
+            }
+            AuditWorkerLane::NotParsed => ParseTransport::NotApplicable,
+        },
+        parse_attempt_count: parsed.attempt_count,
+        pdf_classification: None,
         error: final_error.clone(),
     };
     let context_evidence = ContextFileEvidence {
@@ -587,8 +602,13 @@ pub struct FileAuditV2Source {
     pub failure_class: String,
     pub fallback_backend: String,
     pub fallback_reason_code: String,
+    /// `None` only for historical full-v2 rows created before the execution
+    /// child table amendment. V1 inspect remains usable; v2 fails closed.
+    pub parse_transport: Option<ParseTransport>,
+    pub parse_attempt_count: Option<u64>,
     pub final_diagnostic: Option<Diagnostic>,
     pub classifier: Option<PdfClassificationProvenanceV1>,
+    pub classification_execution: Option<PdfClassificationAuditV1>,
 }
 
 /// Assembles the strict `execution_metrics` object (spec Part 5.3) from the
@@ -1376,11 +1396,20 @@ fn load_file_audits_v2(
                 fr.error_file_path, fr.error_backend,
                 af.classifier_status, af.classifier_page_count,
                 af.classifier_result_examined_pages, af.classifier_nominal_charged_pages,
-                af.classifier_build, af.classifier_profile_hash
+                af.classifier_build, af.classifier_profile_hash,
+                fx.parse_transport, fx.parse_attempt_count,
+                fx.classification_status, fx.classification_page_count,
+                fx.classification_cache_status, fx.classification_cache_miss_reason,
+                fx.classification_result_examined_pages, fx.classification_run_inspected_pages,
+                fx.classification_nominal_charged_pages, fx.classification_duration_ms,
+                fx.classification_transport, fx.classification_attempt_count,
+                fx.classifier_build, fx.classifier_profile_hash
          FROM scan_file_results fr
          LEFT JOIN file_inventory fi ON fi.file_identity = fr.file_identity
          LEFT JOIN context_artifact_files af
              ON af.file_identity = fr.file_identity AND af.artifact_id = ?2
+         LEFT JOIN scan_file_execution_v2 fx
+             ON fx.scan_run_id = fr.scan_run_id AND fx.file_identity = fr.file_identity
          WHERE fr.scan_run_id = ?1
          ORDER BY lower(fr.relative_path), fr.relative_path, fr.file_identity",
     )
@@ -1419,6 +1448,20 @@ fn load_file_audits_v2(
                 row.get::<_, Option<i64>>(27)?,
                 row.get::<_, Option<String>>(28)?,
                 row.get::<_, Option<String>>(29)?,
+                row.get::<_, Option<String>>(30)?,
+                row.get::<_, Option<i64>>(31)?,
+                row.get::<_, Option<String>>(32)?,
+                row.get::<_, Option<i64>>(33)?,
+                row.get::<_, Option<String>>(34)?,
+                row.get::<_, Option<String>>(35)?,
+                row.get::<_, Option<i64>>(36)?,
+                row.get::<_, Option<i64>>(37)?,
+                row.get::<_, Option<i64>>(38)?,
+                row.get::<_, Option<i64>>(39)?,
+                row.get::<_, Option<String>>(40)?,
+                row.get::<_, Option<i64>>(41)?,
+                row.get::<_, Option<String>>(42)?,
+                row.get::<_, Option<String>>(43)?,
             ))
         })
         .map_err(InspectAuditError::Sql)?
@@ -1492,6 +1535,105 @@ fn load_file_audits_v2(
                 ));
             }
         };
+        let (parse_transport, parse_attempt_count) = match (row.30.as_deref(), row.31) {
+            (Some(transport), Some(attempt_count)) => (
+                Some(parse_enum(transport, "file v2 parse_transport")?),
+                Some(u64::try_from(attempt_count).map_err(|_| {
+                    InspectAuditError::RunCorrupt(
+                        "file v2 parse_attempt_count is negative".to_string(),
+                    )
+                })?),
+            ),
+            (None, None) => (None, None),
+            _ => {
+                return Err(InspectAuditError::RunCorrupt(
+                    "file execution provenance columns are inconsistent".to_string(),
+                ));
+            }
+        };
+        let classification_execution = match (
+            row.32.as_deref(),
+            row.33,
+            row.34.as_deref(),
+            row.35.as_deref(),
+            row.36,
+            row.37,
+            row.38,
+            row.39,
+            row.40.as_deref(),
+            row.41,
+            row.42.as_deref(),
+            row.43.as_deref(),
+        ) {
+            (
+                Some(status),
+                page_count,
+                Some(cache_status),
+                Some(cache_miss_reason),
+                result_pages,
+                run_pages,
+                Some(nominal_pages),
+                Some(duration_ms),
+                Some(transport),
+                Some(attempt_count),
+                Some(build),
+                Some(profile),
+            ) => {
+                let audit = PdfClassificationAuditV1 {
+                    status: parse_enum(status, "classification execution status")?,
+                    page_count: Nullable(to_positive_u64(
+                        page_count,
+                        "classification execution page_count",
+                    )?),
+                    classification_cache_status: parse_enum(
+                        cache_status,
+                        "classification execution cache_status",
+                    )?,
+                    classification_cache_miss_reason: cache_miss_reason.to_string(),
+                    result_examined_pages: Nullable(to_positive_u64(
+                        result_pages,
+                        "classification execution result pages",
+                    )?),
+                    run_inspected_pages: Nullable(to_positive_u64(
+                        run_pages,
+                        "classification execution run pages",
+                    )?),
+                    nominal_charged_pages: u64::try_from(nominal_pages).map_err(|_| {
+                        InspectAuditError::RunCorrupt(
+                            "classification execution nominal pages is negative".to_string(),
+                        )
+                    })?,
+                    duration_ms: u64::try_from(duration_ms).map_err(|_| {
+                        InspectAuditError::RunCorrupt(
+                            "classification execution duration is negative".to_string(),
+                        )
+                    })?,
+                    transport: parse_enum(
+                        transport,
+                        "classification execution transport",
+                    )?,
+                    attempt_count: u64::try_from(attempt_count).map_err(|_| {
+                        InspectAuditError::RunCorrupt(
+                            "classification execution attempt count is negative".to_string(),
+                        )
+                    })?,
+                    classifier_build: build.to_string(),
+                    classifier_profile_hash: profile.to_string(),
+                };
+                audit.validate().map_err(|message| {
+                    InspectAuditError::RunCorrupt(format!(
+                        "classification execution audit is invalid: {message}"
+                    ))
+                })?;
+                Some(audit)
+            }
+            (None, None, None, None, None, None, None, None, None, None, None, None) => None,
+            _ => {
+                return Err(InspectAuditError::RunCorrupt(
+                    "classification execution columns are inconsistent".to_string(),
+                ));
+            }
+        };
         rows.push(FileAuditV2Source {
             relative_path: row.0,
             file_identity: row.1,
@@ -1511,8 +1653,11 @@ fn load_file_audits_v2(
             failure_class: row.15,
             fallback_backend: row.16,
             fallback_reason_code: row.17,
+            parse_transport,
+            parse_attempt_count,
             final_diagnostic,
             classifier,
+            classification_execution,
         });
     }
     Ok(rows)

@@ -16,6 +16,7 @@ from src.models.scanner_contract import (
     MaintenanceRequestV1,
     MaintenanceResponseV1,
     RawScannerProfileV2,
+    PdfClassificationAuditV1,
     TransportErrorResponse,
     UpgradeDatabaseRequestV1,
     UpgradeDatabaseResponseV1,
@@ -755,6 +756,246 @@ def test_file_audit_v2_final_diagnostic_nullability_is_enforced() -> None:
     }
     with pytest.raises(ValueError, match="final diagnostic"):
         FileAuditV2.model_validate(payload)
+
+
+def _pdf_classification_audit_payload() -> dict:
+    return {
+        "status": "text_in_parse_window",
+        "page_count": 2,
+        "classification_cache_status": "miss",
+        "classification_cache_miss_reason": "new_file",
+        "result_examined_pages": 1,
+        "run_inspected_pages": 1,
+        "nominal_charged_pages": 2,
+        "duration_ms": 1,
+        "transport": "one_shot",
+        "attempt_count": 1,
+        "classifier_build": "a" * 64,
+        "classifier_profile_hash": "b" * 64,
+    }
+
+
+def test_pdf_classification_audit_execution_matrix_is_enforced() -> None:
+    PdfClassificationAuditV1.model_validate(_pdf_classification_audit_payload())
+
+    fresh = _pdf_classification_audit_payload()
+    fresh.update(
+        classification_cache_status="fresh",
+        classification_cache_miss_reason="",
+        run_inspected_pages=0,
+        duration_ms=0,
+    )
+    with pytest.raises(ValueError, match="zero execution"):
+        PdfClassificationAuditV1.model_validate(fresh)
+
+    not_eligible = _pdf_classification_audit_payload()
+    not_eligible.update(
+        status="not_classified_by_budget",
+        page_count=None,
+        classification_cache_status="not_eligible",
+        classification_cache_miss_reason="",
+        result_examined_pages=0,
+        run_inspected_pages=0,
+        nominal_charged_pages=0,
+        duration_ms=0,
+        transport="not_applicable",
+        attempt_count=0,
+    )
+    PdfClassificationAuditV1.model_validate(not_eligible)
+    not_eligible["classification_cache_status"] = "snapshot"
+    not_eligible["transport"] = "snapshot"
+    with pytest.raises(ValueError, match="not_eligible"):
+        PdfClassificationAuditV1.model_validate(not_eligible)
+
+
+def test_pdf_classification_audit_page_matrix_and_miss_allowlist_are_enforced() -> None:
+    valid = _pdf_classification_audit_payload()
+    PdfClassificationAuditV1.model_validate(valid)
+
+    snapshot = dict(valid)
+    snapshot.update(
+        classification_cache_status="snapshot",
+        classification_cache_miss_reason="",
+        run_inspected_pages=0,
+        duration_ms=0,
+        transport="snapshot",
+        attempt_count=0,
+    )
+    PdfClassificationAuditV1.model_validate(snapshot)
+
+    zero_page_count = dict(valid)
+    zero_page_count["page_count"] = 0
+    with pytest.raises(ValueError, match="positive"):
+        PdfClassificationAuditV1.model_validate(zero_page_count)
+
+    text_beyond_window = dict(valid)
+    text_beyond_window["result_examined_pages"] = 3
+    with pytest.raises(ValueError, match="window"):
+        PdfClassificationAuditV1.model_validate(text_beyond_window)
+
+    no_text_short_window = dict(valid)
+    no_text_short_window.update(
+        status="no_text_in_parse_window",
+        result_examined_pages=1,
+    )
+    with pytest.raises(ValueError, match="window"):
+        PdfClassificationAuditV1.model_validate(no_text_short_window)
+
+    excessive_run_pages = dict(valid)
+    excessive_run_pages.update(attempt_count=2, run_inspected_pages=5)
+    with pytest.raises(ValueError, match="attempt"):
+        PdfClassificationAuditV1.model_validate(excessive_run_pages)
+
+    unknown_beyond_nominal = dict(valid)
+    unknown_beyond_nominal.update(
+        status="unknown",
+        page_count=None,
+        result_examined_pages=3,
+        run_inspected_pages=3,
+    )
+    with pytest.raises(ValueError, match="nominal"):
+        PdfClassificationAuditV1.model_validate(unknown_beyond_nominal)
+
+    legacy_miss_reason = dict(valid)
+    legacy_miss_reason["classification_cache_miss_reason"] = "error_cache"
+    with pytest.raises(ValueError, match="allowlist"):
+        PdfClassificationAuditV1.model_validate(legacy_miss_reason)
+
+
+def test_file_audit_v2_parse_execution_matrix_is_enforced() -> None:
+    valid = _file_audit_v2_payload()
+    valid["final_diagnostic"] = {
+        "error_code": "PARSER_FAILED",
+        "message": "synthetic failure",
+        "retryable": False,
+        "stage": "parse",
+        "file_path": None,
+        "backend": None,
+    }
+    FileAuditV2.model_validate(valid)
+
+    miss_without_execution = dict(valid)
+    miss_without_execution.update(
+        parse_transport="not_applicable",
+        parse_attempt_count=0,
+        parse_duration_ms=0,
+    )
+    with pytest.raises(ValueError, match="started parser"):
+        FileAuditV2.model_validate(miss_without_execution)
+
+    fresh_with_execution = dict(valid)
+    fresh_with_execution.update(
+        parse_status="success",
+        parse_cache_status="fresh",
+        cache_miss_reason="",
+        final_diagnostic=None,
+    )
+    with pytest.raises(ValueError, match="zero execution"):
+        FileAuditV2.model_validate(fresh_with_execution)
+
+    not_applicable_with_execution = dict(valid)
+    not_applicable_with_execution.update(
+        parse_cache_status="not_applicable",
+        cache_miss_reason="",
+    )
+    with pytest.raises(ValueError, match="zero execution"):
+        FileAuditV2.model_validate(not_applicable_with_execution)
+
+    too_many_attempts = dict(valid)
+    too_many_attempts["parse_attempt_count"] = 4
+    with pytest.raises(ValueError):
+        FileAuditV2.model_validate(too_many_attempts)
+
+
+def test_file_audit_v2_backend_lane_and_miss_reason_matrix_is_enforced() -> None:
+    valid_miss = _file_audit_v2_payload()
+    valid_miss["final_diagnostic"] = {
+        "error_code": "PARSER_FAILED",
+        "message": "synthetic failure",
+        "retryable": False,
+        "stage": "parse",
+        "file_path": None,
+        "backend": None,
+    }
+    FileAuditV2.model_validate(valid_miss)
+
+    legacy_miss_reason = dict(valid_miss)
+    legacy_miss_reason["cache_miss_reason"] = "error_cache"
+    with pytest.raises(ValueError, match="allowlist"):
+        FileAuditV2.model_validate(legacy_miss_reason)
+
+    miss_without_body_parser = dict(valid_miss)
+    miss_without_body_parser.update(
+        parser_backend="not_parsed",
+        worker_lane="not_parsed",
+    )
+    with pytest.raises(ValueError, match="body parser"):
+        FileAuditV2.model_validate(miss_without_body_parser)
+
+    metadata = dict(valid_miss)
+    metadata.update(
+        parse_status="success",
+        parser_backend="pdf_metadata_v1",
+        worker_lane="rust_core",
+        parse_cache_status="not_applicable",
+        cache_miss_reason="",
+        parse_duration_ms=0,
+        parse_transport="not_applicable",
+        parse_attempt_count=0,
+        final_diagnostic=None,
+        pdf_classification={
+            **_pdf_classification_audit_payload(),
+            "status": "no_text_in_parse_window",
+            "result_examined_pages": 2,
+            "run_inspected_pages": 2,
+        },
+    )
+    FileAuditV2.model_validate(metadata)
+
+    no_text_with_body_parser = dict(metadata)
+    no_text_with_body_parser.update(
+        parser_backend="pdf_text_v1",
+        worker_lane="python_document_process",
+    )
+    with pytest.raises(ValueError, match="metadata"):
+        FileAuditV2.model_validate(no_text_with_body_parser)
+
+    not_parsed_with_body_parser = dict(metadata)
+    not_parsed_with_body_parser.update(
+        parse_status="not_parsed",
+        parser_backend="pdf_text_v1",
+        worker_lane="python_document_process",
+        pdf_classification=None,
+    )
+    with pytest.raises(ValueError, match="not_parsed"):
+        FileAuditV2.model_validate(not_parsed_with_body_parser)
+
+    classifier_unknown = dict(valid_miss)
+    classifier_unknown.update(
+        parser_backend="not_parsed",
+        worker_lane="not_parsed",
+        parse_cache_status="not_applicable",
+        cache_miss_reason="",
+        parse_duration_ms=0,
+        parse_transport="not_applicable",
+        parse_attempt_count=0,
+        pdf_classification={
+            **_pdf_classification_audit_payload(),
+            "status": "unknown",
+            "page_count": None,
+            "result_examined_pages": None,
+            "run_inspected_pages": None,
+        },
+    )
+    FileAuditV2.model_validate(classifier_unknown)
+
+    unknown_with_body_parser = dict(classifier_unknown)
+    unknown_with_body_parser.update(
+        parser_backend="pdf_text_v1",
+        worker_lane="python_document_process",
+    )
+    with pytest.raises(ValueError, match="classifier failure"):
+        FileAuditV2.model_validate(unknown_with_body_parser)
 
 
 def test_maintenance_response_v1_ok_rejects_invalid_post() -> None:

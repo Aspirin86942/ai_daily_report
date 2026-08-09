@@ -459,6 +459,27 @@ CREATE TABLE scan_file_results (
     PRIMARY KEY (scan_run_id, file_identity)
 ) STRICT;
 
+CREATE TABLE scan_file_execution_v2 (
+    scan_run_id INTEGER NOT NULL,
+    file_identity TEXT NOT NULL,
+    parse_transport TEXT NOT NULL CHECK (parse_transport IN ('session', 'one_shot', 'rust_in_process', 'snapshot', 'not_applicable')),
+    parse_attempt_count INTEGER NOT NULL CHECK (parse_attempt_count BETWEEN 0 AND 3),
+    classification_status TEXT CHECK (classification_status IN ('text_in_parse_window', 'no_text_in_parse_window', 'not_classified_by_budget', 'unknown', 'error')),
+    classification_page_count INTEGER CHECK (classification_page_count IS NULL OR classification_page_count >= 0),
+    classification_cache_status TEXT CHECK (classification_cache_status IN ('fresh', 'miss', 'snapshot', 'not_eligible')),
+    classification_cache_miss_reason TEXT,
+    classification_result_examined_pages INTEGER CHECK (classification_result_examined_pages IS NULL OR classification_result_examined_pages >= 0),
+    classification_run_inspected_pages INTEGER CHECK (classification_run_inspected_pages IS NULL OR classification_run_inspected_pages >= 0),
+    classification_nominal_charged_pages INTEGER CHECK (classification_nominal_charged_pages IS NULL OR classification_nominal_charged_pages >= 0),
+    classification_duration_ms INTEGER CHECK (classification_duration_ms IS NULL OR classification_duration_ms >= 0),
+    classification_transport TEXT CHECK (classification_transport IN ('session', 'one_shot', 'snapshot', 'not_applicable')),
+    classification_attempt_count INTEGER CHECK (classification_attempt_count IS NULL OR classification_attempt_count BETWEEN 0 AND 3),
+    classifier_build TEXT CHECK (classifier_build IS NULL OR length(classifier_build) = 64),
+    classifier_profile_hash TEXT CHECK (classifier_profile_hash IS NULL OR length(classifier_profile_hash) = 64),
+    PRIMARY KEY (scan_run_id, file_identity),
+    FOREIGN KEY (scan_run_id, file_identity) REFERENCES scan_file_results(scan_run_id, file_identity) ON DELETE CASCADE
+) STRICT;
+
 CREATE TABLE scan_stage_metrics (
     scan_run_id INTEGER NOT NULL REFERENCES scan_runs(scan_run_id) ON DELETE CASCADE,
     stage TEXT NOT NULL CHECK (stage IN ('discovery', 'cache', 'parse', 'context')),
@@ -788,12 +809,56 @@ ALTER TABLE scan_file_results ADD COLUMN legacy_cache_status TEXT;
 ALTER TABLE scan_file_results ADD COLUMN legacy_cache_miss_reason TEXT;
 ALTER TABLE scan_file_results ADD COLUMN parse_cache_status TEXT CHECK (parse_cache_status IN ('fresh', 'miss', 'snapshot', 'not_applicable'));
 
+CREATE TABLE scan_file_execution_v2 (
+    scan_run_id INTEGER NOT NULL,
+    file_identity TEXT NOT NULL,
+    parse_transport TEXT NOT NULL CHECK (parse_transport IN ('session', 'one_shot', 'rust_in_process', 'snapshot', 'not_applicable')),
+    parse_attempt_count INTEGER NOT NULL CHECK (parse_attempt_count BETWEEN 0 AND 3),
+    classification_status TEXT CHECK (classification_status IN ('text_in_parse_window', 'no_text_in_parse_window', 'not_classified_by_budget', 'unknown', 'error')),
+    classification_page_count INTEGER CHECK (classification_page_count IS NULL OR classification_page_count >= 0),
+    classification_cache_status TEXT CHECK (classification_cache_status IN ('fresh', 'miss', 'snapshot', 'not_eligible')),
+    classification_cache_miss_reason TEXT,
+    classification_result_examined_pages INTEGER CHECK (classification_result_examined_pages IS NULL OR classification_result_examined_pages >= 0),
+    classification_run_inspected_pages INTEGER CHECK (classification_run_inspected_pages IS NULL OR classification_run_inspected_pages >= 0),
+    classification_nominal_charged_pages INTEGER CHECK (classification_nominal_charged_pages IS NULL OR classification_nominal_charged_pages >= 0),
+    classification_duration_ms INTEGER CHECK (classification_duration_ms IS NULL OR classification_duration_ms >= 0),
+    classification_transport TEXT CHECK (classification_transport IN ('session', 'one_shot', 'snapshot', 'not_applicable')),
+    classification_attempt_count INTEGER CHECK (classification_attempt_count IS NULL OR classification_attempt_count BETWEEN 0 AND 3),
+    classifier_build TEXT CHECK (classifier_build IS NULL OR length(classifier_build) = 64),
+    classifier_profile_hash TEXT CHECK (classifier_profile_hash IS NULL OR length(classifier_profile_hash) = 64),
+    PRIMARY KEY (scan_run_id, file_identity),
+    FOREIGN KEY (scan_run_id, file_identity) REFERENCES scan_file_results(scan_run_id, file_identity) ON DELETE CASCADE
+) STRICT;
+
 CREATE INDEX idx_classification_cache_cached ON classification_cache(cached_at_ms);
 CREATE INDEX idx_context_runs_artifact ON context_runs(artifact_id);
 CREATE INDEX idx_context_runs_reused ON context_runs(reused_from_context_run_id);
 CREATE INDEX idx_artifact_files_file ON context_artifact_files(file_identity);
 CREATE INDEX idx_artifact_decisions_file ON context_artifact_decisions(file_identity);
 CREATE UNIQUE INDEX idx_artifacts_snapshot_key ON context_artifacts(snapshot_key_sha256) WHERE snapshot_eligible = 1;
+"#;
+
+const SCAN_FILE_EXECUTION_V2_DDL: &str = r#"
+CREATE TABLE scan_file_execution_v2 (
+    scan_run_id INTEGER NOT NULL,
+    file_identity TEXT NOT NULL,
+    parse_transport TEXT NOT NULL CHECK (parse_transport IN ('session', 'one_shot', 'rust_in_process', 'snapshot', 'not_applicable')),
+    parse_attempt_count INTEGER NOT NULL CHECK (parse_attempt_count BETWEEN 0 AND 3),
+    classification_status TEXT CHECK (classification_status IN ('text_in_parse_window', 'no_text_in_parse_window', 'not_classified_by_budget', 'unknown', 'error')),
+    classification_page_count INTEGER CHECK (classification_page_count IS NULL OR classification_page_count >= 0),
+    classification_cache_status TEXT CHECK (classification_cache_status IN ('fresh', 'miss', 'snapshot', 'not_eligible')),
+    classification_cache_miss_reason TEXT,
+    classification_result_examined_pages INTEGER CHECK (classification_result_examined_pages IS NULL OR classification_result_examined_pages >= 0),
+    classification_run_inspected_pages INTEGER CHECK (classification_run_inspected_pages IS NULL OR classification_run_inspected_pages >= 0),
+    classification_nominal_charged_pages INTEGER CHECK (classification_nominal_charged_pages IS NULL OR classification_nominal_charged_pages >= 0),
+    classification_duration_ms INTEGER CHECK (classification_duration_ms IS NULL OR classification_duration_ms >= 0),
+    classification_transport TEXT CHECK (classification_transport IN ('session', 'one_shot', 'snapshot', 'not_applicable')),
+    classification_attempt_count INTEGER CHECK (classification_attempt_count IS NULL OR classification_attempt_count BETWEEN 0 AND 3),
+    classifier_build TEXT CHECK (classifier_build IS NULL OR length(classifier_build) = 64),
+    classifier_profile_hash TEXT CHECK (classifier_profile_hash IS NULL OR length(classifier_profile_hash) = 64),
+    PRIMARY KEY (scan_run_id, file_identity),
+    FOREIGN KEY (scan_run_id, file_identity) REFERENCES scan_file_results(scan_run_id, file_identity) ON DELETE CASCADE
+) STRICT;
 "#;
 
 /// Replacement table used during the v1→v2 file_inventory rebuild. SQLite cannot
@@ -1135,6 +1200,20 @@ pub fn migrate(connection: &mut Connection) -> Result<(), SchemaError> {
             rebuild_scan_file_results(&transaction)?;
             transaction.commit()?;
         }
+        let has_file_execution_v2: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_schema
+                WHERE type='table' AND name='scan_file_execution_v2'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if !has_file_execution_v2 {
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(SCAN_FILE_EXECUTION_V2_DDL)?;
+            transaction.commit()?;
+        }
     }
     Ok(())
 }
@@ -1470,6 +1549,7 @@ mod tests {
                 "run_diagnostics",
                 "scan_execution_metrics",
                 "scan_extension_metrics",
+                "scan_file_execution_v2",
                 "scan_file_results",
                 "scan_run_attempts",
                 "scan_runs",

@@ -217,6 +217,7 @@ fn scheduler_rejects_stale_text_source_before_parsing() {
         ErrorCode::SourceVersionChanged
     );
     assert!(parsed[0].payload.is_none());
+    assert_eq!(parsed[0].attempt_count, 0);
 }
 
 #[test]
@@ -487,8 +488,96 @@ fn fallback_uses_only_remaining_file_deadline_and_marks_partial() {
         Some(WorkerBackend::PythonOfficeV1)
     );
     assert_eq!(response.parser_backend, WorkerBackend::PythonOfficeV1);
+    assert_eq!(execution.attempt_count, 2);
     assert!(execution.primary_duration_ms >= 40);
     assert!(execution.fallback_duration_ms < 1_000);
+}
+
+#[test]
+fn primary_success_counts_exactly_one_parser_attempt() {
+    let Some((directory, primary)) = fake_registered_worker("valid", WorkerKind::Office) else {
+        return;
+    };
+    let request = office_request(&directory, WorkerBackend::RustXlsxBoundedV1, 3_000);
+
+    let execution = parse_with_fallback(&primary, None, &request, &office_profile(false));
+
+    assert!(execution.response.is_some());
+    assert!(execution.primary_failure.is_none());
+    assert_eq!(execution.attempt_count, 1);
+}
+
+#[test]
+fn office_source_rejection_before_spawn_counts_zero_attempts() {
+    let Some((directory, primary)) = fake_registered_worker("valid", WorkerKind::Office) else {
+        return;
+    };
+    let mut request = office_request(&directory, WorkerBackend::RustXlsxBoundedV1, 3_000);
+    request.expected_source_version = "mtime_ns=1:size=1".to_string();
+
+    let execution = parse_with_fallback(&primary, None, &request, &office_profile(false));
+
+    assert!(execution.response.is_none());
+    assert_eq!(execution.attempt_count, 0);
+    assert_eq!(execution.primary_duration_ms, 0);
+    assert_eq!(execution.fallback_duration_ms, 0);
+    assert_eq!(
+        execution
+            .final_failure
+            .expect("stale source must fail")
+            .diagnostic
+            .error_code,
+        ErrorCode::SourceVersionChanged
+    );
+}
+
+#[test]
+fn office_fallback_counts_only_the_child_that_actually_started() {
+    let Some((directory, mut primary)) = fake_registered_worker("valid", WorkerKind::Office) else {
+        return;
+    };
+    let Some((_fallback_directory, fallback)) =
+        fake_registered_worker("valid", WorkerKind::PythonDocument)
+    else {
+        return;
+    };
+    let request = office_request(&directory, WorkerBackend::RustXlsxBoundedV1, 3_000);
+    primary.identity.supported_backends.clear();
+
+    let execution =
+        parse_with_fallback(&primary, Some(&fallback), &request, &office_profile(false));
+
+    assert!(execution.response.is_some(), "fallback child should succeed");
+    assert!(execution.primary_failure.is_some());
+    assert_eq!(execution.fallback_backend, Some(WorkerBackend::PythonOfficeV1));
+    assert_eq!(execution.attempt_count, 1);
+    assert_eq!(execution.primary_duration_ms, 0);
+}
+
+#[test]
+fn unstarted_office_fallback_keeps_primary_parser_provenance() {
+    let Some((directory, primary)) =
+        fake_registered_worker("recoverable_slow", WorkerKind::Office)
+    else {
+        return;
+    };
+    let Some((_fallback_directory, mut fallback)) =
+        fake_registered_worker("valid", WorkerKind::PythonDocument)
+    else {
+        return;
+    };
+    let request = office_request(&directory, WorkerBackend::RustXlsxBoundedV1, 3_000);
+    fallback.identity.supported_backends.clear();
+
+    let execution =
+        parse_with_fallback(&primary, Some(&fallback), &request, &office_profile(false));
+
+    assert!(execution.response.is_none());
+    assert_eq!(execution.attempt_count, 1);
+    assert_eq!(
+        execution.last_started_backend,
+        Some(WorkerBackend::RustXlsxBoundedV1)
+    );
 }
 
 #[test]
@@ -596,7 +685,14 @@ fn fake_registered_worker(mode: &str, kind: WorkerKind) -> Option<(TempDir, Regi
         required_backends: identity.supported_backends.clone(),
         required_extensions: identity.supported_extensions.clone(),
     };
-    Some((directory, RegisteredWorker { command, identity }))
+    Some((
+        directory,
+        RegisteredWorker {
+            command,
+            identity,
+            rss_tracker: None,
+        },
+    ))
 }
 
 fn identity(kind: WorkerKind) -> WorkerVersionResponse {

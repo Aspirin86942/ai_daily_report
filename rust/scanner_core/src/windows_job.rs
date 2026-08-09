@@ -30,18 +30,23 @@ use windows_sys::Win32::System::Threading::{
 };
 
 use crate::process::{
-    join_reader, join_writer, read_bounded, ProcessError, ProcessOutput, ProcessSpec,
+    join_reader, join_writer, read_bounded, ProcessError, ProcessFailure, ProcessOutput,
+    ProcessSpec, WorkerRssTracker,
 };
 
 const TERMINATION_WAIT: Duration = Duration::from_secs(5);
 const TIMEOUT_EXIT_CODE: u32 = 124;
 
-pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
+pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     let started = Instant::now();
-    let job = create_kill_on_close_job()?;
-    let (child_stdin, parent_stdin) = create_pipe(false)?;
-    let (parent_stdout, child_stdout) = create_pipe(true)?;
-    let (parent_stderr, child_stderr) = create_pipe(true)?;
+    let job = create_kill_on_close_job().map_err(ProcessFailure::before_start)?;
+    let mut rss_observation = JobRssObservation::new(spec.rss_tracker.as_ref(), job.raw());
+    let (child_stdin, parent_stdin) =
+        create_pipe(false).map_err(ProcessFailure::before_start)?;
+    let (parent_stdout, child_stdout) =
+        create_pipe(true).map_err(ProcessFailure::before_start)?;
+    let (parent_stderr, child_stderr) =
+        create_pipe(true).map_err(ProcessFailure::before_start)?;
 
     let application = wide_null(spec.program.as_os_str());
     let mut command_line = build_command_line(spec.program.as_os_str(), &spec.args);
@@ -55,7 +60,8 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     // explicitly so concurrent Rayon workers cannot inherit one another's pipe
     // endpoints and keep an unrelated reader waiting for EOF.
     let inherited_handles = [child_stdin.raw(), child_stdout.raw(), child_stderr.raw()];
-    let attributes = ProcThreadAttributeList::with_handle_list(&inherited_handles)?;
+    let attributes = ProcThreadAttributeList::with_handle_list(&inherited_handles)
+        .map_err(ProcessFailure::before_start)?;
     let mut startup: STARTUPINFOEXW = unsafe { zeroed() };
     startup.StartupInfo.cb = size_of::<STARTUPINFOEXW>() as u32;
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -80,34 +86,46 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
         )
     };
     if created == 0 {
-        return Err(ProcessError::StartFailed);
+        return Err(ProcessFailure::before_start(ProcessError::StartFailed));
     }
+    rss_observation.mark_started();
     let Some(process) = OwnedHandle::new(process_info.hProcess) else {
         if let Some(thread_handle) = OwnedHandle::new(process_info.hThread) {
             drop(thread_handle);
         }
-        return Err(ProcessError::StartFailed);
+        return Err(ProcessFailure::after_start(ProcessError::StartFailed));
     };
     let Some(thread_handle) = OwnedHandle::new(process_info.hThread) else {
         if !stop_uncontained_process(process.raw()) {
-            return Err(ProcessError::ContainmentFailed);
+            return Err(ProcessFailure::after_start(
+                ProcessError::ContainmentFailed,
+            ));
         }
-        return Err(ProcessError::StartFailed);
+        return Err(ProcessFailure::after_start(ProcessError::StartFailed));
     };
     drop(child_stdin);
     drop(child_stdout);
     drop(child_stderr);
     if unsafe { AssignProcessToJobObject(job.raw(), process.raw()) } == 0 {
         if !stop_uncontained_process(process.raw()) {
-            return Err(ProcessError::ContainmentFailed);
+            return Err(ProcessFailure::after_start(
+                ProcessError::ContainmentFailed,
+            ));
         }
-        return Err(ProcessError::ContainmentFailed);
+        return Err(ProcessFailure::after_start(
+            ProcessError::ContainmentFailed,
+        ));
     }
+    rss_observation.mark_contained();
     if unsafe { ResumeThread(thread_handle.raw()) } == u32::MAX {
         if !terminate_and_wait(&job, &process) {
-            return Err(ProcessError::ContainmentFailed);
+            return Err(ProcessFailure::after_start(
+                ProcessError::ContainmentFailed,
+            ));
         }
-        return Err(ProcessError::ContainmentFailed);
+        return Err(ProcessFailure::after_start(
+            ProcessError::ContainmentFailed,
+        ));
     }
     drop(thread_handle);
 
@@ -139,46 +157,56 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
     };
     if wait_result == WAIT_TIMEOUT {
         if !terminate_and_wait(&job, &process) {
-            return Err(ProcessError::ContainmentFailed);
+            return Err(ProcessFailure::after_start(
+                ProcessError::ContainmentFailed,
+            ));
         }
         let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
         let _ = join_reader(stderr_thread);
-        return Err(ProcessError::TimedOut);
+        return Err(ProcessFailure::after_start(ProcessError::TimedOut));
     }
     if wait_result != WAIT_OBJECT_0 {
         if !terminate_and_wait(&job, &process) {
-            return Err(ProcessError::ContainmentFailed);
+            return Err(ProcessFailure::after_start(
+                ProcessError::ContainmentFailed,
+            ));
         }
         let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
         let _ = join_reader(stderr_thread);
-        return Err(ProcessError::IoFailed);
+        return Err(ProcessFailure::after_start(ProcessError::IoFailed));
     }
 
     let mut exit_code = 0_u32;
     if unsafe { GetExitCodeProcess(process.raw(), &mut exit_code) } == 0 {
         if !terminate_and_wait(&job, &process) {
-            return Err(ProcessError::ContainmentFailed);
+            return Err(ProcessFailure::after_start(
+                ProcessError::ContainmentFailed,
+            ));
         }
         let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
         let _ = join_reader(stderr_thread);
-        return Err(ProcessError::IoFailed);
+        return Err(ProcessFailure::after_start(ProcessError::IoFailed));
     }
 
     // The worker protocol never allows detached descendants. Clear any child
     // still alive after the primary process exits before releasing pipe readers.
-    let active = active_processes(job.raw()).ok_or(ProcessError::ContainmentFailed)?;
+    let active = active_processes(job.raw()).ok_or_else(|| {
+        ProcessFailure::after_start(ProcessError::ContainmentFailed)
+    })?;
     if active > 0
         && (unsafe { TerminateJobObject(job.raw(), exit_code) } == 0
             || !wait_for_job_empty(job.raw(), TERMINATION_WAIT))
     {
-        return Err(ProcessError::ContainmentFailed);
+        return Err(ProcessFailure::after_start(
+            ProcessError::ContainmentFailed,
+        ));
     }
-    join_optional_writer(&mut input_thread)?;
-    let stdout = join_reader(stdout_thread)?;
-    let stderr = join_reader(stderr_thread)?;
+    join_optional_writer(&mut input_thread).map_err(ProcessFailure::after_start)?;
+    let stdout = join_reader(stdout_thread).map_err(ProcessFailure::after_start)?;
+    let stderr = join_reader(stderr_thread).map_err(ProcessFailure::after_start)?;
 
     Ok(ProcessOutput {
         exit_code,
@@ -222,6 +250,11 @@ fn create_kill_on_close_job() -> Result<OwnedHandle, ProcessError> {
 /// process tree can never kill a sibling session in the same pool.
 pub(crate) struct SessionJob(OwnedHandle);
 
+// Windows kernel Job handles may be transferred between threads. Ownership is
+// unique and every SessionJob operation is serialized by its pool slot mutex;
+// no shared raw-handle access is introduced here.
+unsafe impl Send for SessionJob {}
+
 impl SessionJob {
     /// Assigns an already-spawned child process to a fresh kill-on-close job.
     pub(crate) fn assign(process: std::os::windows::io::RawHandle) -> Result<Self, ProcessError> {
@@ -235,6 +268,66 @@ impl SessionJob {
     pub(crate) fn terminate(&self, exit_code: u32) -> bool {
         (unsafe { TerminateJobObject(self.0.raw(), exit_code) }) != 0
     }
+
+    /// Returns the peak committed memory observed for this session's complete
+    /// process tree. The worker is contained in a dedicated Job Object, so the
+    /// value cannot be polluted by sibling sessions.
+    pub(crate) fn peak_memory_bytes(&self) -> Option<u64> {
+        peak_job_memory_bytes(self.0.raw())
+    }
+}
+
+struct JobRssObservation<'a> {
+    tracker: Option<&'a WorkerRssTracker>,
+    job: HANDLE,
+    started: bool,
+    contained: bool,
+}
+
+impl<'a> JobRssObservation<'a> {
+    fn new(tracker: Option<&'a WorkerRssTracker>, job: HANDLE) -> Self {
+        Self {
+            tracker,
+            job,
+            started: false,
+            contained: false,
+        }
+    }
+
+    fn mark_started(&mut self) {
+        self.started = true;
+    }
+
+    fn mark_contained(&mut self) {
+        self.contained = true;
+    }
+}
+
+impl Drop for JobRssObservation<'_> {
+    fn drop(&mut self) {
+        let Some(tracker) = self.tracker.filter(|_| self.started) else {
+            return;
+        };
+        let peak = self
+            .contained
+            .then(|| peak_job_memory_bytes(self.job))
+            .flatten();
+        tracker.observe_started_child(peak);
+    }
+}
+
+fn peak_job_memory_bytes(job: HANDLE) -> Option<u64> {
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+    let ok = unsafe {
+        QueryInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<c_void>(),
+            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            null_mut(),
+        )
+    };
+    (ok != 0).then(|| u64::try_from(limits.PeakJobMemoryUsed).unwrap_or(u64::MAX))
 }
 
 /// Creates one anonymous pipe. `parent_reads` selects which endpoint stays in

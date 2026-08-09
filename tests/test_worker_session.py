@@ -203,6 +203,35 @@ def test_session_hello_then_classify_request_response_pairing(tmp_path: Path) ->
         process.wait(timeout=10)
 
 
+def test_session_source_version_change_is_outer_retryable_error(tmp_path: Path) -> None:
+    if not TEXT_PDF.is_file():
+        pytest.skip("text pdf fixture is not built")
+    process = _spawn_session()
+    try:
+        hello = _readline(process)
+        assert hello["frame"] == "hello"
+
+        request = _classify_request(tmp_path, "61222222-6122-4122-8122-612222222222")
+        request["payload"]["source_version"] = "mtime_ns=1:size=1"
+        _write_request(process, request)
+
+        response = _readline(process)
+        assert response["request_id"] == request["request_id"]
+        assert response["operation"] == "classify_pdf_v1"
+        assert response["status"] == "error"
+        assert response["result"] is None
+        assert response["error"]["error_code"] == "SOURCE_VERSION_CHANGED"
+        assert response["error"]["retryable"] is True
+
+        process.wait(timeout=10)
+        assert process.returncode not in (0, None)
+    finally:
+        if process.poll() is None:
+            process.stdin.close()
+            process.kill()
+            process.wait(timeout=10)
+
+
 def test_session_parse_request_pairs_request_id(tmp_path: Path) -> None:
     if not TEXT_PDF.is_file():
         pytest.skip("text pdf fixture is not built")

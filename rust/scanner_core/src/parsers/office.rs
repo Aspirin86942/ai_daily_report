@@ -8,7 +8,7 @@ use ai_daily_scanner_contract::{
 
 use crate::fallback::{permits_office_fallback, ParseFailure};
 
-use super::{execute_worker_request, next_request_id, RegisteredWorker, WorkerCommand};
+use super::{execute_worker_request_observed, next_request_id, RegisteredWorker, WorkerCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfficeParseExecution {
@@ -16,11 +16,17 @@ pub struct OfficeParseExecution {
     pub primary_failure: Option<ParseFailure>,
     pub final_failure: Option<ParseFailure>,
     pub fallback_backend: Option<WorkerBackend>,
+    /// Backend of the last parser child that actually started. A fallback
+    /// rejected during pre-dispatch validation must not replace primary
+    /// provenance.
+    pub last_started_backend: Option<WorkerBackend>,
     pub primary_duration_ms: u64,
     pub fallback_duration_ms: u64,
+    /// Actual parser process attempts: primary once, plus one when the
+    /// configured fallback process was started.
+    pub attempt_count: u64,
     pub partial: bool,
 }
-
 pub fn worker_command(adapters: &AdapterPaths) -> WorkerCommand {
     WorkerCommand {
         program: PathBuf::from(&adapters.office_worker_path),
@@ -46,19 +52,22 @@ pub fn parse_with_fallback(
     profile: &OfficeParseProfile,
 ) -> OfficeParseExecution {
     let deadline = Instant::now() + Duration::from_millis(request.remaining_timeout_ms);
-    let primary_started = Instant::now();
-    match execute_worker_request(primary_worker, request) {
+    let primary = execute_worker_request_observed(primary_worker, request);
+    let primary_duration_ms = primary.duration_ms;
+    let primary_attempt_count = primary.attempt_count;
+    match primary.outcome {
         Ok(response) => OfficeParseExecution {
             response: Some(response),
             primary_failure: None,
             final_failure: None,
             fallback_backend: None,
-            primary_duration_ms: elapsed_ms(primary_started),
+            last_started_backend: (primary_attempt_count > 0).then_some(request.backend),
+            primary_duration_ms,
             fallback_duration_ms: 0,
+            attempt_count: primary_attempt_count,
             partial: false,
         },
         Err(primary_failure) => {
-            let primary_duration_ms = elapsed_ms(primary_started);
             let fallback_allowed = permits_office_fallback(&primary_failure, profile)
                 && profile
                     .fallback_order
@@ -73,8 +82,11 @@ pub fn parse_with_fallback(
                     final_failure: Some(primary_failure),
                     primary_failure: None,
                     fallback_backend: None,
+                    last_started_backend: (primary_attempt_count > 0)
+                        .then_some(request.backend),
                     primary_duration_ms,
                     fallback_duration_ms: 0,
+                    attempt_count: primary_attempt_count,
                     partial: true,
                 };
             };
@@ -85,15 +97,26 @@ pub fn parse_with_fallback(
             fallback_request.remaining_timeout_ms = u64::try_from(remaining.as_millis())
                 .unwrap_or(u64::MAX)
                 .max(1);
-            let fallback_started = Instant::now();
-            match execute_worker_request(fallback_worker, &fallback_request) {
+            let fallback = execute_worker_request_observed(fallback_worker, &fallback_request);
+            let fallback_duration_ms = fallback.duration_ms;
+            let attempt_count = primary_attempt_count.saturating_add(fallback.attempt_count);
+            let last_started_backend = if fallback.attempt_count > 0 {
+                Some(WorkerBackend::PythonOfficeV1)
+            } else if primary_attempt_count > 0 {
+                Some(request.backend)
+            } else {
+                None
+            };
+            match fallback.outcome {
                 Ok(response) => OfficeParseExecution {
                     response: Some(response),
                     primary_failure: Some(primary_failure),
                     final_failure: None,
                     fallback_backend: Some(WorkerBackend::PythonOfficeV1),
+                    last_started_backend,
                     primary_duration_ms,
-                    fallback_duration_ms: elapsed_ms(fallback_started),
+                    fallback_duration_ms,
+                    attempt_count,
                     partial: true,
                 },
                 Err(final_failure) => OfficeParseExecution {
@@ -101,15 +124,13 @@ pub fn parse_with_fallback(
                     primary_failure: Some(primary_failure),
                     final_failure: Some(final_failure),
                     fallback_backend: Some(WorkerBackend::PythonOfficeV1),
+                    last_started_backend,
                     primary_duration_ms,
-                    fallback_duration_ms: elapsed_ms(fallback_started),
+                    fallback_duration_ms,
+                    attempt_count,
                     partial: true,
                 },
             }
         }
     }
-}
-
-fn elapsed_ms(started: Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use ai_daily_scanner_contract::{
-    ClassifierResponseStatus, ClassifierVersionResponseV1, PdfClassifierRequestV1,
+    ClassificationTransport, ClassifierResponseStatus, ClassifierVersionResponseV1, PdfClassifierRequestV1,
     PdfClassifierResponseV1, PdfClassifierResultStatus, PdfClassifierResultV1,
     PythonOperationDiagnosticV1, PythonOperationErrorCode, PythonOperationStage,
     PythonSessionHelloV1, PythonSessionOperation, PythonSessionRequestV1,
@@ -17,7 +17,9 @@ use ai_daily_scanner_contract::{
     PythonSessionVersionResponseV1, Validate,
 };
 use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
-use ai_daily_scanner_core::parsers::classifier::{classify_pdf_oneshot, PdfClassifierPort};
+use ai_daily_scanner_core::parsers::classifier::{
+    classify_pdf_oneshot, ClassifierPort, PdfClassifierExecution, PdfClassifierPort,
+};
 use ai_daily_scanner_core::parsers::{register_session_version, WorkerCommand};
 use ai_daily_scanner_core::store::classifier_profile_hash;
 use ai_daily_scanner_contract::{RawScannerProfileV2, ReportMode, ScannerProfile, WorkerKind};
@@ -129,6 +131,46 @@ fn classifier_wire_rejects_bad_status_invariants() {
 }
 
 #[test]
+fn classifier_result_is_bounded_by_the_request_window() {
+    let mut text = text_result();
+    text.page_count = ai_daily_scanner_contract::Nullable(Some(10));
+    text.result_examined_pages = ai_daily_scanner_contract::Nullable(Some(6));
+    text.validate()
+        .expect("generic typed result is structurally valid");
+    assert!(
+        text.validate_for_max_pages(5).is_err(),
+        "text result pages must not exceed request.max_pages"
+    );
+
+    let mut no_text = text_result();
+    no_text.status = PdfClassifierResultStatus::NoTextInParseWindow;
+    no_text.page_count = ai_daily_scanner_contract::Nullable(Some(10));
+    no_text.result_examined_pages = ai_daily_scanner_contract::Nullable(Some(4));
+    assert!(
+        no_text.validate_for_max_pages(5).is_err(),
+        "no-text must examine the complete request window"
+    );
+
+    let unknown = PdfClassifierResultV1 {
+        status: PdfClassifierResultStatus::Unknown,
+        page_count: ai_daily_scanner_contract::Nullable(None),
+        result_examined_pages: ai_daily_scanner_contract::Nullable(Some(6)),
+        diagnostic: ai_daily_scanner_contract::Nullable(Some(PythonOperationDiagnosticV1 {
+            error_code: PythonOperationErrorCode::ParserFailed,
+            message: "transient classifier failure".to_string(),
+            retryable: true,
+            stage: PythonOperationStage::Parse,
+            file_path: ai_daily_scanner_contract::Nullable(None),
+            backend: ai_daily_scanner_contract::Nullable(None),
+        })),
+    };
+    assert!(
+        unknown.validate_for_max_pages(5).is_err(),
+        "typed failures must also stay within request.max_pages"
+    );
+}
+
+#[test]
 fn classifier_version_response_round_trips() {
     let version = ClassifierVersionResponseV1 {
         contract: "ai_daily_pdf_classifier".to_string(),
@@ -164,8 +206,8 @@ impl PdfClassifierPort for StubClassifier {
         &self,
         _request: &PdfClassifierRequestV1,
         _timeout: Duration,
-    ) -> Result<PdfClassifierResultV1, ai_daily_scanner_core::fallback::ParseFailure> {
-        self.result.clone().ok_or_else(|| {
+    ) -> PdfClassifierExecution {
+        PdfClassifierExecution::test_oneshot(self.result.clone().ok_or_else(|| {
             ai_daily_scanner_core::fallback::ParseFailure {
                 class: ai_daily_scanner_core::fallback::FailureClass::Deterministic,
                 diagnostic: ai_daily_scanner_contract::Diagnostic {
@@ -177,7 +219,7 @@ impl PdfClassifierPort for StubClassifier {
                     backend: ai_daily_scanner_contract::Nullable(None),
                 },
             }
-        })
+        }))
     }
 }
 
@@ -191,8 +233,40 @@ fn stub_classifier_port_returns_in_memory_results() {
             &request(r"D:\fixture.pdf", "mtime_ns=1:size=2"),
             Duration::from_secs(1),
         )
+        .outcome
         .expect("stub returns the programmed result");
     assert_eq!(outcome.status, PdfClassifierResultStatus::TextInParseWindow);
+}
+
+#[test]
+fn classifier_oneshot_source_rejection_does_not_guess_a_started_attempt() {
+    let directory = tempfile::tempdir().expect("temporary classifier root");
+    let file = directory.path().join("changed.pdf");
+    std::fs::write(&file, b"%PDF-1.4\n").expect("write classifier fixture");
+    let command = WorkerCommand {
+        program: directory.path().join("must-not-start.exe"),
+        base_args: Vec::new(),
+        current_dir: None,
+        expected_kind: WorkerKind::PythonDocument,
+        required_backends: vec!["pdf_text_v1".to_string()],
+        required_extensions: vec![".pdf".to_string()],
+    };
+    let execution = ClassifierPort::new(command).classify_pdf(
+        &request(&file.to_string_lossy(), "mtime_ns=1:size=1"),
+        Duration::from_secs(1),
+    );
+
+    assert_eq!(execution.attempt_count, 0);
+    assert_eq!(execution.duration_ms, 0);
+    assert_eq!(execution.transport, ClassificationTransport::NotApplicable);
+    assert_eq!(
+        execution
+            .outcome
+            .expect_err("stale source must fail before spawn")
+            .diagnostic
+            .error_code,
+        ai_daily_scanner_contract::ErrorCode::SourceVersionChanged
+    );
 }
 
 #[test]
@@ -322,6 +396,7 @@ fn classifier_oneshot_reports_deterministic_error_for_corrupt_pdf() {
             stdin,
             timeout: Duration::from_secs(20),
             capture_limit: 1024 * 1024,
+            rss_tracker: None,
         };
         if let Ok(output) = ai_daily_scanner_core::process::run_process(&spec) {
             eprintln!(

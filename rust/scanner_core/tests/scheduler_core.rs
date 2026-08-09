@@ -14,8 +14,9 @@ use ai_daily_scanner_core::compressor::build_context;
 use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
 use ai_daily_scanner_core::nominal::nominal_rank;
 use ai_daily_scanner_contract::{
-    AuditWorkerLane, CacheStatus, ContextAction, ContextProfile, ContextProfileV2, Diagnostic,
-    DiagnosticStage, ErrorCode, Nullable, ParseStatus, PdfClassificationStatus, RawScannerProfileV2,
+    AuditWorkerLane, CacheStatus, ClassificationCacheStatus, ClassificationTransport,
+    ContextAction, ContextProfile, ContextProfileV2, Diagnostic, DiagnosticStage, ErrorCode,
+    Nullable, ParseStatus, ParseTransport, PdfClassificationStatus, RawScannerProfileV2,
     ReportMode, ScannerProfile, SourceGuardKind,
 };
 
@@ -664,7 +665,9 @@ fn compressor_still_renders_golden_keep_compress_metadata_error() {
 
 use ai_daily_discovery::DiscoveredFileOut;
 use ai_daily_scanner_core::fallback::ParseFailure;
-use ai_daily_scanner_core::parsers::classifier::PdfClassifierPort;
+use ai_daily_scanner_core::parsers::classifier::{
+    PdfClassifierExecution, PdfClassifierPort,
+};
 use ai_daily_scanner_core::scheduler::{
     BudgetedContextScheduler, CachePort, CachePortError, Clock, GuardVerifier, ParseLookupOutcome,
     ParseRequest, ParseResult, ParserPort, ScheduledRunInput, TerminalIntent, WorkerIdentities,
@@ -832,6 +835,8 @@ impl ParserPort for TestParser {
                 failure_class: "deterministic".to_string(),
                 fallback_backend: String::new(),
                 fallback_reason_code: String::new(),
+                parse_transport: ParseTransport::RustInProcess,
+                parse_attempt_count: 1,
                 primary_duration_ms: 0,
                 fallback_duration_ms: 0,
                 parse_duration_ms: 0,
@@ -854,6 +859,8 @@ fn success_parse(identity: &str, path: &str, content: &str) -> ParseResult {
         failure_class: String::new(),
         fallback_backend: String::new(),
         fallback_reason_code: String::new(),
+        parse_transport: ParseTransport::RustInProcess,
+        parse_attempt_count: 1,
         primary_duration_ms: 1,
         fallback_duration_ms: 0,
         parse_duration_ms: 1,
@@ -863,6 +870,24 @@ fn success_parse(identity: &str, path: &str, content: &str) -> ParseResult {
 #[derive(Debug, Clone)]
 struct TestClassifier {
     results: HashMap<String, PdfClassifierResultV1>,
+}
+
+#[derive(Debug, Clone)]
+struct RetryingClassifier;
+
+impl PdfClassifierPort for RetryingClassifier {
+    fn classify_pdf(
+        &self,
+        request: &PdfClassifierRequestV1,
+        _timeout: Duration,
+    ) -> PdfClassifierExecution {
+        PdfClassifierExecution {
+            outcome: Ok(text_result(&request.file_path)),
+            transport: ClassificationTransport::OneShot,
+            attempt_count: 3,
+            duration_ms: 7,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -891,14 +916,14 @@ impl PdfClassifierPort for ConcurrencyClassifier {
         &self,
         request: &PdfClassifierRequestV1,
         _timeout: Duration,
-    ) -> Result<PdfClassifierResultV1, ParseFailure> {
+    ) -> PdfClassifierExecution {
         let now = self.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         self.max_seen
             .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
         // Give concurrent wave threads time to overlap.
         std::thread::sleep(Duration::from_millis(30));
         self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(no_text_result(&request.file_path))
+        PdfClassifierExecution::test_oneshot(Ok(no_text_result(&request.file_path)))
     }
 }
 
@@ -934,8 +959,8 @@ impl PdfClassifierPort for TestClassifier {
         &self,
         request: &PdfClassifierRequestV1,
         _timeout: Duration,
-    ) -> Result<PdfClassifierResultV1, ParseFailure> {
-        self.results
+    ) -> PdfClassifierExecution {
+        PdfClassifierExecution::test_oneshot(self.results
             .get(&request.file_path)
             .cloned()
             .ok_or_else(|| ParseFailure {
@@ -948,7 +973,7 @@ impl PdfClassifierPort for TestClassifier {
                     file_path: Nullable(None),
                     backend: Nullable(None),
                 },
-            })
+            }))
     }
 }
 
@@ -962,6 +987,44 @@ impl GuardVerifier for PassGuard {
         _expected: &ai_daily_scanner_core::source_guard::SourceGuardV2,
     ) -> bool {
         true
+    }
+}
+
+#[derive(Debug)]
+struct FailSecondGuard {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl GuardVerifier for FailSecondGuard {
+    fn verify(
+        &self,
+        _path: &str,
+        _expected: &ai_daily_scanner_core::source_guard::SourceGuardV2,
+    ) -> bool {
+        self.calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            == 0
+    }
+}
+
+#[derive(Debug)]
+struct FailPdfGuard {
+    fail_on_pdf_call: usize,
+    pdf_calls: std::sync::atomic::AtomicUsize,
+}
+
+impl GuardVerifier for FailPdfGuard {
+    fn verify(
+        &self,
+        path: &str,
+        _expected: &ai_daily_scanner_core::source_guard::SourceGuardV2,
+    ) -> bool {
+        if !path.ends_with(".pdf") {
+            return true;
+        }
+        self.pdf_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            != self.fail_on_pdf_call
     }
 }
 
@@ -1308,6 +1371,8 @@ impl ParserPort for DeadlineParser {
                 failure_class: "deterministic".to_string(),
                 fallback_backend: String::new(),
                 fallback_reason_code: "parse_error".to_string(),
+                parse_transport: ParseTransport::OneShot,
+                parse_attempt_count: 1,
                 primary_duration_ms: advance,
                 fallback_duration_ms: 0,
                 parse_duration_ms: advance,
@@ -1491,6 +1556,7 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
     let mut profile = v2_profile(ReportMode::Daily);
     profile.total_deadline_ms = 5_000; // work deadline = 3_000
     profile.parse.pdf.max_pages = 2;
+    profile.session_concurrency = 2;
     let discovery = vec![
         discovered("one.pdf", ".pdf", 128),
         discovered("two.pdf", ".pdf", 128),
@@ -1533,6 +1599,10 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
 
     assert_eq!(outcome.terminal_intent, TerminalIntent::Error);
     assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
+    assert_eq!(
+        outcome.execution_metrics.classify_attempt_count, 2,
+        "only the first bounded wave was actually started"
+    );
     // Error run: no context payload, no snapshot.
     assert!(outcome.context.is_none());
     for rel in ["one.pdf", "two.pdf", "three.pdf"] {
@@ -1553,6 +1623,231 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
                 == ai_daily_scanner_core::store::DiagnosticSeverity::Error));
 }
 
+#[test]
+fn not_classified_by_budget_has_a_zero_execution_audit() {
+    let mut profile = v2_profile(ReportMode::Daily);
+    profile.parse.pdf.max_pages = 2;
+    profile.max_total_pdf_classification_pages = 0;
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        TestCache::default(),
+        TestParser {
+            results: HashMap::new(),
+        },
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        vec![discovered("budget.pdf", ".pdf", 128)],
+        profile,
+    )
+    .expect("budget-excluded PDF outcome");
+
+    let file = outcome
+        .file_results
+        .iter()
+        .find(|row| row.relative_path == "budget.pdf")
+        .expect("budget PDF row");
+    let audit = file
+        .pdf_classification
+        .as_ref()
+        .expect("not-classified PDF must remain auditable");
+    assert_eq!(audit.status, PdfClassificationStatus::NotClassifiedByBudget);
+    assert_eq!(
+        audit.classification_cache_status,
+        ClassificationCacheStatus::NotEligible
+    );
+    assert_eq!(audit.transport, ClassificationTransport::NotApplicable);
+    assert_eq!(audit.attempt_count, 0);
+    assert_eq!(audit.nominal_charged_pages, 0);
+    assert_eq!(audit.result_examined_pages.0, Some(0));
+    assert_eq!(audit.run_inspected_pages.0, Some(0));
+    assert_eq!(outcome.execution_metrics.classify_attempt_count, 0);
+}
+
+#[test]
+fn retry_metrics_count_only_actual_classifier_and_pdf_parse_attempts() {
+    let mut profile = v2_profile(ReportMode::Daily);
+    profile.parse.pdf.max_pages = 2;
+    let mut parsed = success_parse("fixture:retry.pdf", "", "pdf evidence");
+    parsed.parser_backend = "pdf_text_v1".to_string();
+    parsed.worker_lane = "python_document_process".to_string();
+    parsed.parse_transport = ParseTransport::Session;
+    parsed.parse_attempt_count = 2;
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        TestCache::default(),
+        TestParser {
+            results: HashMap::from([("fixture:retry.pdf".to_string(), parsed)]),
+        },
+        RetryingClassifier,
+        vec![discovered("retry.pdf", ".pdf", 128)],
+        profile,
+    )
+    .expect("retried PDF outcome");
+
+    assert_eq!(outcome.execution_metrics.classify_attempt_count, 3);
+    assert_eq!(outcome.execution_metrics.parse_attempt_count, 2);
+    assert_eq!(outcome.execution_metrics.pdfplumber_invocations, 2);
+    assert_eq!(
+        outcome
+            .execution_metrics
+            .unobserved_classification_attempt_count,
+        2,
+        "the two failed transport attempts are unobserved; the final typed result is observed"
+    );
+    let audit = outcome.file_results[0]
+        .pdf_classification
+        .as_ref()
+        .expect("classification audit");
+    assert_eq!(audit.attempt_count, 3);
+    assert_eq!(audit.run_inspected_pages.0, None);
+}
+
+#[test]
+fn post_parse_source_change_discards_content_but_keeps_execution_provenance() {
+    let profile = v2_profile(ReportMode::Daily);
+    let file = discovered("changed.md", ".md", 128);
+    let mut parsed = success_parse(&file.file_identity, &file.path, "discard me");
+    parsed.parser_backend = "light_text_v1".to_string();
+    parsed.worker_lane = "rust_core".to_string();
+    parsed.parse_transport = ParseTransport::RustInProcess;
+    parsed.parse_attempt_count = 2;
+    parsed.primary_duration_ms = 3;
+    parsed.fallback_duration_ms = 4;
+    parsed.parse_duration_ms = 7;
+    let clock = FakeClock::new();
+    let input = ScheduledRunInput::new(
+        1,
+        0,
+        "C:\\corpus".to_string(),
+        vec![file.clone()],
+        Vec::new(),
+        profile,
+        WorkerIdentities {
+            classifier_build: Some("a".repeat(64)),
+            ..WorkerIdentities::default()
+        },
+        "0.1.0".to_string(),
+        "engine-test".to_string(),
+        "c".repeat(64),
+        "d".repeat(64),
+        0,
+        &clock,
+    )
+    .expect("input");
+    let scheduler = BudgetedContextScheduler::new(
+        Box::new(TestClassifier {
+            results: HashMap::new(),
+        }),
+        Box::new(TestParser {
+            results: HashMap::from([(file.file_identity.clone(), parsed)]),
+        }),
+        Box::new(TestCache::default()),
+        Box::new(clock),
+        Box::new(FailSecondGuard {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+        }),
+    );
+
+    let outcome = scheduler.execute(input).expect("source-change outcome");
+    let result = &outcome.file_results[0];
+    assert_eq!(result.parse_status, ParseStatus::Error);
+    assert_eq!(
+        result.error.as_ref().map(|error| error.error_code),
+        Some(ErrorCode::SourceVersionChanged)
+    );
+    assert_eq!(result.parser_backend, "light_text_v1");
+    assert_eq!(result.worker_lane, AuditWorkerLane::RustCore);
+    assert_eq!(result.parse_transport, ParseTransport::RustInProcess);
+    assert_eq!(result.parse_attempt_count, 2);
+    assert_eq!(result.parse_duration_ms, 7);
+    assert_eq!(result.content_sha256, ai_daily_scanner_core::store::sha256_hex(b""));
+    assert_eq!(outcome.execution_metrics.parse_attempt_count, 2);
+    assert!(outcome.parse_cache_receipts.is_empty());
+}
+
+#[test]
+fn classifier_pre_and_post_source_changes_keep_source_changed_semantics() {
+    for (fail_on_pdf_call, expected_attempts) in [(0, 0), (1, 1)] {
+        let profile = v2_profile(ReportMode::Daily);
+        let pdf = discovered("changed.pdf", ".pdf", 128);
+        let text = discovered("notes.md", ".md", 64);
+        let clock = FakeClock::new();
+        let input = ScheduledRunInput::new(
+            1,
+            0,
+            "C:\\corpus".to_string(),
+            vec![pdf.clone(), text.clone()],
+            Vec::new(),
+            profile,
+            WorkerIdentities {
+                classifier_build: Some("a".repeat(64)),
+                ..WorkerIdentities::default()
+            },
+            "0.1.0".to_string(),
+            "engine-test".to_string(),
+            "c".repeat(64),
+            "d".repeat(64),
+            0,
+            &clock,
+        )
+        .expect("input");
+        let scheduler = BudgetedContextScheduler::new(
+            Box::new(TestClassifier {
+                results: HashMap::from([(pdf.path.clone(), no_text_result(&pdf.path))]),
+            }),
+            Box::new(TestParser {
+                results: HashMap::from([(
+                    text.file_identity.clone(),
+                    success_parse(&text.file_identity, &text.path, "text evidence"),
+                )]),
+            }),
+            Box::new(TestCache::default()),
+            Box::new(clock),
+            Box::new(FailPdfGuard {
+                fail_on_pdf_call,
+                pdf_calls: std::sync::atomic::AtomicUsize::new(0),
+            }),
+        );
+
+        let outcome = scheduler.execute(input).expect("source-change outcome");
+        assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+        assert_eq!(
+            outcome.execution_metrics.classify_attempt_count,
+            expected_attempts
+        );
+        let file = outcome
+            .file_results
+            .iter()
+            .find(|row| row.file_identity == pdf.file_identity)
+            .expect("changed PDF row");
+        assert_eq!(file.parse_status, ParseStatus::Error);
+        let diagnostic = file.error.as_ref().expect("source change diagnostic");
+        assert_eq!(diagnostic.error_code, ErrorCode::SourceVersionChanged);
+        assert!(diagnostic.retryable);
+        assert_eq!(file.parser_backend, "not_parsed");
+        assert_eq!(file.worker_lane, AuditWorkerLane::NotParsed);
+        assert_eq!(file.parse_transport, ParseTransport::NotApplicable);
+        assert_eq!(file.parse_attempt_count, 0);
+        assert!(
+            file.pdf_classification.is_none(),
+            "discarded classifier result must not fabricate a classification audit"
+        );
+        let decision = outcome
+            .context
+            .as_ref()
+            .expect("partial context")
+            .decisions
+            .iter()
+            .find(|row| row.file_identity == pdf.file_identity)
+            .expect("changed PDF decision");
+        assert_eq!(decision.decision.action, ContextAction::Error);
+        assert_eq!(decision.decision.error_code, "SOURCE_VERSION_CHANGED");
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ClockAdvancingClassifier {
     clock: Arc<Mutex<u64>>,
@@ -1564,11 +1859,11 @@ impl PdfClassifierPort for ClockAdvancingClassifier {
         &self,
         request: &PdfClassifierRequestV1,
         _timeout: Duration,
-    ) -> Result<PdfClassifierResultV1, ParseFailure> {
+    ) -> PdfClassifierExecution {
         let mut now = self.clock.lock().unwrap();
         *now += 4_000;
         drop(now);
-        Ok(text_result(&request.file_path))
+        PdfClassifierExecution::test_oneshot(Ok(text_result(&request.file_path)))
     }
 }
 
