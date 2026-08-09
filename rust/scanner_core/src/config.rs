@@ -248,6 +248,17 @@ fn normalize_scanner_profile_v2_raw(
     raw: &RawScannerProfileV2,
     report_mode: ReportMode,
 ) -> Result<NormalizedScannerProfileV2, String> {
+    let cpu_count = std::thread::available_parallelism()
+        .map(|value| value.get() as u64)
+        .unwrap_or(1);
+    normalize_scanner_profile_v2_raw_with_parallelism(raw, report_mode, cpu_count)
+}
+
+fn normalize_scanner_profile_v2_raw_with_parallelism(
+    raw: &RawScannerProfileV2,
+    report_mode: ReportMode,
+    cpu_count: u64,
+) -> Result<NormalizedScannerProfileV2, String> {
     raw.validate()?;
     let summary_mode = !matches!(report_mode, ReportMode::Daily);
     let text_max_chars = if summary_mode {
@@ -309,7 +320,11 @@ fn normalize_scanner_profile_v2_raw(
         .ok_or_else(|| "max_file_size_mb overflows bytes".to_string())?;
     let (default_max_candidate_files, default_max_total_pdf_classification_pages, default_max_pdf_text_extractions, default_total_deadline_ms) =
         v2_quota_defaults(report_mode);
-    let max_workers = raw.max_workers.unwrap_or(4);
+    let cpu_count = cpu_count.max(1);
+    let max_workers = raw.max_workers.unwrap_or(cpu_count.min(4));
+    let session_concurrency = raw
+        .session_concurrency
+        .unwrap_or(max_workers.min(4).min(cpu_count));
 
     let profile = NormalizedScannerProfileV2 {
         schema_version: "normalized_scanner_profile_v2".to_string(),
@@ -414,7 +429,7 @@ fn normalize_scanner_profile_v2_raw(
             .unwrap_or(default_max_total_pdf_classification_pages),
         pdf_classification_timeout_ms: raw.pdf_classification_timeout_ms.unwrap_or(2_000),
         total_deadline_ms: raw.total_deadline_ms.unwrap_or(default_total_deadline_ms),
-        session_concurrency: raw.session_concurrency.unwrap_or(max_workers.min(4)),
+        session_concurrency,
         max_requests_per_session: raw.max_requests_per_session.unwrap_or(128),
         session_idle_ttl_ms: raw.session_idle_ttl_ms.unwrap_or(30_000),
         session_rss_limit_bytes: raw
@@ -458,6 +473,47 @@ pub fn normalize_scanner_profile_for_request(
         ScannerProfile::V2(raw) => {
             let v1 = raw_v2_to_v1(raw)?;
             normalize_scanner_profile(&v1, report_mode)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_aware_defaults_preserve_explicit_worker_values() {
+        let cases = [
+            (0_u64, None, None, 1_u64, 1_u64),
+            (2_u64, None, None, 2_u64, 2_u64),
+            (16, None, None, 4, 4),
+            (2, Some(6), None, 6, 2),
+            (2, None, Some(5), 2, 5),
+            (2, Some(6), Some(5), 6, 5),
+        ];
+
+        for (cpu_count, max_workers, session_concurrency, expected_workers, expected_session) in cases
+        {
+            let mut value = serde_json::json!({
+                "schema_version": "scanner_profile_v2"
+            });
+            if let Some(max_workers) = max_workers {
+                value["max_workers"] = serde_json::json!(max_workers);
+            }
+            if let Some(session_concurrency) = session_concurrency {
+                value["session_concurrency"] = serde_json::json!(session_concurrency);
+            }
+            let raw: RawScannerProfileV2 =
+                serde_json::from_value(value).expect("test profile must decode");
+            let normalized = normalize_scanner_profile_v2_raw_with_parallelism(
+                &raw,
+                ReportMode::Daily,
+                cpu_count,
+            )
+            .expect("test profile must normalize");
+
+            assert_eq!(normalized.execution.max_workers, expected_workers);
+            assert_eq!(normalized.session_concurrency, expected_session);
         }
     }
 }

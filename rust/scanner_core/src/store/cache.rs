@@ -14,7 +14,18 @@ use crate::planner::PlannedFile;
 
 pub const PARSE_PROFILE_HASH_ALGORITHM: &str = "sha256-parse-profile-v1";
 pub const CLASSIFIER_PROFILE_HASH_ALGORITHM: &str = "sha256-classifier-profile-v1";
+pub(crate) const CACHE_LOOKUP_BATCH_SIZE: usize = 256;
 const CLASSIFIER_DOMAIN: &[u8] = b"classifier-profile-v1\0";
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CacheLookupKey<'a> {
+    pub file_identity: &'a str,
+    pub source_version: &'a str,
+    pub source_guard_kind: &'a str,
+    pub source_guard_sha256: &'a str,
+    pub parse_profile_hash: &'a str,
+    pub inventory_existed_before: bool,
+}
 
 // ---------------------------------------------------------------------------
 // cache_retention_v1 固定硬上限（spec Part 4 表）。这些常量由
@@ -329,12 +340,8 @@ pub(crate) fn lookup_cache(
             },
         )
         .optional()?;
-    if let Some(entry) = fresh {
-        if sha256_hex(entry.content.as_bytes()) == entry.content_sha256 {
-            return Ok(CacheLookup::Fresh(entry));
-        }
-        // Corrupt cache bytes are never returned as successful content.
-        return Ok(CacheLookup::Miss(CacheMissReason::ErrorCache));
+    if fresh.is_some() {
+        return Ok(resolve_cache_lookup(fresh, false, false, inventory_existed_before));
     }
 
     // spec Part 4 miss-reason tree (cache-only; `scan_file_results` is the
@@ -358,31 +365,162 @@ pub(crate) fn lookup_cache(
         ],
         |row| row.get(0),
     )?;
+    let same_identity: bool = if same_source_and_guard {
+        false
+    } else {
+        connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM parse_cache WHERE file_identity=?1
+             )",
+            [file_identity],
+            |row| row.get(0),
+        )?
+    };
+    Ok(resolve_cache_lookup(
+        None,
+        same_source_and_guard,
+        same_identity,
+        inventory_existed_before,
+    ))
+}
+
+pub(crate) fn lookup_cache_batch(
+    connection: &Connection,
+    keys: &[CacheLookupKey<'_>],
+) -> rusqlite::Result<Vec<CacheLookup>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Only fixed-size lookup keys enter the TEMP table. Non-exact rows are
+    // tested with EXISTS, so their cached content never crosses the SQL seam.
+    connection.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS temp_parse_cache_lookup_v1 (
+            ordinal INTEGER PRIMARY KEY,
+            file_identity TEXT NOT NULL,
+            source_version TEXT NOT NULL,
+            source_guard_kind TEXT NOT NULL,
+            source_guard_sha256 TEXT NOT NULL,
+            parse_profile_hash TEXT NOT NULL,
+            inventory_existed_before INTEGER NOT NULL CHECK (inventory_existed_before IN (0, 1))
+         ) STRICT;",
+    )?;
+
+    let mut output = Vec::with_capacity(keys.len());
+    for chunk in keys.chunks(CACHE_LOOKUP_BATCH_SIZE) {
+        connection.execute("DELETE FROM temp_parse_cache_lookup_v1", [])?;
+        {
+            let mut insert = connection.prepare_cached(
+                "INSERT INTO temp_parse_cache_lookup_v1 (
+                    ordinal, file_identity, source_version, source_guard_kind,
+                    source_guard_sha256, parse_profile_hash, inventory_existed_before
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )?;
+            for (ordinal, key) in chunk.iter().enumerate() {
+                insert.execute(params![
+                    ordinal as i64,
+                    key.file_identity,
+                    key.source_version,
+                    key.source_guard_kind,
+                    key.source_guard_sha256,
+                    key.parse_profile_hash,
+                    if key.inventory_existed_before { 1_i64 } else { 0_i64 },
+                ])?;
+            }
+        }
+
+        let mut statement = connection.prepare_cached(
+            "SELECT input.ordinal,
+                    exact.content, exact.content_sha256, exact.parser_backend,
+                    exact.worker_lane, exact.truncated,
+                    exact.worker_contract_version, exact.worker_version, exact.worker_build,
+                    EXISTS(
+                        SELECT 1 FROM parse_cache AS same_source
+                        WHERE same_source.file_identity=input.file_identity
+                          AND same_source.source_version=input.source_version
+                          AND same_source.source_guard_kind=input.source_guard_kind
+                          AND same_source.source_guard_sha256=input.source_guard_sha256
+                    ),
+                    EXISTS(
+                        SELECT 1 FROM parse_cache AS same_identity
+                        WHERE same_identity.file_identity=input.file_identity
+                    ),
+                    input.inventory_existed_before
+             FROM temp_parse_cache_lookup_v1 AS input
+             LEFT JOIN parse_cache AS exact
+               ON exact.file_identity=input.file_identity
+              AND exact.source_version=input.source_version
+              AND exact.source_guard_kind=input.source_guard_kind
+              AND exact.source_guard_sha256=input.source_guard_sha256
+              AND exact.parse_profile_hash=input.parse_profile_hash
+             ORDER BY input.ordinal",
+        )?;
+        let mut rows = statement.query([])?;
+        let mut expected_ordinal = 0_usize;
+        while let Some(row) = rows.next()? {
+            let ordinal = usize::try_from(row.get::<_, i64>(0)?)
+                .map_err(|_| rusqlite::Error::InvalidQuery)?;
+            if ordinal != expected_ordinal {
+                return Err(rusqlite::Error::InvalidQuery);
+            }
+            let exact = match row.get::<_, Option<String>>(1)? {
+                Some(content) => Some(CacheEntry {
+                    content,
+                    content_sha256: row.get(2)?,
+                    parser_backend: row.get(3)?,
+                    worker_lane: row.get(4)?,
+                    truncated: row.get::<_, i64>(5)? != 0,
+                    worker_contract_version: row.get(6)?,
+                    worker_version: row.get(7)?,
+                    worker_build: row.get(8)?,
+                }),
+                None => None,
+            };
+            output.push(resolve_cache_lookup(
+                exact,
+                row.get(9)?,
+                row.get(10)?,
+                row.get::<_, i64>(11)? != 0,
+            ));
+            expected_ordinal += 1;
+        }
+        if expected_ordinal != chunk.len() {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+    }
+    connection.execute("DELETE FROM temp_parse_cache_lookup_v1", [])?;
+    Ok(output)
+}
+
+fn resolve_cache_lookup(
+    exact: Option<CacheEntry>,
+    same_source_and_guard: bool,
+    same_identity: bool,
+    inventory_existed_before: bool,
+) -> CacheLookup {
+    if let Some(entry) = exact {
+        if sha256_hex(entry.content.as_bytes()) == entry.content_sha256 {
+            return CacheLookup::Fresh(entry);
+        }
+        // Corrupt cache bytes are never returned as successful content.
+        return CacheLookup::Miss(CacheMissReason::ErrorCache);
+    }
     if same_source_and_guard {
         // spec Part 4: exact key absent but another identity row with the same
         // source + guard exists → `parser_identity_changed` (v2). The v1 inspect
         // projects it losslessly to `parser_profile_changed`.
-        return Ok(CacheLookup::Miss(CacheMissReason::ParserIdentityChanged));
+        return CacheLookup::Miss(CacheMissReason::ParserIdentityChanged);
     }
-
-    let same_identity: bool = connection.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM parse_cache WHERE file_identity=?1
-         )",
-        [file_identity],
-        |row| row.get(0),
-    )?;
     if same_identity {
-        return Ok(CacheLookup::Miss(CacheMissReason::SourceVersionChanged));
+        return CacheLookup::Miss(CacheMissReason::SourceVersionChanged);
     }
-
     if inventory_existed_before {
         // spec Part 4 step 4: inventory existed before this round but the exact
         // entry is absent/evicted → `entry_absent_or_evicted` (v2). The v1
         // inspect projects it to `new_file` + `CACHE_MISS_REASON_PROJECTED_AS_NEW_FILE`.
-        Ok(CacheLookup::Miss(CacheMissReason::EntryAbsentOrEvicted))
+        CacheLookup::Miss(CacheMissReason::EntryAbsentOrEvicted)
     } else {
-        Ok(CacheLookup::Miss(CacheMissReason::NewFile))
+        CacheLookup::Miss(CacheMissReason::NewFile)
     }
 }
 

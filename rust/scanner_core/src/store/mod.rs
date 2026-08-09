@@ -954,16 +954,15 @@ impl ScannerStore {
         parse_profile_hash: &str,
         inventory_existed_before: bool,
     ) -> Result<CacheLookup, StoreError> {
-        if file_identity.is_empty()
-            || source_version.is_empty()
-            || inventory::parse_source_version(source_version).is_err()
-            || !valid_guard_wire(source_guard_kind, source_guard_sha256)
-            || !inventory::is_sha256(parse_profile_hash)
-        {
-            return Err(StoreError::InvalidRequest(
-                "cache lookup key is invalid".to_string(),
-            ));
-        }
+        let key = cache::CacheLookupKey {
+            file_identity,
+            source_version,
+            source_guard_kind,
+            source_guard_sha256,
+            parse_profile_hash,
+            inventory_existed_before,
+        };
+        validate_cache_lookup_key(&key)?;
         cache::lookup_cache(
             &self.connection,
             file_identity,
@@ -974,6 +973,16 @@ impl ScannerStore {
             inventory_existed_before,
         )
         .map_err(cache_open)
+    }
+
+    fn lookup_cache_batch(
+        &self,
+        keys: &[cache::CacheLookupKey<'_>],
+    ) -> Result<Vec<CacheLookup>, StoreError> {
+        for key in keys {
+            validate_cache_lookup_key(key)?;
+        }
+        cache::lookup_cache_batch(&self.connection, keys).map_err(cache_open)
     }
 
     /// Upserts the global `file_inventory` in one bounded short transaction and
@@ -1097,7 +1106,7 @@ impl ScannerStore {
         profile: &NormalizedScannerProfileV1,
         route_stacks: &RouteStackFingerprints,
     ) -> Result<Vec<CacheAwarePlanEntry>, StoreError> {
-        planned_files
+        let mut entries = planned_files
             .into_iter()
             .map(|planned| match planned.action {
                 crate::planner::PlanAction::Reject(_) => Ok(CacheAwarePlanEntry {
@@ -1109,22 +1118,45 @@ impl ScannerStore {
                     let profile_hash =
                         parse_profile_hash(1, route_stacks.for_route(route), profile)
                             .map_err(StoreError::InvalidRequest)?;
-                    let lookup = self.lookup_cache(
-                        &planned.file.file_identity,
-                        &planned.file.source_version,
-                        "content_sha256_v1",
-                        &"0".repeat(64),
-                        &profile_hash,
-                        false,
-                    )?;
                     Ok(CacheAwarePlanEntry {
                         planned,
                         parse_profile_hash: Some(profile_hash),
-                        cache_lookup: Some(lookup),
+                        cache_lookup: None,
                     })
                 }
             })
-            .collect()
+            .collect::<Result<Vec<_>, StoreError>>()?;
+        let zero_guard = "0".repeat(64);
+        let keys = entries
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .parse_profile_hash
+                    .as_deref()
+                    .map(|parse_profile_hash| cache::CacheLookupKey {
+                        file_identity: &entry.planned.file.file_identity,
+                        source_version: &entry.planned.file.source_version,
+                        source_guard_kind: "content_sha256_v1",
+                        source_guard_sha256: &zero_guard,
+                        parse_profile_hash,
+                        inventory_existed_before: false,
+                    })
+            })
+            .collect::<Vec<_>>();
+        let mut lookups = self.lookup_cache_batch(&keys)?.into_iter();
+        for entry in &mut entries {
+            if entry.parse_profile_hash.is_some() {
+                entry.cache_lookup = Some(
+                    lookups
+                        .next()
+                        .ok_or_else(|| cache_open("batch cache lookup count mismatch"))?,
+                );
+            }
+        }
+        if lookups.next().is_some() {
+            return Err(cache_open("batch cache lookup count mismatch"));
+        }
+        Ok(entries)
     }
 
     pub fn finalize(
@@ -3420,6 +3452,20 @@ fn valid_guard_wire(kind: &str, hash: &str) -> bool {
         kind,
         "windows_file_id_change_time_v1" | "unix_inode_ctime_v1" | "content_sha256_v1"
     ) && inventory::is_sha256(hash)
+}
+
+fn validate_cache_lookup_key(key: &cache::CacheLookupKey<'_>) -> Result<(), StoreError> {
+    if key.file_identity.is_empty()
+        || key.source_version.is_empty()
+        || inventory::parse_source_version(key.source_version).is_err()
+        || !valid_guard_wire(key.source_guard_kind, key.source_guard_sha256)
+        || !inventory::is_sha256(key.parse_profile_hash)
+    {
+        return Err(StoreError::InvalidRequest(
+            "cache lookup key is invalid".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn now_millis() -> Result<u64, StoreError> {
@@ -6282,6 +6328,166 @@ mod tests {
                 .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &changed_hash, false)
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::ParserIdentityChanged)
+        );
+    }
+
+    #[test]
+    fn batch_cache_lookup_matches_scalar_across_chunk_boundary() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000030");
+        let source = "mtime_ns=100:size=5";
+        let changed_source = "mtime_ns=101:size=5";
+        let profile_hash = "a".repeat(64);
+        let changed_profile_hash = "b".repeat(64);
+        let zero_guard = "0".repeat(64);
+
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        harness
+            .store
+            .prepare_inventory(
+                &[
+                    inventory_record("file-fresh", source),
+                    inventory_record("file-error", source),
+                    inventory_record("file-profile", source),
+                    inventory_record("file-source", source),
+                ],
+                i64::try_from(active.scan_run_id()).unwrap(),
+                1,
+            )
+            .unwrap();
+
+        harness
+            .store
+            .write_success_parse_cache(
+                &[
+                    cache_record("file-fresh", source, &profile_hash, "fresh"),
+                    cache_record("file-error", source, &profile_hash, "corrupt"),
+                    cache_record("file-profile", source, &profile_hash, "profile"),
+                    cache_record("file-source", source, &profile_hash, "source"),
+                ],
+                1,
+            )
+            .unwrap();
+        harness
+            .store
+            .connection
+            .execute(
+                "UPDATE parse_cache SET content_sha256=?1 WHERE file_identity=?2",
+                params![&zero_guard, "file-error"],
+            )
+            .unwrap();
+
+        let mut cases = (0..cache::CACHE_LOOKUP_BATCH_SIZE)
+            .map(|index| {
+                (
+                    format!("file-new-{index}"),
+                    source.to_string(),
+                    profile_hash.clone(),
+                    false,
+                )
+            })
+            .collect::<Vec<_>>();
+        let special_start = cases.len();
+        cases.extend([
+            (
+                "file-fresh".to_string(),
+                source.to_string(),
+                profile_hash.clone(),
+                false,
+            ),
+            (
+                "file-error".to_string(),
+                source.to_string(),
+                profile_hash.clone(),
+                false,
+            ),
+            (
+                "file-profile".to_string(),
+                source.to_string(),
+                changed_profile_hash,
+                false,
+            ),
+            (
+                "file-source".to_string(),
+                changed_source.to_string(),
+                profile_hash.clone(),
+                false,
+            ),
+            (
+                "file-evicted".to_string(),
+                source.to_string(),
+                profile_hash.clone(),
+                true,
+            ),
+            (
+                "file-new".to_string(),
+                source.to_string(),
+                profile_hash,
+                false,
+            ),
+        ]);
+        let keys = cases
+            .iter()
+            .map(
+                |(file_identity, source_version, parse_profile_hash, existed)| {
+                    cache::CacheLookupKey {
+                        file_identity,
+                        source_version,
+                        source_guard_kind: "content_sha256_v1",
+                        source_guard_sha256: &zero_guard,
+                        parse_profile_hash,
+                        inventory_existed_before: *existed,
+                    }
+                },
+            )
+            .collect::<Vec<_>>();
+
+        let scalar = keys
+            .iter()
+            .map(|key| {
+                harness.store.lookup_cache(
+                    key.file_identity,
+                    key.source_version,
+                    key.source_guard_kind,
+                    key.source_guard_sha256,
+                    key.parse_profile_hash,
+                    key.inventory_existed_before,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let batch = harness.store.lookup_cache_batch(&keys).unwrap();
+
+        assert_eq!(batch, scalar);
+        assert!(matches!(batch[special_start], CacheLookup::Fresh(_)));
+        assert_eq!(
+            batch[special_start + 1],
+            CacheLookup::Miss(CacheMissReason::ErrorCache)
+        );
+        assert_eq!(
+            batch[special_start + 2],
+            CacheLookup::Miss(CacheMissReason::ParserIdentityChanged)
+        );
+        assert_eq!(
+            batch[special_start + 3],
+            CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
+        );
+        assert_eq!(
+            batch[special_start + 4],
+            CacheLookup::Miss(CacheMissReason::EntryAbsentOrEvicted)
+        );
+        assert_eq!(
+            batch[special_start + 5],
+            CacheLookup::Miss(CacheMissReason::NewFile)
         );
     }
 

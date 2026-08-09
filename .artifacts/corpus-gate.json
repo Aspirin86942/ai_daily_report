@@ -1,12 +1,12 @@
 {
   "schema": "corpus_gate_evidence_v1",
-  "generated_at_utc": "2026-08-09T10:12:12Z",
+  "generated_at_utc": "2026-08-09T13:39:30Z",
   "manifest_hash": "e37a4838b84992a623b2128807ade133520a78df80bca0007873f03324a511a1",
   "build": {
-    "scanner_sha256": "1c5c2927893a19aa28088edd62c8f6a203433225a5b7b0edf10ba11ce799d0a7",
-    "office_worker_sha256": "a1abb315393f75459a42a4d1232d5931c07ca058c8da6d5d17fda36b508876cc",
+    "scanner_sha256": "203c25278825e74b4fb8bb3171eb13c13203459a3668bfe78592236659c1591d",
+    "office_worker_sha256": "5774955e633feb1c4171e06d9aa6d241db779eb7ce5cdf82394b4b4b4fbb8f94",
     "engine_version": "0.1.0",
-    "engine_build": "sha256-source-v1:5dcf63947bbf2c8b7357da3bbf8de9c7aa35dc51ed5839337aba4462469480fd",
+    "engine_build": "sha256-source-v1:25ba159d862260261943d3b5021b9fd72a6ec1676f1fd4e38f2fea28a2334bbb",
     "target_triple": "x86_64-pc-windows-msvc"
   },
   "corpus": {
@@ -17,7 +17,7 @@
     {
       "combo": "empty_empty",
       "status": "ok",
-      "wall_ms": 2448.5654830932617,
+      "wall_ms": 1568.2439804077148,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -56,7 +56,7 @@
     {
       "combo": "empty_partial",
       "status": "ok",
-      "wall_ms": 2412.5242233276367,
+      "wall_ms": 1650.9156227111816,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -95,7 +95,7 @@
     {
       "combo": "empty_full",
       "status": "ok",
-      "wall_ms": 2440.9327507019043,
+      "wall_ms": 1738.487958908081,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -134,7 +134,7 @@
     {
       "combo": "partial_empty",
       "status": "ok",
-      "wall_ms": 1072.542428970337,
+      "wall_ms": 657.8688621520996,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -173,7 +173,7 @@
     {
       "combo": "partial_partial",
       "status": "ok",
-      "wall_ms": 1036.0758304595947,
+      "wall_ms": 496.3071346282959,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -212,7 +212,7 @@
     {
       "combo": "partial_full",
       "status": "ok",
-      "wall_ms": 585.1452350616455,
+      "wall_ms": 128.67498397827148,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -251,7 +251,7 @@
     {
       "combo": "full_empty",
       "status": "ok",
-      "wall_ms": 1050.6212711334229,
+      "wall_ms": 656.2855243682861,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -290,7 +290,7 @@
     {
       "combo": "full_partial",
       "status": "ok",
-      "wall_ms": 1042.443037033081,
+      "wall_ms": 508.32486152648926,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -329,7 +329,7 @@
     {
       "combo": "full_full",
       "status": "ok",
-      "wall_ms": 564.612627029419,
+      "wall_ms": 127.44784355163574,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
