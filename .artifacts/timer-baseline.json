@@ -17,17 +17,17 @@
   "report_mode": "weekly",
   "os_page_cache_declared_not_cleared": true,
   "build": {
-    "scanner_sha256": "baa1e65d23e003eed5366b9cff46eaa124753afe2ae1293e976eacfb207ef842",
-    "office_worker_sha256": "881109497cb5a835db339b885ed58de4e8c798d8bfa5de65c75d5850845fb8cc",
+    "scanner_sha256": "80bd268a14f1ea839a75f9655e1a00b97c5cd8e86d83336f668bcb4aa4d26af8",
+    "office_worker_sha256": "5c1c914aa973f156139a5a23c0fa7cb40f840ee15246743e0f7a22e8153a7f1d",
     "engine_version": "0.1.0",
-    "engine_build": "sha256-source-v1:f0fbafd47ba8e308620f7c84b558a5d28aa73e3335cc39f0163e77a88df4a912",
+    "engine_build": "sha256-source-v1:c3012d2d87e7bdc15d8dc77cc5d77d96c2de081139bab6ada79ae4dafac2342c",
     "target_triple": "x86_64-pc-windows-msvc",
     "run_identity": {
-      "engine_build": "sha256-source-v1:f0fbafd47ba8e308620f7c84b558a5d28aa73e3335cc39f0163e77a88df4a912",
+      "engine_build": "sha256-source-v1:c3012d2d87e7bdc15d8dc77cc5d77d96c2de081139bab6ada79ae4dafac2342c",
       "workers": {
         "office_contract": "ai_daily_worker_v1",
         "office_version": "0.1.0",
-        "office_build": "sha256-source-v1:f0fbafd47ba8e308620f7c84b558a5d28aa73e3335cc39f0163e77a88df4a912",
+        "office_build": "sha256-source-v1:c3012d2d87e7bdc15d8dc77cc5d77d96c2de081139bab6ada79ae4dafac2342c",
         "python_contract": "ai_daily_worker_v1",
         "python_version": "0.1.0",
         "python_build": "5636b389db22234e5c3f3d28bcb32ddee8103916409bdc2ac3d6b6e5ed5691ff"
@@ -79,27 +79,27 @@
   "normalized_profile_hash_algorithm": "sha256(sorted-key-json-utf8)",
   "normalized_profile_sha256": "9235e1d2595c1e343793e359357f546d7fe1c469f84405dd48ab8e31732c5a7b",
   "profile_and_build_provenance": "context_artifacts.snapshot_key_json",
-  "cold_median_ms": 842.5868000012997,
-  "cold_max_ms": 882.2405999999319,
+  "cold_median_ms": 847.6315000007162,
+  "cold_max_ms": 908.3487000025343,
   "cold_benchmark_wall_ms": [
-    882.2405999999319,
-    833.5955999973521,
-    842.5868000012997
+    840.9260999978869,
+    847.6315000007162,
+    908.3487000025343
   ],
-  "warm_median_ms": 98.16510000018752,
-  "warm_max_ms": 100.25300000052084,
+  "warm_median_ms": 110.50049999903422,
+  "warm_max_ms": 114.15149999811547,
   "warm_benchmark_wall_ms": [
-    100.25300000052084,
-    97.49109999756911,
-    98.16510000018752
+    103.74139999839826,
+    114.15149999811547,
+    110.50049999903422
   ],
   "all_benchmark_wall_ms": [
-    882.2405999999319,
-    833.5955999973521,
-    842.5868000012997,
-    100.25300000052084,
-    97.49109999756911,
-    98.16510000018752
+    840.9260999978869,
+    847.6315000007162,
+    908.3487000025343,
+    103.74139999839826,
+    114.15149999811547,
+    110.50049999903422
   ],
   "samples_clean": true,
   "warm_median_ms_over_400": false,
