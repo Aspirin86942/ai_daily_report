@@ -22,6 +22,10 @@ WORKFLOW_GATES = {
     ".github/workflows/ci.yml": 2,
     ".github/workflows/windows-release.yml": 1,
 }
+WINDOWS_PRODUCTION_WORKFLOWS = (
+    ".github/workflows/ci.yml",
+    ".github/workflows/windows-release.yml",
+)
 
 
 def _export_lock(root: Path, output_path: Path) -> bytes:
@@ -101,3 +105,28 @@ def test_ci_pins_uv_syncs_frozen_and_runs_the_projection_gate() -> None:
             workflow.count("uv run pytest tests/test_requirements_lock.py -v")
             == expected_gate_count
         )
+
+
+def test_windows_workflows_run_the_explicit_clean_production_chain() -> None:
+    root = Path(__file__).resolve().parents[1]
+    ordered_tokens = (
+        "python -m venv $prodVenv",
+        "& $prodPython -m pip install --requirement requirements.lock",
+        "-m src.workers.document_parser_worker version",
+        "-m src.workers.document_parser_worker session-version",
+        "& $env:AI_DAILY_PROD_PYTHON main.py doctor --strict",
+        "& $env:AI_DAILY_PROD_PYTHON scripts/corpus_gate.py",
+    )
+    for relative_path in WINDOWS_PRODUCTION_WORKFLOWS:
+        workflow = (root / relative_path).read_text(encoding="utf-8")
+        positions = []
+        for token in ordered_tokens:
+            assert workflow.count(token) == 1, f"{relative_path}: {token}"
+            positions.append(workflow.index(token))
+        assert positions == sorted(positions), (
+            f"{relative_path}: production gate order"
+        )
+        assert "worker_build -ne $worker.worker_build" in workflow
+        assert "--work-dir (Join-Path $gateRoot 'corpus')" in workflow
+        assert "--out-root (Join-Path $gateRoot 'runs')" in workflow
+        assert "--evidence (Join-Path $gateRoot 'evidence.json')" in workflow

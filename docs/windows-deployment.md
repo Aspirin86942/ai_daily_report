@@ -32,6 +32,14 @@ New-Item -ItemType Directory -Path .\dist -Force | Out-Null
   -ReleaseVersion "2026.07.16"
 ```
 
+The Windows CI and release workflows also create a separate production-only
+virtual environment and install it with
+`python -m pip install --requirement requirements.lock`. From that same clean
+environment they validate the Python worker `version` and `session-version`
+identities, run `doctor --strict`, and execute the full fixed-corpus gate. This
+chain is separate from the uv-managed test environment so dev dependencies
+cannot mask a missing production requirement.
+
 The archive root is `ai-daily-report-windows-x64/` and contains exactly:
 
 - `ai-daily-scanner.exe` and `ai-daily-office-parser.exe` at their fixed Rust
@@ -200,12 +208,13 @@ are external state and require separate explicit authorization to change.
 ## Release workflow evidence
 
 `.github/workflows/windows-release.yml` builds the locked Windows workspace,
-runs package structural/tamper tests, installs two locally identified packages
-under a GUID synthetic root, runs strict doctor and zero-network smoke commands
-from an unrelated cwd, switches A to B, rolls back B to A, verifies shared
-config/data hashes, and ensures logs plus report/scan databases stay under
-`shared/`. The workflow sets an LLM hard prohibition and never copies developer
-credentials or business files.
+repeats the clean production-lock/worker-handshake/strict-doctor/fixed-corpus
+chain, runs package structural/tamper tests, installs two locally identified
+packages under a GUID synthetic root, runs zero-network smoke commands from an
+unrelated cwd, switches A to B, rolls back B to A, verifies shared config/data
+hashes, and ensures logs plus report/scan databases stay under `shared/`. The
+workflow sets an LLM hard prohibition and never copies developer credentials or
+business files.
 
 Linux remains a compatibility-only source target. It has no production release
 artifact, installed-mode guarantee, or Windows process-tree timeout claim.

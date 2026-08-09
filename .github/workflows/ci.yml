@@ -49,8 +49,63 @@ jobs:
           New-Item -ItemType Directory -Path '.ci-work' -Force | Out-Null
           Copy-Item -LiteralPath 'config/settings.example.yaml' `
             -Destination 'config/settings.windows.yaml'
-      - name: Run strict production doctor
-        run: uv run python main.py doctor --strict
+      - name: Install clean production environment from requirements.lock
+        shell: pwsh
+        run: |
+          $prodVenv = Join-Path $env:RUNNER_TEMP 'ai-daily-production-venv'
+          python -m venv $prodVenv
+          if ($LASTEXITCODE -ne 0) { throw 'production venv creation failed' }
+          $prodPython = Join-Path $prodVenv 'Scripts\python.exe'
+          & $prodPython -m pip install --requirement requirements.lock
+          if ($LASTEXITCODE -ne 0) { throw 'production lock install failed' }
+          & $prodPython -m pip check
+          if ($LASTEXITCODE -ne 0) { throw 'production dependency check failed' }
+          Add-Content -LiteralPath $env:GITHUB_ENV `
+            -Value "AI_DAILY_PROD_PYTHON=$prodPython" -Encoding utf8
+      - name: Verify production Python worker handshakes
+        shell: pwsh
+        run: |
+          $workerJson = & $env:AI_DAILY_PROD_PYTHON `
+            -m src.workers.document_parser_worker version
+          if ($LASTEXITCODE -ne 0) { throw 'worker version handshake failed' }
+          $sessionJson = & $env:AI_DAILY_PROD_PYTHON `
+            -m src.workers.document_parser_worker session-version
+          if ($LASTEXITCODE -ne 0) { throw 'session-version handshake failed' }
+          $worker = $workerJson | ConvertFrom-Json
+          $session = $sessionJson | ConvertFrom-Json
+          if (
+            $worker.contract -ne 'ai_daily_worker' -or
+            [int]$worker.protocol_version -ne 1 -or
+            $worker.worker_kind -ne 'python_document' -or
+            $worker.worker_contract_version -ne 'ai_daily_worker_v1' -or
+            $worker.worker_build -notmatch '^[0-9a-f]{64}$'
+          ) {
+            throw 'worker version identity mismatch'
+          }
+          if (
+            $session.contract -ne 'ai_daily_python_session' -or
+            [int]$session.protocol_version -ne 1 -or
+            $session.session_contract_version -ne 'ai_daily_python_session_v1' -or
+            $session.worker_build -ne $worker.worker_build -or
+            $session.classifier_build -notmatch '^[0-9a-f]{64}$' -or
+            (@($session.supported_operations) -join ',') -ne 'classify_pdf_v1,parse_v1'
+          ) {
+            throw 'session-version identity mismatch'
+          }
+      - name: Run strict production doctor in clean environment
+        shell: pwsh
+        run: |
+          & $env:AI_DAILY_PROD_PYTHON main.py doctor --strict
+          if ($LASTEXITCODE -ne 0) { throw 'clean production doctor failed' }
+      - name: Run fixed corpus gate in clean environment
+        shell: pwsh
+        run: |
+          $gateRoot = Join-Path $env:RUNNER_TEMP 'ai-daily-fixed-corpus'
+          & $env:AI_DAILY_PROD_PYTHON scripts/corpus_gate.py `
+            --work-dir (Join-Path $gateRoot 'corpus') `
+            --out-root (Join-Path $gateRoot 'runs') `
+            --evidence (Join-Path $gateRoot 'evidence.json')
+          if ($LASTEXITCODE -ne 0) { throw 'fixed corpus gate failed' }
       - name: Run full Python test suite
         run: uv run pytest tests/ -v
       - name: Run Chinese path and cold-warm cache E2E
