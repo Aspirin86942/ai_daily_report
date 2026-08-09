@@ -42,7 +42,8 @@ use crate::scheduler::{
 };
 use crate::scheduler_adapter::{ProductionParser, StoreCachePort};
 use crate::source_guard::{
-    compute_source_guard, source_guard_kind_text, SourceGuardKind, SourceGuardV2,
+    source_guard_kind_from_text, source_guard_kind_text, SourceGuardKind,
+    SourceGuardObservationMetrics, SourceGuardObserver, SourceGuardV2,
 };
 use crate::store::{
     canonical_envelope_json, current_time_millis, ActiveRun, AttemptRuntime, BeginRunOutcome,
@@ -68,13 +69,18 @@ pub struct CommandOutput {
 struct ActiveRunTiming {
     clock: RealClock,
     deadlines: RunDeadlines,
+    source_guards: SourceGuardObserver,
 }
 
 impl ActiveRunTiming {
     fn start(total_deadline_ms: u64) -> Result<Self, String> {
         let clock = RealClock::new();
         let deadlines = RunDeadlines::derive(total_deadline_ms, &clock)?;
-        Ok(Self { clock, deadlines })
+        Ok(Self {
+            clock,
+            deadlines,
+            source_guards: SourceGuardObserver::default(),
+        })
     }
 
     fn remaining_work_ms(&self) -> u64 {
@@ -958,13 +964,13 @@ fn execute_active_build(
             );
         }
     };
-    let discovery_duration_ms = elapsed_ms(discovery_started);
     let mut warnings: Vec<Diagnostic> = discovery
         .issues
         .iter()
         .map(discovery_issue_diagnostic)
         .collect();
-    attach_source_guards(&mut discovery.files);
+    attach_source_guards(&mut discovery.files, &timing.source_guards);
+    let discovery_duration_ms = elapsed_ms(discovery_started);
 
     // ---- assemble + execute the deep-module scheduler ----
     let classifier_command = document::worker_command(&request.adapters);
@@ -1234,28 +1240,57 @@ fn execute_active_build(
             );
         }
     };
-    // spec Part 5.3: `snapshot_lookup_ms` is the whole lookup/strict-guard span
-    // (key building + the SQL hit selection), measured from one monotonic clock.
-    let hit = match store.snapshot_lookup(&key_parts) {
-        Ok(hit) => hit,
-        Err(error) => {
-            return finish_active_error(
-                request,
-                version,
-                store,
-                active,
-                heartbeat,
-                warnings,
-                error.diagnostic(DiagnosticStage::Cache),
-                elapsed_summary(started_at),
-                worker_handshake_ms,
-                &rss_tracker,
-                timing,
-            );
+    // The strict guard span covers the pre-lookup discovery verification and,
+    // for a SQL hit, loading + verifying every artifact row before reuse.
+    let verified_hit = if discovery_guards_are_current(&discovery.files, &timing.source_guards) {
+        let hit = match store.snapshot_lookup(&key_parts) {
+            Ok(hit) => hit,
+            Err(error) => {
+                return finish_active_error(
+                    request,
+                    version,
+                    store,
+                    active,
+                    heartbeat,
+                    warnings,
+                    error.diagnostic(DiagnosticStage::Cache),
+                    elapsed_summary(started_at),
+                    worker_handshake_ms,
+                    &rss_tracker,
+                    timing,
+                );
+            }
+        };
+        match hit {
+            Some(hit) => {
+                let artifact = match store.load_artifact(hit.artifact_id) {
+                    Ok(artifact) => artifact,
+                    Err(error) => {
+                        return finish_active_error(
+                            request,
+                            version,
+                            store,
+                            active,
+                            heartbeat,
+                            warnings,
+                            error.diagnostic(DiagnosticStage::Cache),
+                            elapsed_summary(started_at),
+                            worker_handshake_ms,
+                            &rss_tracker,
+                            timing,
+                        );
+                    }
+                };
+                artifact_guards_are_current(&artifact, &discovery.files, &timing.source_guards)
+                    .then_some((hit, artifact))
+            }
+            None => None,
         }
+    } else {
+        None
     };
     let snapshot_lookup_ms = elapsed_ms(snapshot_lookup_started);
-    if let Some(hit) = hit {
+    if let Some((hit, artifact)) = verified_hit {
         return finalize_snapshot_hit(
             request,
             version,
@@ -1267,6 +1302,7 @@ fn execute_active_build(
             &context_profile_hash,
             &classifier_identity,
             hit,
+            artifact,
             discovery_duration_ms,
             inventory_prepare_duration_ms,
             snapshot_lookup_ms,
@@ -1321,7 +1357,7 @@ fn execute_active_build(
         Box::new(parser_port),
         Box::new(cache_port),
         Box::new(timing.clock.clone()),
-        Box::new(RealGuardVerifier),
+        Box::new(RealGuardVerifier::new(timing.source_guards.clone())),
     );
     let mut outcome = match scheduler.execute(input) {
         Ok(outcome) => outcome,
@@ -1772,7 +1808,8 @@ fn assemble_scheduler_execution_metrics(
 /// spans are this run's real measured values.
 #[allow(clippy::too_many_arguments)]
 fn assemble_snapshot_execution_metrics(
-    discovery: &[DiscoveredFileOut],
+    discovery_observed_file_count: u64,
+    guards: SourceGuardObservationMetrics,
     reserved_chars: u64,
     rendered_chars: u64,
     worker_handshake_ms: u64,
@@ -1781,12 +1818,11 @@ fn assemble_snapshot_execution_metrics(
     deadline_precommit_elapsed_ms: u64,
     peak_worker_rss_bytes: Option<u64>,
 ) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
-    let guards = crate::scheduler::source_guard_metrics(discovery);
     ai_daily_scanner_contract::ExecutionMetricsV2 {
-        discovery_observed_file_count: guards.discovery_observed_file_count,
-        source_guard_content_hash_file_count: guards.source_guard_content_hash_file_count,
-        source_guard_unavailable_count: guards.source_guard_unavailable_count,
-        source_guard_bytes_read: guards.source_guard_bytes_read,
+        discovery_observed_file_count,
+        source_guard_content_hash_file_count: guards.content_hash_file_count,
+        source_guard_unavailable_count: guards.unavailable_file_count,
+        source_guard_bytes_read: guards.bytes_read,
         candidate_file_count: 0,
         admitted_file_count: 0,
         classification_slot_count: 0,
@@ -1827,13 +1863,14 @@ fn assemble_engine_error_execution_metrics(
     worker_handshake_ms: u64,
     discovery_ms: u64,
     discovery_observed_file_count: u64,
+    guards: SourceGuardObservationMetrics,
     peak_worker_rss_bytes: Option<u64>,
 ) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
     ai_daily_scanner_contract::ExecutionMetricsV2 {
         discovery_observed_file_count,
-        source_guard_content_hash_file_count: 0,
-        source_guard_unavailable_count: 0,
-        source_guard_bytes_read: 0,
+        source_guard_content_hash_file_count: guards.content_hash_file_count,
+        source_guard_unavailable_count: guards.unavailable_file_count,
+        source_guard_bytes_read: guards.bytes_read,
         candidate_file_count: 0,
         admitted_file_count: 0,
         classification_slot_count: 0,
@@ -1884,6 +1921,7 @@ fn finalize_snapshot_hit(
     context_profile_hash: &str,
     classifier_identity: &ClassifierIdentity,
     hit: SnapshotHit,
+    artifact: ArtifactDraft,
     discovery_duration_ms: u64,
     inventory_prepare_duration_ms: u64,
     snapshot_lookup_ms: u64,
@@ -1892,20 +1930,6 @@ fn finalize_snapshot_hit(
     started_at: Instant,
     timing: &ActiveRunTiming,
 ) -> Result<CommandOutput, EngineShellError> {
-    let artifact = match store.load_artifact(hit.artifact_id) {
-        Ok(draft) => draft,
-        Err(error) => {
-            heartbeat.stop();
-            return build_error_output(
-                request,
-                version,
-                error.diagnostic(DiagnosticStage::Cache),
-                Vec::new(),
-                empty_summary(),
-                Some(active.scan_run_id()),
-            );
-        }
-    };
     let file_results = snapshot_file_results(&artifact, Some(classifier_identity));
     let decisions: Vec<ContextDecisionRecord> = artifact
         .decision_rows
@@ -2045,7 +2069,8 @@ fn finalize_snapshot_hit(
             reused_from_context_run_id: hit.source_context_run_id,
         }),
         execution_metrics: Some(assemble_snapshot_execution_metrics(
-            &discovery.files,
+            discovery.files.len() as u64,
+            timing.source_guards.metrics(),
             artifact.semantic_summary.reserved_chars,
             artifact.semantic_summary.rendered_chars,
             worker_handshake_ms,
@@ -2467,16 +2492,94 @@ fn route_stack_fingerprints(
     })
 }
 
+fn source_guard_from_wire(kind: Option<&str>, hash: Option<&str>) -> Option<SourceGuardV2> {
+    let guard = SourceGuardV2 {
+        kind: source_guard_kind_from_text(kind?)?,
+        guard_sha256: hash.map(str::to_string),
+    };
+    guard.validate().ok()?;
+    Some(guard)
+}
+
+fn discovery_guards_are_current(
+    files: &[DiscoveredFileOut],
+    observer: &SourceGuardObserver,
+) -> bool {
+    let mut all_current = true;
+    for file in files {
+        let Some(expected) = source_guard_from_wire(
+            file.source_guard_kind.as_deref(),
+            file.source_guard_sha256.as_deref(),
+        ) else {
+            all_current = false;
+            continue;
+        };
+        if expected.kind == SourceGuardKind::Unavailable
+            || !observer.verify(Path::new(&file.path), &expected)
+        {
+            all_current = false;
+        }
+    }
+    all_current
+}
+
+fn artifact_guards_are_current(
+    artifact: &ArtifactDraft,
+    files: &[DiscoveredFileOut],
+    observer: &SourceGuardObserver,
+) -> bool {
+    let mut all_current = artifact.snapshot_eligible && artifact.file_rows.len() == files.len();
+    let mut rows = std::collections::HashMap::with_capacity(artifact.file_rows.len());
+    for row in &artifact.file_rows {
+        if rows.insert(row.file_identity.as_str(), row).is_some() {
+            all_current = false;
+        }
+    }
+    for file in files {
+        let discovery_guard = source_guard_from_wire(
+            file.source_guard_kind.as_deref(),
+            file.source_guard_sha256.as_deref(),
+        );
+        if let Some(expected) = discovery_guard.as_ref() {
+            if expected.kind == SourceGuardKind::Unavailable
+                || !observer.verify(Path::new(&file.path), expected)
+            {
+                all_current = false;
+            }
+        } else {
+            all_current = false;
+        }
+
+        let Some(row) = rows.remove(file.file_identity.as_str()) else {
+            all_current = false;
+            continue;
+        };
+        let artifact_guard = source_guard_from_wire(
+            row.source_guard_kind.as_deref(),
+            row.source_guard_sha256.as_deref(),
+        );
+        if row.legacy_source_version != file.source_version
+            || artifact_guard.is_none()
+            || artifact_guard != discovery_guard
+        {
+            all_current = false;
+        }
+    }
+    all_current && rows.is_empty()
+}
+
 /// Computes the engine-owned SourceGuardV2 for every discovered file and
 /// carries it on the discovery output so cache/snapshot identity can consume
 /// it. A hard guard I/O error leaves the file unavailable (fail closed), never
 /// an invented metadata identity.
-fn attach_source_guards(files: &mut [DiscoveredFileOut]) {
+fn attach_source_guards(files: &mut [DiscoveredFileOut], observer: &SourceGuardObserver) {
     for file in files {
-        let guard = compute_source_guard(Path::new(&file.path)).unwrap_or(SourceGuardV2 {
-            kind: SourceGuardKind::Unavailable,
-            guard_sha256: None,
-        });
+        let guard = observer
+            .compute(Path::new(&file.path))
+            .unwrap_or(SourceGuardV2 {
+                kind: SourceGuardKind::Unavailable,
+                guard_sha256: None,
+            });
         file.source_guard_kind = Some(source_guard_kind_text(guard.kind).to_string());
         file.source_guard_sha256 = guard.guard_sha256;
     }
@@ -2706,6 +2809,7 @@ fn persist_active_error_without_heartbeat(
             worker_handshake_ms,
             discovery_ms,
             discovery_observed_file_count,
+            timing.source_guards.metrics(),
             peak_worker_rss_bytes,
         )),
     };
@@ -3287,7 +3391,8 @@ mod tests {
             source_guard_sha256: None,
         }];
 
-        attach_source_guards(&mut files);
+        let observer = crate::source_guard::SourceGuardObserver::default();
+        attach_source_guards(&mut files, &observer);
 
         // Every discovered file must carry a guard. Unavailable stays fail-closed
         // with a null hash; any other kind must carry a 64-char sha256.
@@ -3313,8 +3418,144 @@ mod tests {
     }
 
     #[test]
+    fn guard_attachment_metrics_flow_into_engine_error_metrics() {
+        let directory = tempdir().unwrap();
+        let missing = directory.path().join("missing.txt");
+        let observer = crate::source_guard::SourceGuardObserver::default();
+        let mut files = vec![guarded_discovery_file(&missing)];
+
+        attach_source_guards(&mut files, &observer);
+        let observations = observer.metrics();
+        assert_eq!(observations.content_hash_file_count, 1);
+        assert_eq!(observations.unavailable_file_count, 1);
+        assert_eq!(observations.bytes_read, 0);
+
+        let metrics = assemble_engine_error_execution_metrics(1, 2, 1, observations, Some(0));
+        assert_eq!(metrics.source_guard_content_hash_file_count, 1);
+        assert_eq!(metrics.source_guard_unavailable_count, 1);
+        assert_eq!(metrics.source_guard_bytes_read, 0);
+    }
+
+    fn guarded_discovery_file(path: &Path) -> DiscoveredFileOut {
+        DiscoveredFileOut {
+            file_identity: "fixture:evidence".to_string(),
+            path: path.to_string_lossy().into_owned(),
+            extension: ".txt".to_string(),
+            modified_at: "2026-07-16T00:00:00+08:00".to_string(),
+            size_bytes: 4,
+            source_version: "mtime_ns=1:size=4".to_string(),
+            source_guard_kind: None,
+            source_guard_sha256: None,
+        }
+    }
+
+    fn artifact_for_discovery(file: &DiscoveredFileOut) -> ArtifactDraft {
+        ArtifactDraft {
+            snapshot_eligible: true,
+            final_context: "fixture".to_string(),
+            context_sha256: crate::artifact::sha256_hex(b"fixture"),
+            semantic_summary: SemanticSummary {
+                source_file_count: 1,
+                success_count: 1,
+                timeout_count: 0,
+                included_file_count: 1,
+                omitted_file_count: 0,
+                error_file_count: 0,
+                input_chars: 7,
+                output_chars: 7,
+                reserved_chars: 7,
+                rendered_chars: 7,
+            },
+            file_rows: vec![ArtifactFileRow {
+                file_identity: file.file_identity.clone(),
+                relative_path: "evidence.txt".to_string(),
+                legacy_source_version: file.source_version.clone(),
+                source_guard_kind: file.source_guard_kind.clone(),
+                source_guard_sha256: file.source_guard_sha256.clone(),
+                parse_profile_hash: "a".repeat(64),
+                parse_status: ParseStatus::Success,
+                parser_backend: "light_text_v1".to_string(),
+                worker_lane: "rust_core".to_string(),
+                truncated: false,
+                content_sha256: crate::artifact::sha256_hex(b"fixture"),
+                classifier: None,
+            }],
+            decision_rows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn snapshot_precheck_taints_a_source_changed_after_discovery() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("precheck.txt");
+        std::fs::write(&path, "AAAA").unwrap();
+        let observer = crate::source_guard::SourceGuardObserver::default();
+        let mut files = vec![guarded_discovery_file(&path)];
+        attach_source_guards(&mut files, &observer);
+
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&path, "BBBB").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert!(!discovery_guards_are_current(&files, &observer));
+        let current = crate::source_guard::SourceGuardObserver::default()
+            .compute(&path)
+            .unwrap();
+        assert!(
+            !observer.verify(&path, &current),
+            "the scheduler must inherit the precheck mismatch taint"
+        );
+    }
+
+    #[test]
+    fn snapshot_postcheck_rejects_a_source_changed_after_artifact_load() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("postcheck.txt");
+        std::fs::write(&path, "AAAA").unwrap();
+        let observer = crate::source_guard::SourceGuardObserver::default();
+        let mut files = vec![guarded_discovery_file(&path)];
+        attach_source_guards(&mut files, &observer);
+        let artifact = artifact_for_discovery(&files[0]);
+
+        std::thread::sleep(Duration::from_millis(50));
+        std::fs::write(&path, "BBBB").unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert!(!artifact_guards_are_current(&artifact, &files, &observer));
+    }
+
+    #[test]
+    fn snapshot_postcheck_rejects_artifact_guard_row_disagreement() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("artifact-row.txt");
+        std::fs::write(&path, "AAAA").unwrap();
+        let observer = crate::source_guard::SourceGuardObserver::default();
+        let mut files = vec![guarded_discovery_file(&path)];
+        attach_source_guards(&mut files, &observer);
+        let mut artifact = artifact_for_discovery(&files[0]);
+        artifact.file_rows[0].source_guard_kind = Some("unknown_guard".to_string());
+        assert!(!artifact_guards_are_current(&artifact, &files, &observer));
+        artifact.file_rows[0].source_guard_kind = files[0].source_guard_kind.clone();
+        artifact.file_rows[0].source_guard_sha256 = Some("f".repeat(64));
+
+        assert!(!artifact_guards_are_current(&artifact, &files, &observer));
+        artifact.file_rows.clear();
+        assert!(!artifact_guards_are_current(&artifact, &files, &observer));
+    }
+
+    #[test]
     fn snapshot_reports_the_live_handshake_peak_rss() {
-        let metrics = assemble_snapshot_execution_metrics(&[], 0, 0, 1, 2, 3, 4, Some(64 * 1024));
+        let observations = crate::source_guard::SourceGuardObservationMetrics {
+            content_hash_file_count: 1,
+            unavailable_file_count: 2,
+            bytes_read: 3,
+        };
+        let metrics =
+            assemble_snapshot_execution_metrics(4, observations, 0, 0, 1, 2, 3, 4, Some(64 * 1024));
+        assert_eq!(metrics.discovery_observed_file_count, 4);
+        assert_eq!(metrics.source_guard_content_hash_file_count, 1);
+        assert_eq!(metrics.source_guard_unavailable_count, 2);
+        assert_eq!(metrics.source_guard_bytes_read, 3);
         assert_eq!(metrics.peak_worker_rss_bytes.0, Some(64 * 1024));
     }
 

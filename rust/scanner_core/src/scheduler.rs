@@ -36,7 +36,8 @@ use crate::compressor::{build_context, fixed_context_sections, ContextBuildOutpu
 use crate::decision::ContextFileEvidence;
 use crate::parsers::classifier::PdfClassifierPort;
 use crate::source_guard::{
-    source_guard_kind_from_text, verify_guard, SourceGuardKind, SourceGuardV2,
+    source_guard_kind_from_text, SourceGuardKind, SourceGuardObservationMetrics,
+    SourceGuardObserver, SourceGuardV2,
 };
 use crate::store::{
     CacheLookup, CacheWriteRecord, ClassificationCacheLookup, ClassificationCacheWriteRecord,
@@ -53,14 +54,38 @@ pub use crate::deadline::{Clock, RealClock, RunDeadlines, FINALIZATION_RESERVE_M
 /// Source guard verifier around worker results (spec SourceGuard v2).
 pub trait GuardVerifier: Send + Sync {
     fn verify(&self, path: &str, expected: &SourceGuardV2) -> bool;
+
+    fn is_tainted(&self, _path: &str) -> bool {
+        false
+    }
+
+    fn metrics(&self) -> Option<SourceGuardObservationMetrics> {
+        None
+    }
 }
 
 /// Production verifier: recomputes the guard for the current file.
-pub struct RealGuardVerifier;
+pub struct RealGuardVerifier {
+    observer: SourceGuardObserver,
+}
+
+impl RealGuardVerifier {
+    pub fn new(observer: SourceGuardObserver) -> Self {
+        Self { observer }
+    }
+}
 
 impl GuardVerifier for RealGuardVerifier {
     fn verify(&self, path: &str, expected: &SourceGuardV2) -> bool {
-        verify_guard(Path::new(path), expected)
+        self.observer.verify(Path::new(path), expected)
+    }
+
+    fn is_tainted(&self, path: &str) -> bool {
+        self.observer.is_tainted(Path::new(path))
+    }
+
+    fn metrics(&self) -> Option<SourceGuardObservationMetrics> {
+        Some(self.observer.metrics())
     }
 }
 
@@ -575,11 +600,10 @@ impl BudgetedContextScheduler {
         // run-level Error BEFORE `prepare_inventory`, with zero file rows and
         // `discovery_observed_file_count = ceiling + 1`.
         if input.discovery.len() as u64 > ai_daily_scanner_contract::MAX_SOURCE_FILES_PER_RUN {
-            let mut metrics = ExecutionMetrics {
-                discovery_observed_file_count: ai_daily_scanner_contract::MAX_SOURCE_FILES_PER_RUN
-                    + 1,
-                ..ExecutionMetrics::default()
-            };
+            let mut metrics = source_guard_metrics(&input.discovery);
+            apply_observed_source_guard_metrics(&mut metrics, self.guard.as_ref());
+            metrics.discovery_observed_file_count =
+                ai_daily_scanner_contract::MAX_SOURCE_FILES_PER_RUN + 1;
             metrics.deadline_precommit_elapsed_ms = self.clock.now_ms();
             return Ok(BudgetedScanOutcome {
                 scan_run_id: input.scan_run_id,
@@ -648,6 +672,7 @@ impl BudgetedContextScheduler {
         let discovery_count = input.discovery.len() as u64;
         let profile = input.profile.clone();
         let mut metrics = source_guard_metrics(&input.discovery);
+        apply_observed_source_guard_metrics(&mut metrics, self.guard.as_ref());
         // Bounded parallel executor for classification/parse waves (spec
         // Solution / Part 7.3): `session_concurrency` threads at most; each
         // wave is dispatched only while `remaining_to_work_deadline > 0`.
@@ -797,6 +822,21 @@ impl BudgetedContextScheduler {
             &executor,
         )?;
         parse_outputs.classification_cache_receipts = classification_cache_receipts;
+        for file in &input.discovery {
+            if self.guard.is_tainted(&file.path) {
+                parse_outputs
+                    .results
+                    .entry(file.file_identity.clone())
+                    .or_insert_with(|| source_version_changed_parse(file));
+                parse_outputs
+                    .parse_cache_status
+                    .insert(file.file_identity.clone(), CacheStatus::Miss);
+                parse_outputs.parse_cache_miss_reason.insert(
+                    file.file_identity.clone(),
+                    CacheMissReason::SourceVersionChanged,
+                );
+            }
+        }
         let parse_duration_ms = self.clock.now_ms().saturating_sub(parse_started);
 
         // Cache-access touches are optional metadata, but they still obey the
@@ -841,6 +881,8 @@ impl BudgetedContextScheduler {
             Err(message) => {
                 // spec Solution: BUDGET_MODEL_MISMATCH is a defined terminal
                 // state -> Ok(outcome) with Error intent, never Err(SchedulerFailure).
+                apply_observed_source_guard_metrics(&mut metrics, self.guard.as_ref());
+                metrics.deadline_precommit_elapsed_ms = self.clock.now_ms();
                 return Ok(internal_error_outcome(
                     input.scan_run_id,
                     metrics,
@@ -855,6 +897,8 @@ impl BudgetedContextScheduler {
 
         // ---- Enforce the rendered <= reserved budget-model invariant ----
         if let Err(failure) = enforce_rendered_within_reserved(&rendered, &admission, &model) {
+            apply_observed_source_guard_metrics(&mut metrics, self.guard.as_ref());
+            metrics.deadline_precommit_elapsed_ms = self.clock.now_ms();
             return Ok(internal_error_outcome(
                 input.scan_run_id,
                 metrics,
@@ -984,6 +1028,7 @@ impl BudgetedContextScheduler {
             }
         };
 
+        apply_observed_source_guard_metrics(&mut metrics, self.guard.as_ref());
         metrics.deadline_precommit_elapsed_ms = self.clock.now_ms();
 
         Ok(BudgetedScanOutcome {
@@ -1038,14 +1083,22 @@ pub(crate) fn source_guard_metrics(discovery: &[DiscoveredFileOut]) -> Execution
             Some(SourceGuardKind::Unavailable) => metrics.source_guard_unavailable_count += 1,
             Some(SourceGuardKind::ContentSha256V1) => {
                 metrics.source_guard_content_hash_file_count += 1;
-                metrics.source_guard_bytes_read = metrics
-                    .source_guard_bytes_read
-                    .saturating_add(file.size_bytes);
+                // Exact bytes require a run observer; file size is not an I/O
+                // receipt and must never be substituted here.
             }
             _ => {}
         }
     }
     metrics
+}
+
+fn apply_observed_source_guard_metrics(metrics: &mut ExecutionMetrics, guard: &dyn GuardVerifier) {
+    let Some(observed) = guard.metrics() else {
+        return;
+    };
+    metrics.source_guard_content_hash_file_count = observed.content_hash_file_count;
+    metrics.source_guard_unavailable_count = observed.unavailable_file_count;
+    metrics.source_guard_bytes_read = observed.bytes_read;
 }
 
 /// Surfaces a discovery issue as a run-level warning (spec Part 5.3); an
@@ -2029,6 +2082,13 @@ fn source_version_changed_after_parse(
     }
 }
 
+fn is_source_version_changed_result(result: &ParseResult) -> bool {
+    result
+        .error
+        .as_ref()
+        .is_some_and(|diagnostic| diagnostic.error_code == ErrorCode::SourceVersionChanged)
+}
+
 // ---------------------------------------------------------------------------
 // evidence + file results + terminal state
 // ---------------------------------------------------------------------------
@@ -2080,6 +2140,27 @@ fn file_evidence(
     runtime_classification: &HashSet<String>,
     parse_outputs: &ParseOutputs,
 ) -> ContextFileEvidence {
+    if let Some(result) = parse_outputs
+        .results
+        .get(&file.file_identity)
+        .filter(|result| is_source_version_changed_result(result))
+    {
+        return ContextFileEvidence {
+            file_identity: file.file_identity.clone(),
+            absolute_path: file.path.clone(),
+            relative_path: relative_path.to_string(),
+            extension: file.extension.clone(),
+            size_bytes: Some(file.size_bytes),
+            content: String::new(),
+            parser_backend: result.parser_backend.clone(),
+            worker_lane: parse_worker_lane(&result.worker_lane),
+            cache_status: CacheStatus::Miss,
+            parse_status: ParseStatus::Error,
+            truncated: false,
+            error: result.error.clone(),
+            reason: Some("source_version_changed".to_string()),
+        };
+    }
     match action {
         PlanAction::NotParsed { reason } => ContextFileEvidence {
             file_identity: file.file_identity.clone(),
@@ -2499,59 +2580,57 @@ fn build_file_results(
             failure_class,
             fallback_backend,
             fallback_reason,
-        ) = match action {
-            PlanAction::NotParsed { .. } => (
-                ParseStatus::NotParsed,
-                "not_parsed".to_string(),
-                AuditWorkerLane::NotParsed,
-                None,
-                crate::store::sha256_hex(b""),
-                false,
-                0,
-                0,
-                0,
-                String::new(),
-                String::new(),
-                String::new(),
-            ),
-            PlanAction::Reject { reason } => (
+        ) = if let Some(result) = parse_outputs
+            .results
+            .get(&file.file_identity)
+            .filter(|result| is_source_version_changed_result(result))
+        {
+            (
                 ParseStatus::Error,
-                "not_parsed".to_string(),
-                AuditWorkerLane::NotParsed,
-                Some(Diagnostic {
-                    error_code: match reason {
-                        RejectReason::SourceGuardUnavailable => ErrorCode::SourceGuardUnavailable,
-                        RejectReason::ProfileRouteInvariant => ErrorCode::ProfileRouteInvariant,
-                    },
-                    message: reason.as_str().to_string(),
-                    retryable: reason == &RejectReason::SourceGuardUnavailable,
-                    stage: DiagnosticStage::Parse,
-                    file_path: Nullable(Some(file.path.clone())),
-                    backend: Nullable(None),
-                }),
-                crate::store::sha256_hex(b""),
+                result.parser_backend.clone(),
+                parse_worker_lane(&result.worker_lane),
+                result.error.clone(),
+                result.content_sha256.clone(),
                 false,
-                0,
-                0,
-                0,
-                String::new(),
-                String::new(),
-                String::new(),
-            ),
-            PlanAction::ClassifierFailed { status } => {
-                let (parse_status, error_code, retryable) =
-                    classifier_failure_semantics(status, classifications.get(&file.file_identity));
-                (
-                    parse_status,
+                result.primary_duration_ms,
+                result.fallback_duration_ms,
+                result.parse_duration_ms,
+                result.failure_class.clone(),
+                result.fallback_backend.clone(),
+                result.fallback_reason_code.clone(),
+            )
+        } else {
+            match action {
+                PlanAction::NotParsed { .. } => (
+                    ParseStatus::NotParsed,
+                    "not_parsed".to_string(),
+                    AuditWorkerLane::NotParsed,
+                    None,
+                    crate::store::sha256_hex(b""),
+                    false,
+                    0,
+                    0,
+                    0,
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ),
+                PlanAction::Reject { reason } => (
+                    ParseStatus::Error,
                     "not_parsed".to_string(),
                     AuditWorkerLane::NotParsed,
                     Some(Diagnostic {
-                        error_code,
-                        message: format!("pdf classification {status:?}"),
-                        retryable,
+                        error_code: match reason {
+                            RejectReason::SourceGuardUnavailable => {
+                                ErrorCode::SourceGuardUnavailable
+                            }
+                            RejectReason::ProfileRouteInvariant => ErrorCode::ProfileRouteInvariant,
+                        },
+                        message: reason.as_str().to_string(),
+                        retryable: reason == &RejectReason::SourceGuardUnavailable,
                         stage: DiagnosticStage::Parse,
                         file_path: Nullable(Some(file.path.clone())),
-                        backend: Nullable(Some("pdf_classifier".to_string())),
+                        backend: Nullable(None),
                     }),
                     crate::store::sha256_hex(b""),
                     false,
@@ -2561,49 +2640,24 @@ fn build_file_results(
                     String::new(),
                     String::new(),
                     String::new(),
-                )
-            }
-            PlanAction::Admit { .. } => {
-                if runtime_classification.contains(&file.file_identity)
-                    || parse_outputs
-                        .runtime_not_parsed
-                        .contains(&file.file_identity)
-                {
+                ),
+                PlanAction::ClassifierFailed { status } => {
+                    let (parse_status, error_code, retryable) = classifier_failure_semantics(
+                        status,
+                        classifications.get(&file.file_identity),
+                    );
                     (
-                        ParseStatus::NotParsed,
+                        parse_status,
                         "not_parsed".to_string(),
                         AuditWorkerLane::NotParsed,
-                        None,
-                        crate::store::sha256_hex(b""),
-                        false,
-                        0,
-                        0,
-                        0,
-                        String::new(),
-                        String::new(),
-                        String::new(),
-                    )
-                } else if let Some(result) = parse_outputs.results.get(&file.file_identity) {
-                    (
-                        result.parse_status,
-                        result.parser_backend.clone(),
-                        parse_worker_lane(&result.worker_lane),
-                        result.error.clone(),
-                        result.content_sha256.clone(),
-                        result.truncated,
-                        result.primary_duration_ms,
-                        result.fallback_duration_ms,
-                        result.parse_duration_ms,
-                        result.failure_class.clone(),
-                        result.fallback_backend.clone(),
-                        result.fallback_reason_code.clone(),
-                    )
-                } else {
-                    (
-                        ParseStatus::Success,
-                        "pdf_metadata_v1".to_string(),
-                        AuditWorkerLane::RustCore,
-                        None,
+                        Some(Diagnostic {
+                            error_code,
+                            message: format!("pdf classification {status:?}"),
+                            retryable,
+                            stage: DiagnosticStage::Parse,
+                            file_path: Nullable(Some(file.path.clone())),
+                            backend: Nullable(Some("pdf_classifier".to_string())),
+                        }),
                         crate::store::sha256_hex(b""),
                         false,
                         0,
@@ -2614,30 +2668,98 @@ fn build_file_results(
                         String::new(),
                     )
                 }
+                PlanAction::Admit { .. } => {
+                    if runtime_classification.contains(&file.file_identity)
+                        || parse_outputs
+                            .runtime_not_parsed
+                            .contains(&file.file_identity)
+                    {
+                        (
+                            ParseStatus::NotParsed,
+                            "not_parsed".to_string(),
+                            AuditWorkerLane::NotParsed,
+                            None,
+                            crate::store::sha256_hex(b""),
+                            false,
+                            0,
+                            0,
+                            0,
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                        )
+                    } else if let Some(result) = parse_outputs.results.get(&file.file_identity) {
+                        (
+                            result.parse_status,
+                            result.parser_backend.clone(),
+                            parse_worker_lane(&result.worker_lane),
+                            result.error.clone(),
+                            result.content_sha256.clone(),
+                            result.truncated,
+                            result.primary_duration_ms,
+                            result.fallback_duration_ms,
+                            result.parse_duration_ms,
+                            result.failure_class.clone(),
+                            result.fallback_backend.clone(),
+                            result.fallback_reason_code.clone(),
+                        )
+                    } else {
+                        (
+                            ParseStatus::Success,
+                            "pdf_metadata_v1".to_string(),
+                            AuditWorkerLane::RustCore,
+                            None,
+                            crate::store::sha256_hex(b""),
+                            false,
+                            0,
+                            0,
+                            0,
+                            String::new(),
+                            String::new(),
+                            String::new(),
+                        )
+                    }
+                }
             }
         };
-        let profile_hash = match action {
-            PlanAction::Admit { .. } => parse_outputs
+        let source_changed = parse_outputs
+            .results
+            .get(&file.file_identity)
+            .is_some_and(is_source_version_changed_result);
+        let profile_hash = if source_changed {
+            parse_outputs
                 .parse_profile_hashes
                 .get(&file.file_identity)
                 .cloned()
-                .unwrap_or_else(|| rejected_profile_hash.to_string()),
-            _ => rejected_profile_hash.to_string(),
+                .unwrap_or_else(|| rejected_profile_hash.to_string())
+        } else {
+            match action {
+                PlanAction::Admit { .. } => parse_outputs
+                    .parse_profile_hashes
+                    .get(&file.file_identity)
+                    .cloned()
+                    .unwrap_or_else(|| rejected_profile_hash.to_string()),
+                _ => rejected_profile_hash.to_string(),
+            }
         };
-        let (cache_status, cache_miss_reason) = match action {
-            PlanAction::Admit { .. } => (
-                parse_outputs
-                    .parse_cache_status
-                    .get(&file.file_identity)
-                    .copied()
-                    .unwrap_or(CacheStatus::Miss),
-                parse_outputs
-                    .parse_cache_miss_reason
-                    .get(&file.file_identity)
-                    .copied()
-                    .unwrap_or(CacheMissReason::NewFile),
-            ),
-            _ => (CacheStatus::Miss, CacheMissReason::NewFile),
+        let (cache_status, cache_miss_reason) = if source_changed {
+            (CacheStatus::Miss, CacheMissReason::SourceVersionChanged)
+        } else {
+            match action {
+                PlanAction::Admit { .. } => (
+                    parse_outputs
+                        .parse_cache_status
+                        .get(&file.file_identity)
+                        .copied()
+                        .unwrap_or(CacheStatus::Miss),
+                    parse_outputs
+                        .parse_cache_miss_reason
+                        .get(&file.file_identity)
+                        .copied()
+                        .unwrap_or(CacheMissReason::NewFile),
+                ),
+                _ => (CacheStatus::Miss, CacheMissReason::NewFile),
+            }
         };
         let (parse_transport, parse_attempt_count) = parse_outputs
             .results

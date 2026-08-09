@@ -1209,6 +1209,28 @@ fn run_scheduler<
     ai_daily_scanner_core::scheduler::BudgetedScanOutcome,
     ai_daily_scanner_core::scheduler::SchedulerFailure,
 > {
+    run_scheduler_with_guard(
+        clock, cache, parser, classifier, discovery, profile, PassGuard,
+    )
+}
+
+fn run_scheduler_with_guard<
+    C: PdfClassifierPort + 'static,
+    P: ParserPort + 'static,
+    K: CachePort + 'static,
+    G: GuardVerifier + 'static,
+>(
+    clock: &FakeClock,
+    cache: K,
+    parser: P,
+    classifier: C,
+    discovery: Vec<DiscoveredFileOut>,
+    profile: ai_daily_scanner_contract::NormalizedScannerProfileV2,
+    guard: G,
+) -> Result<
+    ai_daily_scanner_core::scheduler::BudgetedScanOutcome,
+    ai_daily_scanner_core::scheduler::SchedulerFailure,
+> {
     let input = ScheduledRunInput::new(
         1,
         0,
@@ -1233,9 +1255,101 @@ fn run_scheduler<
         Box::new(parser),
         Box::new(cache),
         Box::new(clock.clone()),
-        Box::new(PassGuard),
+        Box::new(guard),
     );
     scheduler.execute(input)
+}
+
+#[derive(Debug)]
+struct TaintedObservedGuard;
+
+impl GuardVerifier for TaintedObservedGuard {
+    fn verify(
+        &self,
+        path: &str,
+        _expected: &ai_daily_scanner_core::source_guard::SourceGuardV2,
+    ) -> bool {
+        !path.ends_with("oversized.txt")
+    }
+
+    fn is_tainted(&self, path: &str) -> bool {
+        path.ends_with("oversized.txt")
+    }
+
+    fn metrics(
+        &self,
+    ) -> Option<ai_daily_scanner_core::source_guard::SourceGuardObservationMetrics> {
+        Some(
+            ai_daily_scanner_core::source_guard::SourceGuardObservationMetrics {
+                content_hash_file_count: 1,
+                unavailable_file_count: 0,
+                bytes_read: 123,
+            },
+        )
+    }
+}
+
+#[test]
+fn pre_snapshot_taint_overrides_a_policy_omission_and_refreshes_metrics() {
+    let clock = FakeClock::new();
+    let profile = v2_profile(ReportMode::Daily);
+    let oversized = profile.execution.max_file_size_bytes + 1;
+    let outcome = run_scheduler_with_guard(
+        &clock,
+        TestCache::default(),
+        TestParser {
+            results: HashMap::from([(
+                "fixture:healthy.txt".to_string(),
+                success_parse("fixture:healthy.txt", "", "healthy context"),
+            )]),
+        },
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        vec![
+            discovered("healthy.txt", ".txt", 64),
+            discovered("oversized.txt", ".txt", oversized),
+        ],
+        profile,
+        TaintedObservedGuard,
+    )
+    .expect("tainted outcome");
+
+    let changed = outcome
+        .file_results
+        .iter()
+        .find(|result| result.file_identity == "fixture:oversized.txt")
+        .unwrap();
+    assert_eq!(changed.parse_status, ParseStatus::Error);
+    assert_eq!(
+        changed
+            .error
+            .as_ref()
+            .map(|diagnostic| diagnostic.error_code),
+        Some(ErrorCode::SourceVersionChanged)
+    );
+    assert_eq!(
+        changed.cache_miss_reason,
+        CacheMissReason::SourceVersionChanged
+    );
+    assert_eq!(
+        outcome
+            .execution_metrics
+            .source_guard_content_hash_file_count,
+        1
+    );
+    assert_eq!(outcome.execution_metrics.source_guard_bytes_read, 123);
+    let decision = &outcome
+        .context
+        .as_ref()
+        .unwrap()
+        .decisions
+        .iter()
+        .find(|record| record.file_identity == "fixture:oversized.txt")
+        .unwrap()
+        .decision;
+    assert_eq!(decision.reason, "source_version_changed");
+    assert_eq!(decision.error_code, "SOURCE_VERSION_CHANGED");
 }
 
 #[test]

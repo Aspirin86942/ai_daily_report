@@ -7,7 +7,7 @@
 
 use ai_daily_scanner_core::source_guard::{
     compute_source_guard, full_content_sha256, source_guard_kind_from_text, source_guard_kind_text,
-    verify_guard, SourceGuardKind, SourceGuardV2,
+    verify_guard, SourceGuardKind, SourceGuardObserver, SourceGuardV2,
 };
 use std::path::Path;
 use std::time::SystemTime;
@@ -130,6 +130,45 @@ fn verify_guard_recomputes_and_detects_content_replacement() {
             );
         }
     }
+}
+
+#[test]
+fn observer_metadata_guard_reads_zero_content_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("metadata.txt");
+    std::fs::write(&p, "metadata identity").unwrap();
+    let observer = SourceGuardObserver::default();
+
+    let guard = observer.compute(&p).expect("metadata guard");
+    assert_eq!(guard.kind, platform_metadata_guard_kind());
+    assert!(observer.verify(&p, &guard));
+
+    let metrics = observer.metrics();
+    assert_eq!(metrics.content_hash_file_count, 0);
+    assert_eq!(metrics.unavailable_file_count, 0);
+    assert_eq!(metrics.bytes_read, 0);
+}
+
+#[test]
+fn observer_keeps_a_mismatched_path_tainted_for_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("tainted.txt");
+    std::fs::write(&p, "AAAA").unwrap();
+    let observer = SourceGuardObserver::default();
+    let before = observer.compute(&p).expect("initial guard");
+
+    settle_metadata();
+    std::fs::write(&p, "BBBB").unwrap();
+    settle_metadata();
+    assert!(!observer.verify(&p, &before));
+
+    let current = SourceGuardObserver::default()
+        .compute(&p)
+        .expect("current guard");
+    assert!(
+        !observer.verify(&p, &current),
+        "a path that mismatched once must stay tainted for this run"
+    );
 }
 
 #[test]

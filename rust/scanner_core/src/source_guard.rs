@@ -14,8 +14,10 @@
 
 pub use ai_daily_scanner_contract::SourceGuardKind;
 use sha2::{Digest, Sha256};
-use std::io;
-use std::path::Path;
+use std::collections::HashSet;
+use std::io::{self, Read};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Domain separator for the canonical guard hash. Everything hashed after this
 /// separator is a fixed field order of the identity.
@@ -25,6 +27,32 @@ const DOMAIN_SEPARATOR: &[u8] = b"source-guard-v2\0";
 pub struct SourceGuardV2 {
     pub kind: SourceGuardKind,
     pub guard_sha256: Option<String>,
+}
+
+/// Run-scoped SourceGuard I/O observations. File counts are unique by the
+/// discovery path; bytes include every complete-hash attempt,
+/// including bytes read before an I/O failure.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SourceGuardObservationMetrics {
+    pub content_hash_file_count: u64,
+    pub unavailable_file_count: u64,
+    pub bytes_read: u64,
+}
+
+#[derive(Debug, Default)]
+struct SourceGuardObservationState {
+    content_hash_paths: HashSet<PathBuf>,
+    unavailable_paths: HashSet<PathBuf>,
+    tainted_paths: HashSet<PathBuf>,
+    bytes_read: u64,
+}
+
+/// Shared observer used by discovery, snapshot verification, and Scheduler.
+/// Once a path mismatches during a run it remains tainted, so a racing file
+/// cannot change back and become cache-eligible later in that same run.
+#[derive(Debug, Clone, Default)]
+pub struct SourceGuardObserver {
+    state: Arc<Mutex<SourceGuardObservationState>>,
 }
 
 impl SourceGuardV2 {
@@ -51,6 +79,120 @@ impl SourceGuardV2 {
     }
 }
 
+impl SourceGuardObserver {
+    pub fn compute(&self, path: &Path) -> io::Result<SourceGuardV2> {
+        let result = self.compute_current(path);
+        if result.is_err() {
+            self.record_unavailable(path);
+        }
+        result
+    }
+
+    pub fn verify(&self, path: &Path, expected: &SourceGuardV2) -> bool {
+        if self.is_tainted(path) {
+            return false;
+        }
+        let matches = self.compute(path).is_ok_and(|actual| actual == *expected);
+        if !matches {
+            self.lock_state().tainted_paths.insert(path.to_path_buf());
+        }
+        matches
+    }
+
+    pub fn metrics(&self) -> SourceGuardObservationMetrics {
+        let state = self.lock_state();
+        SourceGuardObservationMetrics {
+            content_hash_file_count: state.content_hash_paths.len() as u64,
+            unavailable_file_count: state.unavailable_paths.len() as u64,
+            bytes_read: state.bytes_read,
+        }
+    }
+
+    fn compute_current(&self, path: &Path) -> io::Result<SourceGuardV2> {
+        #[cfg(windows)]
+        {
+            if let Some(hash) = windows_identity(path)? {
+                return validated_guard(SourceGuardKind::WindowsFileIdChangeTimeV1, hash);
+            }
+        }
+        #[cfg(unix)]
+        {
+            if let Some(hash) = unix_identity(path)? {
+                return validated_guard(SourceGuardKind::UnixInodeCtimeV1, hash);
+            }
+        }
+        // metadata guard 无法形成 → 完整流式 SHA-256（不以首尾采样冒充）
+        match self.observed_full_content_sha256(path) {
+            Some(hash) => validated_guard(SourceGuardKind::ContentSha256V1, hash),
+            None => Ok(SourceGuardV2 {
+                kind: SourceGuardKind::Unavailable,
+                guard_sha256: None,
+            }),
+        }
+    }
+
+    fn observed_full_content_sha256(&self, path: &Path) -> Option<String> {
+        let file = match std::fs::File::open(path) {
+            Ok(file) => file,
+            Err(_) => {
+                self.record_content_hash_path(path);
+                self.record_unavailable(path);
+                return None;
+            }
+        };
+        self.observed_full_content_sha256_from_reader(path, io::BufReader::new(file))
+    }
+
+    fn observed_full_content_sha256_from_reader<R: Read>(
+        &self,
+        path: &Path,
+        mut reader: R,
+    ) -> Option<String> {
+        self.record_content_hash_path(path);
+        let mut hasher = Sha256::new();
+        let mut bytes_read = 0_u64;
+        let mut buffer = [0u8; 64 * 1024];
+        let hash = loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break Some(hex(&hasher.finalize())),
+                Ok(read) => {
+                    bytes_read = bytes_read.saturating_add(read as u64);
+                    hasher.update(&buffer[..read]);
+                }
+                Err(_) => break None,
+            }
+        };
+        let mut state = self.lock_state();
+        state.bytes_read = state.bytes_read.saturating_add(bytes_read);
+        if hash.is_none() {
+            state.unavailable_paths.insert(path.to_path_buf());
+        }
+        hash
+    }
+
+    fn record_content_hash_path(&self, path: &Path) {
+        self.lock_state()
+            .content_hash_paths
+            .insert(path.to_path_buf());
+    }
+
+    fn record_unavailable(&self, path: &Path) {
+        self.lock_state()
+            .unavailable_paths
+            .insert(path.to_path_buf());
+    }
+
+    pub fn is_tainted(&self, path: &Path) -> bool {
+        self.lock_state().tainted_paths.contains(path)
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, SourceGuardObservationState> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 /// Computes the current content identity of the file at `path`.
 ///
 /// The metadata identity is preferred. Any missing field/API or platform
@@ -58,49 +200,7 @@ impl SourceGuardV2 {
 /// and the guard falls back to the complete streamed SHA-256 of the source
 /// bytes. If neither forms, the result is `Unavailable` with a null hash.
 pub fn compute_source_guard(path: &Path) -> io::Result<SourceGuardV2> {
-    #[cfg(windows)]
-    {
-        if let Some(hash) = windows_identity(path)? {
-            let guard = SourceGuardV2 {
-                kind: SourceGuardKind::WindowsFileIdChangeTimeV1,
-                guard_sha256: Some(hash),
-            };
-            guard
-                .validate()
-                .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
-            return Ok(guard);
-        }
-    }
-    #[cfg(unix)]
-    {
-        if let Some(hash) = unix_identity(path)? {
-            let guard = SourceGuardV2 {
-                kind: SourceGuardKind::UnixInodeCtimeV1,
-                guard_sha256: Some(hash),
-            };
-            guard
-                .validate()
-                .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
-            return Ok(guard);
-        }
-    }
-    // metadata guard 无法形成 → 完整流式 SHA-256（不以首尾采样冒充）
-    match full_content_sha256(path) {
-        Some(hash) => {
-            let guard = SourceGuardV2 {
-                kind: SourceGuardKind::ContentSha256V1,
-                guard_sha256: Some(hash),
-            };
-            guard
-                .validate()
-                .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
-            Ok(guard)
-        }
-        None => Ok(SourceGuardV2 {
-            kind: SourceGuardKind::Unavailable,
-            guard_sha256: None,
-        }),
-    }
+    SourceGuardObserver::default().compute(path)
 }
 
 /// Recomputes the guard for `path` and compares it against `expected`.
@@ -110,28 +210,24 @@ pub fn compute_source_guard(path: &Path) -> io::Result<SourceGuardV2> {
 /// worker result and treat the file as `SOURCE_VERSION_CHANGED`, even when the
 /// legacy `source_version` text is unchanged.
 pub fn verify_guard(path: &Path, expected: &SourceGuardV2) -> bool {
-    match compute_source_guard(path) {
-        Ok(actual) => actual == *expected,
-        Err(_) => false,
-    }
+    SourceGuardObserver::default().verify(path, expected)
 }
 
 /// Streams the ENTIRE source bytes through SHA-256. Never samples only the head
 /// and tail; the fallback is a complete content hash.
 pub fn full_content_sha256(path: &Path) -> Option<String> {
-    use std::io::Read;
-    let mut hasher = Sha256::new();
-    let file = std::fs::File::open(path).ok()?;
-    let mut reader = io::BufReader::new(file);
-    let mut buffer = [0u8; 64 * 1024];
-    loop {
-        let read = reader.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Some(hex(&hasher.finalize()))
+    SourceGuardObserver::default().observed_full_content_sha256(path)
+}
+
+fn validated_guard(kind: SourceGuardKind, hash: String) -> io::Result<SourceGuardV2> {
+    let guard = SourceGuardV2 {
+        kind,
+        guard_sha256: Some(hash),
+    };
+    guard
+        .validate()
+        .map_err(|message| io::Error::new(io::ErrorKind::InvalidData, message))?;
+    Ok(guard)
 }
 
 /// Stable wire text for a guard kind, matching the `file_inventory` CHECK and
@@ -294,4 +390,72 @@ fn is_sha256_hex(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[test]
+    fn repeated_full_hash_attempts_count_one_file_and_all_bytes() {
+        let observer = SourceGuardObserver::default();
+        let path = Path::new("fixture/full-hash.txt");
+        let bytes = b"complete bytes";
+
+        for _ in 0..2 {
+            let hash = observer
+                .observed_full_content_sha256_from_reader(path, Cursor::new(bytes))
+                .expect("full hash");
+            assert_eq!(hash, hex(&Sha256::digest(bytes)));
+        }
+
+        assert_eq!(
+            observer.metrics(),
+            SourceGuardObservationMetrics {
+                content_hash_file_count: 1,
+                unavailable_file_count: 0,
+                bytes_read: (bytes.len() * 2) as u64,
+            }
+        );
+    }
+
+    struct FailAfterFirstRead {
+        emitted: bool,
+    }
+
+    impl Read for FailAfterFirstRead {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.emitted {
+                return Err(io::Error::new(io::ErrorKind::Other, "fixture failure"));
+            }
+            self.emitted = true;
+            buffer[..3].copy_from_slice(b"abc");
+            Ok(3)
+        }
+    }
+
+    #[test]
+    fn failed_full_hash_counts_bytes_read_before_failure() {
+        let observer = SourceGuardObserver::default();
+        let path = Path::new("fixture/failing-hash.txt");
+
+        for _ in 0..2 {
+            assert!(observer
+                .observed_full_content_sha256_from_reader(
+                    path,
+                    FailAfterFirstRead { emitted: false },
+                )
+                .is_none());
+        }
+
+        assert_eq!(
+            observer.metrics(),
+            SourceGuardObservationMetrics {
+                content_hash_file_count: 1,
+                unavailable_file_count: 1,
+                bytes_read: 6,
+            }
+        );
+    }
 }
