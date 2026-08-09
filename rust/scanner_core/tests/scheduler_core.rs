@@ -865,6 +865,70 @@ struct TestClassifier {
     results: HashMap<String, PdfClassifierResultV1>,
 }
 
+// ---------------------------------------------------------------------------
+// P4-T0 parallel wave execution: classifier/parser adapters that observe
+// concurrency so the tests can prove classification and parse no longer run
+// one file at a time.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct ConcurrencyClassifier {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    max_seen: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ConcurrencyClassifier {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_seen: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl PdfClassifierPort for ConcurrencyClassifier {
+    fn classify_pdf(
+        &self,
+        request: &PdfClassifierRequestV1,
+        _timeout: Duration,
+    ) -> Result<PdfClassifierResultV1, ParseFailure> {
+        let now = self.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        self.max_seen
+            .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+        // Give concurrent wave threads time to overlap.
+        std::thread::sleep(Duration::from_millis(30));
+        self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(no_text_result(&request.file_path))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ConcurrencyParser {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    max_seen: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ConcurrencyParser {
+    fn new() -> Self {
+        Self {
+            active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_seen: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        }
+    }
+}
+
+impl ParserPort for ConcurrencyParser {
+    fn parse(&self, request: &ParseRequest) -> ParseResult {
+        let now = self.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        self.max_seen
+            .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+        // Give concurrent wave threads time to overlap.
+        std::thread::sleep(Duration::from_millis(30));
+        self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        success_parse(&request.file.file_identity, &request.file.path, "evidence")
+    }
+}
+
 impl PdfClassifierPort for TestClassifier {
     fn classify_pdf(
         &self,
@@ -932,11 +996,11 @@ fn no_text_result(_path: &str) -> PdfClassifierResultV1 {
     }
 }
 
-fn run_scheduler(
+fn run_scheduler<C: PdfClassifierPort + 'static, P: ParserPort + 'static, K: CachePort + 'static>(
     clock: &FakeClock,
-    cache: TestCache,
-    parser: TestParser,
-    classifier: TestClassifier,
+    cache: K,
+    parser: P,
+    classifier: C,
     discovery: Vec<DiscoveredFileOut>,
     profile: ai_daily_scanner_contract::NormalizedScannerProfileV2,
 ) -> Result<
@@ -1256,12 +1320,15 @@ impl ParserPort for DeadlineParser {
 
 #[test]
 fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
-    // 3 text files; each parse advances the clock 2000ms. The first two
-    // complete before the WorkDeadline (3000ms); when the scheduler tries to
-    // start the third file the deadline has passed -> runtime NotParsed and the
-    // run-level trigger is recorded once. Run is Partial, NEVER snapshot.
+    // 3 text files; each parse advances the clock 2000ms. With the bounded
+    // parallel executor (session_concurrency=2) the first wave (a.md, b.md)
+    // completes before the WorkDeadline (3000ms); when the scheduler tries to
+    // start the NEXT batch the deadline has passed -> c.md is queued -> runtime
+    // NotParsed and the run-level trigger is recorded once. Run is Partial,
+    // NEVER snapshot. (P4-T0: the deadline check is per-batch, not per-file.)
     let mut profile = v2_profile(ReportMode::Daily);
     profile.total_deadline_ms = 5_000; // work deadline = 3_000
+    profile.session_concurrency = 2;
     let discovery = vec![
         discovered("notes/a.md", ".md", 64),
         discovered("notes/b.md", ".md", 64),
@@ -1340,12 +1407,15 @@ fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
 
 #[test]
 fn work_deadline_before_any_parse_forms_error_run_without_snapshot() {
-    // Every in-flight parse consumes its full effective timeout, so the first
-    // parse runs into the WorkDeadline -> Timeout, and all queued files become
-    // runtime NotParsed. With no included files the run is Error and the
-    // context is empty.
+    // Every in-flight parse consumes its full effective timeout. With the
+    // bounded parallel executor (session_concurrency=2) the first batch
+    // (a.md, b.md) is in-flight and both run into the WorkDeadline -> Timeout;
+    // the next batch never starts -> c.md is queued -> runtime NotParsed. With
+    // no included files the run is Error and the context is empty.
+    // (P4-T0: per-batch deadline check; in-flight -> Timeout, queued -> NotParsed.)
     let mut profile = v2_profile(ReportMode::Daily);
     profile.total_deadline_ms = 5_000; // work deadline = 3_000
+    profile.session_concurrency = 2;
     let discovery = vec![
         discovered("notes/a.md", ".md", 64),
         discovered("notes/b.md", ".md", 64),
@@ -1387,22 +1457,25 @@ fn work_deadline_before_any_parse_forms_error_run_without_snapshot() {
     assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
     // Error run: no context payload, no snapshot.
     assert!(outcome.context.is_none());
-    // a.md was in-flight -> Timeout; b/c queued -> runtime NotParsed.
-    let a = outcome
-        .file_results
-        .iter()
-        .find(|r| r.relative_path == "notes\\a.md")
-        .expect("a file result");
-    assert_eq!(a.parse_status, ParseStatus::Timeout);
-    for rel in ["notes\\b.md", "notes\\c.md"] {
+    // a.md and b.md were in-flight (first batch) -> Timeout.
+    for rel in ["notes\\a.md", "notes\\b.md"] {
         let file = outcome
             .file_results
             .iter()
             .find(|r| r.relative_path == rel)
             .expect("file result");
-        assert_eq!(file.parse_status, ParseStatus::NotParsed);
-        assert!(file.error.is_none());
+        assert_eq!(file.parse_status, ParseStatus::Timeout, "{rel}");
+        assert!(file.error.is_some(), "{rel} timeout must carry a Diagnostic");
     }
+    // c.md was queued (second batch never started) -> runtime NotParsed with no
+    // per-file Diagnostic.
+    let c = outcome
+        .file_results
+        .iter()
+        .find(|r| r.relative_path == "notes\\c.md")
+        .expect("c file result");
+    assert_eq!(c.parse_status, ParseStatus::NotParsed);
+    assert!(c.error.is_none());
     assert!(outcome
         .diagnostics
         .iter()
@@ -1759,5 +1832,77 @@ fn classifier_unknown_maps_timeout_vs_crash() {
     assert!(
         crash.error.as_ref().is_some_and(|diag| diag.retryable),
         "crash/transient must be retryable"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P4-T0: classification and parse execute in bounded parallel waves
+// (spec Solution + Part 7.3; performance blocker fix). The wave executor must
+// dispatch up to `session_concurrency` classifier/parser invocations at once;
+// results are merged back by nominal rank so completion order never changes the
+// outcome. These tests FAIL on the sequential scheduler and pass after the fix.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn classification_executes_in_parallel_waves() {
+    let mut profile = v2_profile(ReportMode::Daily);
+    profile.session_concurrency = 2;
+    let discovery = vec![
+        discovered("one.pdf", ".pdf", 128),
+        discovered("two.pdf", ".pdf", 128),
+        discovered("three.pdf", ".pdf", 128),
+    ];
+    let classifier = ConcurrencyClassifier::new();
+    let max_seen = classifier.max_seen.clone();
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        TestCache::default(),
+        TestParser {
+            results: HashMap::new(),
+        },
+        classifier,
+        discovery,
+        profile,
+    )
+    .expect("outcome");
+    // All PDFs classified no-text -> metadata-only -> Success.
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
+    assert!(
+        max_seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "classification must run in parallel waves (session_concurrency=2), saw max {}",
+        max_seen.load(std::sync::atomic::Ordering::SeqCst)
+    );
+}
+
+#[test]
+fn parse_executes_in_parallel_waves() {
+    let mut profile = v2_profile(ReportMode::Daily);
+    profile.session_concurrency = 2;
+    let discovery = vec![
+        discovered("notes/a.md", ".md", 64),
+        discovered("notes/b.md", ".md", 64),
+        discovered("notes/c.md", ".md", 64),
+        discovered("notes/d.md", ".md", 64),
+    ];
+    let parser = ConcurrencyParser::new();
+    let max_seen = parser.max_seen.clone();
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        TestCache::default(),
+        parser,
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        discovery,
+        profile,
+    )
+    .expect("outcome");
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
+    assert!(
+        max_seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+        "parse must run in parallel waves (session_concurrency=2), saw max {}",
+        max_seen.load(std::sync::atomic::Ordering::SeqCst)
     );
 }
