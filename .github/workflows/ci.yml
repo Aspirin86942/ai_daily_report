@@ -21,15 +21,14 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: |
-            requirements.lock
-            requirements-dev.txt
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --requirement requirements.lock
-          python -m pip install --requirement requirements-dev.txt
-          python -m pip check
+          cache-dependency-path: requirements.lock
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.0"
+      - name: Sync locked Python dependencies
+        run: uv sync --frozen
+      - name: Verify production requirements projection
+        run: uv run pytest tests/test_requirements_lock.py -v
       - name: Check Rust formatting
         run: cargo fmt --manifest-path rust/Cargo.toml --all --check
       - name: Lint Rust workspace
@@ -51,12 +50,12 @@ jobs:
           Copy-Item -LiteralPath 'config/settings.example.yaml' `
             -Destination 'config/settings.windows.yaml'
       - name: Run strict production doctor
-        run: python main.py doctor --strict
+        run: uv run python main.py doctor --strict
       - name: Run full Python test suite
-        run: python -m pytest tests/ -v
+        run: uv run pytest tests/ -v
       - name: Run Chinese path and cold-warm cache E2E
         run: >-
-          python -m pytest tests/test_windows_rust_core_e2e.py -v
+          uv run pytest tests/test_windows_rust_core_e2e.py -v
           -k "real_rust_chinese_path or real_rust_cold_warm_cache"
       - name: Prove clean deployment is idempotent and does not call an LLM
         shell: pwsh
@@ -159,16 +158,15 @@ jobs:
         with:
           python-version: "3.10"
           cache: pip
-          cache-dependency-path: |
-            requirements.lock
-            requirements-dev.txt
-      - name: Install compatibility dependencies
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install --requirement requirements.lock
-          python -m pip install --requirement requirements-dev.txt
-          python -m pip check
+          cache-dependency-path: requirements.lock
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.0"
+      - name: Sync locked compatibility dependencies
+        run: uv sync --frozen
+      - name: Verify production requirements projection
+        run: uv run pytest tests/test_requirements_lock.py -v
       - name: Run Linux compatibility tests
         run: |
           mkdir -p .ci-work
-          python -m pytest tests/ -v
+          uv run pytest tests/ -v

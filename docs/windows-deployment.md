@@ -167,6 +167,21 @@ pointer. Shared configuration and data are not copied or rewritten.
 & "D:\ai-daily-report\run_current_release.ps1" doctor --strict
 ```
 
+The scanner database schema upgrade from v1 to v2 is one-way. An
+`upgrade-db` request with `apply=false` is a read-only audit only; it does not
+authorize a later write. An `apply=true` request requires separate explicit
+authorization and a new request ID. Neither mode may be run against the
+configured production database as part of release preparation or verification
+without that authorization.
+
+The upgrade tool does not create or validate a backup. Before `apply=true`, the
+operator must preserve a recoverable pre-upgrade database copy, including the
+database plus its WAL/shm sidecars, or use a deployment snapshot that captures
+the same state. A rollback across this schema boundary must restore that
+pre-upgrade copy before starting the old release. Restoring it discards runs
+created after the upgrade; pointing an old release at the v2 database instead
+fails closed as `TooNew`.
+
 Rollback validates the previous release manifest and payload with the active
 trusted verifier, runs the previous `.venv` strict doctor against the same
 shared state, and atomically switches `current.json` only after both succeed:
@@ -177,9 +192,8 @@ shared state, and atomically switches `current.json` only after both succeed:
 ```
 
 Rust v2 owns `shared\data\db\scan_index_v2.sqlite3`; the retired scanner DB is
-not destructively downgraded. A future incompatible v2 schema requires a
-separate migration and backup decision before release. Source-checkout rollback
-is a Git revert and rebuild; installed rollback is the side-by-side pointer
+not destructively downgraded. Outside a schema upgrade, source-checkout rollback
+is a Git revert and rebuild and installed rollback is the side-by-side pointer
 operation. Remote tags, artifacts, attestations, releases, or branch protection
 are external state and require separate explicit authorization to change.
 

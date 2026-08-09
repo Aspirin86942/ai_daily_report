@@ -51,6 +51,7 @@ def test_managed_python_worker_copy_is_content_addressed_and_non_destructive(
     (prefix / "pyvenv.cfg").write_text("home = synthetic\n", encoding="utf-8")
     configured = scripts_dir / "python.exe"
     configured.write_bytes(b"existing venv launcher")
+    (scripts_dir / "python313.dll").write_bytes(b"synthetic runtime")
     base = tmp_path / "base-python.exe"
     base.write_bytes(b"MZ synthetic CPython image")
 
@@ -72,6 +73,29 @@ def test_managed_python_worker_copy_is_content_addressed_and_non_destructive(
     assert managed.name.startswith("ai-daily-python-worker-313-")
     assert managed.read_bytes() == base.read_bytes()
     assert configured.read_bytes() == b"existing venv launcher"
+
+
+def test_managed_python_worker_copy_requires_adjacent_runtime_dll(
+    tmp_path: Path,
+) -> None:
+    prefix = tmp_path / "uv-style-venv"
+    scripts_dir = prefix / "Scripts"
+    scripts_dir.mkdir(parents=True)
+    (prefix / "pyvenv.cfg").write_text("home = synthetic\n", encoding="utf-8")
+    configured = scripts_dir / "python.exe"
+    configured.write_bytes(b"working venv launcher")
+    base = tmp_path / "base-python.exe"
+    base.write_bytes(b"MZ synthetic CPython image")
+
+    selected = _materialize_windows_python_worker_executable(
+        configured=configured,
+        base=base,
+        prefix=prefix,
+        version_tag="311",
+    )
+
+    assert selected == configured
+    assert not list(scripts_dir.glob("ai-daily-python-worker-*.exe"))
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows venv launcher contract")

@@ -77,11 +77,15 @@ def _materialize_windows_python_worker_executable(
 ) -> Path:
     """Create a content-addressed CPython copy without replacing venv files."""
     scripts_dir = configured.parent
+    runtime_dll = scripts_dir / f"python{version_tag}.dll"
     if (
         not base.is_file()
         or base.suffix.lower() != ".exe"
         or scripts_dir.parent != prefix
         or not (prefix / "pyvenv.cfg").is_file()
+        # uv-style venvs keep the runtime DLL beside the base interpreter. A
+        # copied image cannot start there, so retain the working venv launcher.
+        or not runtime_dll.is_file()
     ):
         return configured
     try:
