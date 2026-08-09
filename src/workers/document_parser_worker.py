@@ -233,7 +233,7 @@ def _session_classify(
             request,
             error_code="SOURCE_VERSION_CHANGED",
             message="file source version changed before classification",
-            retryable=False,
+            retryable=True,
         )
 
     result = classify_pdf(request.file_path, request.max_pages)
@@ -245,14 +245,14 @@ def _session_classify(
             request,
             error_code="SOURCE_VERSION_CHANGED",
             message="file source became unavailable during classification",
-            retryable=False,
+            retryable=True,
         )
     if observed_after != observed_before:
         return _session_classify_error(
             request,
             error_code="SOURCE_VERSION_CHANGED",
             message="file source version changed during classification",
-            retryable=False,
+            retryable=True,
         )
 
     if result["status"] in ("text_in_parse_window", "no_text_in_parse_window"):

@@ -416,6 +416,70 @@ fn session_contract_version_is_frozen() {
 }
 
 #[test]
+fn session_recycles_on_idle_ttl_not_process_age() {
+    let Some(python) = python_executable() else {
+        return;
+    };
+    let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let fixture = repository_root
+        .join("tests")
+        .join("fixtures")
+        .join("pdf_benchmark")
+        .join("case_01.pdf");
+    if !fixture.is_file() {
+        return;
+    }
+    let command = WorkerCommand {
+        program: python,
+        base_args: vec![
+            OsString::from("-m"),
+            OsString::from("src.workers.document_parser_worker"),
+        ],
+        current_dir: Some(repository_root),
+        expected_kind: WorkerKind::PythonDocument,
+        required_backends: vec!["pdf_text_v1".to_string()],
+        required_extensions: vec![".pdf".to_string()],
+    };
+    let expected = register_session_version(&command, Duration::from_secs(20))
+        .expect("session-version preflight")
+        .expect("session capability must be present");
+    let mut params = SessionParams::default();
+    params.idle_ttl = Duration::from_millis(60);
+    params.max_requests_per_session = u64::MAX;
+    let mut session = PythonSession::start(
+        &command,
+        &expected.identity,
+        params,
+        Duration::from_secs(20),
+    )
+    .expect("session starts");
+    assert!(!session.recycle_due(), "fresh session must not be idle");
+
+    std::thread::sleep(Duration::from_millis(120));
+    assert!(session.recycle_due(), "idle TTL must be measured from idle time");
+
+    // A completed request resets the idle clock. If recycle were process-age
+    // based, it would still be due here (120ms > 60ms from spawn).
+    let metadata = std::fs::metadata(&fixture).expect("fixture metadata");
+    let modified = metadata
+        .modified()
+        .expect("fixture modified time")
+        .duration_since(UNIX_EPOCH)
+        .expect("fixture mtime after epoch");
+    let source_version =
+        ai_daily_discovery::build_source_version(modified.as_nanos(), metadata.len());
+    let classify_request = build_classify_request(request_id(), &fixture, &source_version, 5);
+    session_classify(&mut session, &classify_request, Duration::from_secs(20))
+        .expect("session classify completes");
+    assert!(
+        !session.recycle_due(),
+        "a completed request must reset the idle timer, not the process age"
+    );
+
+    session.kill();
+}
+
+#[test]
 fn capability_preflight_batch_registers_classifier_and_session() {
     let Some(python) = python_executable() else {
         return;

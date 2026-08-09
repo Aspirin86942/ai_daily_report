@@ -285,12 +285,14 @@ fn validate_classifier_source_after(request: &PdfClassifierRequestV1) -> Result<
 }
 
 fn classifier_source_failure(request: &PdfClassifierRequestV1, message: &str) -> ParseFailure {
+    // spec Part 3.2 matrix: classifier 后验 source-version 不一致 →
+    // SOURCE_VERSION_CHANGED, retryable=true（结果丢弃，可重建后重试）。
     ParseFailure {
-        class: FailureClass::Deterministic,
+        class: FailureClass::RecoverableParserFailure,
         diagnostic: Diagnostic {
             error_code: ErrorCode::SourceVersionChanged,
             message: message.to_string(),
-            retryable: false,
+            retryable: true,
             stage: DiagnosticStage::Parse,
             file_path: Nullable(Some(request.file_path.clone())),
             backend: Nullable(None),

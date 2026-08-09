@@ -256,7 +256,9 @@ struct SessionChild {
     stderr_thread: Option<thread::JoinHandle<()>>,
     #[cfg(windows)]
     job: Option<crate::windows_job::SessionJob>,
-    started: Instant,
+    /// 上次请求完成时刻；idle TTL 按“空闲时间”回收（spec 7.3/8.1），不是
+    /// 进程年龄——持续忙碌的 session 不应每 30s 被误回收。
+    last_activity: Instant,
 }
 
 impl SessionChild {
@@ -298,7 +300,7 @@ impl SessionChild {
             stderr_thread: Some(stderr_thread),
             #[cfg(windows)]
             job,
-            started: Instant::now(),
+            last_activity: Instant::now(),
         })
     }
 
@@ -319,7 +321,16 @@ impl SessionChild {
     }
 
     fn recycle_due(&self, params: &SessionParams) -> bool {
-        self.started.elapsed() >= params.idle_ttl
+        // Idle TTL measures elapsed time since the last completed request, not
+        // process age. RSS recycle (`params.rss_limit_bytes`, spec 7.3) is a
+        // pending item for the pool-wiring task: it needs per-session process
+        // memory accounting (Windows Job Object PeakJobProcessUsedMemory) and
+        // is intentionally surfaced here rather than silently dropped.
+        self.last_activity.elapsed() >= params.idle_ttl
+    }
+
+    fn touch_activity(&mut self) {
+        self.last_activity = Instant::now();
     }
 
     /// 优雅重建前的收割：杀 Job Object 并等进程树清空。
@@ -444,6 +455,11 @@ impl PythonSession {
             session.kill();
             return Err(SessionError::BuildMismatch);
         }
+        // idle 基准从 hello 校验完成后开始，而不是进程 spawn 时刻：冷启动
+        // （import pypdfium2 等）不计入 idle TTL。
+        if let Some(child) = session.child.as_mut() {
+            child.touch_activity();
+        }
         Ok(session)
     }
 
@@ -525,8 +541,12 @@ impl PythonSession {
         if line.len() > SESSION_CLASSIFY_FRAME_LIMIT {
             return Err(SessionError::FrameTooLarge);
         }
-        let response = self.parse_response(line, PythonSessionOperation::ClassifyPdfV1)?;
-        self.requests_served += 1;
+        let response = self.parse_response(
+            line,
+            PythonSessionOperation::ClassifyPdfV1,
+            &request.request_id,
+        )?;
+        self.mark_request_complete();
         match response {
             PythonSessionResponseV1 {
                 status: PythonSessionResponseStatus::Ok,
@@ -580,8 +600,9 @@ impl PythonSession {
         if line.len() > capture_limit {
             return Err(SessionError::FrameTooLarge);
         }
-        let response = self.parse_response(line, PythonSessionOperation::ParseV1)?;
-        self.requests_served += 1;
+        let response =
+            self.parse_response(line, PythonSessionOperation::ParseV1, &request.request_id)?;
+        self.mark_request_complete();
         match response {
             PythonSessionResponseV1 {
                 status: PythonSessionResponseStatus::Ok,
@@ -628,10 +649,19 @@ impl PythonSession {
         child.write_line(frame)
     }
 
+    /// 在响应完整接收后记账：请求计数 + 刷新 idle 基准时间。
+    fn mark_request_complete(&mut self) {
+        self.requests_served += 1;
+        if let Some(child) = self.child.as_mut() {
+            child.touch_activity();
+        }
+    }
+
     fn parse_response(
         &self,
         line: Vec<u8>,
         expected_operation: PythonSessionOperation,
+        expected_request_id: &str,
     ) -> Result<PythonSessionResponseV1, SessionError> {
         let response: PythonSessionResponseV1 = serde_json::from_slice(&line).map_err(|_| {
             SessionError::ProtocolCorruption(
@@ -646,9 +676,11 @@ impl PythonSession {
         if response.contract != "ai_daily_python_session"
             || response.protocol_version != SESSION_PROTOCOL_VERSION
             || response.operation != expected_operation
+            || response.request_id != expected_request_id
         {
+            // spec Part 7.2：重复、未知或错配 request_id 视为 protocol corruption。
             return Err(SessionError::ProtocolCorruption(
-                "session response operation/contract mismatch".to_string(),
+                "session response operation/contract/request_id mismatch".to_string(),
             ));
         }
         Ok(response)
@@ -786,5 +818,79 @@ mod tests {
             failure.diagnostic.file_path.0.as_deref(),
             Some("C:\\x.pdf")
         );
+    }
+
+    fn empty_session() -> PythonSession {
+        PythonSession {
+            child: None,
+            params: SessionParams::default(),
+            identity: PythonSessionVersionResponseV1 {
+                contract: "ai_daily_python_session".to_string(),
+                protocol_version: 1,
+                session_contract_version: "ai_daily_python_session_v1".to_string(),
+                worker_build: "a".repeat(64),
+                classifier_build: "b".repeat(64),
+                supported_operations: vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()],
+            },
+            requests_served: 0,
+        }
+    }
+
+    #[test]
+    fn parse_response_accepts_matching_request_id() {
+        let session = empty_session();
+        let request_id = "11111111-1111-4111-8111-111111111111".to_string();
+        let response = PythonSessionResponseV1 {
+            contract: "ai_daily_python_session".to_string(),
+            protocol_version: 1,
+            request_id: request_id.clone(),
+            operation: PythonSessionOperation::ClassifyPdfV1,
+            status: PythonSessionResponseStatus::Ok,
+            result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(
+                PdfClassifierResultV1 {
+                    status: ai_daily_scanner_contract::PdfClassifierResultStatus::TextInParseWindow,
+                    page_count: ai_daily_scanner_contract::Nullable(Some(1)),
+                    result_examined_pages: ai_daily_scanner_contract::Nullable(Some(1)),
+                    diagnostic: ai_daily_scanner_contract::Nullable(None),
+                },
+            ))),
+            error: ai_daily_scanner_contract::Nullable(None),
+        };
+        let line = serde_json::to_vec(&response).expect("response serializes");
+        let parsed = session
+            .parse_response(line, PythonSessionOperation::ClassifyPdfV1, &request_id)
+            .expect("matching request_id must be accepted");
+        assert_eq!(parsed.request_id, request_id);
+    }
+
+    #[test]
+    fn parse_response_rejects_mismatched_request_id() {
+        // spec Part 7.2：错配 request_id 视为 protocol corruption，不得静默接受。
+        let session = empty_session();
+        let response = PythonSessionResponseV1 {
+            contract: "ai_daily_python_session".to_string(),
+            protocol_version: 1,
+            request_id: "22222222-2222-4222-8222-222222222222".to_string(),
+            operation: PythonSessionOperation::ClassifyPdfV1,
+            status: PythonSessionResponseStatus::Ok,
+            result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(
+                PdfClassifierResultV1 {
+                    status: ai_daily_scanner_contract::PdfClassifierResultStatus::TextInParseWindow,
+                    page_count: ai_daily_scanner_contract::Nullable(Some(1)),
+                    result_examined_pages: ai_daily_scanner_contract::Nullable(Some(1)),
+                    diagnostic: ai_daily_scanner_contract::Nullable(None),
+                },
+            ))),
+            error: ai_daily_scanner_contract::Nullable(None),
+        };
+        let line = serde_json::to_vec(&response).expect("response serializes");
+        let error = session
+            .parse_response(
+                line,
+                PythonSessionOperation::ClassifyPdfV1,
+                "11111111-1111-4111-8111-111111111111",
+            )
+            .expect_err("mismatched request_id must be protocol corruption");
+        assert!(matches!(error, SessionError::ProtocolCorruption(_)));
     }
 }
