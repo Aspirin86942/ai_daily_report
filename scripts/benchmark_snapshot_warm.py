@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import json
 import platform
+import re
 import shutil
 import sqlite3
 import sys
@@ -50,6 +51,15 @@ SEVEN_D_START = date(2026, 8, 2)
 SEVEN_D_END = date(2026, 8, 8)
 SEVEN_D_REPORT_MODE = "weekly"
 SEVEN_D_PROFILE = {"schema_version": "scanner_profile_v1"}
+ANONYMOUS_CORPUS_MANIFEST_PROVENANCE = {
+    "source": "file_inventory",
+    "ordered_fields": [
+        "sha256(file_identity)",
+        "source_version",
+        "size_bytes",
+    ],
+    "hash_algorithm": "sha256",
+}
 
 # spec Part 8.1/9.2：monthly 真实目录显式 summary_pdf_max_pages=5
 def _monthly_profile(
@@ -143,6 +153,209 @@ def anonymous_corpus_hash(conn: sqlite3.Connection) -> dict:
         "anonymous_manifest_sha256": digest.hexdigest(),
         "source_count": len(rows),
     }
+
+
+def is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def anonymous_corpus_manifest_complete(manifest: object) -> bool:
+    if not isinstance(manifest, dict):
+        return False
+    source_count = manifest.get("source_count")
+    return (
+        is_sha256(manifest.get("anonymous_manifest_sha256"))
+        and isinstance(source_count, int)
+        and not isinstance(source_count, bool)
+        and source_count >= 0
+    )
+
+
+def build_identity_complete(identity: object) -> bool:
+    if (
+        not isinstance(identity, dict)
+        or not isinstance(identity.get("engine_build"), str)
+        or not identity["engine_build"]
+    ):
+        return False
+    workers = identity.get("workers")
+    session = identity.get("session")
+    classifier = identity.get("classifier")
+    if not all(isinstance(item, dict) for item in (workers, session, classifier)):
+        return False
+    if not all(
+        isinstance(workers.get(key), str) and workers[key]
+        for key in (
+            "office_contract",
+            "office_version",
+            "office_build",
+            "python_contract",
+            "python_version",
+            "python_build",
+        )
+    ):
+        return False
+    if session.get("capability") != "session" or not all(
+        isinstance(session.get(key), str) and session[key]
+        for key in ("contract", "version", "build")
+    ):
+        return False
+    return (
+        isinstance(classifier.get("contract"), str)
+        and bool(classifier["contract"])
+        and is_sha256(classifier.get("build"))
+        and is_sha256(classifier.get("profile_hash"))
+    )
+
+
+def normalized_profile_evidence_complete(evidence: dict) -> bool:
+    canonical = evidence.get("normalized_profile_json")
+    digest = evidence.get("normalized_profile_sha256")
+    return (
+        isinstance(canonical, str)
+        and evidence.get("normalized_profile_hash_algorithm")
+        == "sha256(sorted-key-json-utf8)"
+        and is_sha256(digest)
+        and hashlib.sha256(canonical.encode("utf-8")).hexdigest() == digest
+    )
+
+
+def capture_run_reproducibility(
+    conn: sqlite3.Connection,
+    scan_run_id: int,
+) -> dict:
+    """Project only portable profile/build provenance from a successful run.
+
+    The snapshot key is the authoritative source because it contains the exact
+    normalized profile and reachable route-stack identities used by Rust.  The
+    logical request and discovery rows deliberately never leave this helper.
+    """
+    artifact = conn.execute(
+        "SELECT cr.context_profile_hash, ca.snapshot_key_sha256,"
+        " ca.snapshot_key_json FROM context_runs cr"
+        " JOIN context_artifacts ca ON ca.artifact_id=cr.artifact_id"
+        " WHERE cr.scan_run_id=?",
+        (scan_run_id,),
+    ).fetchone()
+    if artifact is None or artifact[2] is None:
+        raise RuntimeError("eligible snapshot provenance is unavailable")
+    if not is_sha256(artifact[0]) or not is_sha256(artifact[1]):
+        raise RuntimeError("snapshot provenance hashes are invalid")
+
+    attempt = conn.execute(
+        "SELECT engine_fingerprint, office_worker_contract,"
+        " office_worker_version, office_worker_build,"
+        " python_worker_contract, python_worker_version, python_worker_build"
+        " FROM scan_run_attempts WHERE scan_run_id=?"
+        " ORDER BY attempt_number DESC LIMIT 1",
+        (scan_run_id,),
+    ).fetchone()
+    if attempt is None:
+        raise RuntimeError("run attempt provenance is unavailable")
+
+    try:
+        snapshot = json.loads(artifact[2])
+        engine_fingerprint = json.loads(attempt[0])
+    except (TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError("run provenance JSON is invalid") from error
+    if not isinstance(snapshot, dict) or not isinstance(engine_fingerprint, dict):
+        raise RuntimeError("run provenance JSON is not an object")
+
+    profile = snapshot.get("profile")
+    workers = snapshot.get("workers")
+    session = snapshot.get("session")
+    classifier = snapshot.get("classifier")
+    if not all(isinstance(value, dict) for value in (profile, workers, session, classifier)):
+        raise RuntimeError("snapshot profile/build provenance is incomplete")
+
+    normalized_profile_json = json.dumps(
+        profile,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    build_identity = {
+        "engine_build": snapshot.get("engine_build"),
+        "workers": workers,
+        "session": session,
+        "classifier": classifier,
+    }
+    return {
+        "provenance_source": "context_artifacts.snapshot_key_json",
+        "context_profile_hash": artifact[0],
+        "snapshot_key_sha256": artifact[1],
+        "normalized_profile_json": normalized_profile_json,
+        "normalized_profile_hash_algorithm": "sha256(sorted-key-json-utf8)",
+        "normalized_profile_sha256": hashlib.sha256(
+            normalized_profile_json.encode("utf-8")
+        ).hexdigest(),
+        "build_identity": build_identity,
+        "build_cross_checks": {
+            "engine_build_matches_attempt": (
+                snapshot.get("engine_build") == engine_fingerprint.get("engine_build")
+            ),
+            "office_worker_build_matches_attempt": (
+                workers.get("office_contract") == attempt[1]
+                and workers.get("office_version") == attempt[2]
+                and workers.get("office_build") == attempt[3]
+            ),
+            "python_worker_build_matches_attempt": (
+                workers.get("python_contract") == attempt[4]
+                and workers.get("python_version") == attempt[5]
+                and workers.get("python_build") == attempt[6]
+            ),
+        },
+    }
+
+
+_WINDOWS_ABSOLUTE_PATH = re.compile(
+    r"(?i)(?:^|[\s\"'=:(])(?:[a-z]:[\\/]|\\\\)"
+)
+_PATH_BEARING_EVIDENCE_KEYS = {
+    "file_path",
+    "logical_request",
+    "normalized_office_worker_path",
+    "normalized_python_executable",
+    "normalized_python_module_root",
+    "normalized_scan_db_path",
+    "relative_path",
+    "scan_db_path",
+    "work_dir",
+}
+
+
+def assert_portable_evidence(
+    evidence: object,
+    *,
+    forbidden_paths: tuple[Path, ...] = (),
+) -> None:
+    """Fail closed if aggregate evidence contains path-bearing fields/values."""
+
+    def walk(value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if str(key) in _PATH_BEARING_EVIDENCE_KEYS:
+                    raise ValueError(f"path-bearing evidence key: {key}")
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+        elif isinstance(value, Path):
+            raise ValueError("Path object is not portable evidence")
+        elif isinstance(value, str) and _WINDOWS_ABSOLUTE_PATH.search(value):
+            raise ValueError("absolute path found in portable evidence")
+
+    walk(evidence)
+    rendered = json.dumps(evidence, ensure_ascii=False, sort_keys=True, default=str)
+    folded = rendered.casefold()
+    for path in forbidden_paths:
+        candidate = str(path.resolve()).casefold()
+        if candidate and candidate in folded:
+            raise ValueError("forbidden local path found in portable evidence")
 
 
 def capture_context_state(conn: sqlite3.Connection, scan_run_id: int) -> dict:

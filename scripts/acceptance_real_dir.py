@@ -14,8 +14,9 @@ RawScannerProfileV2 `summary_pdf_max_pages=5`：
 
 每样本反作弊条件（全部满足才通过，见 _assert_sample）：
 - stage_deadline_exhausted_count == 0；无 runtime NotParsed；无 unknown；无 Error；无 Timeout
-- text_pdf_coverage == 1.0；no-text pdfplumber_invocations == 0
+- text_pdf_coverage == 1.0；no-text pdfplumber/action anomaly == 0
 - source_guard_unavailable_count == 0；session capability present；session_fallback_count == 0
+- guard metrics 完整非负；normalized profile/build/corpus 跨样本完全一致且 corpus 未漂移
 - validated == true
 
 pass/fail 只读 harness `benchmark_wall_ms`（wall_clock_ms），永不读取
@@ -25,9 +26,7 @@ ContextSummary.total_duration_ms。证据只提交聚合值 + 匿名 corpus hash
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
-import platform
 import shutil
 import sqlite3
 import subprocess
@@ -45,20 +44,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 # 复用 Plan 3 种子/snapshot 基础设施（spec Part 6）。这些函数不做 pass/fail 判定，
 # 只提供场景/profile/进程/harness 帮助。
 from benchmark_snapshot_warm import (  # noqa: E402
+    ANONYMOUS_CORPUS_MANIFEST_PROVENANCE,
     REAL_WORK_DIR,
     SEVEN_D_END,
     SEVEN_D_PROFILE,
     SEVEN_D_REPORT_MODE,
     SEVEN_D_START,
-    _adapter_payload,
     _build_binary_paths,
     _fresh_dir,
     _hardware_evidence,
     _version_evidence,
     anonymous_corpus_hash,
+    anonymous_corpus_manifest_complete,
+    assert_portable_evidence as _assert_portable_evidence,
+    build_identity_complete as _build_identity_complete,
     capture_context_state,
+    capture_run_reproducibility,
     checkpoint_db,
     median_ms,
+    normalized_profile_evidence_complete,
     request_id_exists,
     run_build_context,
     run_inspect_v2,
@@ -153,6 +157,208 @@ SESSION_PARAMS_DEFAULT = {
 }
 
 
+def _source_guard_evidence(metrics: dict, policy: str | None) -> dict:
+    required = (
+        "discovery_observed_file_count",
+        "source_guard_content_hash_file_count",
+        "source_guard_unavailable_count",
+        "source_guard_bytes_read",
+    )
+    metrics_complete = all(
+        key in metrics
+        and isinstance(metrics[key], int)
+        and not isinstance(metrics[key], bool)
+        and metrics[key] >= 0
+        for key in required
+    )
+    observed = int(metrics.get("discovery_observed_file_count", 0) or 0)
+    content_hash = int(metrics.get("source_guard_content_hash_file_count", 0) or 0)
+    unavailable = int(metrics.get("source_guard_unavailable_count", 0) or 0)
+    metadata = observed - content_hash - unavailable
+    if metadata < 0:
+        metrics_complete = False
+        metadata = 0
+    metadata_kind = (
+        "windows_file_id_change_time_v1"
+        if sys.platform == "win32"
+        else "unix_inode_ctime_v1"
+    )
+    return {
+        "policy": policy,
+        "metrics_complete": metrics_complete,
+        "discovery_observed_file_count": observed,
+        "kind_counts": {
+            metadata_kind: metadata,
+            "content_sha256_v1": content_hash,
+            "unavailable": unavailable,
+        },
+        "content_hash_bytes_read": int(metrics.get("source_guard_bytes_read", 0) or 0),
+    }
+
+
+def _failed_sample_evidence(
+    *,
+    session_capability_present: bool,
+    source_guard_policy: str | None,
+    collection_error_code: str,
+) -> dict:
+    """Return the same top-level evidence shape without exception/path text."""
+    return {
+        "validated": False,
+        "collection_error_code": collection_error_code,
+        "stage_deadline_exhausted_count": None,
+        "runtime_not_parsed_count": None,
+        "unknown_count": None,
+        "error_count": None,
+        "timeout_count": None,
+        "text_pdf_coverage": None,
+        "no_text_pdfplumber_invocations": None,
+        "no_text_action_label_anomaly_count": None,
+        "source_guard_unavailable_count": None,
+        "session_capability_present": bool(session_capability_present),
+        "session_fallback_count": None,
+        "context_profile_hash": None,
+        "normalized_profile_json": None,
+        "normalized_profile_hash_algorithm": "sha256(sorted-key-json-utf8)",
+        "normalized_profile_sha256": None,
+        "snapshot_key_sha256": None,
+        "build_identity": None,
+        "build_cross_checks": {
+            "engine_build_matches_attempt": False,
+            "office_worker_build_matches_attempt": False,
+            "python_worker_build_matches_attempt": False,
+        },
+        "source_guard": _source_guard_evidence({}, source_guard_policy),
+        "summary": None,
+        "metrics": None,
+        "quota_actual": None,
+        "cache_state": None,
+    }
+
+
+def _portable_response_error(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    return {
+        "error_code": value.get("error_code") or "SCANNER_ERROR",
+        "retryable": bool(value.get("retryable")),
+        "stage": value.get("stage"),
+        "backend": value.get("backend"),
+    }
+
+
+def _cold_reproducibility_gates(
+    cold_samples: list[dict],
+    corpus_manifests: list[dict],
+    *,
+    frozen_manifest_sha256: str,
+    expected_pdf_max_pages: int = 5,
+) -> dict:
+    """Cross-sample anti-drift gates for one three-cold acceptance scenario."""
+    anti_cheat = [sample.get("anti_cheat") or {} for sample in cold_samples]
+    corpus_keys = {
+        (
+            manifest.get("anonymous_manifest_sha256"),
+            manifest.get("source_count"),
+        )
+        for manifest in corpus_manifests
+    }
+    profile_keys = {
+        (
+            sample.get("normalized_profile_json"),
+            sample.get("normalized_profile_sha256"),
+        )
+        for sample in anti_cheat
+    }
+    build_keys = {
+        json.dumps(sample.get("build_identity"), sort_keys=True, separators=(",", ":"))
+        for sample in anti_cheat
+    }
+    profiles_complete = all(
+        normalized_profile_evidence_complete(sample)
+        for sample in anti_cheat
+    )
+    expected_profile = False
+    if profiles_complete:
+        try:
+            expected_profile = all(
+                json.loads(sample["normalized_profile_json"])
+                .get("parse", {})
+                .get("pdf", {})
+                .get("max_pages")
+                == expected_pdf_max_pages
+                for sample in anti_cheat
+            )
+        except (AttributeError, json.JSONDecodeError):
+            expected_profile = False
+
+    gates = {
+        "exactly_three_cold_samples": len(cold_samples) == 3,
+        "exactly_three_corpus_manifests": len(corpus_manifests) == 3,
+        "cold_corpus_manifests_complete": len(corpus_manifests) == 3
+        and all(
+            anonymous_corpus_manifest_complete(manifest)
+            for manifest in corpus_manifests
+        ),
+        "cold_corpus_manifests_identical": len(corpus_manifests) == 3
+        and len(corpus_keys) == 1,
+        "corpus_matches_frozen_manifest": len(corpus_manifests) == 3
+        and all(
+            manifest.get("anonymous_manifest_sha256") == frozen_manifest_sha256
+            for manifest in corpus_manifests
+        ),
+        "cold_normalized_profiles_complete": len(anti_cheat) == 3
+        and profiles_complete,
+        "cold_normalized_profiles_identical": len(anti_cheat) == 3
+        and len(profile_keys) == 1,
+        "normalized_pdf_max_pages_matches_scenario": expected_profile,
+        "cold_build_identities_complete": len(anti_cheat) == 3
+        and all(_build_identity_complete(sample.get("build_identity")) for sample in anti_cheat),
+        "cold_build_identities_identical": len(anti_cheat) == 3
+        and len(build_keys) == 1,
+        "cold_build_cross_checks_passed": len(anti_cheat) == 3
+        and all(
+            sample.get("build_cross_checks")
+            and all(sample["build_cross_checks"].values())
+            for sample in anti_cheat
+        ),
+        "passes": False,
+    }
+    gates["passes"] = all(value for key, value in gates.items() if key != "passes")
+    return gates
+
+
+def _identity_evidence_consistent(evidence_rows: list[dict]) -> bool:
+    if not evidence_rows:
+        return False
+    profile_keys = {
+        (
+            evidence.get("normalized_profile_json"),
+            evidence.get("normalized_profile_sha256"),
+        )
+        for evidence in evidence_rows
+    }
+    build_keys = {
+        json.dumps(
+            evidence.get("build_identity"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        for evidence in evidence_rows
+    }
+    return (
+        len(profile_keys) == 1
+        and len(build_keys) == 1
+        and all(
+            normalized_profile_evidence_complete(evidence)
+            and _build_identity_complete(evidence.get("build_identity"))
+            and evidence.get("build_cross_checks")
+            and all(evidence["build_cross_checks"].values())
+            for evidence in evidence_rows
+        )
+    )
+
+
 # ---------------------------------------------------------------------------
 # DB 派生反作弊证据（inspect v2 对冷 run 的逐文件 pdf_classification 为 null，
 # 因此分类事实从隔离 DB 的 classification_cache / context_decisions 派生）
@@ -165,6 +371,7 @@ def _derive_sample_evidence(
     metrics: dict,
     *,
     session_capability_present: bool,
+    source_guard_policy: str | None,
     validated: bool,
 ) -> dict:
     """从隔离 DB + inspect 派生反作弊断言所需的全部数值。不写入真实路径。"""
@@ -178,7 +385,14 @@ def _derive_sample_evidence(
         ).fetchone()
         if summary is None:
             raise RuntimeError(f"context_runs row missing for scan_run_id={scan_run_id}")
-        error_count, timeout_count, included_count, source_count, success_count, omitted_count = summary
+        (
+            error_count,
+            timeout_count,
+            included_count,
+            source_count,
+            success_count,
+            omitted_count,
+        ) = summary
 
         runtime_not_parsed_count = conn.execute(
             "SELECT count(*) FROM context_decisions cd"
@@ -256,12 +470,17 @@ def _derive_sample_evidence(
             "SELECT context_profile_hash FROM context_runs WHERE scan_run_id=?",
             (scan_run_id,),
         ).fetchone()[0]
+        run_provenance = capture_run_reproducibility(conn, scan_run_id)
     finally:
         conn.close()
 
+    source_guard = _source_guard_evidence(metrics, source_guard_policy)
     evidence = {
         "validated": bool(validated),
-        "stage_deadline_exhausted_count": int(metrics.get("stage_deadline_exhausted_count", 0) or 0),
+        "collection_error_code": None,
+        "stage_deadline_exhausted_count": int(
+            metrics.get("stage_deadline_exhausted_count", 0) or 0
+        ),
         "runtime_not_parsed_count": int(runtime_not_parsed_count),
         "unknown_count": int(unknown_count),
         "error_count": int(error_count),
@@ -269,10 +488,23 @@ def _derive_sample_evidence(
         "text_pdf_coverage": text_pdf_coverage,
         "no_text_pdfplumber_invocations": int(no_text_pdfplumber_invocations),
         "no_text_action_label_anomaly_count": int(no_text_action_label_anomaly_count),
-        "source_guard_unavailable_count": int(metrics.get("source_guard_unavailable_count", 0) or 0),
+        "source_guard_unavailable_count": int(
+            metrics.get("source_guard_unavailable_count", 0) or 0
+        ),
         "session_capability_present": bool(session_capability_present),
         "session_fallback_count": int(metrics.get("session_fallback_count", 0) or 0),
         "context_profile_hash": context_profile_hash,
+        "normalized_profile_json": run_provenance["normalized_profile_json"],
+        "normalized_profile_hash_algorithm": run_provenance[
+            "normalized_profile_hash_algorithm"
+        ],
+        "normalized_profile_sha256": run_provenance[
+            "normalized_profile_sha256"
+        ],
+        "snapshot_key_sha256": run_provenance["snapshot_key_sha256"],
+        "build_identity": run_provenance["build_identity"],
+        "build_cross_checks": run_provenance["build_cross_checks"],
+        "source_guard": source_guard,
         "summary": {
             "source_file_count": int(source_count),
             "success_count": int(success_count),
@@ -282,6 +514,9 @@ def _derive_sample_evidence(
             "timeout_count": int(timeout_count),
         },
         "metrics": {
+            "discovery_observed_file_count": int(
+                metrics.get("discovery_observed_file_count", 0) or 0
+            ),
             "candidate_file_count": int(metrics.get("candidate_file_count", 0) or 0),
             "classification_slot_count": int(metrics.get("classification_slot_count", 0) or 0),
             "admitted_file_count": int(metrics.get("admitted_file_count", 0) or 0),
@@ -346,25 +581,86 @@ def _derive_sample_evidence(
 def _assert_sample(sample: dict) -> None:
     """反作弊断言（brief Task 3）。任一失败抛 AssertionError，该样本失败。"""
     ac = sample["anti_cheat"]
-    assert ac["stage_deadline_exhausted_count"] == 0, (
-        f"stage_deadline_exhausted_count={ac['stage_deadline_exhausted_count']}"
+    assert ac["stage_deadline_exhausted_count"] == 0, "STAGE_DEADLINE_EXHAUSTED"
+    assert ac["runtime_not_parsed_count"] == 0, "RUNTIME_NOT_PARSED"
+    assert ac["unknown_count"] == 0, "UNKNOWN_RESULT"
+    assert ac["error_count"] == 0, "ERROR_RESULT"
+    assert ac["timeout_count"] == 0, "TIMEOUT_RESULT"
+    assert ac["text_pdf_coverage"] == 1.0, "TEXT_PDF_COVERAGE"
+    assert ac["no_text_pdfplumber_invocations"] == 0, "NO_TEXT_PDFPLUMBER"
+    assert ac["no_text_action_label_anomaly_count"] == 0, (
+        "NO_TEXT_ACTION_LABEL_ANOMALY"
     )
-    assert ac["runtime_not_parsed_count"] == 0, (
-        f"runtime_not_parsed_count={ac['runtime_not_parsed_count']}"
+    source_guard = ac["source_guard"]
+    assert source_guard["policy"] == "source_guard_v2", "SOURCE_GUARD_POLICY"
+    assert source_guard["metrics_complete"] is True, "SOURCE_GUARD_METRICS_INCOMPLETE"
+    kind_counts = source_guard["kind_counts"]
+    metadata_kind = (
+        "windows_file_id_change_time_v1"
+        if sys.platform == "win32"
+        else "unix_inode_ctime_v1"
     )
-    assert ac["unknown_count"] == 0, f"unknown_count={ac['unknown_count']}"
-    assert ac["error_count"] == 0, f"error_count={ac['error_count']}"
-    assert ac["timeout_count"] == 0, f"timeout_count={ac['timeout_count']}"
-    assert ac["text_pdf_coverage"] == 1.0, f"text_pdf_coverage={ac['text_pdf_coverage']}"
-    assert ac["no_text_pdfplumber_invocations"] == 0, (
-        f"no_text_pdfplumber_invocations={ac['no_text_pdfplumber_invocations']}"
+    assert set(kind_counts) == {
+        metadata_kind,
+        "content_sha256_v1",
+        "unavailable",
+    }, "SOURCE_GUARD_KIND_SET_INVALID"
+    assert all(
+        isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        for value in kind_counts.values()
+    ), "SOURCE_GUARD_KIND_COUNTS_INVALID"
+    assert source_guard["content_hash_bytes_read"] >= 0, "SOURCE_GUARD_BYTES_INVALID"
+    assert sum(kind_counts.values()) == source_guard["discovery_observed_file_count"], (
+        "SOURCE_GUARD_COUNT_MISMATCH"
     )
-    assert ac["source_guard_unavailable_count"] == 0, (
-        f"source_guard_unavailable_count={ac['source_guard_unavailable_count']}"
-    )
-    assert ac["session_capability_present"] is True, "session_capability_present is False"
-    assert ac["session_fallback_count"] == 0, f"session_fallback_count={ac['session_fallback_count']}"
-    assert ac["validated"] is True, "validated is False"
+    assert ac["source_guard_unavailable_count"] == 0, "SOURCE_GUARD_UNAVAILABLE"
+    assert kind_counts["unavailable"] == 0, "SOURCE_GUARD_UNAVAILABLE_KIND"
+    assert ac["session_capability_present"] is True, "SESSION_CAPABILITY_ABSENT"
+    assert ac["session_fallback_count"] == 0, "SESSION_FALLBACK"
+    assert normalized_profile_evidence_complete(ac), "PROFILE_EVIDENCE_INVALID"
+    assert _build_identity_complete(ac["build_identity"]), "BUILD_IDENTITY_INCOMPLETE"
+    assert all(ac["build_cross_checks"].values()), "BUILD_IDENTITY_MISMATCH"
+    assert ac["validated"] is True, "SAMPLE_NOT_VALIDATED"
+
+
+def _collect_sample_evidence(
+    db_path: Path,
+    scan_run_id: int | None,
+    metrics: dict,
+    *,
+    session_capability_present: bool,
+    source_guard_policy: str | None,
+    validated: bool,
+) -> dict:
+    if scan_run_id is None:
+        return _failed_sample_evidence(
+            session_capability_present=session_capability_present,
+            source_guard_policy=source_guard_policy,
+            collection_error_code="EVIDENCE_COLLECTION_FAILED",
+        )
+    try:
+        return _derive_sample_evidence(
+            db_path,
+            scan_run_id,
+            metrics,
+            session_capability_present=session_capability_present,
+            source_guard_policy=source_guard_policy,
+            validated=validated,
+        )
+    except (RuntimeError, sqlite3.Error, KeyError, TypeError, ValueError):
+        return _failed_sample_evidence(
+            session_capability_present=session_capability_present,
+            source_guard_policy=source_guard_policy,
+            collection_error_code="EVIDENCE_COLLECTION_FAILED",
+        )
+
+
+def _anti_cheat_verdict(evidence: dict) -> tuple[bool, str | None]:
+    try:
+        _assert_sample({"anti_cheat": evidence})
+    except AssertionError as error:
+        return False, str(error)
+    return True, None
 
 
 # ---------------------------------------------------------------------------
@@ -443,26 +739,6 @@ def _probe_classifier_build(scanner: Path) -> dict:
         return {}
 
 
-def _probe_worker_builds(db_path: Path, scan_run_id: int) -> dict:
-    """从 scan_run_attempts 读取 worker/engine fingerprints（不含路径）。"""
-    conn = sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True)
-    try:
-        row = conn.execute(
-            "SELECT engine_fingerprint, office_worker_build, python_worker_build"
-            " FROM scan_run_attempts WHERE scan_run_id=? ORDER BY attempt_number LIMIT 1",
-            (scan_run_id,),
-        ).fetchone()
-    finally:
-        conn.close()
-    if row is None:
-        return {}
-    return {
-        "engine_fingerprint": row[0],
-        "office_worker_build": row[1],
-        "python_worker_build": row[2],
-    }
-
-
 # ---------------------------------------------------------------------------
 # 30d / 90d 手工 acceptance（3 独立 cold DB + warm 对比）
 # ---------------------------------------------------------------------------
@@ -476,6 +752,7 @@ def run_cold_acceptance_and_warm(
     label: str,
     out_root: Path,
     session_capability: dict,
+    source_guard_policy: str | None,
 ) -> dict:
     scenario = SCENARIOS[label]
     start = scenario["start"]
@@ -501,6 +778,21 @@ def run_cold_acceptance_and_warm(
             profile=profile,
         )
         checkpoint_db(cold_db)
+        corpus = {
+            "anonymous_manifest_sha256": None,
+            "source_count": None,
+        }
+        try:
+            corpus_conn = sqlite3.connect(
+                f"file:{cold_db.resolve().as_posix()}?mode=ro",
+                uri=True,
+            )
+            try:
+                corpus = anonymous_corpus_hash(corpus_conn)
+            finally:
+                corpus_conn.close()
+        except sqlite3.Error:
+            pass
         inspect_result = None
         metrics: dict = {}
         context = None
@@ -524,6 +816,7 @@ def run_cold_acceptance_and_warm(
                 "context": context,
                 "metrics": metrics,
                 "inspect_result": inspect_result,
+                "corpus_manifest": corpus,
             }
         )
 
@@ -532,90 +825,78 @@ def run_cold_acceptance_and_warm(
     for index, cold in enumerate(colds):
         run = cold["run"]
         inspect_ok = bool(cold["inspect_result"] and cold["inspect_result"]["ok"])
-        try:
-            evidence = _derive_sample_evidence(
-                cold["db"],
-                run["scan_run_id"],
-                cold["metrics"],
-                session_capability_present=session_capability[
-                    "session_capability_present"
-                ],
-                validated=run["validated"] and inspect_ok,
-            )
-        except RuntimeError as error:
-            # A failed/abandoned run may honestly have no context row. Preserve
-            # that as an explicit failed sample instead of inventing zeroes or
-            # aborting before the aggregate evidence is written.
-            evidence = {
-                "validated": False,
-                "collection_error": str(error),
-                "stage_deadline_exhausted_count": None,
-                "runtime_not_parsed_count": None,
-                "unknown_count": None,
-                "error_count": None,
-                "timeout_count": None,
-                "text_pdf_coverage": None,
-                "no_text_pdfplumber_invocations": None,
-                "source_guard_unavailable_count": None,
-                "session_capability_present": session_capability[
-                    "session_capability_present"
-                ],
-                "session_fallback_count": None,
-            }
+        evidence = _collect_sample_evidence(
+            cold["db"],
+            run["scan_run_id"],
+            cold["metrics"],
+            session_capability_present=session_capability[
+                "session_capability_present"
+            ],
+            source_guard_policy=source_guard_policy,
+            validated=run["validated"] and inspect_ok,
+        )
         sample = {
             "index": index,
             "wall_ms": run["wall_ms"],
             "status": run["status"],
-            "response_error": run.get("response_error"),
+            "response_error": _portable_response_error(run.get("response_error")),
             "scan_run_id": run["scan_run_id"],
             "inspect_ok": inspect_ok,
-            "inspect_error": None
-            if cold["inspect_result"] is None
-            else cold["inspect_result"]["error"],
+            "inspect_error_code": None if inspect_ok else "INSPECT_FAILED",
             "anti_cheat": evidence,
             "deadline_ms": deadline_ms,
         }
-        try:
-            _assert_sample(sample)
-            sample["anti_cheat_passed"] = True
-        except AssertionError as error:
-            sample["anti_cheat_passed"] = False
-            sample["anti_cheat_failure"] = str(error)
+        passed, failure_code = _anti_cheat_verdict(evidence)
+        sample["anti_cheat_passed"] = passed
+        if failure_code is not None:
+            sample["anti_cheat_failure_code"] = failure_code
+        cold["anti_cheat"] = evidence
         cold_samples.append(sample)
 
     cold_ms = [s["wall_ms"] for s in cold_samples]
     cold_median = median_ms(cold_ms)
     cold_max = max(cold_ms)
 
-    corpus_conn = sqlite3.connect(colds[0]["db"])
-    try:
-        corpus = anonymous_corpus_hash(corpus_conn)
-    finally:
-        corpus_conn.close()
-
+    corpus_manifests = [cold["corpus_manifest"] for cold in colds]
+    reproducibility_gates = _cold_reproducibility_gates(
+        cold_samples,
+        corpus_manifests,
+        frozen_manifest_sha256=PREVIOUS_MANIFEST_HASHES[label],
+    )
     gates = {
+        **{key: value for key, value in reproducibility_gates.items() if key != "passes"},
         "all_samples_anti_cheat_passed": all(s["anti_cheat_passed"] for s in cold_samples),
         "all_samples_status_ok": all(s["status"] == "ok" for s in cold_samples),
         "cold_median_le_target": cold_median <= target["median_ms_le"],
         "cold_max_le_target": cold_max <= target["max_ms_le"],
         "passes": False,
     }
-    gates["passes"] = all(
-        [gates["all_samples_anti_cheat_passed"], gates["all_samples_status_ok"], gates["cold_median_le_target"], gates["cold_max_le_target"]]
-    )
+    gates["passes"] = all(value for key, value in gates.items() if key != "passes")
+
+    first_evidence = cold_samples[0]["anti_cheat"] if cold_samples else {}
+    corpus = corpus_manifests[0] if corpus_manifests else {
+        "anonymous_manifest_sha256": None,
+        "source_count": None,
+    }
 
     result: dict = {
         "window": {"start": start.isoformat(), "end": end.isoformat()},
         "report_mode": report_mode,
         "profile": profile,
-        "profile_hash_30d_sample": cold_samples[0]["anti_cheat"].get(
-            "context_profile_hash"
-        )
-        if cold_samples
-        else None,
+        "normalized_profile_json": first_evidence.get("normalized_profile_json"),
+        "normalized_profile_hash_algorithm": first_evidence.get(
+            "normalized_profile_hash_algorithm"
+        ),
+        "normalized_profile_sha256": first_evidence.get(
+            "normalized_profile_sha256"
+        ),
+        "build_identity": first_evidence.get("build_identity"),
         "corpus": corpus,
-        "corpus_changed_since_previous": corpus["anonymous_manifest_sha256"]
-        != PREVIOUS_MANIFEST_HASHES[label],
+        "corpus_manifest_provenance": ANONYMOUS_CORPUS_MANIFEST_PROVENANCE,
+        "cold_corpus_manifests": corpus_manifests,
+        "corpus_changed_since_previous": not gates[
+            "corpus_matches_frozen_manifest"
+        ],
         "cold_deadline_ms": deadline_ms,
         "cold_target": target,
         "cold_wall_ms": cold_ms,
@@ -635,6 +916,8 @@ def run_cold_acceptance_and_warm(
             label=label,
             out_root=out_root,
             colds=colds,
+            session_capability=session_capability,
+            source_guard_policy=source_guard_policy,
         )
     result["warm_comparison"] = warm
 
@@ -649,6 +932,8 @@ def run_warm_comparison(
     label: str,
     out_root: Path,
     colds: list[dict],
+    session_capability: dict,
+    source_guard_policy: str | None,
 ) -> dict:
     """snapshot warm vs cache-only warm（Part 6：seed clone + marker，无 bypass）。"""
     scenario = SCENARIOS[label]
@@ -691,6 +976,7 @@ def run_warm_comparison(
         conn = sqlite3.connect(clone_db)
         try:
             context = capture_context_state(conn, run["scan_run_id"])
+            corpus_manifest = anonymous_corpus_hash(conn)
         finally:
             conn.close()
         metrics = (
@@ -698,25 +984,50 @@ def run_warm_comparison(
             if inspect_result["ok"]
             else {}
         )
-        cache_samples.append(
-            {
-                "index": index,
-                "wall_ms": run["wall_ms"],
-                "scan_run_id": run["scan_run_id"],
-                "idempotent_replay_false": idempotent_probe["request_id_absent_before_run"],
-                "snapshot_hit": bool(metrics.get("snapshot_hit")),
-                "parse_cache_lookup_count": metrics.get("parse_cache_lookup_count"),
-                "classification_cache_lookup_count": metrics.get(
-                    "classification_cache_lookup_count"
-                ),
-                "parse_cache_all_hit": metrics.get("parse_cache_all_hit"),
-                "classification_cache_all_hit": metrics.get("classification_cache_all_hit"),
-                "inspect_error": inspect_result["error"],
-                "context_sha256": context["context_sha256"],
-                "timing_ms": _timing_ms(metrics),
-                "semantic": context,
-            }
+        anti_cheat = _collect_sample_evidence(
+            clone_db,
+            run["scan_run_id"],
+            metrics,
+            session_capability_present=session_capability[
+                "session_capability_present"
+            ],
+            source_guard_policy=source_guard_policy,
+            validated=run["validated"] and inspect_result["ok"],
         )
+        sample = {
+            "index": index,
+            "wall_ms": run["wall_ms"],
+            "status": run["status"],
+            "response_error": _portable_response_error(run.get("response_error")),
+            "scan_run_id": run["scan_run_id"],
+            "idempotent_replay_false": (
+                idempotent_probe["request_id_absent_before_run"]
+                and run["scan_run_id"] is not None
+            ),
+            "snapshot_hit": bool(metrics.get("snapshot_hit")),
+            "parse_cache_lookup_count": metrics.get("parse_cache_lookup_count"),
+            "classification_cache_lookup_count": metrics.get(
+                "classification_cache_lookup_count"
+            ),
+            "parse_cache_all_hit": metrics.get("parse_cache_all_hit"),
+            "classification_cache_all_hit": metrics.get(
+                "classification_cache_all_hit"
+            ),
+            "inspect_ok": inspect_result["ok"],
+            "inspect_error_code": None
+            if inspect_result["ok"]
+            else "INSPECT_FAILED",
+            "corpus_manifest": corpus_manifest,
+            "anti_cheat": anti_cheat,
+            "context_sha256": context["context_sha256"],
+            "timing_ms": _timing_ms(metrics),
+            "semantic": context,
+        }
+        passed, failure_code = _anti_cheat_verdict(anti_cheat)
+        sample["anti_cheat_passed"] = passed
+        if failure_code is not None:
+            sample["anti_cheat_failure_code"] = failure_code
+        cache_samples.append(sample)
 
     # snapshot warm：cold[1] 的 DB 上，3 个新 request_id 连续运行。
     snap_cold = colds[1]
@@ -744,6 +1055,7 @@ def run_warm_comparison(
         conn = sqlite3.connect(snap_cold["db"])
         try:
             context = capture_context_state(conn, run["scan_run_id"])
+            corpus_manifest = anonymous_corpus_hash(conn)
         finally:
             conn.close()
         metrics = (
@@ -751,24 +1063,44 @@ def run_warm_comparison(
             if inspect_result["ok"]
             else {}
         )
-        snap_samples.append(
-            {
-                "index": index,
-                "wall_ms": run["wall_ms"],
-                "scan_run_id": run["scan_run_id"],
-                "idempotent_replay_false": (
-                    idempotent_probe["request_id_absent_before_run"]
-                    and run["scan_run_id"] not in seen_run_ids
-                ),
-                "snapshot_hit": bool(metrics.get("snapshot_hit")),
-                "inspect_error": inspect_result["error"],
-                "context_sha256": context["context_sha256"],
-                "context_identical_to_cold": context["context_sha256"]
-                == snap_cold["context"]["context_sha256"],
-                "timing_ms": _timing_ms(metrics),
-                "semantic": context,
-            }
+        anti_cheat = _collect_sample_evidence(
+            snap_cold["db"],
+            run["scan_run_id"],
+            metrics,
+            session_capability_present=session_capability[
+                "session_capability_present"
+            ],
+            source_guard_policy=source_guard_policy,
+            validated=run["validated"] and inspect_result["ok"],
         )
+        sample = {
+            "index": index,
+            "wall_ms": run["wall_ms"],
+            "status": run["status"],
+            "response_error": _portable_response_error(run.get("response_error")),
+            "scan_run_id": run["scan_run_id"],
+            "idempotent_replay_false": (
+                idempotent_probe["request_id_absent_before_run"]
+                and run["scan_run_id"] not in seen_run_ids
+            ),
+            "snapshot_hit": bool(metrics.get("snapshot_hit")),
+            "inspect_ok": inspect_result["ok"],
+            "inspect_error_code": None
+            if inspect_result["ok"]
+            else "INSPECT_FAILED",
+            "corpus_manifest": corpus_manifest,
+            "anti_cheat": anti_cheat,
+            "context_sha256": context["context_sha256"],
+            "context_identical_to_cold": context["context_sha256"]
+            == snap_cold["context"]["context_sha256"],
+            "timing_ms": _timing_ms(metrics),
+            "semantic": context,
+        }
+        passed, failure_code = _anti_cheat_verdict(anti_cheat)
+        sample["anti_cheat_passed"] = passed
+        if failure_code is not None:
+            sample["anti_cheat_failure_code"] = failure_code
+        snap_samples.append(sample)
         seen_run_ids.add(run["scan_run_id"])
 
     cache_ms = [s["wall_ms"] for s in cache_samples]
@@ -787,7 +1119,11 @@ def run_warm_comparison(
     semantic_identical = len({semantic_key(context) for context in all_contexts}) == 1
 
     cache_warm_ok = all(
-        s["snapshot_hit"] is False
+        s["status"] == "ok"
+        and s["inspect_ok"] is True
+        and s["anti_cheat_passed"] is True
+        and s["idempotent_replay_false"] is True
+        and s["snapshot_hit"] is False
         and s["parse_cache_lookup_count"] > 0
         and s["classification_cache_lookup_count"] > 0
         and s["parse_cache_all_hit"] is True
@@ -795,7 +1131,40 @@ def run_warm_comparison(
         for s in cache_samples
     )
     snap_warm_ok = all(
-        s["snapshot_hit"] is True and s["idempotent_replay_false"] for s in snap_samples
+        s["status"] == "ok"
+        and s["inspect_ok"] is True
+        and s["anti_cheat_passed"] is True
+        and s["snapshot_hit"] is True
+        and s["idempotent_replay_false"]
+        for s in snap_samples
+    )
+
+    all_evidence = (
+        [cold["anti_cheat"] for cold in colds]
+        + [sample["anti_cheat"] for sample in cache_samples]
+        + [sample["anti_cheat"] for sample in snap_samples]
+    )
+    all_manifests = (
+        [cold["corpus_manifest"] for cold in colds]
+        + [sample["corpus_manifest"] for sample in cache_samples]
+        + [sample["corpus_manifest"] for sample in snap_samples]
+    )
+    corpus_keys = {
+        (
+            manifest.get("anonymous_manifest_sha256"),
+            manifest.get("source_count"),
+        )
+        for manifest in all_manifests
+    }
+    warm_anti_cheat_ok = all(
+        sample["anti_cheat_passed"] for sample in cache_samples + snap_samples
+    )
+    provenance_ok = len(all_evidence) == 9 and _identity_evidence_consistent(
+        all_evidence
+    )
+    corpus_ok = len(all_manifests) == 9 and len(corpus_keys) == 1 and all(
+        manifest.get("anonymous_manifest_sha256") == PREVIOUS_MANIFEST_HASHES[label]
+        for manifest in all_manifests
     )
 
     gates = {
@@ -803,15 +1172,12 @@ def run_warm_comparison(
         "cache_warm_all_snapshot_miss_and_cache_all_hit": cache_warm_ok,
         "snapshot_warm_all_snapshot_hit": snap_warm_ok,
         "semantic_identical": semantic_identical,
-        "passes": all(
-            [
-                improvement >= MIN_WARM_IMPROVEMENT,
-                cache_warm_ok,
-                snap_warm_ok,
-                semantic_identical,
-            ]
-        ),
+        "all_warm_samples_anti_cheat_passed": warm_anti_cheat_ok,
+        "all_cold_and_warm_profiles_builds_identical": provenance_ok,
+        "all_cold_and_warm_corpus_manifests_frozen": corpus_ok,
+        "passes": False,
     }
+    gates["passes"] = all(value for key, value in gates.items() if key != "passes")
 
     return {
         "warm_comparison": "completed",
@@ -870,8 +1236,11 @@ def run_7d_snapshot_warm_recheck(
     out_root: Path,
     report_mode: str = SEVEN_D_REPORT_MODE,
     profile: dict | None = None,
+    session_capability: dict | None = None,
+    source_guard_policy: str | None = None,
 ) -> dict:
     profile = profile or SEVEN_D_PROFILE
+    session_capability = session_capability or _probe_session_capability(scanner)
     cold_dir = _fresh_dir(out_root / "7d_cold")
     cold_db = cold_dir / "scan_index_v2.sqlite3"
 
@@ -889,34 +1258,88 @@ def run_7d_snapshot_warm_recheck(
     checkpoint_db(cold_db)
     cold_inspect = None
     cold_context = None
-    corpus = {"source_count": None}
+    cold_metrics: dict = {}
+    corpus = {
+        "anonymous_manifest_sha256": None,
+        "source_count": None,
+    }
+    cold_evidence = _failed_sample_evidence(
+        session_capability_present=session_capability[
+            "session_capability_present"
+        ],
+        source_guard_policy=source_guard_policy,
+        collection_error_code="EVIDENCE_COLLECTION_FAILED",
+    )
     if cold["scan_run_id"] is not None:
         cold_inspect = run_inspect_v2(scanner, cold_db, cold["scan_run_id"])
-        conn = sqlite3.connect(cold_db)
-        try:
-            corpus = anonymous_corpus_hash(conn)
-            cold_context = capture_context_state(conn, cold["scan_run_id"])
-        finally:
-            conn.close()
-    cold_clean = cold["status"] == "ok" and cold_context is not None
+        if cold_inspect["ok"]:
+            cold_metrics = cold_inspect["payload"].get("execution_metrics") or {}
+            conn = sqlite3.connect(cold_db)
+            try:
+                corpus = anonymous_corpus_hash(conn)
+                cold_context = capture_context_state(conn, cold["scan_run_id"])
+            finally:
+                conn.close()
+            cold_evidence = _collect_sample_evidence(
+                cold_db,
+                cold["scan_run_id"],
+                cold_metrics,
+                session_capability_present=session_capability[
+                    "session_capability_present"
+                ],
+                source_guard_policy=source_guard_policy,
+                validated=cold["validated"],
+            )
+    cold_anti_cheat_passed, cold_anti_cheat_failure_code = _anti_cheat_verdict(
+        cold_evidence
+    )
+    corpus_matches_frozen = (
+        corpus.get("anonymous_manifest_sha256") == PREVIOUS_MANIFEST_HASHES["7d"]
+    )
+    cold_clean = (
+        cold["status"] == "ok"
+        and cold_context is not None
+        and bool(cold_inspect and cold_inspect["ok"])
+        and cold_anti_cheat_passed
+        and corpus_matches_frozen
+    )
 
     if not cold_clean:
         return {
             "window": {"start": SEVEN_D_START.isoformat(), "end": SEVEN_D_END.isoformat()},
             "report_mode": report_mode,
             "corpus": corpus,
-            "corpus_changed_since_previous": corpus["anonymous_manifest_sha256"]
-            != PREVIOUS_MANIFEST_HASHES["7d"],
+            "corpus_manifest_provenance": ANONYMOUS_CORPUS_MANIFEST_PROVENANCE,
+            "corpus_changed_since_previous": not corpus_matches_frozen,
+            "normalized_profile_json": cold_evidence.get(
+                "normalized_profile_json"
+            ),
+            "normalized_profile_hash_algorithm": cold_evidence.get(
+                "normalized_profile_hash_algorithm"
+            ),
+            "normalized_profile_sha256": cold_evidence.get(
+                "normalized_profile_sha256"
+            ),
+            "build_identity": cold_evidence.get("build_identity"),
             "cold_wall_ms": cold["wall_ms"],
             "cold_status": cold["status"],
+            "cold_response_error": _portable_response_error(
+                cold.get("response_error")
+            ),
             "cold_inspect_ok": bool(cold_inspect and cold_inspect["ok"]),
-            "cold_inspect_error": None if cold_inspect is None else cold_inspect["error"],
+            "cold_inspect_error_code": None
+            if cold_inspect and cold_inspect["ok"]
+            else "INSPECT_FAILED",
+            "cold_anti_cheat": cold_evidence,
+            "cold_anti_cheat_failure_code": cold_anti_cheat_failure_code,
             "samples": [],
             "snapshot_warm_wall_ms": [],
             "snapshot_warm_median_ms": 0.0,
             "snapshot_warm_max_ms": 0.0,
             "gates": {
                 "cold_runs_clean": False,
+                "corpus_matches_frozen_manifest": corpus_matches_frozen,
+                "cold_anti_cheat_passed": cold_anti_cheat_passed,
                 "median_le_370ms": False,
                 "max_le_420ms": False,
                 "all_snapshot_hit": False,
@@ -950,6 +1373,7 @@ def run_7d_snapshot_warm_recheck(
         conn = sqlite3.connect(cold_db)
         try:
             context = capture_context_state(conn, run["scan_run_id"])
+            sample_corpus = anonymous_corpus_hash(conn)
         finally:
             conn.close()
         metrics = (
@@ -957,29 +1381,70 @@ def run_7d_snapshot_warm_recheck(
             if inspect_result["ok"]
             else {}
         )
-        samples.append(
-            {
-                "index": index,
-                "wall_ms": run["wall_ms"],
-                "scan_run_id": run["scan_run_id"],
-                "idempotent_replay_false": (
-                    idempotent_probe["request_id_absent_before_run"]
-                    and run["scan_run_id"] not in seen_run_ids
-                ),
-                "snapshot_hit": bool(metrics.get("snapshot_hit")),
-                "inspect_error": inspect_result["error"],
-                "context_hash_identical": context["context_sha256"]
-                == cold_context["context_sha256"],
-                # spec Part 6: snapshot-warm wall 拆分（handshake/discovery/lookup/
-                # finalization）必须证据可查，7d FAIL 归属才能验证。
-                "timing_ms": _timing_ms(metrics),
-            }
+        anti_cheat = _collect_sample_evidence(
+            cold_db,
+            run["scan_run_id"],
+            metrics,
+            session_capability_present=session_capability[
+                "session_capability_present"
+            ],
+            source_guard_policy=source_guard_policy,
+            validated=run["validated"] and inspect_result["ok"],
         )
+        sample = {
+            "index": index,
+            "wall_ms": run["wall_ms"],
+            "status": run["status"],
+            "response_error": _portable_response_error(run.get("response_error")),
+            "scan_run_id": run["scan_run_id"],
+            "idempotent_replay_false": (
+                idempotent_probe["request_id_absent_before_run"]
+                and run["scan_run_id"] not in seen_run_ids
+            ),
+            "snapshot_hit": bool(metrics.get("snapshot_hit")),
+            "inspect_ok": inspect_result["ok"],
+            "inspect_error_code": None
+            if inspect_result["ok"]
+            else "INSPECT_FAILED",
+            "corpus_manifest": sample_corpus,
+            "anti_cheat": anti_cheat,
+            "context_hash_identical": context["context_sha256"]
+            == cold_context["context_sha256"],
+            # spec Part 6: snapshot-warm wall 拆分（handshake/discovery/lookup/
+            # finalization）必须证据可查，7d FAIL 归属才能验证。
+            "timing_ms": _timing_ms(metrics),
+        }
+        passed, failure_code = _anti_cheat_verdict(anti_cheat)
+        sample["anti_cheat_passed"] = passed
+        if failure_code is not None:
+            sample["anti_cheat_failure_code"] = failure_code
+        samples.append(sample)
         seen_run_ids.add(run["scan_run_id"])
 
     warm_ms = [s["wall_ms"] for s in samples]
+    all_evidence = [cold_evidence] + [sample["anti_cheat"] for sample in samples]
+    all_profiles_builds_identical = (
+        len(all_evidence) == 4 and _identity_evidence_consistent(all_evidence)
+    )
+    all_corpus_frozen = all(
+        sample["corpus_manifest"] == corpus
+        and sample["corpus_manifest"].get("anonymous_manifest_sha256")
+        == PREVIOUS_MANIFEST_HASHES["7d"]
+        for sample in samples
+    )
     gates = {
         "cold_runs_clean": True,
+        "corpus_matches_frozen_manifest": corpus_matches_frozen,
+        "cold_anti_cheat_passed": cold_anti_cheat_passed,
+        "all_warm_samples_anti_cheat_passed": all(
+            sample["anti_cheat_passed"] for sample in samples
+        ),
+        "all_warm_samples_status_ok": all(
+            sample["status"] == "ok" and sample["inspect_ok"] is True
+            for sample in samples
+        ),
+        "all_cold_and_warm_profiles_builds_identical": all_profiles_builds_identical,
+        "all_cold_and_warm_corpus_manifests_frozen": all_corpus_frozen,
         "median_le_370ms": median_ms(warm_ms) <= SEVEN_D_TARGETS["median_ms_le"],
         "max_le_420ms": max(warm_ms) <= SEVEN_D_TARGETS["max_ms_le"],
         "all_snapshot_hit": all(s["snapshot_hit"] for s in samples),
@@ -987,27 +1452,30 @@ def run_7d_snapshot_warm_recheck(
         "all_context_identical_to_cold": all(s["context_hash_identical"] for s in samples),
         "passes": False,
     }
-    gates["passes"] = all(
-        [
-            gates["cold_runs_clean"],
-            gates["median_le_370ms"],
-            gates["max_le_420ms"],
-            gates["all_snapshot_hit"],
-            gates["all_idempotent_replay_false"],
-            gates["all_context_identical_to_cold"],
-        ]
-    )
+    gates["passes"] = all(value for key, value in gates.items() if key != "passes")
 
     return {
         "window": {"start": SEVEN_D_START.isoformat(), "end": SEVEN_D_END.isoformat()},
         "report_mode": report_mode,
         "corpus": corpus,
-        "corpus_changed_since_previous": corpus["anonymous_manifest_sha256"]
-        != PREVIOUS_MANIFEST_HASHES["7d"],
+        "corpus_manifest_provenance": ANONYMOUS_CORPUS_MANIFEST_PROVENANCE,
+        "corpus_changed_since_previous": not corpus_matches_frozen,
+        "normalized_profile_json": cold_evidence.get("normalized_profile_json"),
+        "normalized_profile_hash_algorithm": cold_evidence.get(
+            "normalized_profile_hash_algorithm"
+        ),
+        "normalized_profile_sha256": cold_evidence.get(
+            "normalized_profile_sha256"
+        ),
+        "build_identity": cold_evidence.get("build_identity"),
         "cold_wall_ms": cold["wall_ms"],
         "cold_status": cold["status"],
+        "cold_response_error": _portable_response_error(cold.get("response_error")),
         "cold_inspect_ok": bool(cold_inspect and cold_inspect["ok"]),
-        "cold_inspect_error": None if cold_inspect is None else cold_inspect["error"],
+        "cold_inspect_error_code": None
+        if cold_inspect and cold_inspect["ok"]
+        else "INSPECT_FAILED",
+        "cold_anti_cheat": cold_evidence,
         "snapshot_warm_wall_ms": warm_ms,
         "snapshot_warm_median_ms": median_ms(warm_ms),
         "snapshot_warm_max_ms": max(warm_ms),
@@ -1059,9 +1527,10 @@ def main(argv: list[str] | None = None) -> int:
 
     scanner, office_worker = _build_binary_paths()
     session_capability = _probe_session_capability(scanner)
+    classifier_probe = _probe_classifier_build(scanner)
 
     results: dict = {
-        "schema": "acceptance_real_dir_v1",
+        "schema": "acceptance_real_dir_v2",
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "hardware": _hardware_evidence(),
         "build": {
@@ -1082,7 +1551,7 @@ def main(argv: list[str] | None = None) -> int:
                     "target_triple": version_payload.get("target_triple"),
                 }
             )
-            results["build"]["classifier"] = _probe_classifier_build(scanner)
+            results["build"]["classifier"] = classifier_probe
     except Exception:  # noqa: BLE001
         results["build"]["engine_version"] = "unavailable"
 
@@ -1095,6 +1564,10 @@ def main(argv: list[str] | None = None) -> int:
                     office_worker=office_worker,
                     work_dir=work_dir,
                     out_root=out_root,
+                    session_capability=session_capability,
+                    source_guard_policy=classifier_probe.get(
+                        "source_guard_policy"
+                    ),
                 )
             else:
                 result = run_cold_acceptance_and_warm(
@@ -1104,15 +1577,36 @@ def main(argv: list[str] | None = None) -> int:
                     label=scenario,
                     out_root=out_root,
                     session_capability=session_capability,
+                    source_guard_policy=classifier_probe.get("source_guard_policy"),
                 )
-        except SeedPreparerError as error:
-            print(f"seed preparer failed closed: {error}")
-            return 1
+        except SeedPreparerError:
+            results["scenarios"][scenario] = {
+                "error": {
+                    "error_code": "SEED_PREPARER_FAILED_CLOSED",
+                    "exception_type": "SeedPreparerError",
+                }
+            }
+            print(f"scenario {scenario} seed preparer failed closed")
+            continue
         except Exception as error:  # noqa: BLE001 - evidence must be collected
-            results["scenarios"][scenario] = {"error": str(error)}
-            print(f"scenario {scenario} failed: {error}")
+            results["scenarios"][scenario] = {
+                "error": {
+                    "error_code": "SCENARIO_FAILED",
+                    "exception_type": type(error).__name__,
+                }
+            }
+            print(f"scenario {scenario} failed")
             continue
         results["scenarios"][scenario] = result
+
+    try:
+        _assert_portable_evidence(
+            results,
+            forbidden_paths=(work_dir, out_root, args.evidence, PROJECT_ROOT),
+        )
+    except ValueError as error:
+        print(f"portable evidence gate failed: {error}")
+        return 1
 
     args.evidence.parent.mkdir(parents=True, exist_ok=True)
     args.evidence.write_text(
@@ -1142,7 +1636,10 @@ def main(argv: list[str] | None = None) -> int:
             elif "cold_gates" in result:
                 print(f"{scenario}: cold_gates={json.dumps(result['cold_gates'])}")
                 if isinstance(result.get("warm_comparison"), dict):
-                    print(f"{scenario}: warm_gates={json.dumps(result['warm_comparison']['gates'])}")
+                    print(
+                        f"{scenario}: warm_gates="
+                        f"{json.dumps(result['warm_comparison']['gates'])}"
+                    )
             else:
                 print(f"{scenario}: gates={json.dumps(result.get('gates', {}))}")
         return 2
