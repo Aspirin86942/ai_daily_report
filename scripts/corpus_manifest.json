@@ -1,0 +1,178 @@
+{
+  "schema": "corpus_gate_manifest_v1",
+  "generated_at_utc": "2026-08-09T03:14:25Z",
+  "window": {
+    "start": "2026-08-01",
+    "end": "2026-08-08"
+  },
+  "report_mode": "weekly",
+  "profile": {
+    "schema_version": "scanner_profile_v2",
+    "max_file_size_mb": 1,
+    "max_candidate_files": 4,
+    "max_total_pdf_classification_pages": 100,
+    "max_pdf_text_extractions": 100,
+    "total_deadline_ms": 60000
+  },
+  "files": [
+    {
+      "path": "data\\over_budget.md",
+      "size_bytes": 2097152,
+      "file_type": ".md",
+      "extension": ".md"
+    },
+    {
+      "path": "notes.md",
+      "size_bytes": 62,
+      "file_type": ".md",
+      "extension": ".md"
+    },
+    {
+      "path": "pdf\\no_text_blank_01.pdf",
+      "size_bytes": 1372,
+      "file_type": ".pdf",
+      "extension": ".pdf"
+    },
+    {
+      "path": "pdf\\no_text_image_01.pdf",
+      "size_bytes": 1543,
+      "file_type": ".pdf",
+      "extension": ".pdf"
+    },
+    {
+      "path": "pdf\\text_plain_01.pdf",
+      "size_bytes": 1492,
+      "file_type": ".pdf",
+      "extension": ".pdf"
+    },
+    {
+      "path": "report.txt",
+      "size_bytes": 55,
+      "file_type": ".txt",
+      "extension": ".txt"
+    }
+  ],
+  "classification_truth": {
+    "pdf\\no_text_blank_01.pdf": "no_text_in_parse_window",
+    "pdf\\no_text_image_01.pdf": "no_text_in_parse_window",
+    "pdf\\text_plain_01.pdf": "text_in_parse_window"
+  },
+  "plan": {
+    "source_file_count": 6,
+    "candidate_file_count": 4,
+    "classification_slot_count": 3,
+    "nominal_charged_pages_total": 6,
+    "admitted_file_count": 4,
+    "extraction_slot_count": 1,
+    "included_file_count": 4,
+    "omitted_file_count": 2,
+    "error_file_count": 0,
+    "not_parsed_reasons": [
+      "file_size_policy",
+      "semantic_file_quota_exhausted"
+    ],
+    "admitted_text_pdf_paths": [
+      "pdf\\text_plain_01.pdf"
+    ],
+    "admitted_no_text_pdf_paths": [
+      "pdf\\no_text_blank_01.pdf",
+      "pdf\\no_text_image_01.pdf"
+    ]
+  },
+  "semantic": {
+    "context_sha256": "ab6abcd106e78a24ca0cfdd62bfc2c060ec5f7e39b73069ecd8cd9a0bb5fc942",
+    "semantic_counts": {
+      "source_file_count": 6,
+      "success_count": 4,
+      "timeout_count": 0,
+      "included_file_count": 4,
+      "omitted_file_count": 2,
+      "error_file_count": 0,
+      "input_chars": 2097391,
+      "output_chars": 1506
+    },
+    "decisions": [
+      [
+        "data\\over_budget.md",
+        "omit",
+        "file_size_policy",
+        30,
+        2097152,
+        0,
+        0,
+        ""
+      ],
+      [
+        "notes.md",
+        "keep",
+        "small_file_keep",
+        30,
+        74,
+        74,
+        0,
+        ""
+      ],
+      [
+        "pdf\\no_text_blank_01.pdf",
+        "keep",
+        "small_file_keep",
+        20,
+        0,
+        0,
+        0,
+        ""
+      ],
+      [
+        "pdf\\no_text_image_01.pdf",
+        "keep",
+        "small_file_keep",
+        20,
+        0,
+        0,
+        0,
+        ""
+      ],
+      [
+        "pdf\\text_plain_01.pdf",
+        "keep",
+        "small_file_keep",
+        20,
+        110,
+        110,
+        0,
+        ""
+      ],
+      [
+        "report.txt",
+        "omit",
+        "semantic_file_quota_exhausted",
+        30,
+        55,
+        0,
+        0,
+        ""
+      ]
+    ]
+  },
+  "partial": {
+    "seed": "corpus-gate-v1-2026-08-09",
+    "parse_paths": [
+      "pdf\\text_plain_01.pdf"
+    ],
+    "classification_paths": [
+      "pdf\\no_text_blank_01.pdf",
+      "pdf\\text_plain_01.pdf"
+    ]
+  },
+  "combos": [
+    "empty_empty",
+    "empty_partial",
+    "empty_full",
+    "partial_empty",
+    "partial_partial",
+    "partial_full",
+    "full_empty",
+    "full_partial",
+    "full_full"
+  ]
+}
