@@ -234,6 +234,27 @@ pub struct CacheEntry {
     pub worker_build: String,
 }
 
+impl CacheEntry {
+    fn validate(&self) -> Result<(), String> {
+        if !super::inventory::is_sha256(&self.content_sha256)
+            || sha256_hex(self.content.as_bytes()) != self.content_sha256
+            || self.parser_backend.is_empty()
+            || self.parser_backend.chars().count() > 1_024
+            || self.worker_lane.is_empty()
+            || self.worker_lane.chars().count() > 1_024
+            || self.worker_contract_version.is_empty()
+            || self.worker_contract_version.chars().count() > 1_024
+            || self.worker_version.is_empty()
+            || self.worker_version.chars().count() > 1_024
+            || self.worker_build.is_empty()
+            || self.worker_build.chars().count() > 4_096
+        {
+            return Err("invalid parse cache value".to_string());
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheLookup {
     Fresh(CacheEntry),
@@ -508,7 +529,7 @@ fn resolve_cache_lookup(
     inventory_existed_before: bool,
 ) -> CacheLookup {
     if let Some(entry) = exact {
-        if sha256_hex(entry.content.as_bytes()) == entry.content_sha256 {
+        if entry.validate().is_ok() {
             return CacheLookup::Fresh(entry);
         }
         // Corrupt cache bytes are never returned as successful content.
@@ -779,6 +800,33 @@ pub struct ClassificationCacheEntry {
     pub result_examined_pages: u64,
 }
 
+impl ClassificationCacheEntry {
+    fn validate(&self) -> Result<(), String> {
+        if !matches!(
+            self.status.as_str(),
+            "text_in_parse_window" | "no_text_in_parse_window"
+        ) || self.page_count == 0
+            || self.result_examined_pages == 0
+            || self.result_examined_pages > self.page_count
+        {
+            return Err("invalid classification cache value".to_string());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum CacheLookupReadError {
+    Sqlite(rusqlite::Error),
+    Corrupt(&'static str),
+}
+
+impl From<rusqlite::Error> for CacheLookupReadError {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Sqlite(error)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassificationCacheMissReason {
     NewFile,
@@ -843,6 +891,7 @@ impl ClassificationCacheWriteRecord {
             )
             || self.page_count == 0
             || self.result_examined_pages == 0
+            || self.result_examined_pages > self.page_count
         {
             return Err("invalid classification cache record".to_string());
         }
@@ -886,7 +935,7 @@ pub(crate) fn lookup_classification_cache(
     classifier_profile_hash: &str,
     classifier_build: &str,
     inventory_existed_before: bool,
-) -> rusqlite::Result<ClassificationCacheLookup> {
+) -> Result<ClassificationCacheLookup, CacheLookupReadError> {
     let fresh = connection
         .query_row(
             "SELECT status, page_count, result_examined_pages
@@ -912,13 +961,12 @@ pub(crate) fn lookup_classification_cache(
         )
         .optional()?;
     if let Some(entry) = fresh {
-        if matches!(
-            entry.status.as_str(),
-            "text_in_parse_window" | "no_text_in_parse_window"
-        ) && entry.page_count > 0
-        {
+        if entry.validate().is_ok() {
             return Ok(ClassificationCacheLookup::Fresh(entry));
         }
+        return Err(CacheLookupReadError::Corrupt(
+            "exact classification cache row failed integrity validation",
+        ));
     }
 
     let same_identity_and_guard: bool = connection.query_row(

@@ -6,13 +6,14 @@ pub mod schema;
 
 use ai_daily_discovery::normalize_contract_path_text;
 use ai_daily_scanner_contract::{
-    AutoVacuumMode, BuildContextRequest, ContextAction, ContextDecision, ContextEnvelope,
-    ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, ExecutionMetricsV2,
-    ExtensionMetric, MaintenanceDeletedV1, MaintenanceMode, MaintenancePostIntegrityCheck,
-    MaintenancePreIntegrityCheck, MaintenanceRequestV1, MaintenanceResponseV1, MaintenanceSizeV1,
-    MaintenanceStatus, MaintenanceVacuumStatus, MaintenanceVacuumV1, NormalizedScannerProfileV1,
-    Nullable, ParseStatus, RunStatus, StageMetric, StageName, UpgradeDatabaseRequestV1,
-    UpgradeDatabaseResponseV1, UpgradeIntegrityCheck, UpgradeStatus, Validate, VersionResponse,
+    AutoVacuumMode, BuildContextRequest, CacheMissReason, ContextAction, ContextDecision,
+    ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode,
+    ExecutionMetricsV2, ExtensionMetric, MaintenanceDeletedV1, MaintenanceMode,
+    MaintenancePostIntegrityCheck, MaintenancePreIntegrityCheck, MaintenanceRequestV1,
+    MaintenanceResponseV1, MaintenanceSizeV1, MaintenanceStatus, MaintenanceVacuumStatus,
+    MaintenanceVacuumV1, NormalizedScannerProfileV1, Nullable, ParseStatus, RunStatus, StageMetric,
+    StageName, UpgradeDatabaseRequestV1, UpgradeDatabaseResponseV1, UpgradeIntegrityCheck,
+    UpgradeStatus, Validate, VersionResponse,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
@@ -1080,7 +1081,7 @@ impl ScannerStore {
             inventory_existed_before,
         };
         validate_cache_lookup_key(&key)?;
-        cache::lookup_cache(
+        let lookup = cache::lookup_cache(
             &self.connection,
             file_identity,
             source_version,
@@ -1089,7 +1090,8 @@ impl ScannerStore {
             parse_profile_hash,
             inventory_existed_before,
         )
-        .map_err(cache_open)
+        .map_err(cache_open)?;
+        reject_corrupt_parse_cache_lookup(lookup)
     }
 
     fn lookup_cache_batch(
@@ -1099,7 +1101,11 @@ impl ScannerStore {
         for key in keys {
             validate_cache_lookup_key(key)?;
         }
-        cache::lookup_cache_batch(&self.connection, keys).map_err(cache_open)
+        cache::lookup_cache_batch(&self.connection, keys)
+            .map_err(cache_open)?
+            .into_iter()
+            .map(reject_corrupt_parse_cache_lookup)
+            .collect()
     }
 
     /// Upserts the global `file_inventory` in one bounded short transaction and
@@ -1333,6 +1339,7 @@ impl ScannerStore {
         if file_identity.is_empty()
             || source_version.is_empty()
             || inventory::parse_source_version(source_version).is_err()
+            || !valid_guard_wire(source_guard_kind, source_guard_sha256)
             || !inventory::is_sha256(classifier_profile_hash)
             || !inventory::is_sha256(classifier_build)
         {
@@ -1350,7 +1357,7 @@ impl ScannerStore {
             classifier_build,
             inventory_existed_before,
         )
-        .map_err(cache_open)
+        .map_err(cache_lookup_read_error)
     }
 
     /// Success-only classification-cache write in an independent short
@@ -4406,6 +4413,24 @@ fn cache_open(error: impl ToString) -> StoreError {
     StoreError::CacheOpen {
         detail: error.to_string(),
     }
+}
+
+fn cache_lookup_read_error(error: cache::CacheLookupReadError) -> StoreError {
+    match error {
+        cache::CacheLookupReadError::Sqlite(error) => cache_open(error),
+        cache::CacheLookupReadError::Corrupt(message) => {
+            StoreError::RunCorrupt(message.to_string())
+        }
+    }
+}
+
+fn reject_corrupt_parse_cache_lookup(lookup: CacheLookup) -> Result<CacheLookup, StoreError> {
+    if matches!(lookup, CacheLookup::Miss(CacheMissReason::ErrorCache)) {
+        return Err(StoreError::RunCorrupt(
+            "exact parse cache row failed integrity validation".to_string(),
+        ));
+    }
+    Ok(lookup)
 }
 
 fn cache_write(error: impl ToString) -> StoreError {
@@ -7612,7 +7637,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_cache_lookup_matches_scalar_across_chunk_boundary() {
+    fn batch_cache_lookup_matches_scalar_across_chunk_boundary_and_rejects_corruption() {
         let mut harness = harness("00000000-0000-4000-8000-000000000030");
         let source = "mtime_ns=100:size=5";
         let changed_source = "mtime_ns=101:size=5";
@@ -7685,12 +7710,6 @@ mod tests {
                 false,
             ),
             (
-                "file-error".to_string(),
-                source.to_string(),
-                profile_hash.clone(),
-                false,
-            ),
-            (
                 "file-profile".to_string(),
                 source.to_string(),
                 changed_profile_hash,
@@ -7751,24 +7770,140 @@ mod tests {
         assert!(matches!(batch[special_start], CacheLookup::Fresh(_)));
         assert_eq!(
             batch[special_start + 1],
-            CacheLookup::Miss(CacheMissReason::ErrorCache)
-        );
-        assert_eq!(
-            batch[special_start + 2],
             CacheLookup::Miss(CacheMissReason::ParserIdentityChanged)
         );
         assert_eq!(
-            batch[special_start + 3],
+            batch[special_start + 2],
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
         assert_eq!(
-            batch[special_start + 4],
+            batch[special_start + 3],
             CacheLookup::Miss(CacheMissReason::EntryAbsentOrEvicted)
         );
         assert_eq!(
-            batch[special_start + 5],
+            batch[special_start + 4],
             CacheLookup::Miss(CacheMissReason::NewFile)
         );
+
+        let scalar_error = harness
+            .store
+            .lookup_cache(
+                "file-error",
+                source,
+                "content_sha256_v1",
+                &zero_guard,
+                &"a".repeat(64),
+                false,
+            )
+            .expect_err("a corrupt exact row must fail the run-level lookup");
+        assert!(matches!(scalar_error, StoreError::RunCorrupt(_)));
+
+        let corrupt_profile_hash = "a".repeat(64);
+        let corrupt_key = cache::CacheLookupKey {
+            file_identity: "file-error",
+            source_version: source,
+            source_guard_kind: "content_sha256_v1",
+            source_guard_sha256: &zero_guard,
+            parse_profile_hash: &corrupt_profile_hash,
+            inventory_existed_before: false,
+        };
+        let batch_error = harness
+            .store
+            .lookup_cache_batch(&[corrupt_key])
+            .expect_err("batch lookup must not downgrade exact-row corruption to a miss");
+        assert!(matches!(batch_error, StoreError::RunCorrupt(_)));
+
+        harness
+            .store
+            .connection
+            .execute(
+                "UPDATE parse_cache
+                 SET content_sha256=?1, parser_backend=''
+                 WHERE file_identity='file-error'",
+                [sha256_hex(b"corrupt")],
+            )
+            .unwrap();
+        let value_error = harness
+            .store
+            .lookup_cache(
+                "file-error",
+                source,
+                "content_sha256_v1",
+                &zero_guard,
+                &"a".repeat(64),
+                false,
+            )
+            .expect_err("invalid exact-row values must fail the run-level lookup");
+        assert!(matches!(value_error, StoreError::RunCorrupt(_)));
+    }
+
+    #[test]
+    fn exact_classification_cache_corruption_fails_closed() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000031");
+        let source = "mtime_ns=100:size=5";
+        let guard = "0".repeat(64);
+        let classifier_profile_hash = "c".repeat(64);
+        let classifier_build = "a".repeat(64);
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        harness
+            .store
+            .prepare_inventory(
+                &[inventory_record("file-classification-corrupt", source)],
+                i64::try_from(active.scan_run_id()).unwrap(),
+                1,
+            )
+            .unwrap();
+        harness
+            .store
+            .write_success_classification_cache(
+                &[ClassificationCacheWriteRecord {
+                    file_identity: "file-classification-corrupt".to_string(),
+                    source_version: source.to_string(),
+                    source_guard_kind: "content_sha256_v1".to_string(),
+                    source_guard_sha256: guard.clone(),
+                    classifier_profile_hash: classifier_profile_hash.clone(),
+                    classifier_build: classifier_build.clone(),
+                    status: "text_in_parse_window".to_string(),
+                    page_count: 5,
+                    result_examined_pages: 1,
+                }],
+                1,
+            )
+            .unwrap();
+        harness
+            .store
+            .connection
+            .execute(
+                "UPDATE classification_cache
+                 SET result_examined_pages=0
+                 WHERE file_identity='file-classification-corrupt'",
+                [],
+            )
+            .unwrap();
+
+        let error = harness
+            .store
+            .lookup_classification_cache(
+                "file-classification-corrupt",
+                source,
+                "content_sha256_v1",
+                &guard,
+                &classifier_profile_hash,
+                &classifier_build,
+                false,
+            )
+            .expect_err("exact classification cache corruption must fail the run");
+        assert!(matches!(error, StoreError::RunCorrupt(_)));
     }
 
     #[test]

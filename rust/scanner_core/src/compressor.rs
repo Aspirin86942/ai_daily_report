@@ -2,9 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use ai_daily_scanner_contract::{
-    ContextAction, ContextDecision, ParseStatus, ReportMode,
-};
+use ai_daily_scanner_contract::{ContextAction, ContextDecision, ParseStatus, ReportMode};
 
 use crate::budget_model::{
     budget_model_mismatch, count_chars, OmittedCandidate, OmittedSummaryPlan, MAX_U64_DIGITS,
@@ -209,7 +207,7 @@ pub fn build_context(
         &omitted_files,
         omitted_plan,
         profile.global_max_chars(),
-    );
+    )?;
     append_parse_issues(&mut sections, &parse_issues, profile.global_max_chars());
 
     let content = join_sections(&sections);
@@ -340,9 +338,9 @@ fn append_omitted_summary(
     omitted: &[OmittedRow],
     plan: OmittedSummaryPlan,
     global_budget: u64,
-) {
+) -> Result<(), String> {
     if omitted.is_empty() {
-        return;
+        return Ok(());
     }
     let mut lines = vec![
         "## 省略文件摘要".to_string(),
@@ -363,13 +361,17 @@ fn append_omitted_summary(
             lines.push(line);
             used = candidate_used;
         } else {
-            break;
+            return Err(budget_model_mismatch(
+                "pre-selected omitted detail exceeds its reservation",
+            ));
         }
     }
     // Aggregate rows in (reason, extension) canonical order.
     let mut groups: BTreeMap<(&str, &str), u64> = BTreeMap::new();
     for row in omitted {
-        *groups.entry((row.reason.as_str(), row.extension.as_str())).or_insert(0) += 1;
+        *groups
+            .entry((row.reason.as_str(), row.extension.as_str()))
+            .or_insert(0) += 1;
     }
     let mut other_count = 0_u64;
     for ((reason, extension), count) in groups {
@@ -387,14 +389,25 @@ fn append_omitted_summary(
         let candidate_used = used.saturating_add(count_chars(&line) + 1);
         if candidate_used <= plan.reservation {
             lines.push(line);
+        } else {
+            return Err(budget_model_mismatch(
+                "mandatory omitted catch-all exceeds its reservation",
+            ));
         }
     }
     let section = lines.join("\n");
-    if count_chars(&section) <= plan.reservation
-        && can_append_with_footer(sections, &section, global_budget)
-    {
-        sections.push(section);
+    if count_chars(&section) > plan.reservation {
+        return Err(budget_model_mismatch(
+            "omitted summary exceeds its reservation",
+        ));
     }
+    if !can_append_with_footer(sections, &section, global_budget) {
+        return Err(budget_model_mismatch(
+            "omitted summary exceeds the global context budget",
+        ));
+    }
+    sections.push(section);
+    Ok(())
 }
 
 fn append_parse_issues(sections: &mut Vec<String>, issues: &[String], global_budget: u64) {
@@ -466,7 +479,7 @@ fn enum_text<T: serde::Serialize>(value: &T) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::budget_model::max_omitted_row_chars;
+    use crate::budget_model::{max_omitted_row_chars, BUDGET_MODEL_MISMATCH_CODE};
     use ai_daily_scanner_contract::CacheStatus;
     use ai_daily_scanner_contract::ContextProfile;
 
@@ -516,13 +529,91 @@ mod tests {
         // OmittedSummaryPlan reservation covers the actual render.
         let row = format!(
             "- {} | action=omit | reason={} | input_chars=~{}",
-            "\\deep\\path\\file.md",
-            "pdf_text_extraction_quota_exhausted",
-            9_u64,
+            "\\deep\\path\\file.md", "pdf_text_extraction_quota_exhausted", 9_u64,
         );
         assert!(
             count_chars(&row) <= max_omitted_row_chars("\\deep\\path\\file.md"),
             "rendered omitted row must fit the priced max"
         );
+    }
+
+    #[test]
+    fn omitted_summary_fails_closed_when_preselected_detail_does_not_fit() {
+        let mut sections = vec!["base".to_string()];
+        let original = sections.clone();
+        let omitted = vec![OmittedRow {
+            relative_path: "too-long.md".to_string(),
+            extension: ".md".to_string(),
+            reason: "semantic_file_quota_exhausted".to_string(),
+            input_chars: 1,
+            in_detail_slot: true,
+        }];
+
+        let error = append_omitted_summary(
+            &mut sections,
+            &omitted,
+            OmittedSummaryPlan {
+                reservation: 1,
+                detail_slots: Vec::new(),
+            },
+            10_000,
+        )
+        .expect_err("a pre-selected detail row must never disappear silently");
+
+        assert!(error.contains(BUDGET_MODEL_MISMATCH_CODE));
+        assert_eq!(sections, original);
+    }
+
+    #[test]
+    fn omitted_summary_fails_closed_when_mandatory_catch_all_does_not_fit() {
+        let mut sections = vec!["base".to_string()];
+        let omitted = vec![OmittedRow {
+            relative_path: "omitted.md".to_string(),
+            extension: ".md".to_string(),
+            reason: "semantic_file_quota_exhausted".to_string(),
+            input_chars: 1,
+            in_detail_slot: false,
+        }];
+
+        let error = append_omitted_summary(
+            &mut sections,
+            &omitted,
+            OmittedSummaryPlan {
+                reservation: 1,
+                detail_slots: Vec::new(),
+            },
+            10_000,
+        )
+        .expect_err("the mandatory catch-all must never disappear silently");
+
+        assert!(error.contains(BUDGET_MODEL_MISMATCH_CODE));
+        assert!(error.contains("catch-all"));
+    }
+
+    #[test]
+    fn omitted_summary_fails_closed_when_global_append_does_not_fit() {
+        let mut sections = vec!["base".to_string()];
+        let original = sections.clone();
+        let omitted = vec![OmittedRow {
+            relative_path: "omitted.md".to_string(),
+            extension: ".md".to_string(),
+            reason: "semantic_file_quota_exhausted".to_string(),
+            input_chars: 1,
+            in_detail_slot: false,
+        }];
+
+        let error = append_omitted_summary(
+            &mut sections,
+            &omitted,
+            OmittedSummaryPlan {
+                reservation: 1_000,
+                detail_slots: Vec::new(),
+            },
+            1,
+        )
+        .expect_err("the complete omitted summary must fit the global budget");
+
+        assert!(error.contains(BUDGET_MODEL_MISMATCH_CODE));
+        assert_eq!(sections, original);
     }
 }
