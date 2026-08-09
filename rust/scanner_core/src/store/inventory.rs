@@ -289,9 +289,11 @@ pub(crate) fn upsert_inventory(
     scan_run_id: i64,
     seen_at_ms: i64,
     records: &[InventoryRecord],
-) -> rusqlite::Result<()> {
-    let mut statement = transaction.prepare_cached(
-        "INSERT INTO file_inventory(
+    ensure_deadline: &dyn Fn() -> Result<(), super::StoreError>,
+) -> Result<(), super::StoreError> {
+    let mut statement = transaction
+        .prepare_cached(
+            "INSERT INTO file_inventory(
             file_identity, absolute_path, relative_path, file_type, source_version,
             size_bytes, mtime_ns, last_seen_run_id, last_seen_at_ms,
             source_guard_kind, source_guard_sha256
@@ -307,21 +309,25 @@ pub(crate) fn upsert_inventory(
             last_seen_at_ms=excluded.last_seen_at_ms,
             source_guard_kind=excluded.source_guard_kind,
             source_guard_sha256=excluded.source_guard_sha256",
-    )?;
+        )
+        .map_err(super::cache_write)?;
     for record in records {
-        statement.execute(params![
-            record.file_identity,
-            record.absolute_path,
-            record.relative_path,
-            record.file_type,
-            record.source_version,
-            record.size_bytes as i64,
-            record.mtime_ns as i64,
-            scan_run_id,
-            seen_at_ms,
-            record.source_guard_kind,
-            record.source_guard_sha256,
-        ])?;
+        ensure_deadline()?;
+        statement
+            .execute(params![
+                record.file_identity,
+                record.absolute_path,
+                record.relative_path,
+                record.file_type,
+                record.source_version,
+                record.size_bytes as i64,
+                record.mtime_ns as i64,
+                scan_run_id,
+                seen_at_ms,
+                record.source_guard_kind,
+                record.source_guard_sha256,
+            ])
+            .map_err(super::cache_write)?;
     }
     Ok(())
 }
@@ -439,8 +445,8 @@ pub(crate) fn insert_file_results(
         let classification_page_count = classification
             .and_then(|value| value.page_count.0)
             .map(|value| value as i64);
-        let classification_cache_status = classification
-            .map(|value| persisted_classification_cache_status(value, snapshot_rows));
+        let classification_cache_status =
+            classification.map(|value| persisted_classification_cache_status(value, snapshot_rows));
         let classification_cache_miss_reason = classification.map(|value| {
             if snapshot_rows {
                 String::new()
@@ -451,15 +457,15 @@ pub(crate) fn insert_file_results(
         let classification_result_examined_pages = classification
             .and_then(|value| value.result_examined_pages.0)
             .map(|value| value as i64);
-        let classification_run_inspected_pages = classification.map(|value| {
+        let classification_run_inspected_pages = classification.and_then(|value| {
             if snapshot_rows {
                 Some(0_i64)
             } else {
                 value.run_inspected_pages.0.map(|pages| pages as i64)
             }
-        }).flatten();
-        let classification_nominal_charged_pages = classification
-            .map(|value| value.nominal_charged_pages as i64);
+        });
+        let classification_nominal_charged_pages =
+            classification.map(|value| value.nominal_charged_pages as i64);
         let classification_duration_ms = classification.map(|value| {
             if snapshot_rows {
                 0_i64
@@ -467,8 +473,8 @@ pub(crate) fn insert_file_results(
                 value.duration_ms as i64
             }
         });
-        let classification_transport = classification
-            .map(|value| persisted_classification_transport(value, snapshot_rows));
+        let classification_transport =
+            classification.map(|value| persisted_classification_transport(value, snapshot_rows));
         let classification_attempt_count = classification.map(|value| {
             if snapshot_rows {
                 0_i64
@@ -686,8 +692,7 @@ mod tests {
         omitted.pdf_classification = Some(PdfClassificationAuditV1 {
             status: ai_daily_scanner_contract::PdfClassificationStatus::NoTextInParseWindow,
             page_count: ai_daily_scanner_contract::Nullable(Some(2)),
-            classification_cache_status:
-                ai_daily_scanner_contract::ClassificationCacheStatus::Miss,
+            classification_cache_status: ai_daily_scanner_contract::ClassificationCacheStatus::Miss,
             classification_cache_miss_reason: "new_file".to_string(),
             result_examined_pages: ai_daily_scanner_contract::Nullable(Some(2)),
             run_inspected_pages: ai_daily_scanner_contract::Nullable(Some(2)),

@@ -19,10 +19,11 @@ use crate::parsers::{ParsedPayload, ParserScheduler, ScheduledFileParse, WorkerR
 use crate::planner::PlanAction;
 use crate::scheduler::{
     CachePort, CachePortError, ParseLookupOutcome, ParseRequest, ParseResult, ParserPort,
+    RealClock, RunDeadlines,
 };
 use crate::store::{
-    ClassificationCacheLookup, ClassificationCacheWriteRecord, CacheWriteRecord, InventoryRecord,
-    RouteStackFingerprints, ScannerStore,
+    CacheWriteRecord, ClassificationCacheLookup, ClassificationCacheWriteRecord, InventoryRecord,
+    RouteStackFingerprints, ScannerStore, StoreError,
 };
 
 /// Store-backed [`CachePort`]. Each operation opens its own connection to the
@@ -32,6 +33,8 @@ pub struct StoreCachePort {
     db_path: PathBuf,
     route_stacks: RouteStackFingerprints,
     v1_profile: NormalizedScannerProfileV1,
+    deadlines: RunDeadlines,
+    clock: RealClock,
 }
 
 impl StoreCachePort {
@@ -39,18 +42,31 @@ impl StoreCachePort {
         db_path: PathBuf,
         route_stacks: RouteStackFingerprints,
         v1_profile: NormalizedScannerProfileV1,
+        deadlines: RunDeadlines,
+        clock: RealClock,
     ) -> Self {
         Self {
             db_path,
             route_stacks,
             v1_profile,
+            deadlines,
+            clock,
         }
     }
 
     fn open(&self) -> Result<ScannerStore, CachePortError> {
-        ScannerStore::open_existing(&self.db_path).map_err(|error| CachePortError::Store {
+        ScannerStore::open_existing(&self.db_path).map_err(map_store_error)
+    }
+}
+
+fn map_store_error(error: StoreError) -> CachePortError {
+    match error {
+        StoreError::WorkDeadlineExhausted => CachePortError::DeadlineExhausted {
             detail: error.to_string(),
-        })
+        },
+        _ => CachePortError::Store {
+            detail: error.to_string(),
+        },
     }
 }
 
@@ -62,15 +78,12 @@ impl CachePort for StoreCachePort {
         records: &[InventoryRecord],
     ) -> Result<HashSet<String>, CachePortError> {
         let mut store = self.open()?;
-        let run_id = i64::try_from(scan_run_id)
-            .map_err(|_| CachePortError::InvalidKey {
-                detail: "scan_run_id exceeds SQLite integer range".to_string(),
-            })?;
+        let run_id = i64::try_from(scan_run_id).map_err(|_| CachePortError::InvalidKey {
+            detail: "scan_run_id exceeds SQLite integer range".to_string(),
+        })?;
         store
-            .prepare_inventory(records, run_id, now_ms)
-            .map_err(|error| CachePortError::Store {
-                detail: error.to_string(),
-            })
+            .prepare_inventory_with_deadline(records, run_id, now_ms, self.deadlines, &self.clock)
+            .map_err(map_store_error)
     }
 
     fn lookup_parse(
@@ -85,22 +98,20 @@ impl CachePort for StoreCachePort {
             self.route_stacks.for_route(parser_route),
             &self.v1_profile,
         )
-        .map_err(|message| CachePortError::InvalidKey {
-            detail: message,
-        })?;
+        .map_err(|message| CachePortError::InvalidKey { detail: message })?;
         let store = self.open()?;
-        let guard_kind = file
-            .source_guard_kind
-            .as_deref()
-            .ok_or_else(|| CachePortError::InvalidKey {
-                detail: "source guard kind is missing".to_string(),
-            })?;
-        let guard_sha256 = file
-            .source_guard_sha256
-            .as_deref()
-            .ok_or_else(|| CachePortError::InvalidKey {
-                detail: "source guard sha256 is missing".to_string(),
-            })?;
+        let guard_kind =
+            file.source_guard_kind
+                .as_deref()
+                .ok_or_else(|| CachePortError::InvalidKey {
+                    detail: "source guard kind is missing".to_string(),
+                })?;
+        let guard_sha256 =
+            file.source_guard_sha256
+                .as_deref()
+                .ok_or_else(|| CachePortError::InvalidKey {
+                    detail: "source guard sha256 is missing".to_string(),
+                })?;
         let lookup = store
             .lookup_cache(
                 &file.file_identity,
@@ -126,18 +137,18 @@ impl CachePort for StoreCachePort {
         classifier_build: &str,
         inventory_existed_before: bool,
     ) -> Result<ClassificationCacheLookup, CachePortError> {
-        let guard_kind = file
-            .source_guard_kind
-            .as_deref()
-            .ok_or_else(|| CachePortError::InvalidKey {
-                detail: "source guard kind is missing".to_string(),
-            })?;
-        let guard_sha256 = file
-            .source_guard_sha256
-            .as_deref()
-            .ok_or_else(|| CachePortError::InvalidKey {
-                detail: "source guard sha256 is missing".to_string(),
-            })?;
+        let guard_kind =
+            file.source_guard_kind
+                .as_deref()
+                .ok_or_else(|| CachePortError::InvalidKey {
+                    detail: "source guard kind is missing".to_string(),
+                })?;
+        let guard_sha256 =
+            file.source_guard_sha256
+                .as_deref()
+                .ok_or_else(|| CachePortError::InvalidKey {
+                    detail: "source guard sha256 is missing".to_string(),
+                })?;
         let store = self.open()?;
         store
             .lookup_classification_cache(
@@ -157,10 +168,8 @@ impl CachePort for StoreCachePort {
     fn write_parse(&self, now_ms: u64, records: &[CacheWriteRecord]) -> Result<(), CachePortError> {
         let mut store = self.open()?;
         store
-            .write_success_parse_cache(records, now_ms)
-            .map_err(|error| CachePortError::Store {
-                detail: error.to_string(),
-            })
+            .write_success_parse_cache_with_deadline(records, now_ms, self.deadlines, &self.clock)
+            .map_err(map_store_error)
     }
 
     fn write_classification(
@@ -170,10 +179,13 @@ impl CachePort for StoreCachePort {
     ) -> Result<(), CachePortError> {
         let mut store = self.open()?;
         store
-            .write_success_classification_cache(records, now_ms)
-            .map_err(|error| CachePortError::Store {
-                detail: error.to_string(),
-            })
+            .write_success_classification_cache_with_deadline(
+                records,
+                now_ms,
+                self.deadlines,
+                &self.clock,
+            )
+            .map_err(map_store_error)
     }
 
     fn touch_access(
@@ -187,10 +199,14 @@ impl CachePort for StoreCachePort {
         }
         let mut store = self.open()?;
         store
-            .touch_cache_access(now_ms, parse_hits, classification_hits)
-            .map_err(|error| CachePortError::Store {
-                detail: error.to_string(),
-            })
+            .touch_cache_access_with_deadline(
+                now_ms,
+                parse_hits,
+                classification_hits,
+                self.deadlines,
+                &self.clock,
+            )
+            .map_err(map_store_error)
     }
 }
 
@@ -225,10 +241,7 @@ impl ProductionParser {
             request.timeout_ms,
             &self.profile,
         );
-        match session.parse_pdf(
-            &worker_request,
-            Duration::from_millis(request.timeout_ms),
-        ) {
+        match session.parse_pdf(&worker_request, Duration::from_millis(request.timeout_ms)) {
             Ok(outcome) => {
                 let duration_ms = outcome.duration_ms;
                 let response = outcome.value;
@@ -378,13 +391,14 @@ fn parser_route(route: RouteKind) -> ParserRoute {
 fn to_parse_result(parsed: ScheduledFileParse, file_identity: &str) -> ParseResult {
     let (content, truncated) = match &parsed.payload {
         Some(ParsedPayload::LightText(payload)) => (payload.content.clone(), payload.truncated),
-        Some(ParsedPayload::Worker(response)) => {
-            (response.content.clone(), response.truncated)
-        }
+        Some(ParsedPayload::Worker(response)) => (response.content.clone(), response.truncated),
         None => (String::new(), false),
     };
     let content_sha256 = crate::store::sha256_hex(content.as_bytes());
-    let error = parsed.error.as_ref().map(|failure| failure.diagnostic.clone());
+    let error = parsed
+        .error
+        .as_ref()
+        .map(|failure| failure.diagnostic.clone());
     let parse_status = if error.is_none() {
         ParseStatus::Success
     } else if parsed

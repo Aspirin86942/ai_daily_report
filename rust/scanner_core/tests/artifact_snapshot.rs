@@ -14,7 +14,7 @@ use ai_daily_scanner_core::artifact::{
     SnapshotKeyParts,
 };
 use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
-use ai_daily_scanner_core::scheduler::WorkerIdentities;
+use ai_daily_scanner_core::scheduler::{RealClock, RunDeadlines, WorkerIdentities};
 use sha2::Digest;
 
 const REQUEST_ID_A: &str = "11111111-1111-4111-8111-111111111111";
@@ -138,10 +138,26 @@ fn snapshot_key_changes_when_report_mode_changes() {
 fn snapshot_key_changes_when_engine_build_changes() {
     let profile = v2_profile(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
-    let base = snapshot_key(&request, &[], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("c"))
-        .unwrap();
-    let changed = snapshot_key(&request, &[], &[], &profile, ENGINE_BUILD_B, &workers("o", "p"), &classifier("c"))
-        .unwrap();
+    let base = snapshot_key(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("o", "p"),
+        &classifier("c"),
+    )
+    .unwrap();
+    let changed = snapshot_key(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_B,
+        &workers("o", "p"),
+        &classifier("c"),
+    )
+    .unwrap();
     assert_ne!(base, changed, "engine build must change the snapshot key");
 }
 
@@ -149,8 +165,16 @@ fn snapshot_key_changes_when_engine_build_changes() {
 fn snapshot_key_changes_when_discovery_rows_change() {
     let profile = v2_profile(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
-    let base = snapshot_key(&request, &[], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("c"))
-        .unwrap();
+    let base = snapshot_key(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("o", "p"),
+        &classifier("c"),
+    )
+    .unwrap();
     let changed = snapshot_key(
         &request,
         &[discovery_file("a.txt")],
@@ -168,8 +192,16 @@ fn snapshot_key_changes_when_discovery_rows_change() {
 fn snapshot_key_changes_when_discovery_issues_change() {
     let profile = v2_profile(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
-    let base = snapshot_key(&request, &[], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("c"))
-        .unwrap();
+    let base = snapshot_key(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("o", "p"),
+        &classifier("c"),
+    )
+    .unwrap();
     let changed = snapshot_key(
         &request,
         &[],
@@ -180,29 +212,70 @@ fn snapshot_key_changes_when_discovery_issues_change() {
         &classifier("c"),
     )
     .unwrap();
-    assert_ne!(base, changed, "discovery issues must change the snapshot key");
+    assert_ne!(
+        base, changed,
+        "discovery issues must change the snapshot key"
+    );
 }
 
 #[test]
 fn snapshot_key_changes_when_worker_identity_changes() {
     let profile = v2_profile(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
-    let base = snapshot_key(&request, &[], &[], &profile, ENGINE_BUILD_A, &workers("office-a", "python-a"), &classifier("c"))
-        .unwrap();
-    let changed = snapshot_key(&request, &[], &[], &profile, ENGINE_BUILD_A, &workers("office-b", "python-a"), &classifier("c"))
-        .unwrap();
-    assert_ne!(base, changed, "route-stack worker build must change the snapshot key");
+    let base = snapshot_key(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("office-a", "python-a"),
+        &classifier("c"),
+    )
+    .unwrap();
+    let changed = snapshot_key(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("office-b", "python-a"),
+        &classifier("c"),
+    )
+    .unwrap();
+    assert_ne!(
+        base, changed,
+        "route-stack worker build must change the snapshot key"
+    );
 }
 
 #[test]
 fn snapshot_key_changes_when_classifier_identity_changes() {
     let profile = v2_profile(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
-    let base = snapshot_key(&request, &[], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("classifier-a"))
-        .unwrap();
-    let changed = snapshot_key(&request, &[], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("classifier-b"))
-        .unwrap();
-    assert_ne!(base, changed, "classifier build must change the snapshot key");
+    let base = snapshot_key(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("o", "p"),
+        &classifier("classifier-a"),
+    )
+    .unwrap();
+    let changed = snapshot_key(
+        &request,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("o", "p"),
+        &classifier("classifier-b"),
+    )
+    .unwrap();
+    assert_ne!(
+        base, changed,
+        "classifier build must change the snapshot key"
+    );
 }
 
 #[test]
@@ -252,10 +325,26 @@ fn snapshot_key_omits_request_id() {
     let profile = v2_profile(ReportMode::Daily);
     let request_a = request(ReportMode::Daily, REQUEST_ID_A);
     let request_b = request(ReportMode::Daily, REQUEST_ID_B);
-    let k1 = snapshot_key(&request_a, &[], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("c"))
-        .unwrap();
-    let k2 = snapshot_key(&request_b, &[], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("c"))
-        .unwrap();
+    let k1 = snapshot_key(
+        &request_a,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("o", "p"),
+        &classifier("c"),
+    )
+    .unwrap();
+    let k2 = snapshot_key(
+        &request_b,
+        &[],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("o", "p"),
+        &classifier("c"),
+    )
+    .unwrap();
     assert_eq!(k1, k2, "the snapshot key must not depend on request_id");
 }
 
@@ -264,11 +353,27 @@ fn snapshot_key_includes_source_guard_identity() {
     let profile = v2_profile(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
     let mut file = discovery_file("a.txt");
-    let base = snapshot_key(&request, &[file.clone()], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("c"))
-        .unwrap();
+    let base = snapshot_key(
+        &request,
+        &[file.clone()],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("o", "p"),
+        &classifier("c"),
+    )
+    .unwrap();
     file.source_guard_sha256 = Some("1".repeat(64));
-    let changed = snapshot_key(&request, &[file], &[], &profile, ENGINE_BUILD_A, &workers("o", "p"), &classifier("c"))
-        .unwrap();
+    let changed = snapshot_key(
+        &request,
+        &[file],
+        &[],
+        &profile,
+        ENGINE_BUILD_A,
+        &workers("o", "p"),
+        &classifier("c"),
+    )
+    .unwrap();
     assert_ne!(base, changed, "SourceGuardV2 must enter the snapshot key");
 }
 
@@ -292,7 +397,10 @@ fn snapshot_key_parts_hash_is_domain_separated_sha256_of_canonical_json() {
     hasher.update(b"snapshot-key-v1\0");
     hasher.update(bytes);
     let expected = hex(&hasher.finalize());
-    assert_eq!(parts.sha256, expected, "hash must be the domain-separated SHA-256");
+    assert_eq!(
+        parts.sha256, expected,
+        "hash must be the domain-separated SHA-256"
+    );
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -381,7 +489,10 @@ fn eligible_draft_requires_one_file_and_decision_row_per_source_file() {
         vec![],
         vec![decision_row("a.txt")],
     );
-    assert!(missing_file.is_err(), "eligible artifact must carry a file row per source file");
+    assert!(
+        missing_file.is_err(),
+        "eligible artifact must carry a file row per source file"
+    );
 
     let missing_decision = ArtifactDraft::new(
         true,
@@ -390,7 +501,10 @@ fn eligible_draft_requires_one_file_and_decision_row_per_source_file() {
         vec![file_row("a.txt")],
         vec![],
     );
-    assert!(missing_decision.is_err(), "eligible artifact must carry a decision row per source file");
+    assert!(
+        missing_decision.is_err(),
+        "eligible artifact must carry a decision row per source file"
+    );
 
     let mismatched = ArtifactDraft::new(
         true,
@@ -399,7 +513,10 @@ fn eligible_draft_requires_one_file_and_decision_row_per_source_file() {
         vec![file_row("a.txt"), file_row("b.txt")],
         vec![decision_row("a.txt"), decision_row("b.txt")],
     );
-    assert!(mismatched.is_err(), "eligible artifact row counts must equal source_file_count");
+    assert!(
+        mismatched.is_err(),
+        "eligible artifact row counts must equal source_file_count"
+    );
 }
 
 #[test]
@@ -420,7 +537,10 @@ fn ineligible_draft_must_not_carry_file_or_decision_rows() {
         vec![file_row("a.txt")],
         vec![],
     );
-    assert!(with_rows.is_err(), "ineligible artifact must never carry file rows");
+    assert!(
+        with_rows.is_err(),
+        "ineligible artifact must never carry file rows"
+    );
 }
 
 #[test]
@@ -486,8 +606,8 @@ fn rebuilt_envelope_validates_and_omits_file_context_from_scan_runs() {
         vec![decision_row("a.txt")],
     )
     .expect("eligible draft");
-    let envelope = rebuild_envelope(&metadata, &current_summary, Some(&draft))
-        .expect("rebuild must succeed");
+    let envelope =
+        rebuild_envelope(&metadata, &current_summary, Some(&draft)).expect("rebuild must succeed");
     envelope
         .validate()
         .expect("rebuilt envelope must re-validate as ContextEnvelope v1");
@@ -532,7 +652,10 @@ fn rebuild_envelope_for_error_run_uses_empty_context_without_artifact() {
 fn rebuild_envelope_rejects_missing_small_fields() {
     let metadata = serde_json::json!({ "status": "ok" });
     let result = rebuild_envelope(&metadata, &summary_for_envelope(), None);
-    assert!(result.is_err(), "missing contract/engine fields must fail closed");
+    assert!(
+        result.is_err(),
+        "missing contract/engine fields must fail closed"
+    );
 }
 
 #[test]
@@ -551,7 +674,10 @@ fn rebuild_envelope_rejects_a_context_that_violates_status_invariants() {
         "error": null
     });
     let result = rebuild_envelope(&metadata, &summary_for_envelope(), None);
-    assert!(result.is_err(), "ok run rebuilt with empty context must fail");
+    assert!(
+        result.is_err(),
+        "ok run rebuilt with empty context must fail"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -662,8 +788,8 @@ use ai_daily_scanner_contract::{
 use ai_daily_scanner_core::config::normalize_scanner_profile_for_request;
 use ai_daily_scanner_core::store::{
     canonical_envelope_json, ActiveRun, AttemptRuntime, BeginRunOutcome, CanonicalRequest,
-    ContextDecisionRecord, ContextRunRecord, FileResultRecord, FinalizationBatch,
-    InventoryRecord, ScannerStore, SnapshotHitRef, WorkerFingerprint, SCAN_DB_FILENAME,
+    ContextDecisionRecord, ContextRunRecord, FileResultRecord, FinalizationBatch, InventoryRecord,
+    ScannerStore, SnapshotHitRef, WorkerFingerprint, SCAN_DB_FILENAME,
 };
 
 const REQUEST_ID_R2: &str = "33333333-3333-4333-8333-333333333333";
@@ -703,21 +829,15 @@ fn snapshot_store_harness() -> (
         python_module_root: directory.path().to_string_lossy().to_string(),
         python_document_worker_module: "src.workers.document_parser_worker".to_string(),
     };
-    let profile = normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode)
-        .expect("normalized v1 profile");
+    let profile =
+        normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode)
+            .expect("normalized v1 profile");
     let canonical =
         ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
     let runtime =
         AttemptRuntime::from_request(&request, &ai_daily_scanner_core::version_response()).unwrap();
     let store = ScannerStore::open(&db_path).expect("scanner store");
-    (
-        directory,
-        store,
-        request,
-        canonical,
-        runtime,
-        profile,
-    )
+    (directory, store, request, canonical, runtime, profile)
 }
 
 fn snapshot_started(outcome: BeginRunOutcome) -> ActiveRun {
@@ -741,6 +861,22 @@ fn record_snapshot_workers(store: &mut ScannerStore, active: &ActiveRun, now_ms:
     store
         .record_worker_fingerprints(active, Some(&office), Some(&python), now_ms)
         .expect("worker fingerprints");
+}
+
+fn finalize_snapshot_for_test(
+    store: &mut ScannerStore,
+    active: &ActiveRun,
+    batch: &FinalizationBatch,
+    now_ms: u64,
+) {
+    store
+        .prepare_inventory(&batch.inventory, active.scan_run_id() as i64, now_ms)
+        .expect("snapshot inventory receipt");
+    let clock = RealClock::new();
+    let deadlines = RunDeadlines::derive(3_600_000, &clock).expect("test deadlines");
+    store
+        .finalize(active, batch, now_ms, deadlines, &clock)
+        .expect("snapshot finalize");
 }
 
 fn snapshot_discovery() -> DiscoveredFileOut {
@@ -803,7 +939,12 @@ fn snapshot_decision_row() -> ArtifactDecisionRow {
     }
 }
 
-fn snapshot_context_summary(discovery_ms: u64, cache_ms: u64, parse_ms: u64, compression_ms: u64) -> ContextSummary {
+fn snapshot_context_summary(
+    discovery_ms: u64,
+    cache_ms: u64,
+    parse_ms: u64,
+    compression_ms: u64,
+) -> ContextSummary {
     ContextSummary {
         source_file_count: 1,
         success_count: 1,
@@ -892,12 +1033,33 @@ fn snapshot_file_result(parse_duration_ms: u64, snapshot: bool) -> FileResultRec
     }
 }
 
-fn snapshot_stage_metrics(discovery_ms: u64, cache_ms: u64, parse_ms: u64, compression_ms: u64) -> Vec<StageMetric> {
+fn snapshot_stage_metrics(
+    discovery_ms: u64,
+    cache_ms: u64,
+    parse_ms: u64,
+    compression_ms: u64,
+) -> Vec<StageMetric> {
     vec![
-        StageMetric { stage: StageName::Discovery, item_count: 1, duration_ms: discovery_ms },
-        StageMetric { stage: StageName::Cache, item_count: 1, duration_ms: cache_ms },
-        StageMetric { stage: StageName::Parse, item_count: 1, duration_ms: parse_ms },
-        StageMetric { stage: StageName::Context, item_count: 1, duration_ms: compression_ms },
+        StageMetric {
+            stage: StageName::Discovery,
+            item_count: 1,
+            duration_ms: discovery_ms,
+        },
+        StageMetric {
+            stage: StageName::Cache,
+            item_count: 1,
+            duration_ms: cache_ms,
+        },
+        StageMetric {
+            stage: StageName::Parse,
+            item_count: 1,
+            duration_ms: parse_ms,
+        },
+        StageMetric {
+            stage: StageName::Context,
+            item_count: 1,
+            duration_ms: compression_ms,
+        },
     ]
 }
 
@@ -948,7 +1110,6 @@ fn snapshot_cold_batch(active: &ActiveRun, key: &SnapshotKeyParts) -> Finalizati
         status: RunStatus::Success,
         envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
         inventory: vec![snapshot_inventory_record()],
-        cache_writes: Vec::new(),
         file_results: vec![snapshot_file_result(3, false)],
         diagnostics: Vec::new(),
         stage_metrics: snapshot_stage_metrics(2, 1, 3, 1),
@@ -961,14 +1122,16 @@ fn snapshot_cold_batch(active: &ActiveRun, key: &SnapshotKeyParts) -> Finalizati
     }
 }
 
-fn snapshot_hit_batch(active: &ActiveRun, hit: &ai_daily_scanner_core::store::SnapshotHit) -> FinalizationBatch {
+fn snapshot_hit_batch(
+    active: &ActiveRun,
+    hit: &ai_daily_scanner_core::store::SnapshotHit,
+) -> FinalizationBatch {
     let summary = snapshot_context_summary(2, 1, 0, 1);
     let envelope = snapshot_envelope(active, summary.clone());
     FinalizationBatch {
         status: RunStatus::Success,
         envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
         inventory: vec![snapshot_inventory_record()],
-        cache_writes: Vec::new(),
         file_results: vec![snapshot_file_result(0, true)],
         diagnostics: Vec::new(),
         stage_metrics: snapshot_stage_metrics(2, 1, 0, 1),
@@ -1009,11 +1172,14 @@ fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
         &classifier,
     )
     .expect("snapshot key parts");
-    store
-        .finalize(&active1, &snapshot_cold_batch(&active1, &key), 1_010)
-        .expect("cold finalize");
-    let reader = rusqlite::Connection::open(&_directory.path().join(SCAN_DB_FILENAME))
-        .expect("open db");
+    finalize_snapshot_for_test(
+        &mut store,
+        &active1,
+        &snapshot_cold_batch(&active1, &key),
+        1_010,
+    );
+    let reader =
+        rusqlite::Connection::open(&_directory.path().join(SCAN_DB_FILENAME)).expect("open db");
     let artifact_id: i64 = reader
         .query_row(
             "SELECT artifact_id FROM context_artifacts WHERE snapshot_eligible=1",
@@ -1048,12 +1214,15 @@ fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
         active1.context_run_id() as i64,
         "source run must be the committed Success R1"
     );
-    store
-        .finalize(&active2, &snapshot_hit_batch(&active2, &hit), 2_010)
-        .expect("snapshot-hit finalize");
+    finalize_snapshot_for_test(
+        &mut store,
+        &active2,
+        &snapshot_hit_batch(&active2, &hit),
+        2_010,
+    );
 
-    let connection = rusqlite::Connection::open(&_directory.path().join(SCAN_DB_FILENAME))
-        .expect("open db");
+    let connection =
+        rusqlite::Connection::open(&_directory.path().join(SCAN_DB_FILENAME)).expect("open db");
     let (r2_artifact, r2_snapshot_hit, r2_reused): (i64, i64, Option<i64>) = connection
         .query_row(
             "SELECT artifact_id, snapshot_hit, reused_from_context_run_id
@@ -1078,9 +1247,15 @@ fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("R2 file result");
-    assert_eq!(parse_cache_status, "snapshot", "current row must be snapshot");
+    assert_eq!(
+        parse_cache_status, "snapshot",
+        "current row must be snapshot"
+    );
     assert_eq!(parse_duration_ms, 0, "current row must be 0ms");
-    assert_eq!(cache_miss_reason, "", "current row must carry an empty miss reason");
+    assert_eq!(
+        cache_miss_reason, "",
+        "current row must carry an empty miss reason"
+    );
     let (r2_parse_duration, r2_total_duration): (i64, i64) = connection
         .query_row(
             "SELECT parse_duration_ms, total_duration_ms
@@ -1089,8 +1264,14 @@ fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .expect("R2 summary");
-    assert_eq!(r2_parse_duration, 0, "R2 summary must not copy R1's parse time");
-    assert_eq!(r2_total_duration, 4, "R2 total must be R2's measured 2+1+0+1");
+    assert_eq!(
+        r2_parse_duration, 0,
+        "R2 summary must not copy R1's parse time"
+    );
+    assert_eq!(
+        r2_total_duration, 4,
+        "R2 total must be R2's measured 2+1+0+1"
+    );
 
     // 3) delete R1 -> R2 still references artifact A; reused_from SET NULL.
     connection
@@ -1111,5 +1292,8 @@ fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
         after_artifact, artifact_id,
         "R2 must keep referencing artifact A via artifact-owned rows"
     );
-    assert_eq!(after_reused, None, "deleting the source run must SET NULL reused_from");
+    assert_eq!(
+        after_reused, None,
+        "deleting the source run must SET NULL reused_from"
+    );
 }

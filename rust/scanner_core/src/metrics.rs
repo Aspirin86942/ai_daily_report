@@ -39,44 +39,47 @@ pub(crate) fn validate_metrics(
     Ok(())
 }
 
-pub(crate) fn insert_metrics(
+pub(crate) fn insert_stage_metrics(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
     stages: &[StageMetric],
+) -> rusqlite::Result<()> {
+    let mut statement = transaction.prepare_cached(
+        "INSERT INTO scan_stage_metrics(scan_run_id, stage, item_count, duration_ms)
+         VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for metric in stages {
+        statement.execute(params![
+            scan_run_id,
+            stage_text(metric.stage),
+            metric.item_count as i64,
+            metric.duration_ms as i64,
+        ])?;
+    }
+    Ok(())
+}
+
+pub(crate) fn insert_extension_metrics(
+    transaction: &Transaction<'_>,
+    scan_run_id: i64,
     extensions: &[ExtensionMetric],
 ) -> rusqlite::Result<()> {
-    {
-        let mut statement = transaction.prepare_cached(
-            "INSERT INTO scan_stage_metrics(scan_run_id, stage, item_count, duration_ms)
-             VALUES (?1, ?2, ?3, ?4)",
-        )?;
-        for metric in stages {
-            statement.execute(params![
-                scan_run_id,
-                stage_text(metric.stage),
-                metric.item_count as i64,
-                metric.duration_ms as i64,
-            ])?;
-        }
-    }
-    {
-        let mut statement = transaction.prepare_cached(
-            "INSERT INTO scan_extension_metrics(
-                scan_run_id, extension, file_count, parse_duration_ms,
-                success_count, error_count, timeout_count
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        )?;
-        for metric in extensions {
-            statement.execute(params![
-                scan_run_id,
-                metric.extension,
-                metric.file_count as i64,
-                metric.parse_duration_ms as i64,
-                metric.success_count as i64,
-                metric.error_count as i64,
-                metric.timeout_count as i64,
-            ])?;
-        }
+    let mut statement = transaction.prepare_cached(
+        "INSERT INTO scan_extension_metrics(
+            scan_run_id, extension, file_count, parse_duration_ms,
+            success_count, error_count, timeout_count
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+    )?;
+    for metric in extensions {
+        statement.execute(params![
+            scan_run_id,
+            metric.extension,
+            metric.file_count as i64,
+            metric.parse_duration_ms as i64,
+            metric.success_count as i64,
+            metric.error_count as i64,
+            metric.timeout_count as i64,
+        ])?;
     }
     Ok(())
 }

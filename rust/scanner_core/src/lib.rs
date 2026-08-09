@@ -7,6 +7,7 @@ pub mod classifier;
 pub mod compressor;
 pub mod config;
 pub mod context_audit;
+pub mod deadline;
 pub mod decision;
 pub mod fallback;
 pub mod inspect;

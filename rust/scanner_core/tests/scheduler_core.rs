@@ -1,6 +1,12 @@
 //! Budget model part of the scheduler core: nominal rank + ContextBudgetModel +
 //! two-phase admission plans (spec Part 1). Task 2 of Plan 2.
 
+use ai_daily_scanner_contract::{
+    AuditWorkerLane, CacheStatus, ClassificationCacheStatus, ClassificationTransport,
+    ContextAction, ContextProfile, ContextProfileV2, Diagnostic, DiagnosticStage, ErrorCode,
+    Nullable, ParseStatus, ParseTransport, PdfClassificationStatus, RawScannerProfileV2,
+    ReportMode, ScannerProfile, SourceGuardKind,
+};
 use ai_daily_scanner_core::admission::{
     ClassificationPlan, ContentAdmissionPlan, NotParsedReason, PdfClassificationPlan,
     PdfClassificationResult, PlanAction, PlanCandidate, RejectReason,
@@ -13,12 +19,6 @@ use ai_daily_scanner_core::budget_model::{
 use ai_daily_scanner_core::compressor::build_context;
 use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
 use ai_daily_scanner_core::nominal::nominal_rank;
-use ai_daily_scanner_contract::{
-    AuditWorkerLane, CacheStatus, ClassificationCacheStatus, ClassificationTransport,
-    ContextAction, ContextProfile, ContextProfileV2, Diagnostic, DiagnosticStage, ErrorCode,
-    Nullable, ParseStatus, ParseTransport, PdfClassificationStatus, RawScannerProfileV2,
-    ReportMode, ScannerProfile, SourceGuardKind,
-};
 
 fn v2_profile(mode: ReportMode) -> ai_daily_scanner_contract::NormalizedScannerProfileV2 {
     let raw: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
@@ -72,7 +72,9 @@ fn nominal_rank_table_and_normalization_are_frozen() {
     assert_eq!(nominal_rank(r"\a\.pytest_cache\keep.md", ".md").0, 70);
     assert_eq!(nominal_rank(r"\a\data\benchmarks\keep.xlsx", ".xlsx").0, 70);
     assert_eq!(nominal_rank(r"\a\logs\app.log", ".log").0, 60);
-    for extension in [".doc", ".docx", ".pdf", ".ppt", ".pptx", ".xls", ".xlsm", ".xlsx"] {
+    for extension in [
+        ".doc", ".docx", ".pdf", ".ppt", ".pptx", ".xls", ".xlsm", ".xlsx",
+    ] {
         assert_eq!(
             nominal_rank(&format!(r"\A\b{extension}"), extension).0,
             20,
@@ -132,16 +134,17 @@ fn omitted_summary_plan_pre_selects_detail_slots_within_reservation() {
 
     // Worst case: header + count + catch-all + every pre-selected detail row
     // (rendered at max allowed reason length) must stay inside the reservation.
-    let header = format!(
-        "## 省略文件摘要\n- 省略文件数: {}\n",
-        "9".repeat(20)
-    );
+    let header = format!("## 省略文件摘要\n- 省略文件数: {}\n", "9".repeat(20));
     let catch_all = format!("- 其他 | action=omit | count={}\n", "9".repeat(20));
     let mut used = count_chars(&header) + count_chars(&catch_all);
     for slot in &plan.detail_slots {
         used += max_omitted_row_chars(&slot.relative_path) + 1;
     }
-    assert!(used <= plan.reservation, "omitted summary {used} > reservation {}", plan.reservation);
+    assert!(
+        used <= plan.reservation,
+        "omitted summary {used} > reservation {}",
+        plan.reservation
+    );
 }
 
 #[test]
@@ -164,7 +167,11 @@ fn omitted_summary_plan_respects_nominal_rank_order() {
         },
     ];
     let plan = OmittedSummaryPlan::build(&files, 50_000);
-    let paths: Vec<&str> = plan.detail_slots.iter().map(|s| s.relative_path.as_str()).collect();
+    let paths: Vec<&str> = plan
+        .detail_slots
+        .iter()
+        .map(|s| s.relative_path.as_str())
+        .collect();
     // Nominal rank orders a.md before m.md before z.md regardless of input order.
     assert_eq!(paths, vec![r"\a.md", r"\m.md", r"\z.md"]);
 }
@@ -175,8 +182,11 @@ fn omitted_summary_plan_respects_nominal_rank_order() {
 
 #[test]
 fn context_budget_model_base_chars_includes_omitted_reservation() {
-    let model = ContextBudgetModel::new(&context_profile(50_000, 8_000), &["## 文件证据".to_string()])
-        .expect("valid budget model");
+    let model = ContextBudgetModel::new(
+        &context_profile(50_000, 8_000),
+        &["## 文件证据".to_string()],
+    )
+    .expect("valid budget model");
     let exact = count_chars("## 文件证据") + SECTION_SEPARATOR_CHARS;
     assert_eq!(model.omitted_summary_reservation(), 10_000);
     assert_eq!(model.base_chars(), exact + 10_000);
@@ -244,7 +254,11 @@ fn every_route_reserved_covers_rendered() {
         RouteKind::PythonSharepointText,
     ];
     let long_path = format!("{}\\file.md", "\\deep\\nested\\".repeat(30));
-    let paths = ["\\a.md".to_string(), "\\工作\\目录\\report.md".to_string(), long_path];
+    let paths = [
+        "\\a.md".to_string(),
+        "\\工作\\目录\\report.md".to_string(),
+        long_path,
+    ];
     for mode in [ReportMode::Daily, ReportMode::Weekly, ReportMode::Monthly] {
         let profile = v2_profile(mode);
         let model = ContextBudgetModel::new(&profile.context, &[]).expect("valid model");
@@ -258,8 +272,10 @@ fn every_route_reserved_covers_rendered() {
                     max_excerpt_chars: route.max_excerpt_chars(&profile),
                 };
                 let delta = model.reserved_delta(&hint, Some(1_000_000));
-                let body_chars =
-                    model.per_file_max_chars().min(route.max_excerpt_chars(&profile)) as usize;
+                let body_chars = model
+                    .per_file_max_chars()
+                    .min(route.max_excerpt_chars(&profile))
+                    as usize;
                 let body = "x".repeat(body_chars);
 
                 let success = render_success_section(path, &hint.backend, &hint.worker_lane, &body);
@@ -269,7 +285,8 @@ fn every_route_reserved_covers_rendered() {
                     count_chars(&success) + SECTION_SEPARATOR_CHARS
                 );
 
-                let metadata = render_metadata_section(path, &hint.backend, &hint.worker_lane, ".md");
+                let metadata =
+                    render_metadata_section(path, &hint.backend, &hint.worker_lane, ".md");
                 assert!(
                     count_chars(&metadata) + SECTION_SEPARATOR_CHARS <= delta,
                     "{mode:?} route {route:?} metadata {} > reserved {delta}",
@@ -296,25 +313,42 @@ fn classification_plan_handles_no_io_dispositions_before_candidate_slots() {
     let profile = v2_profile(ReportMode::Daily);
     let files = vec![
         candidate(r"\big.log", ".log", 1024 * 1024 * 1024), // file too large -> policy
-        candidate(r"\a.docx", ".docx", 100),                 // office candidate
-        candidate(r"\b.pdf", ".pdf", 100),                   // pdf candidate
-        candidate(r"\c.md", ".md", 100),                     // text candidate
+        candidate(r"\a.docx", ".docx", 100),                // office candidate
+        candidate(r"\b.pdf", ".pdf", 100),                  // pdf candidate
+        candidate(r"\c.md", ".md", 100),                    // text candidate
     ];
-    let plan = ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
-    let big = plan.iter().find(|p| p.relative_path == r"\big.log").expect("big.log");
+    let plan =
+        ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
+    let big = plan
+        .iter()
+        .find(|p| p.relative_path == r"\big.log")
+        .expect("big.log");
     assert_eq!(
         big.action,
         PlanAction::NotParsed {
             reason: NotParsedReason::FileSizePolicy
         }
     );
-    let pdf = plan.iter().find(|p| p.relative_path == r"\b.pdf").expect("b.pdf");
-    assert!(matches!(pdf.action, PlanAction::Admit { route: RouteKind::Pdf }));
+    let pdf = plan
+        .iter()
+        .find(|p| p.relative_path == r"\b.pdf")
+        .expect("b.pdf");
+    assert!(matches!(
+        pdf.action,
+        PlanAction::Admit {
+            route: RouteKind::Pdf
+        }
+    ));
     assert_eq!(
         pdf.pdf_classification,
-        PdfClassificationPlan::Classify { charged_pages: profile.parse.pdf.max_pages }
+        PdfClassificationPlan::Classify {
+            charged_pages: profile.parse.pdf.max_pages
+        }
     );
-    let text = plan.iter().find(|p| p.relative_path == r"\c.md").expect("c.md");
+    let text = plan
+        .iter()
+        .find(|p| p.relative_path == r"\c.md")
+        .expect("c.md");
     assert_eq!(text.pdf_classification, PdfClassificationPlan::NotPdf);
 }
 
@@ -323,7 +357,11 @@ fn classification_plan_marks_source_guard_unavailable_as_error_reject() {
     let profile = v2_profile(ReportMode::Daily);
     let mut unavailable = candidate(r"\a.pdf", ".pdf", 100);
     unavailable.source_guard_kind = SourceGuardKind::Unavailable;
-    let plan = ClassificationPlan::build(vec![unavailable], &profile, profile.max_total_pdf_classification_pages);
+    let plan = ClassificationPlan::build(
+        vec![unavailable],
+        &profile,
+        profile.max_total_pdf_classification_pages,
+    );
     assert_eq!(
         plan[0].action,
         PlanAction::Reject {
@@ -338,7 +376,8 @@ fn classification_plan_reserves_full_pdf_max_pages_per_pdf_in_nominal_order() {
     let files: Vec<PlanCandidate> = (0..17)
         .map(|index| candidate(&format!(r"\p{index:02}.pdf"), ".pdf", 100))
         .collect();
-    let plan = ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
+    let plan =
+        ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
 
     let classified: Vec<_> = plan
         .iter()
@@ -377,7 +416,8 @@ fn classification_plan_assigns_candidate_slots_by_nominal_rank() {
         candidate(r"\m.pdf", ".pdf", 100),
         candidate(r"\b.md", ".md", 100),
     ];
-    let plan = ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
+    let plan =
+        ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
     // Nominal order: priority 20 pdfs first (m.pdf < z.pdf tie-break), then
     // priority 30 text (a.md < b.md). The two candidate slots go to the pdfs.
     let paths: Vec<&str> = plan.iter().map(|p| p.relative_path.as_str()).collect();
@@ -402,7 +442,9 @@ fn classification_plan_assigns_candidate_slots_by_nominal_rank() {
 // ContentAdmissionPlan (spec Part 1.2 stage B)
 // ---------------------------------------------------------------------------
 
-fn classify_map(items: &[(&str, PdfClassificationStatus)]) -> std::collections::BTreeMap<String, PdfClassificationResult> {
+fn classify_map(
+    items: &[(&str, PdfClassificationStatus)],
+) -> std::collections::BTreeMap<String, PdfClassificationResult> {
     items
         .iter()
         .map(|(identity, status)| {
@@ -444,10 +486,17 @@ fn content_admission_continues_to_smaller_files_after_a_budget_omit() {
     ];
     let classified =
         ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
-    let decisions =
-        ContentAdmissionPlan::build(&classified, &profile, &model, &std::collections::BTreeMap::new());
+    let decisions = ContentAdmissionPlan::build(
+        &classified,
+        &profile,
+        &model,
+        &std::collections::BTreeMap::new(),
+    );
 
-    let big = decisions.iter().find(|d| d.relative_path == r"\big.xlsx").expect("big");
+    let big = decisions
+        .iter()
+        .find(|d| d.relative_path == r"\big.xlsx")
+        .expect("big");
     assert_eq!(
         big.action,
         PlanAction::NotParsed {
@@ -455,8 +504,16 @@ fn content_admission_continues_to_smaller_files_after_a_budget_omit() {
         }
     );
     assert_eq!(big.reserved_chars, 0);
-    let small = decisions.iter().find(|d| d.relative_path == r"\small.md").expect("small");
-    assert!(matches!(small.action, PlanAction::Admit { route: RouteKind::LightText }));
+    let small = decisions
+        .iter()
+        .find(|d| d.relative_path == r"\small.md")
+        .expect("small");
+    assert!(matches!(
+        small.action,
+        PlanAction::Admit {
+            route: RouteKind::LightText
+        }
+    ));
     assert!(small.reserved_chars > 0);
     // admitted reserved chars are charged against the base + running budget
     let base = model.base_chars();
@@ -474,7 +531,8 @@ fn content_admission_text_pdf_requires_budget_and_extraction_slot() {
         candidate(r"\two.pdf", ".pdf", 100),
         candidate(r"\three.pdf", ".pdf", 100),
     ];
-    let classified = ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
+    let classified =
+        ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
     let classifications = classify_map(&[
         (r"\one.pdf", PdfClassificationStatus::TextInParseWindow),
         (r"\two.pdf", PdfClassificationStatus::TextInParseWindow),
@@ -482,16 +540,30 @@ fn content_admission_text_pdf_requires_budget_and_extraction_slot() {
     ]);
     let decisions = ContentAdmissionPlan::build(&classified, &profile, &model, &classifications);
 
-    let one = decisions.iter().find(|d| d.relative_path == r"\one.pdf").expect("one");
-    assert!(matches!(one.action, PlanAction::Admit { route: RouteKind::Pdf }));
-    let two = decisions.iter().find(|d| d.relative_path == r"\two.pdf").expect("two");
+    let one = decisions
+        .iter()
+        .find(|d| d.relative_path == r"\one.pdf")
+        .expect("one");
+    assert!(matches!(
+        one.action,
+        PlanAction::Admit {
+            route: RouteKind::Pdf
+        }
+    ));
+    let two = decisions
+        .iter()
+        .find(|d| d.relative_path == r"\two.pdf")
+        .expect("two");
     assert_eq!(
         two.action,
         PlanAction::NotParsed {
             reason: NotParsedReason::PdfTextExtractionQuotaExhausted
         }
     );
-    let three = decisions.iter().find(|d| d.relative_path == r"\three.pdf").expect("three");
+    let three = decisions
+        .iter()
+        .find(|d| d.relative_path == r"\three.pdf")
+        .expect("three");
     assert_eq!(
         three.action,
         PlanAction::NotParsed {
@@ -499,7 +571,13 @@ fn content_admission_text_pdf_requires_budget_and_extraction_slot() {
         }
     );
     // cache hit/miss both charge a slot: one admitted consumes the single slot.
-    assert_eq!(decisions.iter().filter(|d| matches!(d.action, PlanAction::Admit { .. })).count(), 1);
+    assert_eq!(
+        decisions
+            .iter()
+            .filter(|d| matches!(d.action, PlanAction::Admit { .. }))
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -510,21 +588,45 @@ fn content_admission_no_text_pdf_is_metadata_only_without_extraction_slot() {
         candidate(r"\image.pdf", ".pdf", 100),
         candidate(r"\text.pdf", ".pdf", 100),
     ];
-    let classified = ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
+    let classified =
+        ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
     let classifications = classify_map(&[
         (r"\image.pdf", PdfClassificationStatus::NoTextInParseWindow),
         (r"\text.pdf", PdfClassificationStatus::TextInParseWindow),
     ]);
     let decisions = ContentAdmissionPlan::build(&classified, &profile, &model, &classifications);
 
-    let image = decisions.iter().find(|d| d.relative_path == r"\image.pdf").expect("image");
-    assert!(matches!(image.action, PlanAction::Admit { route: RouteKind::Pdf }));
-    let text = decisions.iter().find(|d| d.relative_path == r"\text.pdf").expect("text");
-    assert!(matches!(text.action, PlanAction::Admit { route: RouteKind::Pdf }));
+    let image = decisions
+        .iter()
+        .find(|d| d.relative_path == r"\image.pdf")
+        .expect("image");
+    assert!(matches!(
+        image.action,
+        PlanAction::Admit {
+            route: RouteKind::Pdf
+        }
+    ));
+    let text = decisions
+        .iter()
+        .find(|d| d.relative_path == r"\text.pdf")
+        .expect("text");
+    assert!(matches!(
+        text.action,
+        PlanAction::Admit {
+            route: RouteKind::Pdf
+        }
+    ));
     // 2 pdfs admitted but only 1 extraction slot consumed (image is metadata-only).
     let admit = decisions
         .iter()
-        .filter(|d| matches!(d.action, PlanAction::Admit { route: RouteKind::Pdf }))
+        .filter(|d| {
+            matches!(
+                d.action,
+                PlanAction::Admit {
+                    route: RouteKind::Pdf
+                }
+            )
+        })
         .count();
     assert_eq!(admit, 2);
 }
@@ -534,16 +636,19 @@ fn content_admission_classifier_failure_is_not_admitted() {
     let profile = v2_profile(ReportMode::Daily);
     let model = admission_context(50_000, 8_000);
     let files = vec![candidate(r"\broken.pdf", ".pdf", 100)];
-    let classified = ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
-    let classifications = classify_map(&[(
-        r"\broken.pdf",
-        PdfClassificationStatus::Error,
-    )]);
+    let classified =
+        ClassificationPlan::build(files, &profile, profile.max_total_pdf_classification_pages);
+    let classifications = classify_map(&[(r"\broken.pdf", PdfClassificationStatus::Error)]);
     let decisions = ContentAdmissionPlan::build(&classified, &profile, &model, &classifications);
-    let broken = decisions.iter().find(|d| d.relative_path == r"\broken.pdf").expect("broken");
+    let broken = decisions
+        .iter()
+        .find(|d| d.relative_path == r"\broken.pdf")
+        .expect("broken");
     assert!(matches!(
         broken.action,
-        PlanAction::ClassifierFailed { status: PdfClassificationStatus::Error }
+        PlanAction::ClassifierFailed {
+            status: PdfClassificationStatus::Error
+        }
     ));
     assert_eq!(broken.reserved_chars, 0);
 }
@@ -566,7 +671,11 @@ fn v1_profile(global_max_chars: u64, per_file_max_chars: u64) -> ContextProfile 
     }
 }
 
-fn evidence(path: &str, extension: &str, content: &str) -> ai_daily_scanner_core::decision::ContextFileEvidence {
+fn evidence(
+    path: &str,
+    extension: &str,
+    content: &str,
+) -> ai_daily_scanner_core::decision::ContextFileEvidence {
     ai_daily_scanner_core::decision::ContextFileEvidence {
         file_identity: format!("fixture:{path}"),
         absolute_path: format!("C:\\fixture\\{}", path.replace('/', "\\")),
@@ -610,7 +719,10 @@ fn compressor_success_omit_branch_is_budget_model_mismatch() {
         ReportMode::Daily,
     );
     let error = result.expect_err("budget overflow must be an internal error, not an Omit");
-    assert!(error.contains("BUDGET_MODEL_MISMATCH"), "unexpected error: {error}");
+    assert!(
+        error.contains("BUDGET_MODEL_MISMATCH"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]
@@ -664,20 +776,19 @@ fn compressor_still_renders_golden_keep_compress_metadata_error() {
 // ===========================================================================
 
 use ai_daily_discovery::DiscoveredFileOut;
-use ai_daily_scanner_core::fallback::ParseFailure;
-use ai_daily_scanner_core::parsers::classifier::{
-    PdfClassifierExecution, PdfClassifierPort,
+use ai_daily_scanner_contract::{
+    CacheMissReason, PdfClassifierRequestV1, PdfClassifierResultStatus, PdfClassifierResultV1,
 };
+use ai_daily_scanner_core::fallback::ParseFailure;
+use ai_daily_scanner_core::parsers::classifier::{PdfClassifierExecution, PdfClassifierPort};
 use ai_daily_scanner_core::scheduler::{
     BudgetedContextScheduler, CachePort, CachePortError, Clock, GuardVerifier, ParseLookupOutcome,
-    ParseRequest, ParseResult, ParserPort, ScheduledRunInput, TerminalIntent, WorkerIdentities,
+    ParseRequest, ParseResult, ParserPort, RunDeadlines, ScheduledRunInput, TerminalIntent,
+    WorkerIdentities,
 };
 use ai_daily_scanner_core::store::{
     CacheEntry, CacheWriteRecord, ClassificationCacheLookup, ClassificationCacheWriteRecord,
     InventoryRecord,
-};
-use ai_daily_scanner_contract::{
-    CacheMissReason, PdfClassifierRequestV1, PdfClassifierResultStatus, PdfClassifierResultV1,
 };
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -715,6 +826,9 @@ struct TestCache {
     classification_writes: Arc<Mutex<Vec<ClassificationCacheWriteRecord>>>,
     /// When set, `lookup_classification` returns this error (run-level failure).
     classification_lookup_error: Option<CachePortError>,
+    /// When set, the optional cache-access touch returns this bounded failure.
+    touch_error: Option<CachePortError>,
+    touch_calls: Arc<Mutex<u64>>,
 }
 
 impl TestCache {
@@ -802,6 +916,19 @@ impl CachePort for TestCache {
             .unwrap()
             .extend(records.iter().cloned());
         Ok(())
+    }
+
+    fn touch_access(
+        &self,
+        _now_ms: u64,
+        _parse_hits: &[String],
+        _classification_hits: &[String],
+    ) -> Result<(), CachePortError> {
+        *self.touch_calls.lock().unwrap() += 1;
+        match &self.touch_error {
+            Some(error) => Err(error.clone()),
+            None => Ok(()),
+        }
     }
 }
 
@@ -917,12 +1044,16 @@ impl PdfClassifierPort for ConcurrencyClassifier {
         request: &PdfClassifierRequestV1,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
-        let now = self.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let now = self
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         self.max_seen
             .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
         // Give concurrent wave threads time to overlap.
         std::thread::sleep(Duration::from_millis(30));
-        self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         PdfClassifierExecution::test_oneshot(Ok(no_text_result(&request.file_path)))
     }
 }
@@ -944,12 +1075,16 @@ impl ConcurrencyParser {
 
 impl ParserPort for ConcurrencyParser {
     fn parse(&self, request: &ParseRequest) -> ParseResult {
-        let now = self.active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let now = self
+            .active
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1;
         self.max_seen
             .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
         // Give concurrent wave threads time to overlap.
         std::thread::sleep(Duration::from_millis(30));
-        self.active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.active
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         success_parse(&request.file.file_identity, &request.file.path, "evidence")
     }
 }
@@ -960,20 +1095,22 @@ impl PdfClassifierPort for TestClassifier {
         request: &PdfClassifierRequestV1,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
-        PdfClassifierExecution::test_oneshot(self.results
-            .get(&request.file_path)
-            .cloned()
-            .ok_or_else(|| ParseFailure {
-                class: ai_daily_scanner_core::fallback::FailureClass::Deterministic,
-                diagnostic: Diagnostic {
-                    error_code: ErrorCode::InternalError,
-                    message: "missing test classifier result".to_string(),
-                    retryable: false,
-                    stage: DiagnosticStage::Internal,
-                    file_path: Nullable(None),
-                    backend: Nullable(None),
-                },
-            }))
+        PdfClassifierExecution::test_oneshot(
+            self.results
+                .get(&request.file_path)
+                .cloned()
+                .ok_or_else(|| ParseFailure {
+                    class: ai_daily_scanner_core::fallback::FailureClass::Deterministic,
+                    diagnostic: Diagnostic {
+                        error_code: ErrorCode::InternalError,
+                        message: "missing test classifier result".to_string(),
+                        retryable: false,
+                        stage: DiagnosticStage::Internal,
+                        file_path: Nullable(None),
+                        backend: Nullable(None),
+                    },
+                }),
+        )
     }
 }
 
@@ -1001,9 +1138,7 @@ impl GuardVerifier for FailSecondGuard {
         _path: &str,
         _expected: &ai_daily_scanner_core::source_guard::SourceGuardV2,
     ) -> bool {
-        self.calls
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            == 0
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0
     }
 }
 
@@ -1059,7 +1194,11 @@ fn no_text_result(_path: &str) -> PdfClassifierResultV1 {
     }
 }
 
-fn run_scheduler<C: PdfClassifierPort + 'static, P: ParserPort + 'static, K: CachePort + 'static>(
+fn run_scheduler<
+    C: PdfClassifierPort + 'static,
+    P: ParserPort + 'static,
+    K: CachePort + 'static,
+>(
     clock: &FakeClock,
     cache: K,
     parser: P,
@@ -1099,6 +1238,43 @@ fn run_scheduler<C: PdfClassifierPort + 'static, P: ParserPort + 'static, K: Cac
     scheduler.execute(input)
 }
 
+#[test]
+fn scheduled_input_keeps_the_begin_run_deadline_origin() {
+    let clock = FakeClock::new();
+    clock.advance(100);
+    let profile = v2_profile(ReportMode::Daily);
+    let deadlines =
+        RunDeadlines::derive(profile.total_deadline_ms, &clock).expect("begin-run deadline pair");
+
+    // Simulate worker handshakes and discovery before the scheduler input is
+    // assembled. The absolute deadline must stay anchored at t=100.
+    clock.advance(3_000);
+    let input = ScheduledRunInput::new_with_deadlines(
+        1,
+        0,
+        "C:\\corpus".to_string(),
+        vec![discovered("notes/a.md", ".md", 64)],
+        Vec::new(),
+        profile.clone(),
+        WorkerIdentities::default(),
+        "0.1.0".to_string(),
+        "engine-test".to_string(),
+        "c".repeat(64),
+        "d".repeat(64),
+        3_000,
+        deadlines,
+    )
+    .expect("scheduled input");
+
+    assert_eq!(input.deadline_origin_ms, 100);
+    assert_eq!(input.absolute_deadline_ms, 100 + profile.total_deadline_ms);
+    assert_eq!(input.work_deadline_ms, input.absolute_deadline_ms - 2_000);
+    assert_eq!(
+        deadlines.remaining_to_work_deadline(&clock),
+        profile.total_deadline_ms - 2_000 - 3_000
+    );
+}
+
 // ---------------------------------------------------------------------------
 // cache-independent determinism (spec Solution/Part 9.1)
 // ---------------------------------------------------------------------------
@@ -1116,40 +1292,64 @@ fn cache_state_does_not_change_semantic_output() {
     let profile = v2_profile(ReportMode::Daily);
     let parser = TestParser {
         results: HashMap::from([
-            ("fixture:notes/a.md".to_string(), success_parse("fixture:notes/a.md", "", "evidence a")),
-            ("fixture:notes/b.txt".to_string(), success_parse("fixture:notes/b.txt", "", "evidence b")),
-            ("fixture:report.pdf".to_string(), success_parse("fixture:report.pdf", "", "pdf evidence")),
+            (
+                "fixture:notes/a.md".to_string(),
+                success_parse("fixture:notes/a.md", "", "evidence a"),
+            ),
+            (
+                "fixture:notes/b.txt".to_string(),
+                success_parse("fixture:notes/b.txt", "", "evidence b"),
+            ),
+            (
+                "fixture:report.pdf".to_string(),
+                success_parse("fixture:report.pdf", "", "pdf evidence"),
+            ),
         ]),
     };
     let classifier = TestClassifier {
-        results: HashMap::from([
-            ("C:\\corpus\\report.pdf".to_string(), text_result("report.pdf")),
-        ]),
+        results: HashMap::from([(
+            "C:\\corpus\\report.pdf".to_string(),
+            text_result("report.pdf"),
+        )]),
     };
 
     // empty cache state
     let clock = FakeClock::new();
     let empty_cache = TestCache::default();
-    let empty = run_scheduler(&clock, empty_cache, parser.clone(), classifier.clone(), discovery.clone(), profile.clone())
-        .expect("empty cache outcome");
+    let empty = run_scheduler(
+        &clock,
+        empty_cache,
+        parser.clone(),
+        classifier.clone(),
+        discovery.clone(),
+        profile.clone(),
+    )
+    .expect("empty cache outcome");
 
     // partial cache state: report.pdf parse cached, b.txt classification n/a, a.md not cached
     let clock = FakeClock::new();
     let mut partial_cache = TestCache::default();
-    partial_cache
-        .parse
-        .insert("fixture:report.pdf".to_string(), TestCache::fresh_parse("fixture:report.pdf", "pdf evidence"));
-    partial_cache
-        .classification
-        .insert("fixture:report.pdf".to_string(), ClassificationCacheLookup::Fresh(
-            ai_daily_scanner_core::store::ClassificationCacheEntry {
-                status: "text_in_parse_window".to_string(),
-                page_count: 2,
-                result_examined_pages: 2,
-            },
-        ));
-    let partial = run_scheduler(&clock, partial_cache, parser.clone(), classifier.clone(), discovery.clone(), profile.clone())
-        .expect("partial cache outcome");
+    partial_cache.parse.insert(
+        "fixture:report.pdf".to_string(),
+        TestCache::fresh_parse("fixture:report.pdf", "pdf evidence"),
+    );
+    partial_cache.classification.insert(
+        "fixture:report.pdf".to_string(),
+        ClassificationCacheLookup::Fresh(ai_daily_scanner_core::store::ClassificationCacheEntry {
+            status: "text_in_parse_window".to_string(),
+            page_count: 2,
+            result_examined_pages: 2,
+        }),
+    );
+    let partial = run_scheduler(
+        &clock,
+        partial_cache,
+        parser.clone(),
+        classifier.clone(),
+        discovery.clone(),
+        profile.clone(),
+    )
+    .expect("partial cache outcome");
 
     // full cache state: all parse + classification cached
     let clock = FakeClock::new();
@@ -1159,21 +1359,28 @@ fn cache_state_does_not_change_semantic_output() {
         ("fixture:notes/b.txt", "evidence b"),
         ("fixture:report.pdf", "pdf evidence"),
     ] {
-        full_cache
-            .parse
-            .insert(identity.to_string(), TestCache::fresh_parse(identity, content));
+        full_cache.parse.insert(
+            identity.to_string(),
+            TestCache::fresh_parse(identity, content),
+        );
     }
-    full_cache
-        .classification
-        .insert("fixture:report.pdf".to_string(), ClassificationCacheLookup::Fresh(
-            ai_daily_scanner_core::store::ClassificationCacheEntry {
-                status: "text_in_parse_window".to_string(),
-                page_count: 2,
-                result_examined_pages: 2,
-            },
-        ));
-    let full = run_scheduler(&clock, full_cache, parser.clone(), classifier.clone(), discovery, profile)
-        .expect("full cache outcome");
+    full_cache.classification.insert(
+        "fixture:report.pdf".to_string(),
+        ClassificationCacheLookup::Fresh(ai_daily_scanner_core::store::ClassificationCacheEntry {
+            status: "text_in_parse_window".to_string(),
+            page_count: 2,
+            result_examined_pages: 2,
+        }),
+    );
+    let full = run_scheduler(
+        &clock,
+        full_cache,
+        parser.clone(),
+        classifier.clone(),
+        discovery,
+        profile,
+    )
+    .expect("full cache outcome");
 
     // Semantic fields must be identical across all three cache states.
     for (name, other) in [("partial", &partial), ("full", &full)] {
@@ -1263,11 +1470,20 @@ fn not_parsed_counts_are_derived_not_error() {
             success_parse("fixture:notes/a.md", "", "evidence a"),
         )]),
     };
-    let classifier = TestClassifier { results: HashMap::new() };
+    let classifier = TestClassifier {
+        results: HashMap::new(),
+    };
 
     let clock = FakeClock::new();
-    let outcome = run_scheduler(&clock, TestCache::default(), parser, classifier, discovery, profile)
-        .expect("outcome");
+    let outcome = run_scheduler(
+        &clock,
+        TestCache::default(),
+        parser,
+        classifier,
+        discovery,
+        profile,
+    )
+    .expect("outcome");
 
     assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
     let context = outcome.context.expect("success context");
@@ -1423,7 +1639,9 @@ fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
         step_ms: 2_000,
     };
     let scheduler = BudgetedContextScheduler::new(
-        Box::new(TestClassifier { results: HashMap::new() }),
+        Box::new(TestClassifier {
+            results: HashMap::new(),
+        }),
         Box::new(parser),
         Box::new(TestCache::default()),
         Box::new(clock),
@@ -1510,7 +1728,9 @@ fn work_deadline_before_any_parse_forms_error_run_without_snapshot() {
         step_ms: 0,
     };
     let scheduler = BudgetedContextScheduler::new(
-        Box::new(TestClassifier { results: HashMap::new() }),
+        Box::new(TestClassifier {
+            results: HashMap::new(),
+        }),
         Box::new(parser),
         Box::new(TestCache::default()),
         Box::new(clock),
@@ -1530,7 +1750,10 @@ fn work_deadline_before_any_parse_forms_error_run_without_snapshot() {
             .find(|r| r.relative_path == rel)
             .expect("file result");
         assert_eq!(file.parse_status, ParseStatus::Timeout, "{rel}");
-        assert!(file.error.is_some(), "{rel} timeout must carry a Diagnostic");
+        assert!(
+            file.error.is_some(),
+            "{rel} timeout must carry a Diagnostic"
+        );
     }
     // c.md was queued (second batch never started) -> runtime NotParsed with no
     // per-file Diagnostic.
@@ -1586,11 +1809,12 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
     // second and third PDFs' classifiers are never started.
     let classifier = ClockAdvancingClassifier {
         clock: clock.now.clone(),
-        work_deadline: input.work_deadline_ms,
     };
     let scheduler = BudgetedContextScheduler::new(
         Box::new(classifier),
-        Box::new(TestParser { results: HashMap::new() }),
+        Box::new(TestParser {
+            results: HashMap::new(),
+        }),
         Box::new(TestCache::default()),
         Box::new(clock),
         Box::new(PassGuard),
@@ -1618,9 +1842,10 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
     assert!(outcome
         .diagnostics
         .iter()
-        .any(|record| record.diagnostic.error_code == ErrorCode::StageDeadlineExhausted
-            && record.severity
-                == ai_daily_scanner_core::store::DiagnosticSeverity::Error));
+        .any(
+            |record| record.diagnostic.error_code == ErrorCode::StageDeadlineExhausted
+                && record.severity == ai_daily_scanner_core::store::DiagnosticSeverity::Error
+        ));
 }
 
 #[test]
@@ -1763,7 +1988,10 @@ fn post_parse_source_change_discards_content_but_keeps_execution_provenance() {
     assert_eq!(result.parse_transport, ParseTransport::RustInProcess);
     assert_eq!(result.parse_attempt_count, 2);
     assert_eq!(result.parse_duration_ms, 7);
-    assert_eq!(result.content_sha256, ai_daily_scanner_core::store::sha256_hex(b""));
+    assert_eq!(
+        result.content_sha256,
+        ai_daily_scanner_core::store::sha256_hex(b"")
+    );
     assert_eq!(outcome.execution_metrics.parse_attempt_count, 2);
     assert!(outcome.parse_cache_receipts.is_empty());
 }
@@ -1851,7 +2079,6 @@ fn classifier_pre_and_post_source_changes_keep_source_changed_semantics() {
 #[derive(Debug, Clone)]
 struct ClockAdvancingClassifier {
     clock: Arc<Mutex<u64>>,
-    work_deadline: u64,
 }
 
 impl PdfClassifierPort for ClockAdvancingClassifier {
@@ -1887,7 +2114,9 @@ fn cache_commit_skipped_after_work_deadline() {
         &clock,
         TestCache::default(),
         parser,
-        TestClassifier { results: HashMap::new() },
+        TestClassifier {
+            results: HashMap::new(),
+        },
         discovery,
         profile,
     )
@@ -1895,6 +2124,85 @@ fn cache_commit_skipped_after_work_deadline() {
     assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
     // One successful parse produced exactly one committed receipt.
     assert_eq!(outcome.parse_cache_receipts.len(), 1);
+}
+
+#[test]
+fn cache_access_touch_failure_is_audited_instead_of_silently_ignored() {
+    let profile = v2_profile(ReportMode::Daily);
+    let discovery = vec![discovered("notes/a.md", ".md", 64)];
+    let touches = Arc::new(Mutex::new(0));
+    let cache = TestCache {
+        parse: HashMap::from([(
+            "fixture:notes/a.md".to_string(),
+            TestCache::fresh_parse("fixture:notes/a.md", "cached evidence"),
+        )]),
+        touch_error: Some(CachePortError::Store {
+            detail: "cache touch unavailable".to_string(),
+        }),
+        touch_calls: touches.clone(),
+        ..TestCache::default()
+    };
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        cache,
+        TestParser {
+            results: HashMap::new(),
+        },
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        discovery,
+        profile,
+    )
+    .expect("outcome");
+
+    assert_eq!(*touches.lock().unwrap(), 1);
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+    assert!(outcome.diagnostics.iter().any(|record| {
+        record.diagnostic.error_code == ErrorCode::CacheWriteFailed
+            && record
+                .diagnostic
+                .message
+                .contains("cache access touch skipped")
+    }));
+}
+
+#[test]
+fn cache_access_touch_deadline_uses_the_run_level_deadline_terminal_state() {
+    let profile = v2_profile(ReportMode::Daily);
+    let discovery = vec![discovered("notes/a.md", ".md", 64)];
+    let cache = TestCache {
+        parse: HashMap::from([(
+            "fixture:notes/a.md".to_string(),
+            TestCache::fresh_parse("fixture:notes/a.md", "cached evidence"),
+        )]),
+        touch_error: Some(CachePortError::DeadlineExhausted {
+            detail: "work deadline exhausted during cache touch".to_string(),
+        }),
+        ..TestCache::default()
+    };
+    let clock = FakeClock::new();
+    let outcome = run_scheduler(
+        &clock,
+        cache,
+        TestParser {
+            results: HashMap::new(),
+        },
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        discovery,
+        profile,
+    )
+    .expect("outcome");
+
+    assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+    assert!(outcome
+        .diagnostics
+        .iter()
+        .any(|record| { record.diagnostic.error_code == ErrorCode::StageDeadlineExhausted }));
 }
 
 #[test]
@@ -1929,7 +2237,9 @@ fn discovery_issues_mark_the_run_partial_with_warnings() {
     )
     .expect("input");
     let scheduler = BudgetedContextScheduler::new(
-        Box::new(TestClassifier { results: HashMap::new() }),
+        Box::new(TestClassifier {
+            results: HashMap::new(),
+        }),
         Box::new(TestParser {
             results: HashMap::from([(
                 "fixture:notes/a.md".to_string(),
@@ -1970,15 +2280,8 @@ fn classification_cache_persists_real_page_counts() {
     };
     let writes = cache.classification_writes.clone();
     let clock = FakeClock::new();
-    let outcome = run_scheduler(
-        &clock,
-        cache,
-        parser,
-        classifier,
-        discovery,
-        profile,
-    )
-    .expect("outcome");
+    let outcome =
+        run_scheduler(&clock, cache, parser, classifier, discovery, profile).expect("outcome");
     assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
     let writes = writes.lock().unwrap();
     assert_eq!(writes.len(), 1);
@@ -2071,14 +2374,13 @@ fn classifier_unknown_maps_timeout_vs_crash() {
             backend: ai_daily_scanner_contract::Nullable(None),
         }
     };
-    let unknown_result = |code: ai_daily_scanner_contract::PythonOperationErrorCode| {
-        PdfClassifierResultV1 {
+    let unknown_result =
+        |code: ai_daily_scanner_contract::PythonOperationErrorCode| PdfClassifierResultV1 {
             status: PdfClassifierResultStatus::Unknown,
             page_count: ai_daily_scanner_contract::Nullable(None),
             result_examined_pages: ai_daily_scanner_contract::Nullable(None),
             diagnostic: ai_daily_scanner_contract::Nullable(Some(diag(code))),
-        }
-    };
+        };
     let discovery = vec![
         discovered("timeout.pdf", ".pdf", 128),
         discovered("crash.pdf", ".pdf", 128),
@@ -2087,15 +2389,11 @@ fn classifier_unknown_maps_timeout_vs_crash() {
         results: HashMap::from([
             (
                 "C:\\corpus\\timeout.pdf".to_string(),
-                unknown_result(
-                    ai_daily_scanner_contract::PythonOperationErrorCode::ParserTimeout,
-                ),
+                unknown_result(ai_daily_scanner_contract::PythonOperationErrorCode::ParserTimeout),
             ),
             (
                 "C:\\corpus\\crash.pdf".to_string(),
-                unknown_result(
-                    ai_daily_scanner_contract::PythonOperationErrorCode::ParserFailed,
-                ),
+                unknown_result(ai_daily_scanner_contract::PythonOperationErrorCode::ParserFailed),
             ),
         ]),
     };

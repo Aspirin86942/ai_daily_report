@@ -7,9 +7,9 @@ use ai_daily_scanner_contract::{
     ContextDecision, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
     DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest,
     InspectRunResponse, InspectStatus, MaintenanceRequestV1, MaintenanceStatus, Nullable,
-    ParseStatus, RunStatus, StageMetric, StageName, TransportErrorResponse, UpgradeDatabaseRequestV1,
-    UpgradeStatus, Validate, VersionResponse, VersionResponseV2, WorkerDiagnosticV1,
-    WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
+    ParseStatus, RunStatus, StageMetric, StageName, TransportErrorResponse,
+    UpgradeDatabaseRequestV1, UpgradeStatus, Validate, VersionResponse, VersionResponseV2,
+    WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
 };
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
@@ -29,16 +29,16 @@ use crate::artifact::{
 };
 use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
 use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
+use crate::parsers::classifier::ClassifierPort;
 use crate::parsers::{
     document, office, preflight_python_capabilities_observed, register_worker,
     register_worker_pair_observed, RegisteredWorker, WorkerCommand, WorkerRegistry,
     WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
 };
-use crate::parsers::classifier::ClassifierPort;
 use crate::process::WorkerRssTracker;
 use crate::scheduler::{
-    BudgetedContextScheduler, BudgetedScanOutcome, RealClock, RealGuardVerifier,
-    ScheduledRunInput, TerminalIntent, WorkerIdentities,
+    BudgetedContextScheduler, BudgetedScanOutcome, Clock, RealClock, RealGuardVerifier,
+    RunDeadlines, ScheduledRunInput, TerminalIntent, WorkerIdentities,
 };
 use crate::scheduler_adapter::{ProductionParser, StoreCachePort};
 use crate::source_guard::{
@@ -48,8 +48,8 @@ use crate::store::{
     canonical_envelope_json, current_time_millis, ActiveRun, AttemptRuntime, BeginRunOutcome,
     ContextDecisionRecord, ContextRunRecord, DiagnosticSeverity, FileResultRecord,
     FinalizationBatch, InventoryRecord, RouteStackFingerprint, RouteStackFingerprints,
-    RunDiagnosticRecord, ScannerStore, SnapshotHit, SnapshotHitRef, StoreError, WorkerFingerprint,
-    HEARTBEAT_INTERVAL_MS,
+    RunDiagnosticRecord, ScannerStore, SnapshotHit, SnapshotHitRef, StoreError,
+    TerminalAuditTimings, WorkerFingerprint, HEARTBEAT_INTERVAL_MS,
 };
 
 #[derive(Debug, Error)]
@@ -62,6 +62,28 @@ pub enum EngineShellError {
 pub struct CommandOutput {
     pub json: String,
     pub exit_code: i32,
+}
+
+#[derive(Debug, Clone)]
+struct ActiveRunTiming {
+    clock: RealClock,
+    deadlines: RunDeadlines,
+}
+
+impl ActiveRunTiming {
+    fn start(total_deadline_ms: u64) -> Result<Self, String> {
+        let clock = RealClock::new();
+        let deadlines = RunDeadlines::derive(total_deadline_ms, &clock)?;
+        Ok(Self { clock, deadlines })
+    }
+
+    fn remaining_work_ms(&self) -> u64 {
+        self.deadlines.remaining_to_work_deadline(&self.clock)
+    }
+
+    fn remaining_absolute_ms(&self) -> u64 {
+        self.deadlines.remaining_to_absolute_deadline(&self.clock)
+    }
 }
 
 impl CommandOutput {
@@ -152,9 +174,7 @@ pub fn dispatch_with_response_version(
     }
 }
 
-fn maintenance_command(
-    request: &MaintenanceRequestV1,
-) -> Result<CommandOutput, EngineShellError> {
+fn maintenance_command(request: &MaintenanceRequestV1) -> Result<CommandOutput, EngineShellError> {
     let response = ScannerStore::maintenance(request);
     debug_assert!(
         response.validate().is_ok(),
@@ -413,14 +433,14 @@ fn inspect_run_command_v2(request: &InspectRunRequest) -> Result<CommandOutput, 
                         )
                     } else {
                         match crate::inspect::assemble_inspect_v2(request, &snapshot) {
-                        Ok(response) => return CommandOutput::success(&response),
-                        Err(message) => crate::inspect::inspect_v2_error(
-                            request,
-                            ErrorCode::RunCorrupt,
-                            message,
-                            false,
-                            Some(snapshot.run_status),
-                        ),
+                            Ok(response) => return CommandOutput::success(&response),
+                            Err(message) => crate::inspect::inspect_v2_error(
+                                request,
+                                ErrorCode::RunCorrupt,
+                                message,
+                                false,
+                                Some(snapshot.run_status),
+                            ),
                         }
                     }
                 }
@@ -497,7 +517,10 @@ fn build_context_command(request: &BuildContextRequest) -> Result<CommandOutput,
             return build_error_output(request, &version, error, Vec::new(), empty_summary(), None);
         }
     };
-    let profile = match normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode) {
+    let profile = match normalize_scanner_profile_for_request(
+        &request.scanner_profile,
+        request.report_mode,
+    ) {
         Ok(profile) => profile,
         Err(message) => {
             return build_error_output(
@@ -515,24 +538,25 @@ fn build_context_command(request: &BuildContextRequest) -> Result<CommandOutput,
             );
         }
     };
-    let v2_profile = match normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode) {
-        Ok(profile) => profile,
-        Err(message) => {
-            return build_error_output(
-                request,
-                &version,
-                diagnostic(
-                    ErrorCode::InvalidRequest,
-                    message,
-                    false,
-                    DiagnosticStage::Request,
-                ),
-                Vec::new(),
-                empty_summary(),
-                None,
-            );
-        }
-    };
+    let v2_profile =
+        match normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode) {
+            Ok(profile) => profile,
+            Err(message) => {
+                return build_error_output(
+                    request,
+                    &version,
+                    diagnostic(
+                        ErrorCode::InvalidRequest,
+                        message,
+                        false,
+                        DiagnosticStage::Request,
+                    ),
+                    Vec::new(),
+                    empty_summary(),
+                    None,
+                );
+            }
+        };
     let canonical = match ScannerStore::canonicalize_request(request, &profile) {
         Ok(canonical) => canonical,
         Err(error) => {
@@ -602,6 +626,32 @@ fn build_context_command(request: &BuildContextRequest) -> Result<CommandOutput,
             );
         }
     };
+    // The only monotonic origin for this run is created immediately after the
+    // begin_run COMMIT. Handshake/discovery time must consume this same budget.
+    let timing = match ActiveRunTiming::start(v2_profile.total_deadline_ms) {
+        Ok(timing) => timing,
+        Err(message) => {
+            let abandon_error = current_time_millis()
+                .and_then(|abandon_now| store.abandon_active_run(&active, abandon_now));
+            let error = match abandon_error {
+                Ok(()) => diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Internal,
+                ),
+                Err(abandon) => abandon.diagnostic(DiagnosticStage::Cache),
+            };
+            return build_error_output(
+                request,
+                &version,
+                error,
+                Vec::new(),
+                empty_summary(),
+                Some(active.scan_run_id()),
+            );
+        }
+    };
     let mut heartbeat = LeaseHeartbeat::start(PathBuf::from(&request.scan_db_path), active.clone());
     execute_active_build(
         request,
@@ -613,6 +663,7 @@ fn build_context_command(request: &BuildContextRequest) -> Result<CommandOutput,
         &active,
         &mut heartbeat,
         started_at,
+        &timing,
     )
 }
 
@@ -627,6 +678,7 @@ fn execute_active_build(
     active: &ActiveRun,
     heartbeat: &mut LeaseHeartbeat,
     started_at: Instant,
+    timing: &ActiveRunTiming,
 ) -> Result<CommandOutput, EngineShellError> {
     let rss_tracker = WorkerRssTracker::default();
     // ---- bounded parallel worker handshakes (spec Solution run.rs order) ----
@@ -644,19 +696,37 @@ fn execute_active_build(
         .iter()
         .any(|extension| extension == ".pdf")
         && profile.parse.pdf.backend == "pdf_text_v1";
+    let remaining_handshake_ms = timing.remaining_work_ms();
+    if remaining_handshake_ms == 0 {
+        return finish_active_error(
+            request,
+            version,
+            store,
+            active,
+            heartbeat,
+            Vec::new(),
+            stage_deadline_exhausted("worker handshake"),
+            elapsed_summary(started_at),
+            0,
+            &rss_tracker,
+            timing,
+        );
+    }
+    let handshake_timeout =
+        WORKER_HANDSHAKE_TIMEOUT.min(Duration::from_millis(remaining_handshake_ms.max(1)));
     let (office_python_pair, capability_pair) = std::thread::scope(|scope| {
         let office_python = scope.spawn(|| {
             register_worker_pair_observed(
                 &office_command,
                 &python_command,
-                WORKER_HANDSHAKE_TIMEOUT,
+                handshake_timeout,
                 &rss_tracker,
             )
         });
         let capabilities = if profile_allows_pdf {
             let pair = preflight_python_capabilities_observed(
                 &python_command,
-                WORKER_HANDSHAKE_TIMEOUT,
+                handshake_timeout,
                 &rss_tracker,
             );
             (Some(pair.0), Some(pair.1))
@@ -763,6 +833,7 @@ fn execute_active_build(
             elapsed_summary(started_at),
             worker_handshake_ms,
             &rss_tracker,
+            timing,
         );
     }
     let (Some(office_worker), Some(python_worker)) = (office_worker, python_worker) else {
@@ -782,6 +853,7 @@ fn execute_active_build(
             elapsed_summary(started_at),
             worker_handshake_ms,
             &rss_tracker,
+            timing,
         );
     };
     if let Some(session) = &session_worker {
@@ -808,6 +880,7 @@ fn execute_active_build(
                 elapsed_summary(started_at),
                 worker_handshake_ms,
                 &rss_tracker,
+                timing,
             );
         }
     }
@@ -815,33 +888,57 @@ fn execute_active_build(
         office: Some(office_worker.clone()),
         python_document: Some(python_worker.clone()),
     };
-    let route_stacks = match route_stack_fingerprints(version, profile, &office_worker, &python_worker)
-    {
-        Ok(value) => value,
-        Err(message) => {
-            return finish_active_error(
-                request,
-                version,
-                store,
-                active,
-                heartbeat,
-                Vec::new(),
-                diagnostic(
-                    ErrorCode::InternalError,
-                    message,
-                    false,
-                    DiagnosticStage::Cache,
-                ),
-                elapsed_summary(started_at),
-                worker_handshake_ms,
-                &rss_tracker,
-            );
-        }
-    };
+    let route_stacks =
+        match route_stack_fingerprints(version, profile, &office_worker, &python_worker) {
+            Ok(value) => value,
+            Err(message) => {
+                return finish_active_error(
+                    request,
+                    version,
+                    store,
+                    active,
+                    heartbeat,
+                    Vec::new(),
+                    diagnostic(
+                        ErrorCode::InternalError,
+                        message,
+                        false,
+                        DiagnosticStage::Cache,
+                    ),
+                    elapsed_summary(started_at),
+                    worker_handshake_ms,
+                    &rss_tracker,
+                    timing,
+                );
+            }
+        };
 
     // ---- discovery (with engine-owned SourceGuardV2) ----
+    let remaining_discovery_ms = timing.remaining_work_ms();
+    if remaining_discovery_ms == 0 {
+        return finish_active_error(
+            request,
+            version,
+            store,
+            active,
+            heartbeat,
+            Vec::new(),
+            stage_deadline_exhausted("discovery"),
+            elapsed_summary(started_at),
+            worker_handshake_ms,
+            &rss_tracker,
+            timing,
+        );
+    }
     let discovery_started = Instant::now();
-    let mut discovery = match discover_with_timeout(work_dir, request, profile) {
+    let discovery_timeout = Duration::from_millis(
+        profile
+            .execution
+            .discovery_timeout_ms
+            .min(remaining_discovery_ms)
+            .max(1),
+    );
+    let mut discovery = match discover_with_timeout(work_dir, request, profile, discovery_timeout) {
         Ok(report) => report,
         Err(error) => {
             let mut summary = elapsed_summary(started_at);
@@ -857,6 +954,7 @@ fn execute_active_build(
                 summary,
                 worker_handshake_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
@@ -887,8 +985,9 @@ fn execute_active_build(
         PathBuf::from(&request.scan_db_path),
         route_stacks,
         profile.clone(),
+        timing.deadlines,
+        timing.clock.clone(),
     );
-    let clock = RealClock::new();
     let context_profile_hash = match context_profile_hash(1, &version.engine_build, profile) {
         Ok(value) => value,
         Err(message) => {
@@ -908,6 +1007,7 @@ fn execute_active_build(
                 elapsed_summary(started_at),
                 worker_handshake_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
@@ -930,6 +1030,7 @@ fn execute_active_build(
                 elapsed_summary(started_at),
                 worker_handshake_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
@@ -947,6 +1048,7 @@ fn execute_active_build(
                 elapsed_summary(started_at),
                 worker_handshake_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
@@ -967,6 +1069,103 @@ fn execute_active_build(
             .as_ref()
             .map(|session| session.identity.session_contract_version.clone()),
     };
+
+    // Persistence boundary 2: the complete discovery inventory is committed in
+    // fixed short transactions before either snapshot or parse/classification
+    // cache lookup. Only the completed receipt opens those lookup paths.
+    let inventory = match snapshot_inventory(&discovery.files, &request.work_dir) {
+        Ok(records) => records,
+        Err(message) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Cache,
+                ),
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
+                timing,
+            );
+        }
+    };
+    let inventory_prepare_started = timing.clock.now_ms();
+    let inventory_now_ms = match current_time_millis() {
+        Ok(value) => value,
+        Err(error) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                error.diagnostic(DiagnosticStage::Internal),
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
+                timing,
+            );
+        }
+    };
+    let scan_run_id = match i64::try_from(active.scan_run_id()) {
+        Ok(value) => value,
+        Err(_) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                diagnostic(
+                    ErrorCode::InvalidRequest,
+                    "scan_run_id exceeds SQLite integer range".to_string(),
+                    false,
+                    DiagnosticStage::Cache,
+                ),
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
+                timing,
+            );
+        }
+    };
+    let inventory_existed_before = match store.prepare_inventory_with_deadline(
+        &inventory,
+        scan_run_id,
+        inventory_now_ms,
+        timing.deadlines,
+        &timing.clock,
+    ) {
+        Ok(receipt) => receipt,
+        Err(error) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                warnings,
+                error.diagnostic(DiagnosticStage::Cache),
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
+                timing,
+            );
+        }
+    };
+    let inventory_prepare_duration_ms = timing
+        .clock
+        .now_ms()
+        .saturating_sub(inventory_prepare_started);
 
     // ---- snapshot fast path (spec Part 5.4) ----
     // The live worker handshake is kept; a snapshot skips classification/parse
@@ -999,6 +1198,7 @@ fn execute_active_build(
                     elapsed_summary(started_at),
                     worker_handshake_ms,
                     &rss_tracker,
+                    timing,
                 );
             }
         },
@@ -1030,6 +1230,7 @@ fn execute_active_build(
                 elapsed_summary(started_at),
                 worker_handshake_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
@@ -1049,6 +1250,7 @@ fn execute_active_build(
                 elapsed_summary(started_at),
                 worker_handshake_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
@@ -1061,18 +1263,21 @@ fn execute_active_build(
             active,
             heartbeat,
             &discovery,
+            inventory,
             &context_profile_hash,
             &classifier_identity,
             hit,
             discovery_duration_ms,
+            inventory_prepare_duration_ms,
             snapshot_lookup_ms,
             worker_handshake_ms,
             &rss_tracker,
             started_at,
+            timing,
         );
     }
 
-    let input = match ScheduledRunInput::new(
+    let input = match ScheduledRunInput::new_with_deadlines(
         active.scan_run_id(),
         started_at_ms,
         work_dir.to_string_lossy().into_owned(),
@@ -1085,8 +1290,15 @@ fn execute_active_build(
         context_profile_hash.clone(),
         rejected_profile_hash,
         discovery_duration_ms,
-        &clock,
-    ) {
+        timing.deadlines,
+    )
+    .and_then(|input| {
+        input.with_prepared_inventory(
+            inventory,
+            inventory_existed_before,
+            inventory_prepare_duration_ms,
+        )
+    }) {
         Ok(input) => input,
         Err(failure) => {
             return finish_active_error(
@@ -1100,15 +1312,15 @@ fn execute_active_build(
                 elapsed_summary(started_at),
                 worker_handshake_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
-    let absolute_deadline_ms = input.absolute_deadline_ms;
     let scheduler = BudgetedContextScheduler::new(
         Box::new(classifier_port),
         Box::new(parser_port),
         Box::new(cache_port),
-        Box::new(clock),
+        Box::new(timing.clock.clone()),
         Box::new(RealGuardVerifier),
     );
     let mut outcome = match scheduler.execute(input) {
@@ -1125,6 +1337,7 @@ fn execute_active_build(
                 elapsed_summary(started_at),
                 worker_handshake_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
@@ -1146,8 +1359,13 @@ fn execute_active_build(
     } else {
         None
     };
-    let (envelope, run_status) =
-        scheduler_outcome_envelope(request, version, active, &outcome, derived_error_context.as_ref());
+    let (envelope, run_status) = scheduler_outcome_envelope(
+        request,
+        version,
+        active,
+        &outcome,
+        derived_error_context.as_ref(),
+    );
     let envelope_json = match canonical_envelope_json(&envelope) {
         Ok(value) => value,
         Err(error) => {
@@ -1166,6 +1384,7 @@ fn execute_active_build(
                 worker_handshake_ms,
                 discovery_duration_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
@@ -1186,7 +1405,12 @@ fn execute_active_build(
                 store,
                 active,
                 warnings,
-                diagnostic(ErrorCode::InternalError, message, false, DiagnosticStage::Internal),
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Internal,
+                ),
                 outcome
                     .context
                     .as_ref()
@@ -1195,6 +1419,7 @@ fn execute_active_build(
                 worker_handshake_ms,
                 discovery_duration_ms,
                 &rss_tracker,
+                timing,
             );
         }
     };
@@ -1210,7 +1435,6 @@ fn execute_active_build(
         status: run_status,
         envelope_json: envelope_json.clone(),
         inventory: outcome.inventory,
-        cache_writes: outcome.parse_cache_receipts,
         file_results: outcome.file_results,
         diagnostics: outcome.diagnostics,
         stage_metrics: outcome.stage_metrics,
@@ -1264,25 +1488,19 @@ fn execute_active_build(
         worker_handshake_ms,
         discovery_duration_ms,
         &rss_tracker,
+        timing,
     ) {
         return output;
     }
-    match store.finalize(active, &batch, finalize_now_ms) {
-        Ok(_timings) => {
-            // spec Part 4 opportunistic GC: only when >=10ms remain to the
-            // absolute deadline. It runs in an independent zero-wait transaction,
-            // forms a freelist only, and never rewrites the committed terminal
-            // result; its cost stays fully inside benchmark_wall_ms.
-            if let Ok(now) = current_time_millis() {
-                let remaining = absolute_deadline_ms.saturating_sub(now);
-                if remaining >= crate::store::cache::OPPORTUNISTIC_GC_BUDGET_MS {
-                    let _ = store.run_opportunistic_gc(
-                        now,
-                        crate::store::cache::OPPORTUNISTIC_GC_BUDGET_MS,
-                    );
-                }
-            }
-            CommandOutput::canonical_json(envelope_json, exit_code)
+    match store.finalize(
+        active,
+        &batch,
+        finalize_now_ms,
+        timing.deadlines,
+        &timing.clock,
+    ) {
+        Ok(timings) => {
+            complete_committed_terminal(store, timing, timings, envelope_json, exit_code)
         }
         Err(error) => abandon_after_finalization_failure(
             request,
@@ -1457,8 +1675,10 @@ fn build_error_context_record(
         .saturating_sub(success_count)
         .saturating_sub(timeout_count)
         .saturating_sub(error_count);
-    let stage_by_name: std::collections::HashMap<StageName, &StageMetric> =
-        stage_metrics.iter().map(|metric| (metric.stage, metric)).collect();
+    let stage_by_name: std::collections::HashMap<StageName, &StageMetric> = stage_metrics
+        .iter()
+        .map(|metric| (metric.stage, metric))
+        .collect();
     let summary = ContextSummary {
         source_file_count,
         success_count,
@@ -1466,9 +1686,14 @@ fn build_error_context_record(
         included_file_count: success_count,
         omitted_file_count: not_parsed_count,
         error_file_count: error_count,
-        input_chars: decisions.iter().map(|record| record.decision.input_chars).sum(),
+        input_chars: decisions
+            .iter()
+            .map(|record| record.decision.input_chars)
+            .sum(),
         output_chars: 0,
-        total_duration_ms: stage_metrics.iter().fold(0_u64, |acc, metric| acc + metric.duration_ms),
+        total_duration_ms: stage_metrics
+            .iter()
+            .fold(0_u64, |acc, metric| acc + metric.duration_ms),
         discovery_duration_ms: stage_by_name
             .get(&StageName::Discovery)
             .map(|metric| metric.duration_ms)
@@ -1655,14 +1880,17 @@ fn finalize_snapshot_hit(
     active: &ActiveRun,
     heartbeat: &mut LeaseHeartbeat,
     discovery: &DiscoveryReport,
+    inventory: Vec<InventoryRecord>,
     context_profile_hash: &str,
     classifier_identity: &ClassifierIdentity,
     hit: SnapshotHit,
     discovery_duration_ms: u64,
+    inventory_prepare_duration_ms: u64,
     snapshot_lookup_ms: u64,
     worker_handshake_ms: u64,
     rss_tracker: &WorkerRssTracker,
     started_at: Instant,
+    timing: &ActiveRunTiming,
 ) -> Result<CommandOutput, EngineShellError> {
     let artifact = match store.load_artifact(hit.artifact_id) {
         Ok(draft) => draft,
@@ -1672,25 +1900,6 @@ fn finalize_snapshot_hit(
                 request,
                 version,
                 error.diagnostic(DiagnosticStage::Cache),
-                Vec::new(),
-                empty_summary(),
-                Some(active.scan_run_id()),
-            );
-        }
-    };
-    let inventory = match snapshot_inventory(&discovery.files, &request.work_dir) {
-        Ok(records) => records,
-        Err(message) => {
-            heartbeat.stop();
-            return build_error_output(
-                request,
-                version,
-                diagnostic(
-                    ErrorCode::InternalError,
-                    message,
-                    false,
-                    DiagnosticStage::Internal,
-                ),
                 Vec::new(),
                 empty_summary(),
                 Some(active.scan_run_id()),
@@ -1739,7 +1948,7 @@ fn finalize_snapshot_hit(
         StageMetric {
             stage: StageName::Cache,
             item_count: discovery.files.len() as u64,
-            duration_ms: snapshot_lookup_ms,
+            duration_ms: inventory_prepare_duration_ms.saturating_add(snapshot_lookup_ms),
         },
         StageMetric {
             stage: StageName::Parse,
@@ -1752,26 +1961,26 @@ fn finalize_snapshot_hit(
             duration_ms: compression_duration_ms,
         },
     ];
-    let extension_metrics =
-        match crate::context_audit::extension_metrics(&inventory, &file_results) {
-            Ok(metrics) => metrics,
-            Err(message) => {
-                heartbeat.stop();
-                return build_error_output(
-                    request,
-                    version,
-                    diagnostic(
-                        ErrorCode::InternalError,
-                        message,
-                        false,
-                        DiagnosticStage::Internal,
-                    ),
-                    Vec::new(),
-                    empty_summary(),
-                    Some(active.scan_run_id()),
-                );
-            }
-        };
+    let extension_metrics = match crate::context_audit::extension_metrics(&inventory, &file_results)
+    {
+        Ok(metrics) => metrics,
+        Err(message) => {
+            heartbeat.stop();
+            return build_error_output(
+                request,
+                version,
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Internal,
+                ),
+                Vec::new(),
+                empty_summary(),
+                Some(active.scan_run_id()),
+            );
+        }
+    };
     let peak_worker_rss_bytes = rss_tracker.peak_worker_rss_bytes();
     let warnings: Vec<Diagnostic> = peak_worker_rss_bytes
         .is_none()
@@ -1818,7 +2027,6 @@ fn finalize_snapshot_hit(
         status: RunStatus::Success,
         envelope_json: envelope_json.clone(),
         inventory,
-        cache_writes: Vec::new(),
         file_results,
         diagnostics: warnings
             .into_iter()
@@ -1874,11 +2082,18 @@ fn finalize_snapshot_hit(
         worker_handshake_ms,
         discovery_duration_ms,
         rss_tracker,
+        timing,
     ) {
         return output;
     }
-    match store.finalize(active, &batch, finalize_now_ms) {
-        Ok(_timings) => CommandOutput::canonical_json(envelope_json, 0),
+    match store.finalize(
+        active,
+        &batch,
+        finalize_now_ms,
+        timing.deadlines,
+        &timing.clock,
+    ) {
+        Ok(timings) => complete_committed_terminal(store, timing, timings, envelope_json, 0),
         Err(error) => abandon_after_finalization_failure(
             request,
             version,
@@ -1910,10 +2125,12 @@ fn build_batch_artifact(
             .diagnostics
             .iter()
             .any(|record| record.severity == DiagnosticSeverity::Warning)
-        && outcome
-            .file_results
-            .iter()
-            .all(|record| !matches!(record.parse_status, ParseStatus::Error | ParseStatus::Timeout));
+        && outcome.file_results.iter().all(|record| {
+            !matches!(
+                record.parse_status,
+                ParseStatus::Error | ParseStatus::Timeout
+            )
+        });
     let semantic = SemanticSummary {
         source_file_count: context.summary.source_file_count,
         success_count: context.summary.success_count,
@@ -1980,10 +2197,12 @@ fn artifact_file_rows(
             // provenance subset (status/page/result/nominal/build/profile-hash);
             // cache status / miss reason / run pages / duration / transport /
             // attempt are current-run execution fields and never reused.
-            let classifier = outcome
-                .classifications
-                .get(&item.file_identity)
-                .map(|classification| PdfClassificationProvenanceV1 {
+            let classifier =
+                outcome
+                    .classifications
+                    .get(&item.file_identity)
+                    .map(|classification| {
+                        PdfClassificationProvenanceV1 {
                     status: classification.status,
                     page_count: classification.page_count,
                     result_examined_pages: classification.result_examined_pages,
@@ -1996,7 +2215,8 @@ fn artifact_file_rows(
                     },
                     classifier_build: classifier_build.clone(),
                     classifier_profile_hash: classifier_profile_hash.to_string(),
-                });
+                }
+                    });
             ArtifactFileRow {
                 file_identity: item.file_identity.clone(),
                 relative_path: item.relative_path.clone(),
@@ -2013,7 +2233,9 @@ fn artifact_file_rows(
                     .map(|record| record.parser_backend.clone())
                     .unwrap_or_else(|| "not_parsed".to_string()),
                 worker_lane: result
-                    .map(|record| crate::store::inventory::worker_lane_text(record.worker_lane).to_string())
+                    .map(|record| {
+                        crate::store::inventory::worker_lane_text(record.worker_lane).to_string()
+                    })
                     .unwrap_or_else(|| "not_parsed".to_string()),
                 truncated: result.map(|record| record.truncated).unwrap_or(false),
                 content_sha256: result
@@ -2264,6 +2486,7 @@ fn discover_with_timeout(
     work_dir: &Path,
     request: &BuildContextRequest,
     profile: &ai_daily_scanner_contract::NormalizedScannerProfileV1,
+    timeout: Duration,
 ) -> Result<DiscoveryReport, Diagnostic> {
     let start_date = NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d").map_err(|_| {
         diagnostic(
@@ -2298,9 +2521,7 @@ fn discover_with_timeout(
     let handle = thread::spawn(move || {
         let _ = sender.send(discover_files_with_diagnostics(&discovery_request));
     });
-    match receiver.recv_timeout(Duration::from_millis(
-        profile.execution.discovery_timeout_ms,
-    )) {
+    match receiver.recv_timeout(timeout) {
         Ok(Ok(report)) => {
             if handle.join().is_err() {
                 Err(diagnostic(
@@ -2368,6 +2589,7 @@ fn finish_active_error(
     summary: ContextSummary,
     worker_handshake_ms: u64,
     rss_tracker: &WorkerRssTracker,
+    timing: &ActiveRunTiming,
 ) -> Result<CommandOutput, EngineShellError> {
     heartbeat.stop();
     if let Some(background_error) = heartbeat.take_background_error() {
@@ -2390,6 +2612,7 @@ fn finish_active_error(
         worker_handshake_ms,
         discovery_ms,
         rss_tracker,
+        timing,
     )
 }
 
@@ -2405,6 +2628,7 @@ fn persist_active_error_without_heartbeat(
     worker_handshake_ms: u64,
     discovery_ms: u64,
     rss_tracker: &WorkerRssTracker,
+    timing: &ActiveRunTiming,
 ) -> Result<CommandOutput, EngineShellError> {
     let discovery_observed_file_count = summary.source_file_count;
     let summary = empty_summary();
@@ -2460,7 +2684,6 @@ fn persist_active_error_without_heartbeat(
         status: RunStatus::Error,
         envelope_json: envelope_json.clone(),
         inventory: Vec::new(),
-        cache_writes: Vec::new(),
         file_results: Vec::new(),
         diagnostics,
         stage_metrics: crate::scheduler::zero_stage_metrics(),
@@ -2499,8 +2722,8 @@ fn persist_active_error_without_heartbeat(
             );
         }
     };
-    match store.finalize(active, &batch, now_ms) {
-        Ok(_timings) => CommandOutput::canonical_json(envelope_json, 1),
+    match store.finalize(active, &batch, now_ms, timing.deadlines, &timing.clock) {
+        Ok(timings) => complete_committed_terminal(store, timing, timings, envelope_json, 1),
         Err(write_error) => abandon_after_finalization_failure(
             request,
             version,
@@ -2513,6 +2736,43 @@ fn persist_active_error_without_heartbeat(
     }
 }
 
+fn complete_committed_terminal(
+    store: &mut ScannerStore,
+    timing: &ActiveRunTiming,
+    timings: TerminalAuditTimings,
+    envelope_json: String,
+    exit_code: i32,
+) -> Result<CommandOutput, EngineShellError> {
+    if timings.busy_timeout_restore_failed {
+        eprintln!("scanner warning: SQLite busy timeout restore failed after terminal commit");
+        return CommandOutput::canonical_json(envelope_json, exit_code);
+    }
+
+    // Optional GC is admitted only after the authoritative terminal COMMIT.
+    // Busy, deadline overshoot, time-read, or restore failures remain redacted
+    // runtime warnings and can never rewrite that committed result.
+    if timing.remaining_absolute_ms() >= crate::store::cache::OPPORTUNISTIC_GC_BUDGET_MS {
+        match current_time_millis() {
+            Ok(now_ms) => {
+                if store
+                    .run_opportunistic_gc(
+                        now_ms,
+                        crate::store::cache::OPPORTUNISTIC_GC_BUDGET_MS,
+                        &timing.clock,
+                    )
+                    .is_err()
+                {
+                    eprintln!("scanner warning: opportunistic SQLite GC was skipped");
+                }
+            }
+            Err(_) => {
+                eprintln!("scanner warning: opportunistic SQLite GC was skipped");
+            }
+        }
+    }
+    CommandOutput::canonical_json(envelope_json, exit_code)
+}
+
 fn abandon_after_finalization_failure(
     request: &BuildContextRequest,
     version: &VersionResponse,
@@ -2522,8 +2782,7 @@ fn abandon_after_finalization_failure(
     mut warnings: Vec<Diagnostic>,
     summary: ContextSummary,
 ) -> Result<CommandOutput, EngineShellError> {
-    let cleanup = current_time_millis()
-        .and_then(|now_ms| store.abandon_active_run(active, now_ms));
+    let cleanup = current_time_millis().and_then(|now_ms| store.abandon_active_run(active, now_ms));
     if let Err(cleanup_error) = cleanup {
         warnings.push(cleanup_error.diagnostic(DiagnosticStage::Cache));
     }
@@ -2547,6 +2806,7 @@ fn persist_post_outcome_failure_if_invalid(
     worker_handshake_ms: u64,
     discovery_ms: u64,
     rss_tracker: &WorkerRssTracker,
+    timing: &ActiveRunTiming,
 ) -> Option<Result<CommandOutput, EngineShellError>> {
     let error = match store.validate_finalization_batch(active, batch) {
         Ok(()) => return None,
@@ -2568,6 +2828,7 @@ fn persist_post_outcome_failure_if_invalid(
         worker_handshake_ms,
         discovery_ms,
         rss_tracker,
+        timing,
     ))
 }
 
@@ -2681,6 +2942,15 @@ fn diagnostic(
         file_path: Nullable(None),
         backend: Nullable(None),
     }
+}
+
+fn stage_deadline_exhausted(operation: &str) -> Diagnostic {
+    diagnostic(
+        ErrorCode::StageDeadlineExhausted,
+        format!("work deadline exhausted before {operation}"),
+        true,
+        DiagnosticStage::Process,
+    )
 }
 
 fn elapsed_summary(started_at: Instant) -> ContextSummary {
@@ -2816,6 +3086,50 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn committed_terminal_output_survives_restore_and_opportunistic_gc_failures() {
+        let directory = tempdir().unwrap();
+        let db_path = directory.path().join(crate::store::SCAN_DB_FILENAME);
+        let mut store = ScannerStore::open(&db_path).unwrap();
+        let timing = ActiveRunTiming::start(5_000).unwrap();
+        let _ = crate::store::take_test_opportunistic_gc_calls();
+
+        let output = complete_committed_terminal(
+            &mut store,
+            &timing,
+            TerminalAuditTimings {
+                busy_timeout_restore_failed: true,
+                ..TerminalAuditTimings::default()
+            },
+            "{\"status\":\"committed\"}".to_string(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(output.json, "{\"status\":\"committed\"}");
+        assert_eq!(output.exit_code, 0);
+        assert_eq!(
+            crate::store::take_test_opportunistic_gc_calls(),
+            0,
+            "restore failure must skip every post-commit store use"
+        );
+
+        let locker = rusqlite::Connection::open(&db_path).unwrap();
+        locker.busy_timeout(Duration::from_millis(0)).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let output = complete_committed_terminal(
+            &mut store,
+            &timing,
+            TerminalAuditTimings::default(),
+            "{\"status\":\"committed\"}".to_string(),
+            7,
+        )
+        .unwrap();
+        locker.execute_batch("ROLLBACK").unwrap();
+        assert_eq!(output.json, "{\"status\":\"committed\"}");
+        assert_eq!(output.exit_code, 7);
+        assert_eq!(crate::store::take_test_opportunistic_gc_calls(), 1);
+    }
+
+    #[test]
     fn scanner_version_uses_the_frozen_command_order() {
         let response = version_response();
 
@@ -2882,24 +3196,17 @@ mod tests {
             .into_owned();
         request.adapters.python_module_root = directory.path().to_string_lossy().into_owned();
 
-        let profile = normalize_scanner_profile_for_request(
-            &request.scanner_profile,
-            request.report_mode,
-        )
-        .expect("normalized scanner profile");
-        let canonical = ScannerStore::canonicalize_request(&request, &profile)
-            .expect("canonical request");
-        let runtime = AttemptRuntime::from_request(&request, &version_response())
-            .expect("attempt runtime");
+        let profile =
+            normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode)
+                .expect("normalized scanner profile");
+        let canonical =
+            ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
+        let runtime =
+            AttemptRuntime::from_request(&request, &version_response()).expect("attempt runtime");
         let mut store = ScannerStore::open(&scan_db).expect("scanner store");
         let now_ms = current_time_millis().expect("current time");
         let active = match store
-            .begin_run(
-                &request.request_id,
-                &canonical,
-                &runtime,
-                now_ms,
-            )
+            .begin_run(&request.request_id, &canonical, &runtime, now_ms)
             .expect("begin run")
         {
             BeginRunOutcome::Started(active) => active,
@@ -2922,7 +3229,6 @@ mod tests {
             status: RunStatus::Success,
             envelope_json: "{}".to_string(),
             inventory: Vec::new(),
-            cache_writes: Vec::new(),
             file_results: Vec::new(),
             diagnostics: Vec::new(),
             stage_metrics: Vec::new(),
@@ -2934,6 +3240,7 @@ mod tests {
             execution_metrics: None,
         };
 
+        let timing = ActiveRunTiming::start(10_000).expect("test deadline");
         let output = persist_post_outcome_failure_if_invalid(
             &request,
             &version_response(),
@@ -2943,6 +3250,7 @@ mod tests {
             0,
             0,
             &WorkerRssTracker::default(),
+            &timing,
         )
         .expect("invalid outcome must be converted")
         .expect("terminal failure output");
@@ -3006,8 +3314,7 @@ mod tests {
 
     #[test]
     fn snapshot_reports_the_live_handshake_peak_rss() {
-        let metrics =
-            assemble_snapshot_execution_metrics(&[], 0, 0, 1, 2, 3, 4, Some(64 * 1024));
+        let metrics = assemble_snapshot_execution_metrics(&[], 0, 0, 1, 2, 3, 4, Some(64 * 1024));
         assert_eq!(metrics.peak_worker_rss_bytes.0, Some(64 * 1024));
     }
 
@@ -3047,10 +3354,7 @@ mod tests {
             Some(RunStatus::Success)
         );
         assert_eq!(outcome.diagnostics.len(), 1);
-        assert_eq!(
-            outcome.diagnostics[0].severity,
-            DiagnosticSeverity::Warning
-        );
+        assert_eq!(outcome.diagnostics[0].severity, DiagnosticSeverity::Warning);
         assert_eq!(
             outcome.diagnostics[0].diagnostic.error_code,
             ErrorCode::WorkerRssUnavailable
@@ -3160,7 +3464,10 @@ mod tests {
             .pdf_classification
             .as_ref()
             .expect("quota decision permits controlled reconstruction");
-        assert_eq!(audit.status, ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget);
+        assert_eq!(
+            audit.status,
+            ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget
+        );
 
         historical.decision_rows[0].reason = "semantic_file_quota_exhausted".to_string();
         let rows = snapshot_file_results(&historical, Some(&identity));

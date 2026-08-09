@@ -6,24 +6,25 @@ pub mod schema;
 
 use ai_daily_discovery::normalize_contract_path_text;
 use ai_daily_scanner_contract::{
-    AutoVacuumMode, BuildContextRequest, ContextAction, ContextDecision,
-    ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode,
-    ExecutionMetricsV2, ExtensionMetric, MaintenanceDeletedV1, MaintenanceMode,
-    MaintenancePostIntegrityCheck, MaintenancePreIntegrityCheck, MaintenanceRequestV1,
-    MaintenanceResponseV1, MaintenanceSizeV1, MaintenanceStatus, MaintenanceVacuumStatus,
-    MaintenanceVacuumV1, NormalizedScannerProfileV1, Nullable, ParseStatus, RunStatus, StageMetric,
-    StageName, UpgradeDatabaseRequestV1, UpgradeDatabaseResponseV1, UpgradeIntegrityCheck,
-    UpgradeStatus, Validate, VersionResponse,
+    AutoVacuumMode, BuildContextRequest, ContextAction, ContextDecision, ContextEnvelope,
+    ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, ExecutionMetricsV2,
+    ExtensionMetric, MaintenanceDeletedV1, MaintenanceMode, MaintenancePostIntegrityCheck,
+    MaintenancePreIntegrityCheck, MaintenanceRequestV1, MaintenanceResponseV1, MaintenanceSizeV1,
+    MaintenanceStatus, MaintenanceVacuumStatus, MaintenanceVacuumV1, NormalizedScannerProfileV1,
+    Nullable, ParseStatus, RunStatus, StageMetric, StageName, UpgradeDatabaseRequestV1,
+    UpgradeDatabaseResponseV1, UpgradeIntegrityCheck, UpgradeStatus, Validate, VersionResponse,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
-use std::collections::HashSet;
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 use crate::artifact::{ArtifactDecisionRow, ArtifactDraft, ArtifactFileRow, SnapshotKeyParts};
+use crate::deadline::{Clock, RunDeadlines};
 
 pub use cache::{
     classifier_profile_hash, parse_profile_hash, sha256_hex, CacheAwarePlanEntry, CacheEntry,
@@ -38,8 +39,10 @@ pub const SCAN_DB_FILENAME: &str = "scan_index_v2.sqlite3";
 pub const REQUEST_HASH_ALGORITHM: &str = "sha256-request-v1";
 pub const HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 pub const LEASE_GRACE_MS: u64 = 20_000;
+const TERMINAL_WRITE_BATCH_SIZE: usize = 256;
 const _: () = assert!(LEASE_GRACE_MS >= HEARTBEAT_INTERVAL_MS * 3);
 const _: () = assert!(LEASE_GRACE_MS > BUSY_TIMEOUT_MS);
+const CACHE_TRANSACTION_BATCH_SIZE: usize = 256;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StoreError {
@@ -67,6 +70,12 @@ pub enum StoreError {
     SchemaTooNew,
     #[error("artifact is not dedup-compatible with the stored snapshot: {0}")]
     ArtifactMismatch(String),
+    #[error("absolute deadline exhausted before terminal commit")]
+    AbsoluteDeadlineExhausted,
+    #[error("work deadline exhausted before cache commit")]
+    WorkDeadlineExhausted,
+    #[error("scanner database busy timeout could not be restored")]
+    BusyTimeoutRestore { detail: String },
 }
 
 impl StoreError {
@@ -74,7 +83,9 @@ impl StoreError {
         match self {
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::CacheOpen { .. } => ErrorCode::CacheOpenFailed,
-            Self::CacheWrite { .. } | Self::LeaseLost => ErrorCode::CacheWriteFailed,
+            Self::CacheWrite { .. } | Self::BusyTimeoutRestore { .. } | Self::LeaseLost => {
+                ErrorCode::CacheWriteFailed
+            }
             Self::ScanAlreadyRunning => ErrorCode::ScanAlreadyRunning,
             Self::RequestInProgress => ErrorCode::RequestInProgress,
             Self::RequestIdConflict => ErrorCode::RequestIdConflict,
@@ -82,6 +93,9 @@ impl StoreError {
             Self::RunNotFound => ErrorCode::RunNotFound,
             Self::SchemaUpgradeRequired | Self::SchemaTooNew => ErrorCode::SchemaUpgradeRequired,
             Self::ArtifactMismatch(_) => ErrorCode::BudgetModelMismatch,
+            Self::AbsoluteDeadlineExhausted | Self::WorkDeadlineExhausted => {
+                ErrorCode::StageDeadlineExhausted
+            }
         }
     }
 
@@ -90,9 +104,12 @@ impl StoreError {
             self,
             Self::CacheOpen { .. }
                 | Self::CacheWrite { .. }
+                | Self::BusyTimeoutRestore { .. }
                 | Self::ScanAlreadyRunning
                 | Self::RequestInProgress
                 | Self::LeaseLost
+                | Self::AbsoluteDeadlineExhausted
+                | Self::WorkDeadlineExhausted
         )
     }
 
@@ -368,7 +385,6 @@ pub struct FinalizationBatch {
     /// Exact canonical JSON that is returned to Python and reused for retries.
     pub envelope_json: String,
     pub inventory: Vec<InventoryRecord>,
-    pub cache_writes: Vec<CacheWriteRecord>,
     pub file_results: Vec<FileResultRecord>,
     pub diagnostics: Vec<RunDiagnosticRecord>,
     pub stage_metrics: Vec<StageMetric>,
@@ -397,6 +413,10 @@ pub struct TerminalAuditTimings {
     pub terminal_precommit_ms: u64,
     pub envelope_rebuild_ms: u64,
     pub terminal_rows_written: u64,
+    /// The terminal COMMIT is authoritative even if restoring the connection's
+    /// default busy timeout subsequently fails. The caller must surface this
+    /// redacted runtime warning and skip any post-commit use of the connection.
+    pub busy_timeout_restore_failed: bool,
 }
 
 /// A snapshot lookup hit: the eligible artifact and the committed Success source
@@ -527,19 +547,93 @@ impl ScannerStore {
         parse_hits: &[String],
         classification_hits: &[String],
     ) -> Result<(), StoreError> {
+        self.touch_cache_access_impl(now_ms, parse_hits, classification_hits, None)
+    }
+
+    pub fn touch_cache_access_with_deadline(
+        &mut self,
+        now_ms: u64,
+        parse_hits: &[String],
+        classification_hits: &[String],
+        deadlines: RunDeadlines,
+        clock: &dyn Clock,
+    ) -> Result<(), StoreError> {
+        self.touch_cache_access_impl(
+            now_ms,
+            parse_hits,
+            classification_hits,
+            Some((deadlines, clock)),
+        )
+    }
+
+    fn touch_cache_access_impl(
+        &mut self,
+        now_ms: u64,
+        parse_hits: &[String],
+        classification_hits: &[String],
+        deadline: Option<(RunDeadlines, &dyn Clock)>,
+    ) -> Result<(), StoreError> {
         let now_ms = checked_i64(now_ms, "cache touch timestamp")?;
         if parse_hits.is_empty() && classification_hits.is_empty() {
             return Ok(());
         }
+        let ensure_work_deadline = || {
+            if deadline
+                .is_some_and(|(deadlines, clock)| deadlines.remaining_to_work_deadline(clock) == 0)
+            {
+                Err(StoreError::WorkDeadlineExhausted)
+            } else {
+                Ok(())
+            }
+        };
+        ensure_work_deadline()?;
+        if let Some((deadlines, clock)) = deadline {
+            let remaining_ms = deadlines.remaining_to_work_deadline(clock);
+            if remaining_ms == 0 {
+                return Err(StoreError::WorkDeadlineExhausted);
+            }
+            self.connection
+                .busy_timeout(Duration::from_millis(remaining_ms.min(BUSY_TIMEOUT_MS)))
+                .map_err(cache_write)?;
+        }
         let bucket = cache::date_bucket_for_ms(now_ms);
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(cache_write)?;
-        cache::touch_parse_cache_access(&transaction, parse_hits, &bucket).map_err(cache_write)?;
-        cache::touch_classification_cache_access(&transaction, classification_hits, &bucket)
-            .map_err(cache_write)?;
-        transaction.commit().map_err(cache_write)
+        let result = (|| -> Result<(), StoreError> {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(cache_write)?;
+            cache::touch_parse_cache_access_with_check(&transaction, parse_hits, &bucket, &|| {
+                ensure_work_deadline().is_ok()
+            })
+            .map_err(cache_mutation)?;
+            cache::touch_classification_cache_access_with_check(
+                &transaction,
+                classification_hits,
+                &bucket,
+                &|| ensure_work_deadline().is_ok(),
+            )
+            .map_err(cache_mutation)?;
+            ensure_work_deadline()?;
+            transaction.commit().map_err(cache_write)
+        })();
+        let restore = if deadline.is_some() {
+            restore_default_busy_timeout(&self.connection).map_err(cache_write)
+        } else {
+            Ok(())
+        };
+        match (result, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(_)) => {
+                eprintln!(
+                    "scanner warning: SQLite busy timeout restore failed after cache touch commit"
+                );
+                Ok(())
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Err(_), Err(error)) => Err(StoreError::BusyTimeoutRestore {
+                detail: error.to_string(),
+            }),
+        }
     }
 
     /// Opportunistic age/orphan row GC (spec Part 4): runs after the terminal
@@ -547,10 +641,21 @@ impl ScannerStore {
     /// transaction with `busy_timeout=0`, bounded indexed delete batches, and a
     /// 10ms admission budget checked before each statement. It only forms a
     /// freelist (no vacuum) and never rewrites the committed terminal result.
-    pub fn run_opportunistic_gc(&mut self, now_ms: u64, budget_ms: u64) -> Result<(), StoreError> {
+    pub fn run_opportunistic_gc(
+        &mut self,
+        now_ms: u64,
+        budget_ms: u64,
+        clock: &dyn Clock,
+    ) -> Result<(), StoreError> {
+        #[cfg(test)]
+        TEST_OPPORTUNISTIC_GC_CALLS.with(|count| count.set(count.get().saturating_add(1)));
         let now_ms = checked_i64(now_ms, "opportunistic gc timestamp")?;
-        let budget_ms = checked_i64(budget_ms, "opportunistic gc budget")?;
-        if budget_ms <= 0 {
+        if budget_ms == 0 {
+            return Ok(());
+        }
+        let deadline_ms = clock.now_ms().saturating_add(budget_ms);
+        let budget_open = || clock.now_ms() < deadline_ms;
+        if !budget_open() {
             return Ok(());
         }
         self.connection
@@ -561,17 +666,9 @@ impl ScannerStore {
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Deferred)
                 .map_err(cache_write)?;
-            let started = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|duration| duration.as_millis() as i64)
-                .unwrap_or(now_ms);
-            let deadline = started.saturating_add(budget_ms);
-            // Orphan artifacts first (zero `context_runs` references).
-            loop {
-                if remaining_opportunistic_ms(deadline) <= 0 {
-                    break;
-                }
-                let deleted = transaction
+            // One bounded orphan-artifact delete batch.
+            if budget_open() {
+                transaction
                     .execute(
                         "DELETE FROM context_artifacts WHERE artifact_id IN (
                             SELECT artifact_id FROM context_artifacts
@@ -579,22 +676,20 @@ impl ScannerStore {
                                 SELECT 1 FROM context_runs
                                 WHERE context_runs.artifact_id = context_artifacts.artifact_id
                             )
+                            ORDER BY created_at_ms ASC, artifact_id ASC
                             LIMIT 64
                          )",
                         [],
                     )
                     .map_err(cache_write)?;
-                if deleted == 0 {
-                    break;
-                }
+                #[cfg(test)]
+                TEST_OPPORTUNISTIC_GC_STATEMENTS_EXECUTED
+                    .with(|count| count.set(count.get().saturating_add(1)));
             }
-            // Aged terminal runs (>90 days) by finished_at_ms ASC.
+            // One bounded aged-terminal-run delete batch.
             let cutoff = now_ms.saturating_sub(cache::TERMINAL_RUN_MAX_AGE_DAYS * 86_400_000);
-            loop {
-                if remaining_opportunistic_ms(deadline) <= 0 {
-                    break;
-                }
-                let deleted = transaction
+            if budget_open() {
+                transaction
                     .execute(
                         "DELETE FROM scan_runs WHERE scan_run_id IN (
                             SELECT scan_run_id FROM scan_runs
@@ -606,16 +701,25 @@ impl ScannerStore {
                         params![cutoff],
                     )
                     .map_err(cache_write)?;
-                if deleted == 0 {
-                    break;
-                }
+                #[cfg(test)]
+                TEST_OPPORTUNISTIC_GC_STATEMENTS_EXECUTED
+                    .with(|count| count.set(count.get().saturating_add(1)));
+            }
+            // COMMIT is another non-preemptible statement. If admission has
+            // expired, dropping this transaction rolls back optional GC only.
+            if !budget_open() {
+                return Ok(());
             }
             transaction.commit().map_err(cache_write)
         })();
-        let _ = self
-            .connection
-            .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS));
-        outcome
+        let restore = restore_default_busy_timeout(&self.connection);
+        match (outcome, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(error), Ok(())) => Err(error),
+            (_, Err(error)) => Err(StoreError::BusyTimeoutRestore {
+                detail: error.to_string(),
+            }),
+        }
     }
 
     pub fn path(&self) -> &Path {
@@ -939,10 +1043,23 @@ impl ScannerStore {
             }
             transaction.commit().map_err(cache_write)
         })();
-        let _ = self
-            .connection
-            .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS));
-        outcome
+        let restore = restore_default_busy_timeout(&self.connection);
+        match (outcome, restore) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Ok(()), Err(_)) => {
+                // The cleanup COMMIT already atomically abandoned the run and
+                // released its lease. Surface a redacted warning without
+                // pretending cleanup failed or attempting a second mutation.
+                eprintln!(
+                    "scanner warning: SQLite busy timeout restore failed after abandon commit"
+                );
+                Ok(())
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Err(_), Err(error)) => Err(StoreError::BusyTimeoutRestore {
+                detail: error.to_string(),
+            }),
+        }
     }
 
     pub fn lookup_cache(
@@ -996,27 +1113,110 @@ impl ScannerStore {
         scan_run_id: i64,
         now_ms: u64,
     ) -> Result<HashSet<String>, StoreError> {
+        self.prepare_inventory_impl(records, scan_run_id, now_ms, None)
+    }
+
+    pub fn prepare_inventory_with_deadline(
+        &mut self,
+        records: &[InventoryRecord],
+        scan_run_id: i64,
+        now_ms: u64,
+        deadlines: RunDeadlines,
+        clock: &dyn Clock,
+    ) -> Result<HashSet<String>, StoreError> {
+        self.prepare_inventory_impl(records, scan_run_id, now_ms, Some((deadlines, clock)))
+    }
+
+    fn prepare_inventory_impl(
+        &mut self,
+        records: &[InventoryRecord],
+        scan_run_id: i64,
+        now_ms: u64,
+        deadline: Option<(RunDeadlines, &dyn Clock)>,
+    ) -> Result<HashSet<String>, StoreError> {
+        let ensure_work_deadline = || {
+            if deadline
+                .is_some_and(|(deadlines, clock)| deadlines.remaining_to_work_deadline(clock) == 0)
+            {
+                Err(StoreError::WorkDeadlineExhausted)
+            } else {
+                Ok(())
+            }
+        };
         let now_ms = checked_i64(now_ms, "inventory timestamp")?;
-        let mut existed = std::collections::HashSet::new();
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(cache_write)?;
-        for record in records {
-            let already: bool = transaction
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM file_inventory WHERE file_identity=?1)",
-                    [&record.file_identity],
-                    |row| row.get(0),
-                )
-                .map_err(cache_write)?;
-            if already {
-                existed.insert(record.file_identity.clone());
+        let mut unique = HashSet::with_capacity(records.len());
+        for (index, record) in records.iter().enumerate() {
+            if index % CACHE_TRANSACTION_BATCH_SIZE == 0 {
+                ensure_work_deadline()?;
+            }
+            record.validate().map_err(StoreError::InvalidRequest)?;
+            if !unique.insert(record.file_identity.as_str()) {
+                return Err(StoreError::InvalidRequest(
+                    "prepared inventory identities must be unique".to_string(),
+                ));
             }
         }
-        inventory::upsert_inventory(&transaction, scan_run_id, now_ms, records)
-            .map_err(cache_write)?;
-        transaction.commit().map_err(cache_write)?;
+        let mut existed = std::collections::HashSet::new();
+        for (batch_index, chunk) in records.chunks(CACHE_TRANSACTION_BATCH_SIZE).enumerate() {
+            let is_last_batch = (batch_index + 1) * CACHE_TRANSACTION_BATCH_SIZE >= records.len();
+            ensure_work_deadline()?;
+            if let Some((deadlines, clock)) = deadline {
+                let remaining_ms = deadlines.remaining_to_work_deadline(clock);
+                if remaining_ms == 0 {
+                    return Err(StoreError::WorkDeadlineExhausted);
+                }
+                self.connection
+                    .busy_timeout(Duration::from_millis(remaining_ms.min(BUSY_TIMEOUT_MS)))
+                    .map_err(cache_write)?;
+            }
+            let batch_result = (|| {
+                let transaction = self
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(cache_write)?;
+                for record in chunk {
+                    ensure_work_deadline()?;
+                    let already: bool = transaction
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM file_inventory WHERE file_identity=?1)",
+                            [&record.file_identity],
+                            |row| row.get(0),
+                        )
+                        .map_err(cache_write)?;
+                    if already {
+                        existed.insert(record.file_identity.clone());
+                    }
+                }
+                inventory::upsert_inventory(
+                    &transaction,
+                    scan_run_id,
+                    now_ms,
+                    chunk,
+                    &ensure_work_deadline,
+                )?;
+                ensure_work_deadline()?;
+                transaction.commit().map_err(cache_write)
+            })();
+            let restore_result = if deadline.is_some() {
+                restore_default_busy_timeout(&self.connection).map_err(cache_write)
+            } else {
+                Ok(())
+            };
+            match (batch_result, restore_result) {
+                (Ok(()), Ok(())) => {}
+                (Ok(()), Err(_)) if is_last_batch => {
+                    eprintln!(
+                        "scanner warning: SQLite busy timeout restore failed after inventory commit"
+                    );
+                }
+                (Err(error), Ok(())) => return Err(error),
+                (_, Err(error)) => {
+                    return Err(StoreError::BusyTimeoutRestore {
+                        detail: error.to_string(),
+                    })
+                }
+            }
+        }
         Ok(existed)
     }
 
@@ -1028,18 +1228,93 @@ impl ScannerStore {
         records: &[CacheWriteRecord],
         cached_at_ms: u64,
     ) -> Result<(), StoreError> {
-        let cached_at_ms = checked_i64(cached_at_ms, "cache write timestamp")?;
-        for record in records {
-            record
-                .validate()
-                .map_err(StoreError::InvalidRequest)?;
+        self.write_success_parse_cache_impl(records, cached_at_ms, None)
+    }
+
+    pub fn write_success_parse_cache_with_deadline(
+        &mut self,
+        records: &[CacheWriteRecord],
+        cached_at_ms: u64,
+        deadlines: RunDeadlines,
+        clock: &dyn Clock,
+    ) -> Result<(), StoreError> {
+        self.write_success_parse_cache_impl(records, cached_at_ms, Some((deadlines, clock)))
+    }
+
+    fn write_success_parse_cache_impl(
+        &mut self,
+        records: &[CacheWriteRecord],
+        cached_at_ms: u64,
+        deadline: Option<(RunDeadlines, &dyn Clock)>,
+    ) -> Result<(), StoreError> {
+        if deadline.is_some() && records.len() > CACHE_TRANSACTION_BATCH_SIZE {
+            return Err(StoreError::InvalidRequest(format!(
+                "parse cache write batch exceeds {CACHE_TRANSACTION_BATCH_SIZE} records"
+            )));
         }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(cache_write)?;
-        cache::write_success_cache(&transaction, cached_at_ms, records).map_err(cache_write)?;
-        transaction.commit().map_err(cache_write)
+        let ensure_work_deadline = || {
+            if deadline
+                .is_some_and(|(deadlines, clock)| deadlines.remaining_to_work_deadline(clock) == 0)
+            {
+                Err(StoreError::WorkDeadlineExhausted)
+            } else {
+                Ok(())
+            }
+        };
+        let cached_at_ms = checked_i64(cached_at_ms, "cache write timestamp")?;
+        for (index, record) in records.iter().enumerate() {
+            if index % CACHE_TRANSACTION_BATCH_SIZE == 0 {
+                ensure_work_deadline()?;
+            }
+            record.validate().map_err(StoreError::InvalidRequest)?;
+        }
+        for chunk in records.chunks(CACHE_TRANSACTION_BATCH_SIZE) {
+            ensure_work_deadline()?;
+            if let Some((deadlines, clock)) = deadline {
+                let remaining_ms = deadlines.remaining_to_work_deadline(clock);
+                if remaining_ms == 0 {
+                    return Err(StoreError::WorkDeadlineExhausted);
+                }
+                self.connection
+                    .busy_timeout(Duration::from_millis(remaining_ms.min(BUSY_TIMEOUT_MS)))
+                    .map_err(cache_write)?;
+            }
+            let batch_result = (|| {
+                let transaction = self
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(cache_write)?;
+                ensure_work_deadline()?;
+                cache::write_success_cache_with_check(&transaction, cached_at_ms, chunk, &|| {
+                    ensure_work_deadline().is_ok()
+                })
+                .map_err(cache_mutation)?;
+                ensure_work_deadline()?;
+                transaction.commit().map_err(cache_write)
+            })();
+            let restore_result = if deadline.is_some() {
+                restore_default_busy_timeout(&self.connection).map_err(cache_write)
+            } else {
+                Ok(())
+            };
+            match (batch_result, restore_result) {
+                (Ok(()), Ok(())) => {}
+                (Ok(()), Err(_)) => {
+                    // This deadline-aware API admits exactly one transaction
+                    // batch, so the successful COMMIT is the complete receipt.
+                    eprintln!(
+                        "scanner warning: SQLite busy timeout restore failed after parse cache commit"
+                    );
+                }
+                (Err(error), Ok(())) => return Err(error),
+                (Err(_), Err(error)) => {
+                    return Err(StoreError::BusyTimeoutRestore {
+                        detail: error.to_string(),
+                    })
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Typed classification-cache lookup (spec Part 3.2). The miss-reason tree
@@ -1085,19 +1360,98 @@ impl ScannerStore {
         records: &[ClassificationCacheWriteRecord],
         cached_at_ms: u64,
     ) -> Result<(), StoreError> {
-        let cached_at_ms = checked_i64(cached_at_ms, "classification cache write timestamp")?;
-        for record in records {
-            record
-                .validate()
-                .map_err(StoreError::InvalidRequest)?;
+        self.write_success_classification_cache_impl(records, cached_at_ms, None)
+    }
+
+    pub fn write_success_classification_cache_with_deadline(
+        &mut self,
+        records: &[ClassificationCacheWriteRecord],
+        cached_at_ms: u64,
+        deadlines: RunDeadlines,
+        clock: &dyn Clock,
+    ) -> Result<(), StoreError> {
+        self.write_success_classification_cache_impl(
+            records,
+            cached_at_ms,
+            Some((deadlines, clock)),
+        )
+    }
+
+    fn write_success_classification_cache_impl(
+        &mut self,
+        records: &[ClassificationCacheWriteRecord],
+        cached_at_ms: u64,
+        deadline: Option<(RunDeadlines, &dyn Clock)>,
+    ) -> Result<(), StoreError> {
+        if deadline.is_some() && records.len() > CACHE_TRANSACTION_BATCH_SIZE {
+            return Err(StoreError::InvalidRequest(format!(
+                "classification cache write batch exceeds {CACHE_TRANSACTION_BATCH_SIZE} records"
+            )));
         }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(cache_write)?;
-        cache::write_success_classification_cache(&transaction, cached_at_ms, records)
-            .map_err(cache_write)?;
-        transaction.commit().map_err(cache_write)
+        let ensure_work_deadline = || {
+            if deadline
+                .is_some_and(|(deadlines, clock)| deadlines.remaining_to_work_deadline(clock) == 0)
+            {
+                Err(StoreError::WorkDeadlineExhausted)
+            } else {
+                Ok(())
+            }
+        };
+        let cached_at_ms = checked_i64(cached_at_ms, "classification cache write timestamp")?;
+        for (index, record) in records.iter().enumerate() {
+            if index % CACHE_TRANSACTION_BATCH_SIZE == 0 {
+                ensure_work_deadline()?;
+            }
+            record.validate().map_err(StoreError::InvalidRequest)?;
+        }
+        for chunk in records.chunks(CACHE_TRANSACTION_BATCH_SIZE) {
+            ensure_work_deadline()?;
+            if let Some((deadlines, clock)) = deadline {
+                let remaining_ms = deadlines.remaining_to_work_deadline(clock);
+                if remaining_ms == 0 {
+                    return Err(StoreError::WorkDeadlineExhausted);
+                }
+                self.connection
+                    .busy_timeout(Duration::from_millis(remaining_ms.min(BUSY_TIMEOUT_MS)))
+                    .map_err(cache_write)?;
+            }
+            let batch_result = (|| {
+                let transaction = self
+                    .connection
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(cache_write)?;
+                ensure_work_deadline()?;
+                cache::write_success_classification_cache_with_check(
+                    &transaction,
+                    cached_at_ms,
+                    chunk,
+                    &|| ensure_work_deadline().is_ok(),
+                )
+                .map_err(cache_mutation)?;
+                ensure_work_deadline()?;
+                transaction.commit().map_err(cache_write)
+            })();
+            let restore_result = if deadline.is_some() {
+                restore_default_busy_timeout(&self.connection).map_err(cache_write)
+            } else {
+                Ok(())
+            };
+            match (batch_result, restore_result) {
+                (Ok(()), Ok(())) => {}
+                (Ok(()), Err(_)) => {
+                    eprintln!(
+                        "scanner warning: SQLite busy timeout restore failed after classification cache commit"
+                    );
+                }
+                (Err(error), Ok(())) => return Err(error),
+                (Err(_), Err(error)) => {
+                    return Err(StoreError::BusyTimeoutRestore {
+                        detail: error.to_string(),
+                    })
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn attach_cache_evidence(
@@ -1164,17 +1518,180 @@ impl ScannerStore {
         active: &ActiveRun,
         batch: &FinalizationBatch,
         now_ms: u64,
+        deadlines: RunDeadlines,
+        clock: &dyn Clock,
     ) -> Result<TerminalAuditTimings, StoreError> {
-        let envelope = validate_finalization(active, batch)?;
+        let remaining_ms = deadlines.remaining_to_absolute_deadline(clock);
+        if remaining_ms == 0 {
+            return Err(StoreError::AbsoluteDeadlineExhausted);
+        }
+        self.connection
+            .busy_timeout(Duration::from_millis(remaining_ms.min(BUSY_TIMEOUT_MS)))
+            .map_err(cache_write)?;
+        let result =
+            self.finalize_with_bounded_busy_timeout(active, batch, now_ms, deadlines, clock);
+        let restore = restore_default_busy_timeout(&self.connection);
+        match (result, restore) {
+            (Ok(timings), Ok(())) => Ok(timings),
+            (Ok(mut timings), Err(_)) => {
+                // COMMIT already linearized the terminal result. Do not rewrite
+                // it as Abandoned merely because this connection cannot be
+                // safely reused for optional post-commit work.
+                timings.busy_timeout_restore_failed = true;
+                Ok(timings)
+            }
+            (Err(error), Ok(())) => Err(error),
+            (Err(_), Err(error)) => Err(StoreError::BusyTimeoutRestore {
+                detail: error.to_string(),
+            }),
+        }
+    }
+
+    fn finalize_with_bounded_busy_timeout(
+        &mut self,
+        active: &ActiveRun,
+        batch: &FinalizationBatch,
+        now_ms: u64,
+        deadlines: RunDeadlines,
+        clock: &dyn Clock,
+    ) -> Result<TerminalAuditTimings, StoreError> {
+        let ensure_deadline = || {
+            if deadlines.remaining_to_absolute_deadline(clock) == 0 {
+                Err(StoreError::AbsoluteDeadlineExhausted)
+            } else {
+                Ok(())
+            }
+        };
+        ensure_deadline()?;
+        let envelope = validate_finalization_with_check(active, batch, &ensure_deadline)?;
+        ensure_deadline()?;
         let now_ms = checked_i64(now_ms, "finalization timestamp")?;
         let metadata_json = envelope_metadata_json(&envelope)?;
+        let metadata_value: serde_json::Value = serde_json::from_str(&metadata_json)
+            .map_err(|error| StoreError::RunCorrupt(error.to_string()))?;
+        let status = terminal_status_text(batch.status)?;
+        let audit_size = compute_audit_size_with_check(batch, &ensure_deadline)?;
+        ensure_deadline()?;
         schema::require_durable_finalization(&self.connection)
             .map_err(|error| cache_write(error.to_string()))?;
+        ensure_deadline()?;
+
+        // All JSON construction, artifact loading/dedup comparison, size
+        // calculation, and semantic validation happen before opening the
+        // terminal transaction. The transaction only applies prepared rows and
+        // rechecks indexed database invariants.
+        let snapshot_artifact = match &batch.snapshot_hit {
+            Some(hit) => Some(load_artifact_from_connection_with_check(
+                &self.connection,
+                hit.artifact_id,
+                &ensure_deadline,
+            )?),
+            None => None,
+        };
+        ensure_deadline()?;
+        let artifact_for_rebuild = snapshot_artifact.as_ref().or(batch.artifact.as_ref());
+        if let Some(context) = &batch.context {
+            if batch.status != RunStatus::Error {
+                let semantic = &artifact_for_rebuild
+                    .ok_or_else(|| {
+                        StoreError::RunCorrupt(
+                            "success/partial run must carry artifact semantics".to_string(),
+                        )
+                    })?
+                    .semantic_summary;
+                let summary = &context.summary;
+                if semantic.source_file_count != summary.source_file_count
+                    || semantic.success_count != summary.success_count
+                    || semantic.timeout_count != summary.timeout_count
+                    || semantic.included_file_count != summary.included_file_count
+                    || semantic.omitted_file_count != summary.omitted_file_count
+                    || semantic.error_file_count != summary.error_file_count
+                    || semantic.input_chars != summary.input_chars
+                    || semantic.output_chars != summary.output_chars
+                {
+                    return Err(StoreError::RunCorrupt(
+                        "artifact semantic summary disagrees with the current summary".to_string(),
+                    ));
+                }
+            }
+        }
+        let prepared_semantic_json = batch
+            .artifact
+            .as_ref()
+            .map(semantic_summary_json_for)
+            .transpose()?;
+        let prepared_artifact_size = match (&batch.artifact, &prepared_semantic_json) {
+            (Some(draft), Some(semantic_json)) => Some(artifact_size_bytes_with_check(
+                &draft.final_context,
+                &draft.context_sha256,
+                semantic_json,
+                batch.snapshot_key.as_ref(),
+                &draft.file_rows,
+                &draft.decision_rows,
+                &ensure_deadline,
+            )?),
+            (None, None) => None,
+            _ => {
+                return Err(StoreError::RunCorrupt(
+                    "artifact preparation is incomplete".to_string(),
+                ))
+            }
+        };
+        let dedup_artifact_id = match (&batch.artifact, &batch.snapshot_key) {
+            (Some(draft), Some(key)) => {
+                dedup_artifact(&self.connection, draft, key, &ensure_deadline)?
+            }
+            _ => None,
+        };
+        let mut protected_runs: HashSet<i64> = HashSet::new();
+        protected_runs.insert(active.scan_run_id);
+        let mut protected_artifacts: HashSet<i64> = HashSet::new();
+        if let Some(hit) = &batch.snapshot_hit {
+            protected_runs.insert(hit.reused_from_context_run_id);
+            protected_artifacts.insert(hit.artifact_id);
+        }
+        if let Some(artifact_id) = dedup_artifact_id {
+            protected_artifacts.insert(artifact_id);
+        }
+        let new_artifact_size = if batch.artifact.is_some() && dedup_artifact_id.is_none() {
+            prepared_artifact_size
+        } else {
+            None
+        };
+        let retention_plan = prepare_finalization_retention_plan(
+            &self.connection,
+            active.scan_run_id,
+            &protected_runs,
+            &protected_artifacts,
+            new_artifact_size,
+            now_ms,
+            audit_size,
+            &ensure_deadline,
+        )?;
+        ensure_deadline()?;
+        let rebuild_started = clock.now_ms();
+        let rebuilt = crate::artifact::rebuild_envelope(
+            &metadata_value,
+            &envelope.summary,
+            artifact_for_rebuild,
+        )
+        .map_err(|message| {
+            StoreError::RunCorrupt(format!("rebuilt envelope is invalid: {message}"))
+        })?;
+        if canonical_envelope_json(&rebuilt)? != batch.envelope_json {
+            return Err(StoreError::RunCorrupt(
+                "rebuilt envelope disagrees with the committed envelope".to_string(),
+            ));
+        }
+        let envelope_rebuild_ms = clock.now_ms().saturating_sub(rebuild_started);
+        let terminal_rows_written =
+            compute_terminal_rows_written(batch, dedup_artifact_id.is_some());
+        ensure_deadline()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(cache_write)?;
-        let transaction_started = Instant::now();
+        let transaction_started = clock.now_ms();
         heartbeat_in_transaction(&transaction, active, now_ms)?;
         ensure_engine_fingerprint(&transaction, active, &envelope)?;
         let handshake_failed = batch.diagnostics.iter().any(|record| {
@@ -1187,46 +1704,63 @@ impl ScannerStore {
         let fingerprints_required = matches!(batch.status, RunStatus::Success | RunStatus::Partial)
             || !batch.inventory.is_empty()
             || !batch.file_results.is_empty()
-            || !batch.cache_writes.is_empty()
             || !handshake_failed;
         if fingerprints_required {
             ensure_worker_fingerprints(&transaction, active)?;
         }
 
-        let audit_write_started = Instant::now();
-        inventory::upsert_inventory(&transaction, active.scan_run_id, now_ms, &batch.inventory)
-            .map_err(cache_write)?;
-        cache::write_success_cache(&transaction, now_ms, &batch.cache_writes)
-            .map_err(cache_write)?;
+        let audit_write_started = clock.now_ms();
         let snapshot_rows = batch.snapshot_hit.is_some();
-        inventory::insert_file_results(
-            &transaction,
-            active.scan_run_id,
-            &batch.file_results,
-            snapshot_rows,
-        )
-        .map_err(cache_write)?;
-        insert_diagnostics(&transaction, active.scan_run_id, &batch.diagnostics)
+        for records in batch.inventory.chunks(TERMINAL_WRITE_BATCH_SIZE) {
+            ensure_deadline()?;
+            verify_inventory_snapshot(&transaction, active.scan_run_id, records)?;
+        }
+        for records in batch.file_results.chunks(TERMINAL_WRITE_BATCH_SIZE) {
+            ensure_deadline()?;
+            inventory::insert_file_results(
+                &transaction,
+                active.scan_run_id,
+                records,
+                snapshot_rows,
+            )
             .map_err(cache_write)?;
-        crate::metrics::insert_metrics(
-            &transaction,
-            active.scan_run_id,
-            &batch.stage_metrics,
-            &batch.extension_metrics,
-        )
-        .map_err(cache_write)?;
-        let current_run_audit_write_ms = elapsed_ms(audit_write_started);
+        }
+        for (batch_index, records) in batch
+            .diagnostics
+            .chunks(TERMINAL_WRITE_BATCH_SIZE)
+            .enumerate()
+        {
+            ensure_deadline()?;
+            insert_diagnostics(
+                &transaction,
+                active.scan_run_id,
+                batch_index * TERMINAL_WRITE_BATCH_SIZE,
+                records,
+            )
+            .map_err(cache_write)?;
+            #[cfg(test)]
+            TEST_TERMINAL_DIAGNOSTIC_BATCHES_WRITTEN.with(|count| {
+                count.set(count.get().saturating_add(1));
+            });
+        }
+        for records in batch.stage_metrics.chunks(TERMINAL_WRITE_BATCH_SIZE) {
+            ensure_deadline()?;
+            crate::metrics::insert_stage_metrics(&transaction, active.scan_run_id, records)
+                .map_err(cache_write)?;
+        }
+        for records in batch.extension_metrics.chunks(TERMINAL_WRITE_BATCH_SIZE) {
+            ensure_deadline()?;
+            crate::metrics::insert_extension_metrics(&transaction, active.scan_run_id, records)
+                .map_err(cache_write)?;
+        }
+        ensure_deadline()?;
+        let current_run_audit_write_ms = clock.now_ms().saturating_sub(audit_write_started);
 
         // ---- artifact write / snapshot-hit reference + context_runs ----
         // spec Part 4/5.2: establish the current `context_runs.artifact_id`
         // reference and a temporary protected set BEFORE the retention/orphan
         // sweep, so a just-hit artifact can never be reclaimed in the
         // "old reference deleted, current reference not yet created" window.
-        let mut protected_runs: HashSet<i64> = HashSet::new();
-        protected_runs.insert(active.scan_run_id);
-        let mut protected_artifacts: HashSet<i64> = HashSet::new();
-        let mut artifact_for_rebuild: Option<ArtifactDraft> = None;
-
         if let Some(context) = &batch.context {
             if batch.status == RunStatus::Error {
                 // spec Part 2.3: a committed Error run MUST write a context_runs
@@ -1239,96 +1773,83 @@ impl ScannerStore {
                     false,
                     None,
                     now_ms,
-                )
-                .map_err(cache_write)?;
+                    &ensure_deadline,
+                )?;
             } else {
-            let artifact_id = if let Some(hit) = &batch.snapshot_hit {
-                let draft = load_artifact_from_connection(&transaction, hit.artifact_id)?;
-                protected_artifacts.insert(hit.artifact_id);
-                protected_runs.insert(hit.reused_from_context_run_id);
-                artifact_for_rebuild = Some(draft);
-                hit.artifact_id
-            } else {
-                let draft = batch.artifact.as_ref().ok_or_else(|| {
-                    StoreError::RunCorrupt(
-                        "success/partial run must carry an artifact draft".to_string(),
-                    )
-                })?;
-                if draft.snapshot_eligible != batch.snapshot_key.is_some() {
-                    return Err(StoreError::RunCorrupt(
-                        "artifact eligibility disagrees with the snapshot key".to_string(),
-                    ));
-                }
-                let semantic_json = semantic_summary_json_for(draft)?;
-                let artifact_id = if let Some(key) = &batch.snapshot_key {
-                    if let Some(existing) = dedup_artifact(&transaction, draft, key)? {
+                let artifact_id = if let Some(hit) = &batch.snapshot_hit {
+                    let still_present: bool = transaction
+                        .query_row(
+                            "SELECT EXISTS(SELECT 1 FROM context_artifacts WHERE artifact_id=?1)",
+                            [hit.artifact_id],
+                            |row| row.get(0),
+                        )
+                        .map_err(cache_write)?;
+                    if !still_present {
+                        return Err(StoreError::RunCorrupt(
+                            "snapshot artifact disappeared before terminal commit".to_string(),
+                        ));
+                    }
+                    protected_artifacts.insert(hit.artifact_id);
+                    protected_runs.insert(hit.reused_from_context_run_id);
+                    hit.artifact_id
+                } else {
+                    let draft = batch.artifact.as_ref().ok_or_else(|| {
+                        StoreError::RunCorrupt(
+                            "success/partial run must carry an artifact draft".to_string(),
+                        )
+                    })?;
+                    if draft.snapshot_eligible != batch.snapshot_key.is_some() {
+                        return Err(StoreError::RunCorrupt(
+                            "artifact eligibility disagrees with the snapshot key".to_string(),
+                        ));
+                    }
+                    let artifact_id = if let Some(existing) = dedup_artifact_id {
                         existing
                     } else {
-                        let size = artifact_size_bytes(
-                            &draft.final_context,
-                            &draft.context_sha256,
-                            &semantic_json,
-                            Some(key),
-                            &draft.file_rows,
-                            &draft.decision_rows,
-                        );
-                        make_room_for_artifact(&transaction, &protected_artifacts, size)?;
-                        insert_artifact(&transaction, draft, Some(key), now_ms)?
-                    }
-                } else {
-                    let size = artifact_size_bytes(
-                        &draft.final_context,
-                        &draft.context_sha256,
-                        &semantic_json,
-                        None,
-                        &draft.file_rows,
-                        &draft.decision_rows,
-                    );
-                    make_room_for_artifact(&transaction, &protected_artifacts, size)?;
-                    insert_artifact(&transaction, draft, None, now_ms)?
+                        let semantic_json = prepared_semantic_json.as_deref().ok_or_else(|| {
+                            StoreError::RunCorrupt(
+                                "artifact semantic JSON was not prepared".to_string(),
+                            )
+                        })?;
+                        let size = prepared_artifact_size.ok_or_else(|| {
+                            StoreError::RunCorrupt("artifact size was not prepared".to_string())
+                        })?;
+                        apply_artifact_retention_plan(
+                            &transaction,
+                            &retention_plan,
+                            &protected_runs,
+                            &protected_artifacts,
+                            &ensure_deadline,
+                        )?;
+                        insert_artifact(
+                            &transaction,
+                            draft,
+                            batch.snapshot_key.as_ref(),
+                            semantic_json,
+                            size,
+                            now_ms,
+                            &ensure_deadline,
+                        )?
+                    };
+                    protected_artifacts.insert(artifact_id);
+                    artifact_id
                 };
-                protected_artifacts.insert(artifact_id);
-                artifact_for_rebuild = Some(draft.clone());
-                artifact_id
-            };
-            insert_context(
-                &transaction,
-                active.scan_run_id,
-                context,
-                Some(artifact_id),
-                batch.snapshot_hit.is_some(),
-                batch
-                    .snapshot_hit
-                    .as_ref()
-                    .map(|hit| hit.reused_from_context_run_id),
-                now_ms,
-            )
-            .map_err(cache_write)?;
-            // spec Part 5.2: the artifact semantic summary must agree with the
-            // current summary (both derive from the same semantic decisions).
-            let semantic = &artifact_for_rebuild
-                .as_ref()
-                .expect("artifact set above")
-                .semantic_summary;
-            let summary = &context.summary;
-            if semantic.source_file_count != summary.source_file_count
-                || semantic.success_count != summary.success_count
-                || semantic.timeout_count != summary.timeout_count
-                || semantic.included_file_count != summary.included_file_count
-                || semantic.omitted_file_count != summary.omitted_file_count
-                || semantic.error_file_count != summary.error_file_count
-                || semantic.input_chars != summary.input_chars
-                || semantic.output_chars != summary.output_chars
-            {
-                return Err(StoreError::RunCorrupt(
-                    "artifact semantic summary disagrees with the current summary".to_string(),
-                ));
-            }
+                insert_context(
+                    &transaction,
+                    active.scan_run_id,
+                    context,
+                    Some(artifact_id),
+                    batch.snapshot_hit.is_some(),
+                    batch
+                        .snapshot_hit
+                        .as_ref()
+                        .map(|hit| hit.reused_from_context_run_id),
+                    now_ms,
+                    &ensure_deadline,
+                )?;
             }
         }
 
-        let status = terminal_status_text(batch.status)?;
-        let audit_size = compute_audit_size(batch);
         let updated = transaction
             .execute(
                 "UPDATE scan_runs
@@ -1372,42 +1893,32 @@ impl ScannerStore {
         // spec Part 4/5.2 terminal run GC: protected set = current run +
         // snapshot-hit source run; the just-hit artifact is protected by the
         // current context_runs reference.
-        retention_gc_for_current_run(&transaction, &protected_runs, now_ms, audit_size)
-            .map_err(cache_write)?;
+        apply_terminal_retention_plan(
+            &transaction,
+            &retention_plan,
+            &protected_runs,
+            &ensure_deadline,
+        )?;
+        ensure_deadline()?;
         // spec Part 5.3: the authoritative `execution_metrics` row is bound at
         // the precommit checkpoint. `terminal_precommit_ms` runs from transaction
         // begin to just before the metrics write; `envelope_rebuild_ms` covers the
         // metadata+summary+artifact rebuild and validation.
-        let terminal_precommit_ms = elapsed_ms(transaction_started);
-        let terminal_rows_written = compute_terminal_rows_written(batch);
-        let rebuild_started = Instant::now();
-        let metadata_value: serde_json::Value = serde_json::from_str(&metadata_json)
-            .map_err(|error| StoreError::RunCorrupt(error.to_string()))?;
-        let rebuilt = crate::artifact::rebuild_envelope(
-            &metadata_value,
-            &envelope.summary,
-            artifact_for_rebuild.as_ref(),
-        )
-        .map_err(|message| {
-            StoreError::RunCorrupt(format!("rebuilt envelope is invalid: {message}"))
-        })?;
-        if canonical_envelope_json(&rebuilt)? != batch.envelope_json {
-            return Err(StoreError::RunCorrupt(
-                "rebuilt envelope disagrees with the committed envelope".to_string(),
-            ));
-        }
-        let envelope_rebuild_ms = elapsed_ms(rebuild_started);
+        let terminal_precommit_ms = clock.now_ms().saturating_sub(transaction_started);
         if let Some(metrics) = &batch.execution_metrics {
             let mut metrics = metrics.clone();
             metrics.current_run_audit_write_ms = current_run_audit_write_ms;
             metrics.terminal_precommit_ms = terminal_precommit_ms;
             metrics.terminal_rows_written = terminal_rows_written;
             metrics.envelope_rebuild_ms = envelope_rebuild_ms;
+            metrics.deadline_precommit_elapsed_ms =
+                clock.now_ms().saturating_sub(deadlines.origin_ms);
             metrics.validate().map_err(|message| {
                 StoreError::RunCorrupt(format!("execution metrics are invalid: {message}"))
             })?;
             insert_execution_metrics(&transaction, active.scan_run_id, &metrics)?;
         }
+        ensure_deadline()?;
         let lease_deleted = transaction
             .execute(
                 "DELETE FROM engine_lease WHERE lease_key=1 AND owner_id=?1",
@@ -1417,6 +1928,9 @@ impl ScannerStore {
         if lease_deleted != 1 {
             return Err(StoreError::LeaseLost);
         }
+        // COMMIT is non-preemptible. The last legal check is immediately before
+        // calling it; a successful COMMIT remains authoritative if it overshoots.
+        ensure_deadline()?;
         transaction.commit().map_err(cache_write)?;
 
         // The exact bytes committed above must still parse as the validated object.
@@ -1426,6 +1940,7 @@ impl ScannerStore {
             terminal_precommit_ms,
             envelope_rebuild_ms,
             terminal_rows_written,
+            busy_timeout_restore_failed: false,
         })
     }
 
@@ -1446,7 +1961,15 @@ impl ScannerStore {
                         final_envelope_metadata_json
                  FROM scan_runs WHERE scan_run_id=?1",
                 [scan_run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .optional()
             .map_err(cache_open)?
@@ -1994,7 +2517,11 @@ fn upgrade_audit_inner(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabaseRes
                 UpgradeIntegrityCheck::NotRun,
                 false,
                 0,
-                upgrade_diagnostic(ErrorCode::InternalError, "system clock is invalid".to_string(), false),
+                upgrade_diagnostic(
+                    ErrorCode::InternalError,
+                    "system clock is invalid".to_string(),
+                    false,
+                ),
             );
         }
     };
@@ -2271,16 +2798,7 @@ fn upgrade_database_apply(request: &UpgradeDatabaseRequestV1) -> UpgradeDatabase
     let auto_vacuum_converted = convert_auto_vacuum(&connection).unwrap_or(false);
     let _ = release_upgrade_lease(&connection);
     if auto_vacuum_converted {
-        upgrade_ok_response(
-            request,
-            1,
-            pre,
-            post,
-            true,
-            true,
-            detected,
-            invalidated,
-        )
+        upgrade_ok_response(request, 1, pre, post, true, true, detected, invalidated)
     } else {
         upgrade_partial_response(
             request,
@@ -2410,7 +2928,8 @@ fn maintenance_command(request: &MaintenanceRequestV1) -> MaintenanceResponseV1 
             None,
             upgrade_diagnostic(
                 ErrorCode::SchemaUpgradeRequired,
-                "maintenance requires a v2 scanner database; run upgrade-db apply=true first".to_string(),
+                "maintenance requires a v2 scanner database; run upgrade-db apply=true first"
+                    .to_string(),
                 false,
             ),
         );
@@ -2762,10 +3281,9 @@ fn maintenance_sizes(
         sum("SELECT COALESCE(SUM(entry_size_bytes), 0) FROM classification_cache")?;
     let context_artifacts_logical_bytes =
         sum("SELECT COALESCE(SUM(artifact_size_bytes), 0) FROM context_artifacts")?;
-    let terminal_audit_logical_bytes = sum(
-        "SELECT COALESCE(SUM(audit_size_bytes), 0) FROM scan_runs
-         WHERE status IN ('success', 'partial', 'error', 'abandoned')",
-    )?;
+    let terminal_audit_logical_bytes =
+        sum("SELECT COALESCE(SUM(audit_size_bytes), 0) FROM scan_runs
+         WHERE status IN ('success', 'partial', 'error', 'abandoned')")?;
     let page_size: i64 = connection
         .query_row("PRAGMA page_size", [], |row| row.get(0))
         .map_err(cache_open)?;
@@ -2965,12 +3483,11 @@ fn artifact_invariants_hold(connection: &Connection) -> bool {
     if eligible_count_mismatch != 0 {
         return false;
     }
-    let mut statement = match connection
-        .prepare("SELECT final_context, context_sha256 FROM context_artifacts")
-    {
-        Ok(statement) => statement,
-        Err(_) => return false,
-    };
+    let mut statement =
+        match connection.prepare("SELECT final_context, context_sha256 FROM context_artifacts") {
+            Ok(statement) => statement,
+            Err(_) => return false,
+        };
     let mut rows = match statement.query([]) {
         Ok(rows) => rows,
         Err(_) => return false,
@@ -3002,13 +3519,12 @@ fn run_maintenance_gc(
     expire_stale_running_runs(&transaction, now_ms).map_err(cache_write)?;
     gc_terminal_runs(&transaction, now_ms).map_err(cache_write)?;
     gc_orphan_artifacts(&transaction).map_err(cache_write)?;
-    cache::evict_parse_cache(&transaction, cache::PARSE_CACHE_MAX_BYTES)
-        .map_err(cache_write)?;
+    cache::evict_parse_cache(&transaction, cache::PARSE_CACHE_MAX_BYTES).map_err(cache_write)?;
     cache::evict_classification_cache(&transaction, cache::CLASSIFICATION_CACHE_MAX_BYTES)
         .map_err(cache_write)?;
     // Count the deletions inside the transaction so a commit failure rolls back
     // everything and the reported deleted counts stay honest (zero on rollback).
-    let after = table_counts(&*transaction)?;
+    let after = table_counts(&transaction)?;
     transaction.commit().map_err(cache_write)?;
     Ok(deleted_diff(&before, &after))
 }
@@ -3029,10 +3545,7 @@ fn expire_stale_running_runs(
 ///（maintenance 无当前 record，protected set 为空），再按
 /// `(finished_at_ms ASC, scan_run_id ASC)` 删到 ≤500 runs 且 ≤2GiB。不级联删除
 /// 全局 inventory/parse cache。
-fn gc_terminal_runs(
-    transaction: &rusqlite::Transaction<'_>,
-    now_ms: i64,
-) -> rusqlite::Result<()> {
+fn gc_terminal_runs(transaction: &rusqlite::Transaction<'_>, now_ms: i64) -> rusqlite::Result<()> {
     let cutoff_ms = now_ms.saturating_sub(cache::TERMINAL_RUN_MAX_AGE_DAYS * 86_400_000);
     transaction.execute(
         "DELETE FROM scan_runs
@@ -3092,10 +3605,8 @@ fn gc_orphan_artifacts(transaction: &rusqlite::Transaction<'_>) -> rusqlite::Res
 /// Logical INSERT/UPDATE row count of the terminal transaction (spec Part 5.3
 /// `terminal_rows_written`): current run/artifact/context/metric rows only;
 /// retention DELETE, cache-transaction and maintenance rows are excluded.
-fn compute_terminal_rows_written(batch: &FinalizationBatch) -> u64 {
+fn compute_terminal_rows_written(batch: &FinalizationBatch, artifact_deduplicated: bool) -> u64 {
     let mut rows = 0_u64;
-    rows = rows.saturating_add(batch.inventory.len() as u64);
-    rows = rows.saturating_add(batch.cache_writes.len() as u64);
     rows = rows.saturating_add(batch.file_results.len() as u64);
     rows = rows.saturating_add(batch.file_results.len() as u64); // scan_file_execution_v2
     rows = rows.saturating_add(batch.diagnostics.len() as u64);
@@ -3104,7 +3615,7 @@ fn compute_terminal_rows_written(batch: &FinalizationBatch) -> u64 {
     if let Some(context) = &batch.context {
         rows = rows.saturating_add(1); // context_runs row
         rows = rows.saturating_add(context.decisions.len() as u64);
-        if batch.snapshot_hit.is_none() {
+        if batch.snapshot_hit.is_none() && !artifact_deduplicated {
             if let Some(artifact) = &batch.artifact {
                 rows = rows.saturating_add(1); // artifact parent
                 rows = rows.saturating_add(artifact.file_rows.len() as u64);
@@ -3117,18 +3628,27 @@ fn compute_terminal_rows_written(batch: &FinalizationBatch) -> u64 {
     rows
 }
 
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at.elapsed().as_millis() as u64
+#[cfg(test)]
+fn compute_audit_size(batch: &FinalizationBatch) -> i64 {
+    compute_audit_size_with_check(batch, &|| Ok(())).unwrap_or(i64::MAX)
 }
 
-fn compute_audit_size(batch: &FinalizationBatch) -> i64 {
+fn compute_audit_size_with_check(
+    batch: &FinalizationBatch,
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+) -> Result<i64, StoreError> {
     let mut total = batch.envelope_json.len() as i64;
-    total += batch.inventory.len() as i64 * 256;
-    for record in &batch.file_results {
+    for (index, record) in batch.file_results.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         total += record.relative_path.len() as i64 + 256;
         total += file_execution_audit_size(record, batch.snapshot_hit.is_some());
     }
-    for record in &batch.diagnostics {
+    for (index, record) in batch.diagnostics.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         total += record.diagnostic.message.len() as i64 + 160;
     }
     total += batch.stage_metrics.len() as i64 * 48;
@@ -3137,11 +3657,14 @@ fn compute_audit_size(batch: &FinalizationBatch) -> i64 {
     }
     if let Some(context) = &batch.context {
         total += context.final_context.len() as i64 + 320;
-        for record in &context.decisions {
+        for (index, record) in context.decisions.iter().enumerate() {
+            if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+                ensure_deadline()?;
+            }
             total += record.decision.relative_path.len() as i64 + 160;
         }
     }
-    total
+    Ok(total)
 }
 
 fn file_execution_audit_size(record: &FileResultRecord, snapshot_rows: bool) -> i64 {
@@ -3199,9 +3722,7 @@ fn file_execution_audit_size(record: &FileResultRecord, snapshot_rows: bool) -> 
         .saturating_add(nullable_integer_bytes(
             classification.result_examined_pages.0,
         ))
-        .saturating_add(nullable_integer_bytes(
-            classification.run_inspected_pages.0,
-        ))
+        .saturating_add(nullable_integer_bytes(classification.run_inspected_pages.0))
         .saturating_add(INTEGER_BYTES)
         .saturating_add(INTEGER_BYTES)
         .saturating_add(text_bytes(&classification_transport))
@@ -3211,84 +3732,489 @@ fn file_execution_audit_size(record: &FileResultRecord, snapshot_rows: bool) -> 
     total
 }
 
-/// Terminal run GC for the CURRENT finalize（spec Part 4）：先删超 90 天且不在
-/// protected set（当前 run）的 rows，再按 `(finished_at_ms ASC, scan_run_id ASC)`
-/// 删到 ≤500 runs 且 ≤2GiB。为当前 record 腾挪使用「现存 + 当前 audit」比较；
-/// 若删尽未保护旧 run 后当前 record 自身仍超 cap → fail closed（不部分落 audit）。
-fn retention_gc_for_current_run(
-    transaction: &rusqlite::Transaction<'_>,
+const RETENTION_DELETE_BATCH_SIZE: usize = 64;
+
+#[derive(Debug)]
+enum PreparedRetentionDelete {
+    Artifacts(Vec<i64>),
+    Runs(Vec<i64>),
+}
+
+#[derive(Debug, Default)]
+struct FinalizationRetentionPlan {
+    artifact_room: Vec<PreparedRetentionDelete>,
+    terminal_run_batches: Vec<Vec<i64>>,
+    new_artifact_size: Option<i64>,
+}
+
+#[derive(Debug)]
+struct ArtifactRetentionState {
+    artifact_id: i64,
+    artifact_size_bytes: i64,
+    created_at_ms: i64,
+    remaining_references: usize,
+    removed: bool,
+}
+
+#[derive(Debug)]
+struct TerminalRetentionState {
+    scan_run_id: i64,
+    finished_at_ms: i64,
+    audit_size_bytes: i64,
+    removed: bool,
+}
+
+/// Prepares every retention victim before the terminal transaction (spec Part
+/// 2.3). The simulation uses the frozen ordering and accounts for references
+/// that become orphaned after a planned terminal-run delete.
+#[allow(clippy::too_many_arguments)]
+fn prepare_finalization_retention_plan(
+    connection: &Connection,
+    current_run_id: i64,
     protected_runs: &HashSet<i64>,
+    protected_artifacts: &HashSet<i64>,
+    new_artifact_size: Option<i64>,
     now_ms: i64,
     audit_size: i64,
-) -> Result<(), StoreError> {
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+) -> Result<FinalizationRetentionPlan, StoreError> {
     if audit_size > cache::TERMINAL_AUDIT_MAX_BYTES {
         return Err(StoreError::RunCorrupt(
             "current terminal audit exceeds the 2 GiB retention cap".to_string(),
         ));
     }
-    let cutoff_ms = now_ms.saturating_sub(cache::TERMINAL_RUN_MAX_AGE_DAYS * 86_400_000);
-    let clause = terminal_run_not_in_clause(protected_runs);
-    let sql = format!(
-        "DELETE FROM scan_runs
-         WHERE status IN ('success', 'partial', 'error', 'abandoned')
-           AND finished_at_ms IS NOT NULL AND finished_at_ms < ?1
-           {clause}"
-    );
-    let mut params = vec![cutoff_ms];
-    params.extend(protected_runs.iter().copied());
-    transaction
-        .execute(&sql, rusqlite::params_from_iter(params.iter()))
-        .map_err(cache_write)?;
-    loop {
-        let count: i64 = transaction
-            .query_row(
-                "SELECT count(*) FROM scan_runs
-                 WHERE status IN ('success', 'partial', 'error', 'abandoned')",
-                [],
-                |row| row.get(0),
+    if new_artifact_size.is_some_and(|size| size > cache::CONTEXT_ARTIFACTS_MAX_BYTES) {
+        return Err(StoreError::RunCorrupt(
+            "current artifact exceeds the 512 MiB context artifact cap".to_string(),
+        ));
+    }
+
+    let mut artifacts = Vec::new();
+    let mut artifact_indexes = HashMap::new();
+    let mut artifact_bytes = 0_i64;
+    {
+        ensure_deadline()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT artifact_id, artifact_size_bytes, created_at_ms
+                 FROM context_artifacts ORDER BY artifact_id ASC",
             )
             .map_err(cache_write)?;
-        let total: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(SUM(audit_size_bytes), 0) FROM scan_runs
-                 WHERE status IN ('success', 'partial', 'error', 'abandoned')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(cache_write)?;
-        if count <= cache::TERMINAL_RUN_MAX_COUNT && total <= cache::TERMINAL_AUDIT_MAX_BYTES {
-            return Ok(());
+        let mut rows = statement.query([]).map_err(cache_write)?;
+        let mut index = 0_usize;
+        loop {
+            if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+                ensure_deadline()?;
+            }
+            let Some(row) = rows.next().map_err(cache_write)? else {
+                break;
+            };
+            let artifact_id: i64 = row.get(0).map_err(cache_write)?;
+            let artifact_size_bytes: i64 = row.get(1).map_err(cache_write)?;
+            let created_at_ms: i64 = row.get(2).map_err(cache_write)?;
+            artifact_bytes = artifact_bytes
+                .checked_add(artifact_size_bytes)
+                .ok_or_else(|| {
+                    StoreError::RunCorrupt("artifact retention byte total overflowed".to_string())
+                })?;
+            artifact_indexes.insert(artifact_id, artifacts.len());
+            artifacts.push(ArtifactRetentionState {
+                artifact_id,
+                artifact_size_bytes,
+                created_at_ms,
+                remaining_references: 0,
+                removed: false,
+            });
+            index += 1;
         }
-        let clause = terminal_run_not_in_clause(protected_runs);
-        let sql = format!(
-            "DELETE FROM scan_runs WHERE scan_run_id IN (
-                SELECT scan_run_id FROM scan_runs
-                WHERE status IN ('success', 'partial', 'error', 'abandoned')
-                  {clause}
-                ORDER BY finished_at_ms ASC, scan_run_id ASC
-                LIMIT 1
-             )"
-        );
-        let mut params: Vec<i64> = protected_runs.iter().copied().collect();
-        params.sort_unstable();
-        let deleted = transaction
-            .execute(&sql, rusqlite::params_from_iter(params.iter()))
+    }
+
+    let mut run_artifacts: HashMap<i64, Vec<usize>> = HashMap::new();
+    {
+        ensure_deadline()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT scan_run_id, artifact_id FROM context_runs
+                 WHERE artifact_id IS NOT NULL ORDER BY scan_run_id ASC, artifact_id ASC",
+            )
             .map_err(cache_write)?;
-        if deleted == 0 {
-            // 无未保护旧 run 可删，仍超 cap → fail closed。
+        let mut rows = statement.query([]).map_err(cache_write)?;
+        let mut index = 0_usize;
+        loop {
+            if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+                ensure_deadline()?;
+            }
+            let Some(row) = rows.next().map_err(cache_write)? else {
+                break;
+            };
+            let scan_run_id: i64 = row.get(0).map_err(cache_write)?;
+            let artifact_id: i64 = row.get(1).map_err(cache_write)?;
+            let artifact_index = *artifact_indexes.get(&artifact_id).ok_or_else(|| {
+                StoreError::RunCorrupt(
+                    "context run references a missing artifact during retention planning"
+                        .to_string(),
+                )
+            })?;
+            artifacts[artifact_index].remaining_references = artifacts[artifact_index]
+                .remaining_references
+                .checked_add(1)
+                .ok_or_else(|| {
+                    StoreError::RunCorrupt("artifact reference count overflowed".to_string())
+                })?;
+            run_artifacts
+                .entry(scan_run_id)
+                .or_default()
+                .push(artifact_index);
+            index += 1;
+        }
+    }
+
+    let mut terminal_runs = Vec::new();
+    {
+        ensure_deadline()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT scan_run_id, finished_at_ms, audit_size_bytes FROM scan_runs
+                 WHERE status IN ('success', 'partial', 'error', 'abandoned')
+                 ORDER BY finished_at_ms ASC, scan_run_id ASC",
+            )
+            .map_err(cache_write)?;
+        let mut rows = statement.query([]).map_err(cache_write)?;
+        let mut index = 0_usize;
+        loop {
+            if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+                ensure_deadline()?;
+            }
+            let Some(row) = rows.next().map_err(cache_write)? else {
+                break;
+            };
+            let scan_run_id: i64 = row.get(0).map_err(cache_write)?;
+            if scan_run_id == current_run_id {
+                return Err(StoreError::RunCorrupt(
+                    "active run became terminal before finalization".to_string(),
+                ));
+            }
+            let finished_at_ms: Option<i64> = row.get(1).map_err(cache_write)?;
+            terminal_runs.push(TerminalRetentionState {
+                scan_run_id,
+                finished_at_ms: finished_at_ms.ok_or_else(|| {
+                    StoreError::RunCorrupt(
+                        "terminal retention row has no finished timestamp".to_string(),
+                    )
+                })?,
+                audit_size_bytes: row.get(2).map_err(cache_write)?,
+                removed: false,
+            });
+            index += 1;
+        }
+    }
+
+    let mut plan = FinalizationRetentionPlan {
+        new_artifact_size,
+        ..FinalizationRetentionPlan::default()
+    };
+    if let Some(new_size) = new_artifact_size {
+        let mut orphan_heap = BinaryHeap::new();
+        for (index, artifact) in artifacts.iter().enumerate() {
+            if artifact.remaining_references == 0
+                && !protected_artifacts.contains(&artifact.artifact_id)
+            {
+                orphan_heap.push(Reverse((
+                    artifact.created_at_ms,
+                    artifact.artifact_id,
+                    index,
+                )));
+            }
+        }
+        let mut run_cursor = 0_usize;
+        while artifact_bytes.saturating_add(new_size) > cache::CONTEXT_ARTIFACTS_MAX_BYTES {
+            ensure_deadline()?;
+            let orphan_batch = select_orphan_artifact_batch(
+                &mut artifacts,
+                &mut orphan_heap,
+                protected_artifacts,
+                &mut artifact_bytes,
+            );
+            if !orphan_batch.is_empty() {
+                plan.artifact_room
+                    .push(PreparedRetentionDelete::Artifacts(orphan_batch));
+                continue;
+            }
+
+            let mut run_batch = Vec::new();
+            while run_batch.len() < RETENTION_DELETE_BATCH_SIZE && run_cursor < terminal_runs.len()
+            {
+                let run_index = run_cursor;
+                run_cursor += 1;
+                if terminal_runs[run_index].removed
+                    || protected_runs.contains(&terminal_runs[run_index].scan_run_id)
+                {
+                    continue;
+                }
+                let run_id = terminal_runs[run_index].scan_run_id;
+                terminal_runs[run_index].removed = true;
+                run_batch.push(run_id);
+                if let Some(indexes) = run_artifacts.get(&run_id) {
+                    for &artifact_index in indexes {
+                        let artifact = &mut artifacts[artifact_index];
+                        artifact.remaining_references = artifact
+                            .remaining_references
+                            .checked_sub(1)
+                            .ok_or_else(|| {
+                                StoreError::RunCorrupt(
+                                    "artifact reference simulation underflowed".to_string(),
+                                )
+                            })?;
+                        if artifact.remaining_references == 0
+                            && !artifact.removed
+                            && !protected_artifacts.contains(&artifact.artifact_id)
+                        {
+                            orphan_heap.push(Reverse((
+                                artifact.created_at_ms,
+                                artifact.artifact_id,
+                                artifact_index,
+                            )));
+                        }
+                    }
+                }
+            }
+            if run_batch.is_empty() {
+                return Err(StoreError::RunCorrupt(
+                    "context artifact retention could not make room for the current artifact"
+                        .to_string(),
+                ));
+            }
+            plan.artifact_room
+                .push(PreparedRetentionDelete::Runs(run_batch));
+        }
+    }
+
+    let cutoff_ms = now_ms.saturating_sub(cache::TERMINAL_RUN_MAX_AGE_DAYS * 86_400_000);
+    let mut terminal_batch = Vec::new();
+    for run in &mut terminal_runs {
+        if !run.removed
+            && !protected_runs.contains(&run.scan_run_id)
+            && run.finished_at_ms < cutoff_ms
+        {
+            run.removed = true;
+            terminal_batch.push(run.scan_run_id);
+            if terminal_batch.len() == RETENTION_DELETE_BATCH_SIZE {
+                plan.terminal_run_batches
+                    .push(std::mem::take(&mut terminal_batch));
+            }
+        }
+    }
+    if !terminal_batch.is_empty() {
+        plan.terminal_run_batches.push(terminal_batch);
+    }
+
+    let mut terminal_count = 1_i64;
+    let mut terminal_bytes = audit_size;
+    for run in terminal_runs.iter().filter(|run| !run.removed) {
+        terminal_count = terminal_count.checked_add(1).ok_or_else(|| {
+            StoreError::RunCorrupt("terminal retention row count overflowed".to_string())
+        })?;
+        terminal_bytes = terminal_bytes
+            .checked_add(run.audit_size_bytes)
+            .ok_or_else(|| {
+                StoreError::RunCorrupt("terminal retention byte total overflowed".to_string())
+            })?;
+    }
+
+    let mut cap_batch = Vec::new();
+    for run in &mut terminal_runs {
+        if terminal_count <= cache::TERMINAL_RUN_MAX_COUNT
+            && terminal_bytes <= cache::TERMINAL_AUDIT_MAX_BYTES
+        {
+            break;
+        }
+        if run.removed || protected_runs.contains(&run.scan_run_id) {
+            continue;
+        }
+        run.removed = true;
+        terminal_count = terminal_count.saturating_sub(1);
+        terminal_bytes = terminal_bytes.saturating_sub(run.audit_size_bytes);
+        cap_batch.push(run.scan_run_id);
+        if cap_batch.len() == RETENTION_DELETE_BATCH_SIZE {
+            plan.terminal_run_batches
+                .push(std::mem::take(&mut cap_batch));
+        }
+    }
+    if !cap_batch.is_empty() {
+        plan.terminal_run_batches.push(cap_batch);
+    }
+    if terminal_count > cache::TERMINAL_RUN_MAX_COUNT
+        || terminal_bytes > cache::TERMINAL_AUDIT_MAX_BYTES
+    {
+        return Err(StoreError::RunCorrupt(
+            "terminal audit retention could not make room for the current record".to_string(),
+        ));
+    }
+    Ok(plan)
+}
+
+fn select_orphan_artifact_batch(
+    artifacts: &mut [ArtifactRetentionState],
+    orphan_heap: &mut BinaryHeap<Reverse<(i64, i64, usize)>>,
+    protected_artifacts: &HashSet<i64>,
+    artifact_bytes: &mut i64,
+) -> Vec<i64> {
+    let mut batch = Vec::new();
+    while batch.len() < RETENTION_DELETE_BATCH_SIZE {
+        let Some(Reverse((_, _, index))) = orphan_heap.pop() else {
+            break;
+        };
+        let artifact = &mut artifacts[index];
+        if artifact.removed
+            || artifact.remaining_references != 0
+            || protected_artifacts.contains(&artifact.artifact_id)
+        {
+            continue;
+        }
+        artifact.removed = true;
+        *artifact_bytes = artifact_bytes.saturating_sub(artifact.artifact_size_bytes);
+        batch.push(artifact.artifact_id);
+    }
+    batch
+}
+
+fn apply_artifact_retention_plan(
+    transaction: &rusqlite::Transaction<'_>,
+    plan: &FinalizationRetentionPlan,
+    protected_runs: &HashSet<i64>,
+    protected_artifacts: &HashSet<i64>,
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    for deletion in &plan.artifact_room {
+        ensure_deadline()?;
+        match deletion {
+            PreparedRetentionDelete::Artifacts(ids) => {
+                delete_prepared_artifacts(transaction, ids, protected_artifacts)?
+            }
+            PreparedRetentionDelete::Runs(ids) => {
+                delete_prepared_terminal_runs(transaction, ids, protected_runs)?
+            }
+        }
+    }
+    if let Some(new_size) = plan.new_artifact_size {
+        ensure_deadline()?;
+        let current: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(SUM(artifact_size_bytes), 0) FROM context_artifacts",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(cache_write)?;
+        if current.saturating_add(new_size) > cache::CONTEXT_ARTIFACTS_MAX_BYTES {
             return Err(StoreError::RunCorrupt(
-                "terminal audit retention could not make room for the current record".to_string(),
+                "prepared artifact retention plan no longer makes room".to_string(),
             ));
         }
     }
+    Ok(())
 }
 
-fn terminal_run_not_in_clause(protected_runs: &HashSet<i64>) -> String {
-    if protected_runs.is_empty() {
-        return String::new();
+fn apply_terminal_retention_plan(
+    transaction: &rusqlite::Transaction<'_>,
+    plan: &FinalizationRetentionPlan,
+    protected_runs: &HashSet<i64>,
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    for ids in &plan.terminal_run_batches {
+        ensure_deadline()?;
+        delete_prepared_terminal_runs(transaction, ids, protected_runs)?;
     }
-    let placeholders = vec!["?"; protected_runs.len()].join(",");
-    format!(" AND scan_run_id NOT IN ({placeholders})")
+    ensure_deadline()?;
+    let (count, total): (i64, i64) = transaction
+        .query_row(
+            "SELECT count(*), COALESCE(SUM(audit_size_bytes), 0) FROM scan_runs
+             WHERE status IN ('success', 'partial', 'error', 'abandoned')",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(cache_write)?;
+    if count > cache::TERMINAL_RUN_MAX_COUNT || total > cache::TERMINAL_AUDIT_MAX_BYTES {
+        return Err(StoreError::RunCorrupt(
+            "prepared terminal retention plan no longer satisfies the hard caps".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn delete_prepared_artifacts(
+    transaction: &rusqlite::Transaction<'_>,
+    ids: &[i64],
+    protected_artifacts: &HashSet<i64>,
+) -> Result<(), StoreError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let id_placeholders = vec!["?"; ids.len()].join(",");
+    let mut protected: Vec<i64> = protected_artifacts.iter().copied().collect();
+    protected.sort_unstable();
+    let protected_clause = if protected.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " AND context_artifacts.artifact_id NOT IN ({})",
+            vec!["?"; protected.len()].join(",")
+        )
+    };
+    let sql = format!(
+        "DELETE FROM context_artifacts
+         WHERE context_artifacts.artifact_id IN ({id_placeholders})
+           AND NOT EXISTS(
+               SELECT 1 FROM context_runs
+               WHERE context_runs.artifact_id = context_artifacts.artifact_id
+           ){protected_clause}"
+    );
+    let parameters: Vec<i64> = ids.iter().copied().chain(protected).collect();
+    let deleted = transaction
+        .execute(&sql, rusqlite::params_from_iter(parameters))
+        .map_err(cache_write)?;
+    if deleted != ids.len() {
+        return Err(StoreError::RunCorrupt(
+            "prepared artifact retention victims changed before terminal apply".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn delete_prepared_terminal_runs(
+    transaction: &rusqlite::Transaction<'_>,
+    ids: &[i64],
+    protected_runs: &HashSet<i64>,
+) -> Result<(), StoreError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let id_placeholders = vec!["?"; ids.len()].join(",");
+    let mut protected: Vec<i64> = protected_runs.iter().copied().collect();
+    protected.sort_unstable();
+    let protected_clause = if protected.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " AND scan_runs.scan_run_id NOT IN ({})",
+            vec!["?"; protected.len()].join(",")
+        )
+    };
+    let sql = format!(
+        "DELETE FROM scan_runs
+         WHERE scan_runs.scan_run_id IN ({id_placeholders})
+           AND status IN ('success', 'partial', 'error', 'abandoned')
+           {protected_clause}"
+    );
+    let parameters: Vec<i64> = ids.iter().copied().chain(protected).collect();
+    let deleted = transaction
+        .execute(&sql, rusqlite::params_from_iter(parameters))
+        .map_err(cache_write)?;
+    if deleted != ids.len() {
+        return Err(StoreError::RunCorrupt(
+            "prepared terminal retention victims changed before terminal apply".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn run_incremental_vacuum(connection: &Connection) -> Result<u64, StoreError> {
@@ -3337,7 +4263,9 @@ fn deleted_diff(
     after: &MaintenanceDeletedV1,
 ) -> MaintenanceDeletedV1 {
     MaintenanceDeletedV1 {
-        parse_cache_rows: before.parse_cache_rows.saturating_sub(after.parse_cache_rows),
+        parse_cache_rows: before
+            .parse_cache_rows
+            .saturating_sub(after.parse_cache_rows),
         classification_cache_rows: before
             .classification_cache_rows
             .saturating_sub(after.classification_cache_rows),
@@ -3366,7 +4294,9 @@ fn deleted_diff(
         scan_extension_metrics_rows: before
             .scan_extension_metrics_rows
             .saturating_sub(after.scan_extension_metrics_rows),
-        context_runs_rows: before.context_runs_rows.saturating_sub(after.context_runs_rows),
+        context_runs_rows: before
+            .context_runs_rows
+            .saturating_sub(after.context_runs_rows),
         context_decisions_rows: before
             .context_decisions_rows
             .saturating_sub(after.context_decisions_rows),
@@ -3374,13 +4304,6 @@ fn deleted_diff(
             .file_inventory_rows
             .saturating_sub(after.file_inventory_rows),
     }
-}
-
-fn remaining_opportunistic_ms(deadline: i64) -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| deadline.saturating_sub(duration.as_millis() as i64))
-        .unwrap_or(0)
 }
 
 fn acquire_upgrade_lease(connection: &mut Connection, now_ms: i64) -> Result<(), StoreError> {
@@ -3491,6 +4414,38 @@ fn cache_write(error: impl ToString) -> StoreError {
     }
 }
 
+fn cache_mutation(error: cache::CacheMutationError) -> StoreError {
+    match error {
+        cache::CacheMutationError::Sqlite(error) => cache_write(error),
+        cache::CacheMutationError::DeadlineExhausted => StoreError::WorkDeadlineExhausted,
+    }
+}
+
+fn restore_default_busy_timeout(connection: &Connection) -> rusqlite::Result<()> {
+    #[cfg(test)]
+    if TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE.with(|flag| flag.get()) {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
+    connection.busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS))
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+    static TEST_TERMINAL_DIAGNOSTIC_BATCHES_WRITTEN: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static TEST_OPPORTUNISTIC_GC_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    static TEST_OPPORTUNISTIC_GC_STATEMENTS_EXECUTED: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_test_opportunistic_gc_calls() -> usize {
+    TEST_OPPORTUNISTIC_GC_CALLS.with(|count| count.replace(0))
+}
+
 fn query_existing_run(
     connection: &Connection,
     request_id: &str,
@@ -3577,8 +4532,11 @@ fn load_stored_envelope_ref(
     let metadata_json = existing
         .final_envelope_metadata_json
         .clone()
-        .ok_or_else(|| StoreError::RunCorrupt("terminal run has no envelope metadata".to_string()))?;
-    let envelope = rebuild_envelope_from_metadata(connection, existing.scan_run_id, &metadata_json)?;
+        .ok_or_else(|| {
+            StoreError::RunCorrupt("terminal run has no envelope metadata".to_string())
+        })?;
+    let envelope =
+        rebuild_envelope_from_metadata(connection, existing.scan_run_id, &metadata_json)?;
     let envelope_json = canonical_envelope_json(&envelope)?;
     if envelope.request_id != request_id
         || envelope.scan_run_id.0 != Some(existing.scan_run_id as u64)
@@ -3606,21 +4564,19 @@ pub(crate) fn rebuild_envelope_from_metadata(
 ) -> Result<ContextEnvelope, StoreError> {
     let metadata: serde_json::Value = serde_json::from_str(metadata_json)
         .map_err(|_| StoreError::RunCorrupt("envelope metadata JSON is invalid".to_string()))?;
-    let summary: ContextSummary = serde_json::from_value(
-        metadata
-            .get("summary")
-            .cloned()
-            .ok_or_else(|| StoreError::RunCorrupt("envelope metadata missing summary".to_string()))?,
-    )
-    .map_err(|_| StoreError::RunCorrupt("envelope metadata summary is invalid".to_string()))?;
+    let summary: ContextSummary =
+        serde_json::from_value(metadata.get("summary").cloned().ok_or_else(|| {
+            StoreError::RunCorrupt("envelope metadata missing summary".to_string())
+        })?)
+        .map_err(|_| StoreError::RunCorrupt("envelope metadata summary is invalid".to_string()))?;
     let artifact = load_artifact_for_replay(connection, scan_run_id)?;
     let envelope = crate::artifact::rebuild_envelope(&metadata, &summary, artifact.as_ref())
         .map_err(|message| {
             StoreError::RunCorrupt(format!("rebuilt envelope is invalid: {message}"))
         })?;
-    envelope
-        .validate()
-        .map_err(|_| StoreError::RunCorrupt("rebuilt envelope violates the contract".to_string()))?;
+    envelope.validate().map_err(|_| {
+        StoreError::RunCorrupt("rebuilt envelope violates the contract".to_string())
+    })?;
     Ok(envelope)
 }
 
@@ -3875,9 +4831,16 @@ fn validate_finalization(
     active: &ActiveRun,
     batch: &FinalizationBatch,
 ) -> Result<ContextEnvelope, StoreError> {
+    validate_finalization_with_check(active, batch, &|| Ok(()))
+}
+
+fn validate_finalization_with_check(
+    active: &ActiveRun,
+    batch: &FinalizationBatch,
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+) -> Result<ContextEnvelope, StoreError> {
     terminal_status_text(batch.status)?;
     if batch.inventory.len() > 1_000_000
-        || batch.cache_writes.len() > 1_000_000
         || batch.file_results.len() > 1_000_000
         || batch.diagnostics.len() > 100_001
     {
@@ -3886,7 +4849,10 @@ fn validate_finalization(
         ));
     }
     let mut inventory_by_identity = std::collections::HashMap::new();
-    for record in &batch.inventory {
+    for (index, record) in batch.inventory.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         record.validate().map_err(StoreError::InvalidRequest)?;
         if inventory_by_identity
             .insert(record.file_identity.as_str(), record)
@@ -3897,23 +4863,11 @@ fn validate_finalization(
             ));
         }
     }
-    let mut cache_keys = std::collections::HashSet::new();
-    for record in &batch.cache_writes {
-        record.validate().map_err(StoreError::InvalidRequest)?;
-        if !inventory_by_identity.contains_key(record.file_identity.as_str())
-            || !cache_keys.insert((
-                record.file_identity.as_str(),
-                record.source_version.as_str(),
-                record.parse_profile_hash.as_str(),
-            ))
-        {
-            return Err(StoreError::InvalidRequest(
-                "cache writes must reference unique inventory versions".to_string(),
-            ));
-        }
-    }
     let mut file_results_by_identity = std::collections::HashMap::new();
-    for record in &batch.file_results {
+    for (index, record) in batch.file_results.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         record
             .validate_for_persistence(batch.snapshot_hit.is_some())
             .map_err(StoreError::InvalidRequest)?;
@@ -3934,25 +4888,10 @@ fn validate_finalization(
             ));
         }
     }
-    for cache_write in &batch.cache_writes {
-        let result = file_results_by_identity
-            .get(cache_write.file_identity.as_str())
-            .ok_or_else(|| {
-                StoreError::InvalidRequest(
-                    "cache write has no matching successful file result".to_string(),
-                )
-            })?;
-        if result.parse_status != ai_daily_scanner_contract::ParseStatus::Success
-            || result.source_version != cache_write.source_version
-            || result.parse_profile_hash != cache_write.parse_profile_hash
-            || result.content_sha256 != cache_write.content_sha256
-        {
-            return Err(StoreError::InvalidRequest(
-                "cache write disagrees with its successful file result".to_string(),
-            ));
+    for (index, record) in batch.diagnostics.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
         }
-    }
-    for record in &batch.diagnostics {
         record
             .diagnostic
             .validate()
@@ -3961,6 +4900,7 @@ fn validate_finalization(
     crate::metrics::validate_metrics(&batch.stage_metrics, &batch.extension_metrics)
         .map_err(StoreError::InvalidRequest)?;
 
+    ensure_deadline()?;
     let envelope: ContextEnvelope = serde_json::from_str(&batch.envelope_json)
         .map_err(|_| StoreError::InvalidRequest("final envelope JSON is invalid".to_string()))?;
     envelope.validate().map_err(StoreError::InvalidRequest)?;
@@ -3978,18 +4918,17 @@ fn validate_finalization(
         ));
     }
 
-    let warning_diagnostics: Vec<Diagnostic> = batch
-        .diagnostics
-        .iter()
-        .filter(|record| record.severity == DiagnosticSeverity::Warning)
-        .map(|record| record.diagnostic.clone())
-        .collect();
-    let error_diagnostics: Vec<Diagnostic> = batch
-        .diagnostics
-        .iter()
-        .filter(|record| record.severity == DiagnosticSeverity::Error)
-        .map(|record| record.diagnostic.clone())
-        .collect();
+    let mut warning_diagnostics: Vec<Diagnostic> = Vec::new();
+    let mut error_diagnostics: Vec<Diagnostic> = Vec::new();
+    for records in batch.diagnostics.chunks(TERMINAL_WRITE_BATCH_SIZE) {
+        ensure_deadline()?;
+        for record in records {
+            match record.severity {
+                DiagnosticSeverity::Warning => warning_diagnostics.push(record.diagnostic.clone()),
+                DiagnosticSeverity::Error => error_diagnostics.push(record.diagnostic.clone()),
+            }
+        }
+    }
     if warning_diagnostics != envelope.warnings
         || error_diagnostics != envelope.error.0.iter().cloned().collect::<Vec<_>>()
     {
@@ -4000,12 +4939,14 @@ fn validate_finalization(
 
     match (&batch.context, envelope.context_run_id.0) {
         (Some(context), Some(context_run_id)) if context_run_id == active.context_run_id() => {
-            validate_context(context)?;
-            let decision_identities: std::collections::HashSet<&str> = context
-                .decisions
-                .iter()
-                .map(|record| record.file_identity.as_str())
-                .collect();
+            validate_context(context, ensure_deadline)?;
+            let mut decision_identities: std::collections::HashSet<&str> =
+                std::collections::HashSet::new();
+            for records in context.decisions.chunks(TERMINAL_WRITE_BATCH_SIZE) {
+                ensure_deadline()?;
+                decision_identities
+                    .extend(records.iter().map(|record| record.file_identity.as_str()));
+            }
             let inventory_identities: std::collections::HashSet<&str> =
                 inventory_by_identity.keys().copied().collect();
             if context.status != batch.status
@@ -4025,6 +4966,7 @@ fn validate_finalization(
                 &file_results_by_identity,
                 &batch.stage_metrics,
                 &batch.extension_metrics,
+                ensure_deadline,
             )?;
         }
         (None, None) => {}
@@ -4037,60 +4979,120 @@ fn validate_finalization(
     Ok(envelope)
 }
 
+/// Rechecks that the independently committed inventory receipt still matches
+/// this run's immutable discovery snapshot. This is an indexed invariant read,
+/// never an inventory mutation inside the terminal transaction.
+fn verify_inventory_snapshot(
+    transaction: &rusqlite::Transaction<'_>,
+    scan_run_id: i64,
+    records: &[InventoryRecord],
+) -> Result<(), StoreError> {
+    let mut statement = transaction
+        .prepare_cached(
+            "SELECT absolute_path, relative_path, file_type, source_version,
+                    size_bytes, mtime_ns, last_seen_run_id,
+                    source_guard_kind, source_guard_sha256
+             FROM file_inventory WHERE file_identity=?1",
+        )
+        .map_err(cache_write)?;
+    for record in records {
+        let persisted = statement
+            .query_row([&record.file_identity], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                ))
+            })
+            .optional()
+            .map_err(cache_write)?;
+        let Some(persisted) = persisted else {
+            return Err(StoreError::RunCorrupt(
+                "terminal inventory receipt is incomplete".to_string(),
+            ));
+        };
+        let size_bytes = i64::try_from(record.size_bytes).map_err(|_| {
+            StoreError::InvalidRequest("inventory size exceeds SQLite integer range".to_string())
+        })?;
+        let mtime_ns = i64::try_from(record.mtime_ns).map_err(|_| {
+            StoreError::InvalidRequest("inventory mtime exceeds SQLite integer range".to_string())
+        })?;
+        if persisted
+            != (
+                record.absolute_path.clone(),
+                record.relative_path.clone(),
+                record.file_type.clone(),
+                record.source_version.clone(),
+                size_bytes,
+                mtime_ns,
+                Some(scan_run_id),
+                record.source_guard_kind.clone(),
+                record.source_guard_sha256.clone(),
+            )
+        {
+            return Err(StoreError::RunCorrupt(
+                "terminal inventory receipt disagrees with discovery".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_context_relations(
     context: &ContextRunRecord,
     inventory: &std::collections::HashMap<&str, &InventoryRecord>,
     file_results: &std::collections::HashMap<&str, &FileResultRecord>,
     stage_metrics: &[StageMetric],
     extension_metrics: &[ExtensionMetric],
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
 ) -> Result<(), StoreError> {
     let summary = &context.summary;
-    let success_count = file_results
-        .values()
-        .filter(|result| result.parse_status == ParseStatus::Success)
-        .count() as u64;
-    let timeout_count = file_results
-        .values()
-        .filter(|result| result.parse_status == ParseStatus::Timeout)
-        .count() as u64;
-    let error_count = file_results
-        .values()
-        .filter(|result| result.parse_status == ParseStatus::Error)
-        .count() as u64;
+    let mut success_count = 0_u64;
+    let mut timeout_count = 0_u64;
+    let mut error_count = 0_u64;
+    for (index, result) in file_results.values().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
+        match result.parse_status {
+            ParseStatus::Success => success_count += 1,
+            ParseStatus::Timeout => timeout_count += 1,
+            ParseStatus::Error => error_count += 1,
+            ParseStatus::NotParsed => {}
+        }
+    }
     // spec Part 2.2: `not_parsed_count` is DERIVED, not a stored counter.
     let not_parsed_count = (file_results.len() as u64)
         .checked_sub(success_count)
         .and_then(|value| value.checked_sub(timeout_count))
         .and_then(|value| value.checked_sub(error_count))
-        .ok_or_else(|| {
-            StoreError::InvalidRequest("file status counts overflow".to_string())
-        })?;
-    let included_count = context
-        .decisions
-        .iter()
-        .filter(|record| {
-            matches!(
-                record.decision.action,
-                ContextAction::Keep | ContextAction::Compress | ContextAction::MetadataOnly
-            )
-        })
-        .count() as u64;
-    let omitted_count = context
-        .decisions
-        .iter()
-        .filter(|record| record.decision.action == ContextAction::Omit)
-        .count() as u64;
-    let decision_error_count = context
-        .decisions
-        .iter()
-        .filter(|record| record.decision.action == ContextAction::Error)
-        .count() as u64;
-    let input_chars = context.decisions.iter().try_fold(0_u64, |total, record| {
-        total
+        .ok_or_else(|| StoreError::InvalidRequest("file status counts overflow".to_string()))?;
+    let mut included_count = 0_u64;
+    let mut omitted_count = 0_u64;
+    let mut decision_error_count = 0_u64;
+    let mut input_chars = 0_u64;
+    for (index, record) in context.decisions.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
+        match record.decision.action {
+            ContextAction::Keep | ContextAction::Compress | ContextAction::MetadataOnly => {
+                included_count += 1
+            }
+            ContextAction::Omit => omitted_count += 1,
+            ContextAction::Error => decision_error_count += 1,
+        }
+        input_chars = input_chars
             .checked_add(record.decision.input_chars)
-            .ok_or_else(|| StoreError::InvalidRequest("decision input count overflows".to_string()))
-    })?;
-    for record in &context.decisions {
+            .ok_or_else(|| {
+                StoreError::InvalidRequest("decision input count overflows".to_string())
+            })?;
         let item = inventory
             .get(record.file_identity.as_str())
             .ok_or_else(|| {
@@ -4161,7 +5163,10 @@ fn validate_context_relations(
 
     let mut expected_extensions: std::collections::BTreeMap<&str, (u64, u64, u64, u64, u64)> =
         std::collections::BTreeMap::new();
-    for (identity, item) in inventory {
+    for (index, (identity, item)) in inventory.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         let result = file_results.get(identity).ok_or_else(|| {
             StoreError::InvalidRequest("extension metric file result is missing".to_string())
         })?;
@@ -4209,7 +5214,10 @@ fn validate_context_relations(
     Ok(())
 }
 
-fn validate_context(context: &ContextRunRecord) -> Result<(), StoreError> {
+fn validate_context(
+    context: &ContextRunRecord,
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
     terminal_status_text(context.status)?;
     if context.decisions.len() > 1_000_000 {
         return Err(StoreError::InvalidRequest(
@@ -4230,7 +5238,10 @@ fn validate_context(context: &ContextRunRecord) -> Result<(), StoreError> {
         ));
     }
     let mut identities = std::collections::HashSet::new();
-    for record in &context.decisions {
+    for (index, record) in context.decisions.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         record
             .decision
             .validate()
@@ -4298,6 +5309,7 @@ fn terminal_status_text(status: RunStatus) -> Result<&'static str, StoreError> {
 fn insert_diagnostics(
     transaction: &rusqlite::Transaction<'_>,
     scan_run_id: i64,
+    sequence_offset: usize,
     diagnostics: &[RunDiagnosticRecord],
 ) -> rusqlite::Result<()> {
     let mut statement = transaction.prepare_cached(
@@ -4309,7 +5321,7 @@ fn insert_diagnostics(
     for (sequence, record) in diagnostics.iter().enumerate() {
         statement.execute(params![
             scan_run_id,
-            sequence as i64,
+            sequence_offset.saturating_add(sequence) as i64,
             record.severity.as_str(),
             inventory::enum_text(&record.diagnostic.error_code),
             record.diagnostic.message,
@@ -4330,9 +5342,7 @@ fn insert_execution_metrics(
     metrics: &ExecutionMetricsV2,
 ) -> Result<(), StoreError> {
     let all_hit = |value: &Option<bool>| value.map(i64::from);
-    let c = |value: u64, field: &str| -> Result<i64, StoreError> {
-        checked_i64(value, field)
-    };
+    let c = |value: u64, field: &str| -> Result<i64, StoreError> { checked_i64(value, field) };
     transaction
         .execute(
             "INSERT INTO scan_execution_metrics(
@@ -4355,24 +5365,51 @@ fn insert_execution_metrics(
                        ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
             params![
                 scan_run_id,
-                c(metrics.discovery_observed_file_count, "discovery_observed_file_count")?,
-                c(metrics.source_guard_content_hash_file_count, "source_guard_content_hash_file_count")?,
-                c(metrics.source_guard_unavailable_count, "source_guard_unavailable_count")?,
+                c(
+                    metrics.discovery_observed_file_count,
+                    "discovery_observed_file_count"
+                )?,
+                c(
+                    metrics.source_guard_content_hash_file_count,
+                    "source_guard_content_hash_file_count"
+                )?,
+                c(
+                    metrics.source_guard_unavailable_count,
+                    "source_guard_unavailable_count"
+                )?,
                 c(metrics.source_guard_bytes_read, "source_guard_bytes_read")?,
                 c(metrics.candidate_file_count, "candidate_file_count")?,
                 c(metrics.admitted_file_count, "admitted_file_count")?,
-                c(metrics.classification_slot_count, "classification_slot_count")?,
-                c(metrics.confirmed_run_inspected_pages_total, "confirmed_run_inspected_pages_total")?,
-                c(metrics.unobserved_classification_attempt_count, "unobserved_classification_attempt_count")?,
-                c(metrics.nominal_charged_pages_total, "nominal_charged_pages_total")?,
+                c(
+                    metrics.classification_slot_count,
+                    "classification_slot_count"
+                )?,
+                c(
+                    metrics.confirmed_run_inspected_pages_total,
+                    "confirmed_run_inspected_pages_total"
+                )?,
+                c(
+                    metrics.unobserved_classification_attempt_count,
+                    "unobserved_classification_attempt_count"
+                )?,
+                c(
+                    metrics.nominal_charged_pages_total,
+                    "nominal_charged_pages_total"
+                )?,
                 c(metrics.extraction_slot_count, "extraction_slot_count")?,
                 c(metrics.pdfplumber_invocations, "pdfplumber_invocations")?,
                 i64::from(metrics.snapshot_hit),
                 c(metrics.parse_cache_lookup_count, "parse_cache_lookup_count")?,
-                c(metrics.classification_cache_lookup_count, "classification_cache_lookup_count")?,
+                c(
+                    metrics.classification_cache_lookup_count,
+                    "classification_cache_lookup_count"
+                )?,
                 all_hit(&metrics.parse_cache_all_hit.0),
                 all_hit(&metrics.classification_cache_all_hit.0),
-                c(metrics.stage_deadline_exhausted_count, "stage_deadline_exhausted_count")?,
+                c(
+                    metrics.stage_deadline_exhausted_count,
+                    "stage_deadline_exhausted_count"
+                )?,
                 c(metrics.session_restart_count, "session_restart_count")?,
                 c(metrics.session_fallback_count, "session_fallback_count")?,
                 c(metrics.classify_attempt_count, "classify_attempt_count")?,
@@ -4382,9 +5419,15 @@ fn insert_execution_metrics(
                 c(metrics.worker_handshake_ms, "worker_handshake_ms")?,
                 c(metrics.discovery_ms, "discovery_ms")?,
                 c(metrics.snapshot_lookup_ms, "snapshot_lookup_ms")?,
-                c(metrics.current_run_audit_write_ms, "current_run_audit_write_ms")?,
+                c(
+                    metrics.current_run_audit_write_ms,
+                    "current_run_audit_write_ms"
+                )?,
                 c(metrics.terminal_precommit_ms, "terminal_precommit_ms")?,
-                c(metrics.deadline_precommit_elapsed_ms, "deadline_precommit_elapsed_ms")?,
+                c(
+                    metrics.deadline_precommit_elapsed_ms,
+                    "deadline_precommit_elapsed_ms"
+                )?,
                 c(metrics.envelope_rebuild_ms, "envelope_rebuild_ms")?,
                 c(metrics.terminal_rows_written, "terminal_rows_written")?,
                 metrics.peak_worker_rss_bytes.0.map(|value| value as i64),
@@ -4402,10 +5445,13 @@ fn insert_context(
     snapshot_hit: bool,
     reused_from_context_run_id: Option<i64>,
     now_ms: i64,
-) -> rusqlite::Result<()> {
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+) -> Result<(), StoreError> {
+    ensure_deadline()?;
     let summary = &context.summary;
-    transaction.execute(
-        "INSERT INTO context_runs(
+    transaction
+        .execute(
+            "INSERT INTO context_runs(
             context_run_id, scan_run_id, context_profile_hash, status,
             final_context, context_sha256, source_file_count, success_count,
             timeout_count, included_file_count, omitted_file_count,
@@ -4416,49 +5462,57 @@ fn insert_context(
             ?1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10,
             ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21
          )",
-        params![
-            scan_run_id,
-            context.context_profile_hash,
-            terminal_status_text(context.status).map_err(|_| rusqlite::Error::InvalidQuery)?,
-            context.final_context,
-            context.context_sha256,
-            summary.source_file_count as i64,
-            summary.success_count as i64,
-            summary.timeout_count as i64,
-            summary.included_file_count as i64,
-            summary.omitted_file_count as i64,
-            summary.error_file_count as i64,
-            summary.input_chars as i64,
-            summary.output_chars as i64,
-            summary.total_duration_ms as i64,
-            summary.discovery_duration_ms as i64,
-            summary.parse_duration_ms as i64,
-            summary.compression_duration_ms as i64,
-            now_ms,
-            artifact_id,
-            reused_from_context_run_id,
-            i64::from(snapshot_hit),
-        ],
-    )?;
-    let mut statement = transaction.prepare_cached(
-        "INSERT INTO context_decisions(
+            params![
+                scan_run_id,
+                context.context_profile_hash,
+                terminal_status_text(context.status)?,
+                context.final_context,
+                context.context_sha256,
+                summary.source_file_count as i64,
+                summary.success_count as i64,
+                summary.timeout_count as i64,
+                summary.included_file_count as i64,
+                summary.omitted_file_count as i64,
+                summary.error_file_count as i64,
+                summary.input_chars as i64,
+                summary.output_chars as i64,
+                summary.total_duration_ms as i64,
+                summary.discovery_duration_ms as i64,
+                summary.parse_duration_ms as i64,
+                summary.compression_duration_ms as i64,
+                now_ms,
+                artifact_id,
+                reused_from_context_run_id,
+                i64::from(snapshot_hit),
+            ],
+        )
+        .map_err(cache_write)?;
+    let mut statement = transaction
+        .prepare_cached(
+            "INSERT INTO context_decisions(
             context_run_id, file_identity, relative_path, action, reason,
             priority, input_chars, output_chars, truncated, error_code
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-    )?;
-    for record in &context.decisions {
-        statement.execute(params![
-            scan_run_id,
-            record.file_identity,
-            record.decision.relative_path,
-            inventory::enum_text(&record.decision.action),
-            record.decision.reason,
-            record.decision.priority as i64,
-            record.decision.input_chars as i64,
-            record.decision.output_chars as i64,
-            i64::from(record.decision.truncated),
-            record.decision.error_code,
-        ])?;
+        )
+        .map_err(cache_write)?;
+    for records in context.decisions.chunks(TERMINAL_WRITE_BATCH_SIZE) {
+        ensure_deadline()?;
+        for record in records {
+            statement
+                .execute(params![
+                    scan_run_id,
+                    record.file_identity,
+                    record.decision.relative_path,
+                    inventory::enum_text(&record.decision.action),
+                    record.decision.reason,
+                    record.decision.priority as i64,
+                    record.decision.input_chars as i64,
+                    record.decision.output_chars as i64,
+                    i64::from(record.decision.truncated),
+                    record.decision.error_code,
+                ])
+                .map_err(cache_write)?;
+        }
     }
     Ok(())
 }
@@ -4487,7 +5541,7 @@ fn envelope_metadata_json(envelope: &ContextEnvelope) -> Result<String, StoreErr
         "request_id": envelope.request_id,
         "engine_version": envelope.engine_version,
         "engine_build": envelope.engine_build,
-        "status": serde_json::to_value(&envelope.status)
+        "status": serde_json::to_value(envelope.status)
             .map_err(|error| StoreError::InvalidRequest(error.to_string()))?,
         "scan_run_id": envelope.scan_run_id.0,
         "context_run_id": envelope.context_run_id.0,
@@ -4512,6 +5566,27 @@ pub(crate) fn artifact_size_bytes(
     file_rows: &[ArtifactFileRow],
     decision_rows: &[ArtifactDecisionRow],
 ) -> i64 {
+    artifact_size_bytes_with_check(
+        final_context,
+        context_sha256,
+        semantic_summary_json,
+        snapshot_key,
+        file_rows,
+        decision_rows,
+        &|| Ok(()),
+    )
+    .unwrap_or(i64::MAX)
+}
+
+fn artifact_size_bytes_with_check(
+    final_context: &str,
+    context_sha256: &str,
+    semantic_summary_json: &str,
+    snapshot_key: Option<&SnapshotKeyParts>,
+    file_rows: &[ArtifactFileRow],
+    decision_rows: &[ArtifactDecisionRow],
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+) -> Result<i64, StoreError> {
     // parent context_artifacts columns
     let mut size = 8  // snapshot_eligible (i64)
         + final_context.len() as i64
@@ -4522,13 +5597,22 @@ pub(crate) fn artifact_size_bytes(
     if let Some(key) = snapshot_key {
         size += key.sha256.len() as i64 + key.canonical_json.len() as i64;
     }
-    for row in file_rows {
+    for (index, row) in file_rows.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         size += 8; // artifact_id (i64)
         size += row.file_identity.len() as i64;
         size += row.relative_path.len() as i64;
         size += row.legacy_source_version.len() as i64;
-        size += row.source_guard_kind.as_ref().map_or(0, |value| value.len() as i64);
-        size += row.source_guard_sha256.as_ref().map_or(0, |value| value.len() as i64);
+        size += row
+            .source_guard_kind
+            .as_ref()
+            .map_or(0, |value| value.len() as i64);
+        size += row
+            .source_guard_sha256
+            .as_ref()
+            .map_or(0, |value| value.len() as i64);
         size += row.parse_profile_hash.len() as i64;
         size += inventory::enum_text(&row.parse_status).len() as i64; // parse_status TEXT
         size += row.parser_backend.len() as i64;
@@ -4537,14 +5621,17 @@ pub(crate) fn artifact_size_bytes(
         size += row.content_sha256.len() as i64;
         if let Some(classifier) = &row.classifier {
             size += inventory::enum_text(&classifier.status).len() as i64; // classifier_status TEXT
-            size += classifier.page_count.map_or(0, |_| 8);       // nullable i64
+            size += classifier.page_count.map_or(0, |_| 8); // nullable i64
             size += classifier.result_examined_pages.map_or(0, |_| 8); // nullable i64
             size += 8; // classifier_nominal_charged_pages (i64, NOT NULL)
             size += classifier.classifier_build.len() as i64;
             size += classifier.classifier_profile_hash.len() as i64;
         }
     }
-    for row in decision_rows {
+    for (index, row) in decision_rows.iter().enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         size += 8; // artifact_id (i64)
         size += row.file_identity.len() as i64;
         size += row.relative_path.len() as i64;
@@ -4556,7 +5643,7 @@ pub(crate) fn artifact_size_bytes(
         size += 8; // truncated (i64)
         size += row.error_code.len() as i64;
     }
-    size
+    Ok(size)
 }
 
 fn semantic_summary_json_for(draft: &ArtifactDraft) -> Result<String, StoreError> {
@@ -4572,18 +5659,12 @@ fn insert_artifact(
     transaction: &rusqlite::Transaction<'_>,
     draft: &ArtifactDraft,
     snapshot_key: Option<&SnapshotKeyParts>,
+    semantic_summary_json: &str,
+    artifact_size: i64,
     now_ms: i64,
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
 ) -> Result<i64, StoreError> {
-    let semantic_summary_json = serde_json::to_string(&draft.semantic_summary)
-        .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
-    let artifact_size = artifact_size_bytes(
-        &draft.final_context,
-        &draft.context_sha256,
-        &semantic_summary_json,
-        snapshot_key,
-        &draft.file_rows,
-        &draft.decision_rows,
-    );
+    ensure_deadline()?;
     let (key_sha256, key_json) = match snapshot_key {
         Some(key) => (Some(key.sha256.as_str()), Some(key.canonical_json.as_str())),
         None => (None, None),
@@ -4621,64 +5702,71 @@ fn insert_artifact(
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         )
         .map_err(cache_write)?;
-        for row in &draft.file_rows {
-            file_stmt
-                .execute(params![
-                    artifact_id,
-                    row.file_identity,
-                    row.relative_path,
-                    row.legacy_source_version,
-                    row.source_guard_kind,
-                    row.source_guard_sha256,
-                    row.parse_profile_hash,
-                    inventory::parse_status_text(row.parse_status),
-                    row.parser_backend,
-                    row.worker_lane,
-                    i64::from(row.truncated),
-                    row.content_sha256,
-                    row.classifier
-                        .as_ref()
-                        .map(|classifier| inventory::enum_text(&classifier.status)),
-                    row.classifier
-                        .as_ref()
-                        .and_then(|classifier| classifier.page_count.map(|value| value as i64)),
-                    row.classifier
-                        .as_ref()
-                        .and_then(|classifier| classifier.result_examined_pages.map(|value| value as i64)),
-                    row.classifier
-                        .as_ref()
-                        .map(|classifier| classifier.nominal_charged_pages as i64),
-                    row.classifier
-                        .as_ref()
-                        .map(|classifier| classifier.classifier_build.clone()),
-                    row.classifier
-                        .as_ref()
-                        .map(|classifier| classifier.classifier_profile_hash.clone()),
-                ])
-                .map_err(cache_write)?;
+        for rows in draft.file_rows.chunks(TERMINAL_WRITE_BATCH_SIZE) {
+            ensure_deadline()?;
+            for row in rows {
+                file_stmt
+                    .execute(params![
+                        artifact_id,
+                        row.file_identity,
+                        row.relative_path,
+                        row.legacy_source_version,
+                        row.source_guard_kind,
+                        row.source_guard_sha256,
+                        row.parse_profile_hash,
+                        inventory::parse_status_text(row.parse_status),
+                        row.parser_backend,
+                        row.worker_lane,
+                        i64::from(row.truncated),
+                        row.content_sha256,
+                        row.classifier
+                            .as_ref()
+                            .map(|classifier| inventory::enum_text(&classifier.status)),
+                        row.classifier
+                            .as_ref()
+                            .and_then(|classifier| classifier.page_count.map(|value| value as i64)),
+                        row.classifier.as_ref().and_then(|classifier| classifier
+                            .result_examined_pages
+                            .map(|value| value as i64)),
+                        row.classifier
+                            .as_ref()
+                            .map(|classifier| classifier.nominal_charged_pages as i64),
+                        row.classifier
+                            .as_ref()
+                            .map(|classifier| classifier.classifier_build.clone()),
+                        row.classifier
+                            .as_ref()
+                            .map(|classifier| classifier.classifier_profile_hash.clone()),
+                    ])
+                    .map_err(cache_write)?;
+            }
         }
-        let mut decision_stmt = transaction.prepare_cached(
-            "INSERT INTO context_artifact_decisions(
+        let mut decision_stmt = transaction
+            .prepare_cached(
+                "INSERT INTO context_artifact_decisions(
                 artifact_id, file_identity, relative_path, action, reason,
                 priority, input_chars, output_chars, truncated, error_code
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-        )
-        .map_err(cache_write)?;
-        for row in &draft.decision_rows {
-            decision_stmt
-                .execute(params![
-                    artifact_id,
-                    row.file_identity,
-                    row.relative_path,
-                    inventory::enum_text(&row.action),
-                    row.reason,
-                    row.priority as i64,
-                    row.input_chars as i64,
-                    row.output_chars as i64,
-                    i64::from(row.truncated),
-                    row.error_code,
-                ])
-                .map_err(cache_write)?;
+            )
+            .map_err(cache_write)?;
+        for rows in draft.decision_rows.chunks(TERMINAL_WRITE_BATCH_SIZE) {
+            ensure_deadline()?;
+            for row in rows {
+                decision_stmt
+                    .execute(params![
+                        artifact_id,
+                        row.file_identity,
+                        row.relative_path,
+                        inventory::enum_text(&row.action),
+                        row.reason,
+                        row.priority as i64,
+                        row.input_chars as i64,
+                        row.output_chars as i64,
+                        i64::from(row.truncated),
+                        row.error_code,
+                    ])
+                    .map_err(cache_write)?;
+            }
         }
     }
     Ok(artifact_id)
@@ -4690,6 +5778,15 @@ fn load_artifact_from_connection(
     connection: &Connection,
     artifact_id: i64,
 ) -> Result<ArtifactDraft, StoreError> {
+    load_artifact_from_connection_with_check(connection, artifact_id, &|| Ok(()))
+}
+
+fn load_artifact_from_connection_with_check(
+    connection: &Connection,
+    artifact_id: i64,
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+) -> Result<ArtifactDraft, StoreError> {
+    ensure_deadline()?;
     let row: Option<(i64, String, String, String)> = connection
         .query_row(
             "SELECT snapshot_eligible, final_context, context_sha256, semantic_summary_json
@@ -4699,7 +5796,8 @@ fn load_artifact_from_connection(
         )
         .optional()
         .map_err(cache_open)?;
-    let Some((snapshot_eligible, final_context, context_sha256, semantic_summary_json)) = row else {
+    let Some((snapshot_eligible, final_context, context_sha256, semantic_summary_json)) = row
+    else {
         return Err(StoreError::RunNotFound);
     };
     let semantic_summary: crate::artifact::SemanticSummary =
@@ -4741,7 +5839,10 @@ fn load_artifact_from_connection(
         })
         .map_err(cache_open)?;
     let mut file_rows = Vec::new();
-    for row in file_query {
+    for (index, row) in file_query.enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         let (
             file_identity,
             relative_path,
@@ -4815,7 +5916,10 @@ fn load_artifact_from_connection(
         })
         .map_err(cache_open)?;
     let mut decision_rows = Vec::new();
-    for row in decision_query {
+    for (index, row) in decision_query.enumerate() {
+        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
         let (
             file_identity,
             relative_path,
@@ -4861,10 +5965,12 @@ fn load_artifact_from_connection(
 /// the artifact is field-for-field identical; any difference is a non-retryable
 /// `BUDGET_MODEL_MISMATCH`/store invariant (never overwrites the old artifact).
 fn dedup_artifact(
-    transaction: &rusqlite::Transaction<'_>,
+    transaction: &Connection,
     draft: &ArtifactDraft,
     key: &SnapshotKeyParts,
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
 ) -> Result<Option<i64>, StoreError> {
+    ensure_deadline()?;
     let existing_id: Option<i64> = transaction
         .query_row(
             "SELECT artifact_id FROM context_artifacts
@@ -4878,7 +5984,9 @@ fn dedup_artifact(
     let Some(existing_id) = existing_id else {
         return Ok(None);
     };
-    let existing = load_artifact_from_connection(&*transaction, existing_id)?;
+    let existing =
+        load_artifact_from_connection_with_check(transaction, existing_id, ensure_deadline)?;
+    ensure_deadline()?;
     let existing_key_json: Option<String> = transaction
         .query_row(
             "SELECT snapshot_key_json FROM context_artifacts WHERE artifact_id=?1",
@@ -4896,97 +6004,6 @@ fn dedup_artifact(
     }
 }
 
-/// spec Part 4: 512 MiB context-artifact cap enforcement inside the terminal
-/// transaction. Deletes retention-allowed orphans first (zero `context_runs`
-/// references, not in the protected set), then the oldest terminal runs
-/// (cascading their context_runs so their artifacts become orphans for the next
-/// orphan sweep). If the current artifact itself exceeds the cap or no rows are
-/// deletable (pinned references), finalization fails closed.
-fn make_room_for_artifact(
-    transaction: &rusqlite::Transaction<'_>,
-    protected_artifacts: &HashSet<i64>,
-    new_size: i64,
-) -> Result<(), StoreError> {
-    if new_size > cache::CONTEXT_ARTIFACTS_MAX_BYTES {
-        return Err(StoreError::RunCorrupt(
-            "current artifact exceeds the 512 MiB context artifact cap".to_string(),
-        ));
-    }
-    let total_artifacts = || -> Result<i64, StoreError> {
-        transaction
-            .query_row(
-                "SELECT COALESCE(SUM(artifact_size_bytes), 0) FROM context_artifacts",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(cache_write)
-    };
-    let mut current = total_artifacts()?;
-    if current.saturating_add(new_size) <= cache::CONTEXT_ARTIFACTS_MAX_BYTES {
-        return Ok(());
-    }
-    loop {
-        // 1) delete orphan artifacts (zero context_runs references, not protected).
-        let clause = not_in_clause(protected_artifacts);
-        let sql = format!(
-            "DELETE FROM context_artifacts WHERE artifact_id IN (
-                SELECT artifact_id FROM context_artifacts
-                WHERE NOT EXISTS(
-                    SELECT 1 FROM context_runs WHERE context_runs.artifact_id = context_artifacts.artifact_id
-                )
-                  {clause}
-                ORDER BY created_at_ms ASC, artifact_id ASC
-                LIMIT 64
-             )"
-        );
-        let deleted = transaction
-            .execute(&sql, rusqlite::params_from_iter(protected_artifacts.iter()))
-            .map_err(cache_write)?;
-        if deleted > 0 {
-            current = total_artifacts()?;
-            if current.saturating_add(new_size) <= cache::CONTEXT_ARTIFACTS_MAX_BYTES {
-                return Ok(());
-            }
-            continue;
-        }
-        // 2) delete the oldest terminal runs. Their context_runs rows cascade
-        //    away (the referenced artifacts become orphans and are reclaimed by
-        //    the next orphan sweep). The current run is still 'running' and the
-        //    snapshot-hit source run is protected by the caller (make_room is
-        //    only reached on the new-artifact path).
-        let deleted = transaction
-            .execute(
-                "DELETE FROM scan_runs WHERE scan_run_id IN (
-                    SELECT scan_run_id FROM scan_runs
-                    WHERE status IN ('success', 'partial', 'error', 'abandoned')
-                    ORDER BY finished_at_ms ASC, scan_run_id ASC
-                    LIMIT 64
-                 )",
-                [],
-            )
-            .map_err(cache_write)?;
-        if deleted > 0 {
-            current = total_artifacts()?;
-            if current.saturating_add(new_size) <= cache::CONTEXT_ARTIFACTS_MAX_BYTES {
-                return Ok(());
-            }
-            continue;
-        }
-        // 3) no deletable rows → pinned references → fail closed.
-        return Err(StoreError::RunCorrupt(
-            "context artifact retention could not make room for the current artifact".to_string(),
-        ));
-    }
-}
-
-fn not_in_clause(ids: &HashSet<i64>) -> String {
-    if ids.is_empty() {
-        return String::new();
-    }
-    let placeholders = vec!["?"; ids.len()].join(",");
-    format!(" AND artifact_id NOT IN ({placeholders})")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4995,12 +6012,72 @@ mod tests {
     use crate::planner::{PlanAction, PlannedFile};
     use ai_daily_discovery::DiscoveredFileOut;
     use ai_daily_scanner_contract::{
-        AdapterPaths, AuditWorkerLane, CacheMissReason, CacheStatus, ContextAction,
-        ClassificationCacheStatus, ClassificationTransport, ContextDecision, DiagnosticStage,
-        ParseStatus, ParseTransport, PdfClassificationAuditV1, PdfClassificationStatus,
-        RawScannerProfileV1, ReportMode,
+        AdapterPaths, AuditWorkerLane, CacheMissReason, CacheStatus, ClassificationCacheStatus,
+        ClassificationTransport, ContextAction, ContextDecision, DiagnosticStage, ParseStatus,
+        ParseTransport, PdfClassificationAuditV1, PdfClassificationStatus, RawScannerProfileV1,
+        ReportMode,
     };
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
+
+    struct ExpiringClock {
+        calls: AtomicUsize,
+        expire_after: usize,
+        expired_at_ms: u64,
+    }
+
+    impl ExpiringClock {
+        fn new(expire_after: usize, expired_at_ms: u64) -> Self {
+            Self {
+                calls: AtomicUsize::new(0),
+                expire_after,
+                expired_at_ms,
+            }
+        }
+
+        fn reset(&self) {
+            self.calls.store(0, Ordering::SeqCst);
+        }
+    }
+
+    impl crate::deadline::Clock for ExpiringClock {
+        fn now_ms(&self) -> u64 {
+            if self.calls.fetch_add(1, Ordering::SeqCst) >= self.expire_after {
+                self.expired_at_ms
+            } else {
+                0
+            }
+        }
+    }
+
+    struct DiagnosticBatchExpiringClock {
+        expire_after_batches: usize,
+        expired_at_ms: u64,
+    }
+
+    impl crate::deadline::Clock for DiagnosticBatchExpiringClock {
+        fn now_ms(&self) -> u64 {
+            let written = TEST_TERMINAL_DIAGNOSTIC_BATCHES_WRITTEN.with(|count| count.get());
+            if written >= self.expire_after_batches {
+                self.expired_at_ms
+            } else {
+                0
+            }
+        }
+    }
+
+    struct OpportunisticGcOvershootClock;
+
+    impl crate::deadline::Clock for OpportunisticGcOvershootClock {
+        fn now_ms(&self) -> u64 {
+            let statements = TEST_OPPORTUNISTIC_GC_STATEMENTS_EXECUTED.with(|count| count.get());
+            if statements == 0 {
+                0
+            } else {
+                10
+            }
+        }
+    }
 
     struct Harness {
         _directory: TempDir,
@@ -5036,8 +6113,9 @@ mod tests {
             python_module_root: directory.path().to_string_lossy().to_string(),
             python_document_worker_module: "src.workers.document_parser_worker".to_string(),
         };
-        let profile = normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode)
-            .expect("normalized scanner profile");
+        let profile =
+            normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode)
+                .expect("normalized scanner profile");
         let canonical =
             ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
         let runtime = AttemptRuntime::from_request(&request, &crate::version_response()).unwrap();
@@ -5058,6 +6136,26 @@ mod tests {
             BeginRunOutcome::Started(active) => active,
             BeginRunOutcome::Stored(_) => panic!("expected a new active run"),
         }
+    }
+
+    struct FixedClock(u64);
+
+    impl crate::deadline::Clock for FixedClock {
+        fn now_ms(&self) -> u64 {
+            self.0
+        }
+    }
+
+    fn finalize_for_test(
+        store: &mut ScannerStore,
+        active: &ActiveRun,
+        batch: &FinalizationBatch,
+        now_ms: u64,
+    ) -> Result<TerminalAuditTimings, StoreError> {
+        store.prepare_inventory(&batch.inventory, active.scan_run_id, now_ms)?;
+        let clock = FixedClock(0);
+        let deadlines = crate::deadline::RunDeadlines::derive(3_600_000, &clock).unwrap();
+        store.finalize(active, batch, now_ms, deadlines, &clock)
     }
 
     fn canonical_for_request_id(harness: &Harness, request_id: &str) -> CanonicalRequest {
@@ -5115,7 +6213,6 @@ mod tests {
             status: RunStatus::Error,
             envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
             inventory: Vec::new(),
-            cache_writes: Vec::new(),
             file_results: Vec::new(),
             diagnostics: vec![RunDiagnosticRecord {
                 severity: DiagnosticSeverity::Error,
@@ -5129,6 +6226,37 @@ mod tests {
             snapshot_hit: None,
             execution_metrics: None,
         }
+    }
+
+    fn diagnostic_audit_batch(active: &ActiveRun, warning_count: usize) -> FinalizationBatch {
+        let mut batch = error_batch(active);
+        let mut envelope: ContextEnvelope =
+            serde_json::from_str(&batch.envelope_json).expect("error envelope");
+        let warnings: Vec<Diagnostic> = (0..warning_count)
+            .map(|index| Diagnostic {
+                error_code: ErrorCode::CacheWriteFailed,
+                message: format!("synthetic cache warning {index}"),
+                retryable: true,
+                stage: DiagnosticStage::Cache,
+                file_path: Nullable(None),
+                backend: Nullable(None),
+            })
+            .collect();
+        envelope.warnings = warnings.clone();
+        batch.envelope_json = canonical_envelope_json(&envelope).expect("canonical envelope");
+        let error = batch
+            .diagnostics
+            .pop()
+            .expect("error batch carries one error");
+        batch.diagnostics = warnings
+            .into_iter()
+            .map(|diagnostic| RunDiagnosticRecord {
+                severity: DiagnosticSeverity::Warning,
+                diagnostic,
+            })
+            .chain(std::iter::once(error))
+            .collect();
+        batch
     }
 
     fn inventory_record(identity: &str, source_version: &str) -> InventoryRecord {
@@ -5260,6 +6388,20 @@ mod tests {
         }
     }
 
+    fn insert_orphan_artifact(store: &ScannerStore, created_at_ms: i64) {
+        store
+            .connection
+            .execute(
+                "INSERT INTO context_artifacts(
+                    snapshot_eligible, snapshot_key_sha256, snapshot_key_json,
+                    final_context, context_sha256, semantic_summary_json,
+                    artifact_size_bytes, created_at_ms, last_accessed_bucket
+                 ) VALUES (0, NULL, NULL, '', ?1, '{}', 1, ?2, '1970-01-01')",
+                params!["0".repeat(64), created_at_ms],
+            )
+            .unwrap();
+    }
+
     fn record_both_workers(store: &mut ScannerStore, active: &ActiveRun, now_ms: u64) {
         let office = WorkerFingerprint {
             contract: "ai_daily_worker_v1".to_string(),
@@ -5335,12 +6477,6 @@ mod tests {
             status: RunStatus::Success,
             envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
             inventory: vec![inventory_record(identity, source_version)],
-            cache_writes: vec![cache_record(
-                identity,
-                source_version,
-                profile_hash,
-                content,
-            )],
             file_results: vec![success_file_result(
                 identity,
                 source_version,
@@ -5662,6 +6798,60 @@ mod tests {
     }
 
     #[test]
+    fn abandon_cleanup_is_zero_wait_atomic_and_commit_survives_restore_failure() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000211");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        let locker = rusqlite::Connection::open(&harness.db_path).unwrap();
+        locker.busy_timeout(Duration::from_millis(0)).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+        assert!(matches!(
+            harness.store.abandon_active_run(&active, 2),
+            Err(StoreError::CacheWrite { .. })
+        ));
+        let (status, lease_count): (String, i64) = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT status, (SELECT count(*) FROM engine_lease) FROM scan_runs
+                 WHERE scan_run_id=?1",
+                [active.scan_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
+        assert_eq!(lease_count, 1, "busy cleanup cannot delete only the lease");
+        locker.execute_batch("ROLLBACK").unwrap();
+
+        TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE.with(|flag| flag.set(true));
+        let committed = harness.store.abandon_active_run(&active, 3);
+        TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE.with(|flag| flag.set(false));
+        committed.expect("abandon COMMIT is authoritative despite restore failure");
+        let (status, lease_count): (String, i64) = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT status, (SELECT count(*) FROM engine_lease) FROM scan_runs
+                 WHERE scan_run_id=?1",
+                [active.scan_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "abandoned");
+        assert_eq!(lease_count, 0);
+    }
+
+    #[test]
     fn abandoned_same_request_reuses_row_appends_attempt_and_clears_lease_on_finish() {
         let mut first = harness("00000000-0000-4000-8000-000000000008");
         let active = started(
@@ -5689,9 +6879,7 @@ mod tests {
         assert_eq!(recovered.scan_run_id(), active.scan_run_id());
         assert_eq!(recovered.attempt_number(), 2);
         let batch = error_batch(&recovered);
-        recovered_store
-            .finalize(&recovered, &batch, 30_000)
-            .unwrap();
+        finalize_for_test(&mut recovered_store, &recovered, &batch, 30_000).unwrap();
         let lease_count: i64 = recovered_store
             .connection
             .query_row("SELECT count(*) FROM engine_lease", [], |row| row.get(0))
@@ -5739,7 +6927,7 @@ mod tests {
         );
         let batch = error_batch(&active);
         let expected = batch.envelope_json.clone();
-        harness.store.finalize(&active, &batch, 2).unwrap();
+        finalize_for_test(&mut harness.store, &active, &batch, 2).unwrap();
 
         let mut changed_version = crate::version_response();
         changed_version.engine_build = "engine-build-that-did-not-exist-on-first-run".to_string();
@@ -5808,8 +6996,11 @@ mod tests {
             "hello",
         );
         let expected = batch.envelope_json.clone();
-        assert!(expected.contains("hello"), "original envelope carries the body");
-        harness.store.finalize(&active, &batch, 2).unwrap();
+        assert!(
+            expected.contains("hello"),
+            "original envelope carries the body"
+        );
+        finalize_for_test(&mut harness.store, &active, &batch, 2).unwrap();
 
         let stored_json: String = harness
             .store
@@ -5939,7 +7130,6 @@ mod tests {
             status: RunStatus::Error,
             envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
             inventory: vec![inventory],
-            cache_writes: Vec::new(),
             file_results: vec![FileResultRecord {
                 file_identity: "file-a".to_string(),
                 relative_path: "evidence.txt".to_string(),
@@ -5975,10 +7165,26 @@ mod tests {
                 },
             }],
             stage_metrics: vec![
-                StageMetric { stage: StageName::Discovery, item_count: 1, duration_ms: 2 },
-                StageMetric { stage: StageName::Cache, item_count: 1, duration_ms: 0 },
-                StageMetric { stage: StageName::Parse, item_count: 1, duration_ms: 1 },
-                StageMetric { stage: StageName::Context, item_count: 1, duration_ms: 0 },
+                StageMetric {
+                    stage: StageName::Discovery,
+                    item_count: 1,
+                    duration_ms: 2,
+                },
+                StageMetric {
+                    stage: StageName::Cache,
+                    item_count: 1,
+                    duration_ms: 0,
+                },
+                StageMetric {
+                    stage: StageName::Parse,
+                    item_count: 1,
+                    duration_ms: 1,
+                },
+                StageMetric {
+                    stage: StageName::Context,
+                    item_count: 1,
+                    duration_ms: 0,
+                },
             ],
             extension_metrics: vec![ExtensionMetric {
                 extension: ".txt".to_string(),
@@ -6028,7 +7234,7 @@ mod tests {
                 peak_worker_rss_bytes: Nullable(None),
             }),
         };
-        harness.store.finalize(&active, &batch, 2).expect("error finalize");
+        finalize_for_test(&mut harness.store, &active, &batch, 2).expect("error finalize");
 
         // The context_runs row must exist with artifact_id=NULL and status=error.
         let (context_run_id, status, artifact_id): (i64, String, Option<i64>) = harness
@@ -6043,7 +7249,10 @@ mod tests {
             .unwrap();
         assert_eq!(context_run_id, active.context_run_id() as i64);
         assert_eq!(status, "error");
-        assert!(artifact_id.is_none(), "error run must reference no artifact");
+        assert!(
+            artifact_id.is_none(),
+            "error run must reference no artifact"
+        );
 
         // v1 inspect succeeds.
         let snapshot = harness
@@ -6078,8 +7287,8 @@ mod tests {
             )
             .expect("terminal row count");
         assert_eq!(
-            rows_written, 14,
-            "one scan_file_execution_v2 child row must be included"
+            rows_written, 13,
+            "terminal rows include scan_file_execution_v2 but exclude global inventory"
         );
 
         // A historical full-v2 database amended with an empty execution child
@@ -6108,7 +7317,9 @@ mod tests {
         assert_eq!(output.exit_code, 1);
         let value: serde_json::Value = serde_json::from_str(&output.json).expect("v2 JSON");
         assert_eq!(
-            value.pointer("/error/error_code").and_then(serde_json::Value::as_str),
+            value
+                .pointer("/error/error_code")
+                .and_then(serde_json::Value::as_str),
             Some("INSPECT_V2_PROVENANCE_UNAVAILABLE")
         );
     }
@@ -6134,7 +7345,9 @@ mod tests {
         record_both_workers(&mut harness.store, &active, 1);
         let error = Diagnostic {
             error_code: ErrorCode::SourceFileLimitExceeded,
-            message: "discovery observed 1000001 source files, exceeding the engine ceiling of 1000000".to_string(),
+            message:
+                "discovery observed 1000001 source files, exceeding the engine ceiling of 1000000"
+                    .to_string(),
             retryable: false,
             stage: DiagnosticStage::Discovery,
             file_path: Nullable(None),
@@ -6168,17 +7381,32 @@ mod tests {
             status: RunStatus::Error,
             envelope_json: canonical_envelope_json(&envelope).expect("canonical envelope"),
             inventory: Vec::new(),
-            cache_writes: Vec::new(),
             file_results: Vec::new(),
             diagnostics: vec![RunDiagnosticRecord {
                 severity: DiagnosticSeverity::Error,
                 diagnostic: error,
             }],
             stage_metrics: vec![
-                StageMetric { stage: StageName::Discovery, item_count: 0, duration_ms: 0 },
-                StageMetric { stage: StageName::Cache, item_count: 0, duration_ms: 0 },
-                StageMetric { stage: StageName::Parse, item_count: 0, duration_ms: 0 },
-                StageMetric { stage: StageName::Context, item_count: 0, duration_ms: 0 },
+                StageMetric {
+                    stage: StageName::Discovery,
+                    item_count: 0,
+                    duration_ms: 0,
+                },
+                StageMetric {
+                    stage: StageName::Cache,
+                    item_count: 0,
+                    duration_ms: 0,
+                },
+                StageMetric {
+                    stage: StageName::Parse,
+                    item_count: 0,
+                    duration_ms: 0,
+                },
+                StageMetric {
+                    stage: StageName::Context,
+                    item_count: 0,
+                    duration_ms: 0,
+                },
             ],
             extension_metrics: Vec::new(),
             context: Some(context),
@@ -6221,7 +7449,8 @@ mod tests {
                 peak_worker_rss_bytes: Nullable(None),
             }),
         };
-        harness.store.finalize(&active, &batch, 2).expect("zero-file error finalize");
+        finalize_for_test(&mut harness.store, &active, &batch, 2)
+            .expect("zero-file error finalize");
 
         let (context_run_id, status, artifact_id): (i64, String, Option<i64>) = harness
             .store
@@ -6242,7 +7471,11 @@ mod tests {
             .inspect_run(active.scan_run_id(), false)
             .expect("v1 inspect must succeed for a zero-file error run");
         assert_eq!(snapshot.run_status, RunStatus::Error);
-        assert_eq!(snapshot.stage_metrics.len(), 4, "zero-file error must persist 4 stage rows");
+        assert_eq!(
+            snapshot.stage_metrics.len(),
+            4,
+            "zero-file error must persist 4 stage rows"
+        );
 
         let request = ai_daily_scanner_contract::InspectRunRequest {
             contract: "ai_daily_context".to_string(),
@@ -6255,7 +7488,10 @@ mod tests {
         let v2 = crate::inspect::assemble_inspect_v2(&request, &snapshot)
             .expect("v2 inspect must succeed for a zero-file error run");
         assert_eq!(v2.status, ai_daily_scanner_contract::InspectStatus::Ok);
-        assert_eq!(v2.execution_metrics.discovery_observed_file_count, 1_000_001);
+        assert_eq!(
+            v2.execution_metrics.discovery_observed_file_count,
+            1_000_001
+        );
     }
 
     #[test]
@@ -6267,7 +7503,14 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
+                .lookup_cache(
+                    "file-a",
+                    source,
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &profile_hash,
+                    false
+                )
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::NewFile)
         );
@@ -6283,39 +7526,69 @@ mod tests {
                 .unwrap(),
         );
         record_both_workers(&mut harness.store, &active, 1);
+        let batch = success_batch(&active, "file-a", source, &profile_hash, "hello");
         harness
             .store
-            .finalize(
-                &active,
-                &success_batch(&active, "file-a", source, &profile_hash, "hello"),
-                2,
-            )
+            .prepare_inventory(&batch.inventory, active.scan_run_id, 2)
             .unwrap();
+        harness
+            .store
+            .write_success_parse_cache(&[cache_record("file-a", source, &profile_hash, "hello")], 2)
+            .unwrap();
+        finalize_for_test(&mut harness.store, &active, &batch, 2).unwrap();
         assert!(matches!(
             harness
                 .store
-                .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
+                .lookup_cache(
+                    "file-a",
+                    source,
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &profile_hash,
+                    false
+                )
                 .unwrap(),
             CacheLookup::Fresh(_)
         ));
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=101:size=6", "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
+                .lookup_cache(
+                    "file-a",
+                    "mtime_ns=101:size=6",
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &profile_hash,
+                    false
+                )
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=100:size=6", "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
+                .lookup_cache(
+                    "file-a",
+                    "mtime_ns=100:size=6",
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &profile_hash,
+                    false
+                )
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=101:size=5", "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
+                .lookup_cache(
+                    "file-a",
+                    "mtime_ns=101:size=5",
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &profile_hash,
+                    false
+                )
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
         );
@@ -6325,7 +7598,14 @@ mod tests {
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &changed_hash, false)
+                .lookup_cache(
+                    "file-a",
+                    source,
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &changed_hash,
+                    false
+                )
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::ParserIdentityChanged)
         );
@@ -6511,14 +7791,16 @@ mod tests {
                 .unwrap(),
         );
         record_both_workers(&mut harness.store, &active, 1);
+        let batch = success_batch(&active, "file-a", source, &profile_hash, "hello");
         harness
             .store
-            .finalize(
-                &active,
-                &success_batch(&active, "file-a", source, &profile_hash, "hello"),
-                2,
-            )
+            .prepare_inventory(&batch.inventory, active.scan_run_id, 2)
             .unwrap();
+        harness
+            .store
+            .write_success_parse_cache(&[cache_record("file-a", source, &profile_hash, "hello")], 2)
+            .unwrap();
+        finalize_for_test(&mut harness.store, &active, &batch, 2).unwrap();
         // Same identity + source_version + profile, SAME guard -> Fresh.
         assert!(matches!(
             harness
@@ -6589,14 +7871,16 @@ mod tests {
                 .unwrap(),
         );
         record_both_workers(&mut harness.store, &first, 1);
+        let first_batch = success_batch(&first, "file-a", source, &profile_hash, "hello");
         harness
             .store
-            .finalize(
-                &first,
-                &success_batch(&first, "file-a", source, &profile_hash, "hello"),
-                2,
-            )
+            .prepare_inventory(&first_batch.inventory, first.scan_run_id, 2)
             .unwrap();
+        harness
+            .store
+            .write_success_parse_cache(&[cache_record("file-a", source, &profile_hash, "hello")], 2)
+            .unwrap();
+        finalize_for_test(&mut harness.store, &first, &first_batch, 2).unwrap();
         let second_request_id = "00000000-0000-4000-8000-000000000016";
         let second_canonical = canonical_for_request_id(&harness, second_request_id);
         let second = started(
@@ -6606,23 +7890,39 @@ mod tests {
                 .unwrap(),
         );
         record_both_workers(&mut harness.store, &second, 3);
+        let second_batch = success_batch(&second, "file-b", source, &profile_hash, "world");
         harness
             .store
-            .finalize(
-                &second,
-                &success_batch(&second, "file-b", source, &profile_hash, "world"),
-                4,
-            )
+            .prepare_inventory(&second_batch.inventory, second.scan_run_id, 4)
             .unwrap();
+        harness
+            .store
+            .write_success_parse_cache(&[cache_record("file-b", source, &profile_hash, "world")], 4)
+            .unwrap();
+        finalize_for_test(&mut harness.store, &second, &second_batch, 4).unwrap();
 
         let lookups = [
             harness
                 .store
-                .lookup_cache("file-a", "mtime_ns=101:size=6", "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
+                .lookup_cache(
+                    "file-a",
+                    "mtime_ns=101:size=6",
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &profile_hash,
+                    false,
+                )
                 .unwrap(),
             harness
                 .store
-                .lookup_cache("file-b", source, "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
+                .lookup_cache(
+                    "file-b",
+                    source,
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &profile_hash,
+                    false,
+                )
                 .unwrap(),
         ];
         assert_eq!(
@@ -6691,14 +7991,21 @@ mod tests {
             pdf_classification: None,
             error: Some(diagnostic),
         });
-        harness.store.finalize(&active, &batch, 2).unwrap();
+        finalize_for_test(&mut harness.store, &active, &batch, 2).unwrap();
         // v2 spec Part 4: no negative cache — an Error result row is per-run
         // audit, not a cache entry, so the guard-bound cache lookup reports a
         // new-file miss rather than the legacy `error_cache` literal.
         assert_eq!(
             harness
                 .store
-                .lookup_cache("file-a", source, "content_sha256_v1", &"0".repeat(64), &profile_hash, false)
+                .lookup_cache(
+                    "file-a",
+                    source,
+                    "content_sha256_v1",
+                    &"0".repeat(64),
+                    &profile_hash,
+                    false
+                )
                 .unwrap(),
             CacheLookup::Miss(CacheMissReason::NewFile)
         );
@@ -6725,7 +8032,7 @@ mod tests {
         record.source_guard_kind = Some("content_sha256_v1".to_string());
         record.source_guard_sha256 = Some("a".repeat(64));
         batch.inventory = vec![record];
-        harness.store.finalize(&active, &batch, 2).unwrap();
+        finalize_for_test(&mut harness.store, &active, &batch, 2).unwrap();
 
         let connection = rusqlite::Connection::open(&harness.db_path).unwrap();
         let (kind, hash): (Option<String>, Option<String>) = connection
@@ -6761,7 +8068,7 @@ mod tests {
         record.source_guard_kind = Some("unavailable".to_string());
         record.source_guard_sha256 = None;
         batch.inventory = vec![record];
-        harness.store.finalize(&active, &batch, 2).unwrap();
+        finalize_for_test(&mut harness.store, &active, &batch, 2).unwrap();
 
         let connection = rusqlite::Connection::open(&harness.db_path).unwrap();
         let (kind, hash): (Option<String>, Option<String>) = connection
@@ -6823,7 +8130,7 @@ mod tests {
             pdf_classification: None,
             error: None,
         });
-        harness.store.finalize(&active, &batch, 2).unwrap();
+        finalize_for_test(&mut harness.store, &active, &batch, 2).unwrap();
 
         let connection = rusqlite::Connection::open(&harness.db_path).unwrap();
         let (parse_cache_status, cache_miss_reason): (Option<String>, String) = connection
@@ -6842,7 +8149,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_final_transaction_leaves_no_cache_inventory_or_false_success() {
+    fn failed_terminal_transaction_preserves_independent_inventory_only() {
         let mut harness = harness("00000000-0000-4000-8000-000000000013");
         let active = started(
             harness
@@ -6872,7 +8179,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            harness.store.finalize(&active, &batch, 2),
+            finalize_for_test(&mut harness.store, &active, &batch, 2),
             Err(StoreError::CacheWrite { .. })
         ));
         for table in [
@@ -6888,7 +8195,8 @@ mod tests {
                     row.get(0)
                 })
                 .unwrap();
-            assert_eq!(count, 0, "{table}");
+            let expected = i64::from(table == "file_inventory");
+            assert_eq!(count, expected, "{table}");
         }
         let status: String = harness
             .store
@@ -6900,6 +8208,446 @@ mod tests {
             )
             .unwrap();
         assert_eq!(status, "running");
+    }
+
+    #[test]
+    fn absolute_deadline_expiry_never_commits_a_terminal_row() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000113");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        let batch = error_batch(&active);
+        let clock = ExpiringClock::new(3, 5_000);
+        let deadlines = crate::deadline::RunDeadlines::derive(5_000, &clock).unwrap();
+        clock.reset();
+
+        assert!(matches!(
+            harness
+                .store
+                .finalize(&active, &batch, 2, deadlines, &clock),
+            Err(StoreError::AbsoluteDeadlineExhausted)
+        ));
+        let status: String = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT status FROM scan_runs WHERE scan_run_id=?1",
+                [active.scan_run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
+        let diagnostics: i64 = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT count(*) FROM run_diagnostics WHERE scan_run_id=?1",
+                [active.scan_run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(diagnostics, 0);
+    }
+
+    #[test]
+    fn terminal_audit_batches_commit_completely_at_small_and_large_scales() {
+        for (suffix, warning_count) in [(201_u64, 1_usize), (202, 1_000), (203, 10_000)] {
+            let request_id = format!("00000000-0000-4000-8000-{suffix:012}");
+            let mut harness = harness(&request_id);
+            let active = started(
+                harness
+                    .store
+                    .begin_run(
+                        &harness.request.request_id,
+                        &harness.canonical,
+                        &harness.runtime,
+                        1,
+                    )
+                    .unwrap(),
+            );
+            let batch = diagnostic_audit_batch(&active, warning_count);
+            let clock = FixedClock(0);
+            let deadlines = crate::deadline::RunDeadlines::derive(3_600_000, &clock).unwrap();
+
+            harness
+                .store
+                .finalize(&active, &batch, 2, deadlines, &clock)
+                .expect("complete terminal audit commit");
+
+            let (status, diagnostic_count): (String, i64) = harness
+                .store
+                .connection
+                .query_row(
+                    "SELECT status, (SELECT count(*) FROM run_diagnostics WHERE scan_run_id=?1)
+                     FROM scan_runs WHERE scan_run_id=?1",
+                    [active.scan_run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(status, "error");
+            assert_eq!(diagnostic_count, warning_count as i64 + 1);
+        }
+    }
+
+    #[test]
+    fn absolute_deadline_after_one_open_transaction_batch_rolls_back_every_terminal_row() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000204");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        let batch = diagnostic_audit_batch(&active, 1_000);
+        TEST_TERMINAL_DIAGNOSTIC_BATCHES_WRITTEN.with(|count| count.set(0));
+        let clock = DiagnosticBatchExpiringClock {
+            expire_after_batches: 1,
+            expired_at_ms: 5_000,
+        };
+        let deadlines = crate::deadline::RunDeadlines::derive(5_000, &clock).unwrap();
+
+        let result = harness
+            .store
+            .finalize(&active, &batch, 2, deadlines, &clock);
+        let observed_batches =
+            TEST_TERMINAL_DIAGNOSTIC_BATCHES_WRITTEN.with(|count| count.replace(0));
+        assert_eq!(result, Err(StoreError::AbsoluteDeadlineExhausted));
+        assert_eq!(observed_batches, 1, "one SQL batch executed before expiry");
+
+        let (status, diagnostic_count): (String, i64) = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT status, (SELECT count(*) FROM run_diagnostics WHERE scan_run_id=?1)
+                 FROM scan_runs WHERE scan_run_id=?1",
+                [active.scan_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
+        assert_eq!(
+            diagnostic_count, 0,
+            "the open terminal transaction rolled back"
+        );
+    }
+
+    #[test]
+    fn prepare_inventory_deadline_after_first_batch_preserves_only_the_global_prefix() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000205");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        let records: Vec<InventoryRecord> = (0..257)
+            .map(|index| inventory_record(&format!("file-{index:03}"), "mtime_ns=100:size=5"))
+            .collect();
+        let clock = ExpiringClock::new(517, 3_000);
+        let deadlines = crate::deadline::RunDeadlines::derive(5_000, &clock).unwrap();
+        clock.reset();
+
+        assert_eq!(
+            harness.store.prepare_inventory_with_deadline(
+                &records,
+                active.scan_run_id,
+                2,
+                deadlines,
+                &clock,
+            ),
+            Err(StoreError::WorkDeadlineExhausted)
+        );
+        let persisted: i64 = harness
+            .store
+            .connection
+            .query_row("SELECT count(*) FROM file_inventory", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            persisted, 256,
+            "only the committed global prefix may remain"
+        );
+        let final_identity_present: bool = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM file_inventory WHERE file_identity='file-256')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !final_identity_present,
+            "no completed inventory receipt was returned"
+        );
+    }
+
+    #[test]
+    fn cache_commit_remains_authoritative_when_work_deadline_expires_on_return() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000206");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        let records = vec![
+            inventory_record("file-a", "mtime_ns=100:size=5"),
+            inventory_record("file-b", "mtime_ns=100:size=5"),
+        ];
+        harness
+            .store
+            .prepare_inventory(&records, active.scan_run_id, 1)
+            .unwrap();
+        let first = cache_record("file-a", "mtime_ns=100:size=5", &"a".repeat(64), "a");
+        let second = cache_record("file-b", "mtime_ns=100:size=5", &"a".repeat(64), "b");
+        let clock = ExpiringClock::new(8, 3_000);
+        let deadlines = crate::deadline::RunDeadlines::derive(5_000, &clock).unwrap();
+        clock.reset();
+
+        harness
+            .store
+            .write_success_parse_cache_with_deadline(&[first], 2, deadlines, &clock)
+            .expect("the first cache COMMIT is the receipt linearization point");
+        assert_eq!(deadlines.remaining_to_work_deadline(&clock), 0);
+        assert_eq!(
+            harness
+                .store
+                .write_success_parse_cache_with_deadline(&[second], 3, deadlines, &clock),
+            Err(StoreError::WorkDeadlineExhausted)
+        );
+        let persisted: Vec<String> = harness
+            .store
+            .connection
+            .prepare("SELECT file_identity FROM parse_cache ORDER BY file_identity")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap();
+        assert_eq!(persisted, vec!["file-a".to_string()]);
+    }
+
+    #[test]
+    fn busy_timeout_restore_failure_preserves_commit_and_surfaces_rollback_failure() {
+        let mut committed = harness("00000000-0000-4000-8000-000000000207");
+        let active = started(
+            committed
+                .store
+                .begin_run(
+                    &committed.request.request_id,
+                    &committed.canonical,
+                    &committed.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        let batch = error_batch(&active);
+        let clock = FixedClock(0);
+        let deadlines = crate::deadline::RunDeadlines::derive(5_000, &clock).unwrap();
+        TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE.with(|flag| flag.set(true));
+        let committed_result = committed
+            .store
+            .finalize(&active, &batch, 2, deadlines, &clock);
+        TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE.with(|flag| flag.set(false));
+        let timings = committed_result.expect("terminal COMMIT remains authoritative");
+        assert!(timings.busy_timeout_restore_failed);
+        let status: String = committed
+            .store
+            .connection
+            .query_row(
+                "SELECT status FROM scan_runs WHERE scan_run_id=?1",
+                [active.scan_run_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "error");
+
+        let mut rolled_back = harness("00000000-0000-4000-8000-000000000208");
+        let active = started(
+            rolled_back
+                .store
+                .begin_run(
+                    &rolled_back.request.request_id,
+                    &rolled_back.canonical,
+                    &rolled_back.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        rolled_back
+            .store
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_terminal_diagnostic
+                 BEFORE INSERT ON run_diagnostics
+                 BEGIN SELECT RAISE(ABORT, 'injected terminal failure'); END;",
+            )
+            .unwrap();
+        let batch = error_batch(&active);
+        TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE.with(|flag| flag.set(true));
+        let failed_result = rolled_back
+            .store
+            .finalize(&active, &batch, 2, deadlines, &clock);
+        TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE.with(|flag| flag.set(false));
+        assert!(matches!(
+            failed_result,
+            Err(StoreError::BusyTimeoutRestore { .. })
+        ));
+        let (status, diagnostics): (String, i64) = rolled_back
+            .store
+            .connection
+            .query_row(
+                "SELECT status, (SELECT count(*) FROM run_diagnostics WHERE scan_run_id=?1)
+                 FROM scan_runs WHERE scan_run_id=?1",
+                [active.scan_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "running");
+        assert_eq!(diagnostics, 0);
+    }
+
+    #[test]
+    fn terminal_finalization_never_rewrites_an_independent_cache_receipt() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000209");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1,
+                )
+                .unwrap(),
+        );
+        record_both_workers(&mut harness.store, &active, 1);
+        let source = "mtime_ns=100:size=5";
+        let profile_hash = "a".repeat(64);
+        let batch = success_batch(&active, "file-a", source, &profile_hash, "terminal");
+        harness
+            .store
+            .prepare_inventory(&batch.inventory, active.scan_run_id, 2)
+            .unwrap();
+        harness
+            .store
+            .write_success_parse_cache(
+                &[cache_record("file-a", source, &profile_hash, "cached")],
+                7,
+            )
+            .unwrap();
+
+        finalize_for_test(&mut harness.store, &active, &batch, 10).unwrap();
+        let (content, cached_at_ms): (String, i64) = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT content, cached_at_ms FROM parse_cache WHERE file_identity='file-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(content, "cached");
+        assert_eq!(cached_at_ms, 7);
+    }
+
+    #[test]
+    fn opportunistic_gc_success_busy_overshoot_and_restore_failure_are_isolated() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000210");
+        insert_orphan_artifact(&harness.store, 1);
+        let locker = rusqlite::Connection::open(&harness.db_path).unwrap();
+        locker.busy_timeout(Duration::from_millis(0)).unwrap();
+        locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let fixed = FixedClock(0);
+        assert!(matches!(
+            harness.store.run_opportunistic_gc(100, 10, &fixed),
+            Err(StoreError::CacheWrite { .. })
+        ));
+        locker.execute_batch("ROLLBACK").unwrap();
+        let count_after_busy: i64 = harness
+            .store
+            .connection
+            .query_row("SELECT count(*) FROM context_artifacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count_after_busy, 1);
+
+        harness
+            .store
+            .run_opportunistic_gc(100, 10, &fixed)
+            .expect("bounded GC succeeds after the lock clears");
+        let count_after_success: i64 = harness
+            .store
+            .connection
+            .query_row("SELECT count(*) FROM context_artifacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count_after_success, 0);
+
+        insert_orphan_artifact(&harness.store, 2);
+        TEST_OPPORTUNISTIC_GC_STATEMENTS_EXECUTED.with(|count| count.set(0));
+        harness
+            .store
+            .run_opportunistic_gc(100, 10, &OpportunisticGcOvershootClock)
+            .expect("budget overshoot only rolls back optional GC");
+        let overshoot_statements =
+            TEST_OPPORTUNISTIC_GC_STATEMENTS_EXECUTED.with(|count| count.replace(0));
+        let count_after_overshoot: i64 = harness
+            .store
+            .connection
+            .query_row("SELECT count(*) FROM context_artifacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(overshoot_statements, 1);
+        assert_eq!(
+            count_after_overshoot, 1,
+            "overshooting GC transaction rolled back"
+        );
+
+        TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE.with(|flag| flag.set(true));
+        let restore_failure = harness.store.run_opportunistic_gc(100, 10, &fixed);
+        TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE.with(|flag| flag.set(false));
+        assert!(matches!(
+            restore_failure,
+            Err(StoreError::BusyTimeoutRestore { .. })
+        ));
+        let count_after_restore_failure: i64 = harness
+            .store
+            .connection
+            .query_row("SELECT count(*) FROM context_artifacts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            count_after_restore_failure, 0,
+            "the GC COMMIT remains authoritative even when restore fails"
+        );
     }
 
     #[test]
@@ -6925,7 +8673,7 @@ mod tests {
         );
 
         assert!(matches!(
-            harness.store.finalize(&active, &batch, 2),
+            finalize_for_test(&mut harness.store, &active, &batch, 2),
             Err(StoreError::RunCorrupt(_))
         ));
     }
@@ -6950,7 +8698,7 @@ mod tests {
         batch.envelope_json = canonical_envelope_json(&envelope).unwrap();
 
         assert!(matches!(
-            harness.store.finalize(&active, &batch, 2),
+            finalize_for_test(&mut harness.store, &active, &batch, 2),
             Err(StoreError::RunCorrupt(_))
         ));
     }
@@ -7004,7 +8752,7 @@ mod tests {
             .unwrap();
         let batch = error_batch(&active);
         let expected_diagnostics = batch.diagnostics.clone();
-        harness.store.finalize(&active, &batch, 3).unwrap();
+        finalize_for_test(&mut harness.store, &active, &batch, 3).unwrap();
 
         let fingerprints: (Option<String>, Option<String>) = harness
             .store
@@ -7056,7 +8804,7 @@ mod tests {
             &"a".repeat(64),
             "hello",
         );
-        harness.store.finalize(&active, &batch, 1_010).unwrap();
+        finalize_for_test(&mut harness.store, &active, &batch, 1_010).unwrap();
 
         let snapshot = harness
             .store
@@ -7213,7 +8961,10 @@ mod tests {
         db_path
     }
 
-    fn upgrade_request(path: &Path, apply: bool) -> ai_daily_scanner_contract::UpgradeDatabaseRequestV1 {
+    fn upgrade_request(
+        path: &Path,
+        apply: bool,
+    ) -> ai_daily_scanner_contract::UpgradeDatabaseRequestV1 {
         ai_daily_scanner_contract::UpgradeDatabaseRequestV1 {
             contract: "ai_daily_scanner_upgrade".to_string(),
             protocol_version: 1,
@@ -7329,7 +9080,10 @@ mod tests {
         assert_eq!(response.legacy_parse_cache_rows_detected, 1);
         assert_eq!(response.invalidated_parse_cache_rows, 1);
         assert_eq!(response.post_integrity_check, UpgradeIntegrityCheck::Ok);
-        assert!(response.error.0.is_none(), "partial must not carry an error");
+        assert!(
+            response.error.0.is_none(),
+            "partial must not carry an error"
+        );
         assert!(
             !response.warnings.is_empty(),
             "partial must carry a maintenance warning"
@@ -7389,7 +9143,10 @@ mod tests {
             response.post_integrity_check,
             MaintenancePostIntegrityCheck::NotRun
         );
-        assert_eq!(response.vacuum.status, MaintenanceVacuumStatus::SkippedDryRun);
+        assert_eq!(
+            response.vacuum.status,
+            MaintenanceVacuumStatus::SkippedDryRun
+        );
         assert!(response.error.0.is_none());
     }
 
@@ -7423,7 +9180,10 @@ mod tests {
             response.vacuum.status,
             MaintenanceVacuumStatus::NotRequested
         );
-        assert_eq!(response.post_integrity_check, MaintenancePostIntegrityCheck::Ok);
+        assert_eq!(
+            response.post_integrity_check,
+            MaintenancePostIntegrityCheck::Ok
+        );
         assert!(response.error.0.is_none());
     }
 
@@ -7475,7 +9235,9 @@ mod tests {
                 [],
             )
             .unwrap();
-        connection.pragma_update(None, "foreign_keys", true).unwrap();
+        connection
+            .pragma_update(None, "foreign_keys", true)
+            .unwrap();
         // 520 aged terminal runs (each tiny audit).
         for index in 0..520 {
             connection
@@ -7494,13 +9256,43 @@ mod tests {
                 )
                 .unwrap();
         }
+        connection
+            .execute(
+                "INSERT INTO scan_runs(
+                    request_id, canonical_request_json, request_hash_algorithm, request_hash,
+                    owner_id, status, created_at_ms, started_at_ms, updated_at_ms,
+                    finished_at_ms, final_envelope_json, audit_provenance_version, audit_size_bytes
+                 ) VALUES ('current', '{}', 'sha256-request-v1', ?1, 'owner', 'running',
+                            2, 2, 2, NULL, NULL, 'full_v2', 0)",
+                ["1".repeat(64)],
+            )
+            .unwrap();
+        let current_run_id = connection.last_insert_rowid();
+        let protected_runs = std::collections::HashSet::from([current_run_id]);
+        let plan = prepare_finalization_retention_plan(
+            &connection,
+            current_run_id,
+            &protected_runs,
+            &HashSet::new(),
+            None,
+            1_000_000,
+            100,
+            &|| Ok(()),
+        )
+        .expect("retention planning succeeds before the transaction");
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .unwrap();
-        // 当前 run 已 terminal（由 finalize 先写）；此处直接调用 retention GC。
-        let protected_runs = std::collections::HashSet::from([1]);
-        retention_gc_for_current_run(&transaction, &protected_runs, 1_000_000, 100)
-            .expect("retention gc succeeds");
+        transaction
+            .execute(
+                "UPDATE scan_runs SET status='error', finished_at_ms=2,
+                                      final_envelope_json='{}', audit_size_bytes=100
+                 WHERE scan_run_id=?1 AND status='running'",
+                [current_run_id],
+            )
+            .unwrap();
+        apply_terminal_retention_plan(&transaction, &plan, &protected_runs, &|| Ok(()))
+            .expect("prepared retention applies");
         let count: i64 = transaction
             .query_row(
                 "SELECT count(*) FROM scan_runs
@@ -7514,10 +9306,134 @@ mod tests {
     }
 
     #[test]
+    fn artifact_retention_plan_preselects_orphan_before_transaction() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let db_path = directory.path().join(SCAN_DB_FILENAME);
+        let mut store = ScannerStore::open(&db_path).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO scan_runs(
+                    request_id, canonical_request_json, request_hash_algorithm, request_hash,
+                    owner_id, status, created_at_ms, started_at_ms, updated_at_ms,
+                    audit_provenance_version, audit_size_bytes
+                 ) VALUES ('current', '{}', 'sha256-request-v1', ?1, 'owner', 'running',
+                            2, 2, 2, 'full_v2', 0)",
+                ["1".repeat(64)],
+            )
+            .unwrap();
+        let current_run_id = store.connection.last_insert_rowid();
+        store
+            .connection
+            .execute(
+                "INSERT INTO context_artifacts(
+                    snapshot_eligible, snapshot_key_sha256, snapshot_key_json,
+                    final_context, context_sha256, semantic_summary_json,
+                    artifact_size_bytes, created_at_ms, last_accessed_bucket
+                 ) VALUES (0, NULL, NULL, '', ?1, '{}', ?2, 1, '1970-01-01')",
+                params!["0".repeat(64), cache::CONTEXT_ARTIFACTS_MAX_BYTES],
+            )
+            .unwrap();
+        let orphan_artifact_id = store.connection.last_insert_rowid();
+        let protected_runs = HashSet::from([current_run_id]);
+        let plan = prepare_finalization_retention_plan(
+            &store.connection,
+            current_run_id,
+            &protected_runs,
+            &HashSet::new(),
+            Some(1),
+            100,
+            0,
+            &|| Ok(()),
+        )
+        .expect("artifact victim is selected before the transaction");
+        match plan.artifact_room.as_slice() {
+            [PreparedRetentionDelete::Artifacts(ids)] => {
+                assert_eq!(ids.as_slice(), [orphan_artifact_id]);
+            }
+            other => panic!("unexpected artifact retention plan: {other:?}"),
+        }
+
+        let transaction = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        apply_artifact_retention_plan(
+            &transaction,
+            &plan,
+            &protected_runs,
+            &HashSet::new(),
+            &|| Ok(()),
+        )
+        .expect("prepared orphan deletion applies");
+        let remaining_bytes: i64 = transaction
+            .query_row(
+                "SELECT COALESCE(SUM(artifact_size_bytes), 0) FROM context_artifacts",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(remaining_bytes.saturating_add(1) <= cache::CONTEXT_ARTIFACTS_MAX_BYTES);
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn artifact_retention_apply_fails_closed_when_prepared_victim_changes() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let db_path = directory.path().join(SCAN_DB_FILENAME);
+        let mut store = ScannerStore::open(&db_path).unwrap();
+        store
+            .connection
+            .execute(
+                "INSERT INTO context_artifacts(
+                    snapshot_eligible, snapshot_key_sha256, snapshot_key_json,
+                    final_context, context_sha256, semantic_summary_json,
+                    artifact_size_bytes, created_at_ms, last_accessed_bucket
+                 ) VALUES (0, NULL, NULL, '', ?1, '{}', ?2, 1, '1970-01-01')",
+                params!["0".repeat(64), cache::CONTEXT_ARTIFACTS_MAX_BYTES],
+            )
+            .unwrap();
+        let orphan_artifact_id = store.connection.last_insert_rowid();
+        let plan = prepare_finalization_retention_plan(
+            &store.connection,
+            1,
+            &HashSet::from([1]),
+            &HashSet::new(),
+            Some(1),
+            100,
+            0,
+            &|| Ok(()),
+        )
+        .expect("artifact victim is selected before the transaction");
+        store
+            .connection
+            .execute(
+                "DELETE FROM context_artifacts WHERE artifact_id=?1",
+                [orphan_artifact_id],
+            )
+            .unwrap();
+
+        let transaction = store
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let error = apply_artifact_retention_plan(
+            &transaction,
+            &plan,
+            &HashSet::from([1]),
+            &HashSet::new(),
+            &|| Ok(()),
+        )
+        .expect_err("changed prepared victim must fail closed");
+        assert!(matches!(error, StoreError::RunCorrupt(_)));
+        transaction.rollback().unwrap();
+    }
+
+    #[test]
     fn retention_gc_for_current_run_fails_closed_when_record_exceeds_cap() {
         let directory = tempfile::tempdir().expect("temporary directory");
         let db_path = directory.path().join(SCAN_DB_FILENAME);
-        let mut connection = rusqlite::Connection::open(&db_path).unwrap();
+        let connection = rusqlite::Connection::open(&db_path).unwrap();
         connection.execute_batch(schema::V2_DDL).unwrap();
         connection.pragma_update(None, "user_version", 2).unwrap();
         connection
@@ -7528,20 +9444,22 @@ mod tests {
                 [],
             )
             .unwrap();
-        connection.pragma_update(None, "foreign_keys", true).unwrap();
-        let transaction = connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
+        connection
+            .pragma_update(None, "foreign_keys", true)
             .unwrap();
         // 当前 record 自身超 2 GiB → fail closed。
         let protected_runs = std::collections::HashSet::from([1]);
-        let error = retention_gc_for_current_run(
-            &transaction,
+        let error = prepare_finalization_retention_plan(
+            &connection,
+            1,
             &protected_runs,
+            &HashSet::new(),
+            None,
             1_000_000,
             cache::TERMINAL_AUDIT_MAX_BYTES + 1,
+            &|| Ok(()),
         )
         .expect_err("current audit over cap must fail closed");
         assert!(matches!(error, StoreError::RunCorrupt(_)));
-        transaction.commit().unwrap();
     }
 }

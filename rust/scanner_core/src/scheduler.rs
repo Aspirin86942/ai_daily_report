@@ -18,7 +18,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
-use ai_daily_discovery::{DiscoveryIssue, DiscoveredFileOut};
+use ai_daily_discovery::{DiscoveredFileOut, DiscoveryIssue};
 use ai_daily_scanner_contract::{
     AuditWorkerLane, CacheMissReason, CacheStatus, ClassificationCacheStatus,
     ClassificationTransport, ContextSummary, Diagnostic, DiagnosticStage, ErrorCode,
@@ -28,58 +28,27 @@ use ai_daily_scanner_contract::{
 use rayon::prelude::*;
 
 use crate::admission::{
-    AdmissionDecision, ClassificationPlan, ClassifiedPlan, ContentAdmissionPlan, PlanAction,
-    PlanCandidate, PdfClassificationResult, RejectReason,
+    AdmissionDecision, ClassificationPlan, ClassifiedPlan, ContentAdmissionPlan,
+    PdfClassificationResult, PlanAction, PlanCandidate, RejectReason,
 };
 use crate::budget_model::{count_chars, ContextBudgetModel, RouteKind};
 use crate::compressor::{build_context, fixed_context_sections, ContextBuildOutput};
 use crate::decision::ContextFileEvidence;
 use crate::parsers::classifier::PdfClassifierPort;
-use crate::source_guard::{source_guard_kind_from_text, verify_guard, SourceGuardKind, SourceGuardV2};
+use crate::source_guard::{
+    source_guard_kind_from_text, verify_guard, SourceGuardKind, SourceGuardV2,
+};
 use crate::store::{
-    ClassificationCacheLookup, ClassificationCacheWriteRecord, ContextDecisionRecord,
-    ContextRunRecord, DiagnosticSeverity, FileResultRecord, InventoryRecord, RunDiagnosticRecord,
-    CacheLookup, CacheWriteRecord,
+    CacheLookup, CacheWriteRecord, ClassificationCacheLookup, ClassificationCacheWriteRecord,
+    ContextDecisionRecord, ContextRunRecord, DiagnosticSeverity, FileResultRecord, InventoryRecord,
+    RunDiagnosticRecord,
 };
 
-/// Fixed tail reserve for envelope/finalization (spec Solution).
-pub const FINALIZATION_RESERVE_MS: u64 = 2_000;
+pub use crate::deadline::{Clock, RealClock, RunDeadlines, FINALIZATION_RESERVE_MS};
 
 // ---------------------------------------------------------------------------
 // Clock / guard / ports
 // ---------------------------------------------------------------------------
-
-/// Monotonic clock source (fake-able in tests). Values are milliseconds since
-/// the same origin as the deadline values in [`ScheduledRunInput`].
-pub trait Clock: Send + Sync {
-    fn now_ms(&self) -> u64;
-}
-
-/// Production monotonic clock.
-#[derive(Debug)]
-pub struct RealClock {
-    origin: std::time::Instant,
-}
-
-impl RealClock {
-    pub fn new() -> Self {
-        Self {
-            origin: std::time::Instant::now(),
-        }
-    }
-}
-
-impl Default for RealClock {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Clock for RealClock {
-    fn now_ms(&self) -> u64 {
-        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
-    }
-}
 
 /// Source guard verifier around worker results (spec SourceGuard v2).
 pub trait GuardVerifier: Send + Sync {
@@ -99,6 +68,7 @@ impl GuardVerifier for RealGuardVerifier {
 pub enum CachePortError {
     Store { detail: String },
     InvalidKey { detail: String },
+    DeadlineExhausted { detail: String },
 }
 
 impl CachePortError {
@@ -107,11 +77,14 @@ impl CachePortError {
             error_code: match self {
                 Self::Store { .. } => ErrorCode::CacheWriteFailed,
                 Self::InvalidKey { .. } => ErrorCode::InvalidRequest,
+                Self::DeadlineExhausted { .. } => ErrorCode::StageDeadlineExhausted,
             },
             message: match self {
-                Self::Store { detail } | Self::InvalidKey { detail } => detail.clone(),
+                Self::Store { detail }
+                | Self::InvalidKey { detail }
+                | Self::DeadlineExhausted { detail } => detail.clone(),
             },
-            retryable: matches!(self, Self::Store { .. }),
+            retryable: matches!(self, Self::Store { .. } | Self::DeadlineExhausted { .. }),
             stage,
             file_path: Nullable(None),
             backend: Nullable(None),
@@ -148,8 +121,7 @@ pub trait CachePort: Send + Sync {
         classifier_build: &str,
         inventory_existed_before: bool,
     ) -> Result<ClassificationCacheLookup, CachePortError>;
-    fn write_parse(&self, now_ms: u64, records: &[CacheWriteRecord])
-        -> Result<(), CachePortError>;
+    fn write_parse(&self, now_ms: u64, records: &[CacheWriteRecord]) -> Result<(), CachePortError>;
     fn write_classification(
         &self,
         now_ms: u64,
@@ -324,10 +296,15 @@ pub struct ScheduledRunInput {
     pub rejected_profile_hash: String,
     /// Discovery wall span observed by the run shell (spec Part 5.3).
     pub discovery_duration_ms: u64,
+    /// Monotonic origin captured immediately after `begin_run` succeeds.
+    pub deadline_origin_ms: u64,
     /// Monotonic ms at which all heavy work must stop (Absolute - 2,000ms).
     pub work_deadline_ms: u64,
     /// Monotonic ms at which no terminal write may begin.
     pub absolute_deadline_ms: u64,
+    prepared_inventory: Option<Vec<InventoryRecord>>,
+    prepared_inventory_existed_before: Option<HashSet<String>>,
+    prepared_inventory_duration_ms: u64,
 }
 
 impl ScheduledRunInput {
@@ -348,18 +325,44 @@ impl ScheduledRunInput {
         discovery_duration_ms: u64,
         clock: &dyn Clock,
     ) -> Result<Self, SchedulerFailure> {
-        let now = clock.now_ms();
-        let absolute = now
-            .checked_add(profile.total_deadline_ms)
-            .ok_or_else(|| SchedulerFailure::internal("deadline arithmetic overflowed"))?;
-        let work = absolute
-            .checked_sub(FINALIZATION_RESERVE_MS)
-            .ok_or_else(|| SchedulerFailure::internal("work deadline underflowed"))?;
-        if work >= absolute {
-            return Err(SchedulerFailure::internal(
-                "work deadline must precede the absolute deadline",
-            ));
-        }
+        let deadlines = RunDeadlines::derive(profile.total_deadline_ms, clock)
+            .map_err(|message| SchedulerFailure::internal(&message))?;
+        Self::new_with_deadlines(
+            scan_run_id,
+            started_at_ms,
+            work_dir,
+            discovery,
+            discovery_issues,
+            profile,
+            workers,
+            engine_version,
+            engine_build,
+            context_profile_hash,
+            rejected_profile_hash,
+            discovery_duration_ms,
+            deadlines,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_deadlines(
+        scan_run_id: u64,
+        started_at_ms: u64,
+        work_dir: String,
+        discovery: Vec<DiscoveredFileOut>,
+        discovery_issues: Vec<DiscoveryIssue>,
+        profile: NormalizedScannerProfileV2,
+        workers: WorkerIdentities,
+        engine_version: String,
+        engine_build: String,
+        context_profile_hash: String,
+        rejected_profile_hash: String,
+        discovery_duration_ms: u64,
+        deadlines: RunDeadlines,
+    ) -> Result<Self, SchedulerFailure> {
+        deadlines
+            .validate(profile.total_deadline_ms)
+            .map_err(|message| SchedulerFailure::internal(&message))?;
         Ok(Self {
             scan_run_id,
             started_at_ms,
@@ -373,9 +376,41 @@ impl ScheduledRunInput {
             context_profile_hash,
             rejected_profile_hash,
             discovery_duration_ms,
-            work_deadline_ms: work,
-            absolute_deadline_ms: absolute,
+            deadline_origin_ms: deadlines.origin_ms,
+            work_deadline_ms: deadlines.work_deadline_ms,
+            absolute_deadline_ms: deadlines.absolute_deadline_ms,
+            prepared_inventory: None,
+            prepared_inventory_existed_before: None,
+            prepared_inventory_duration_ms: 0,
         })
+    }
+
+    /// Production run.rs prepares the global inventory receipt before snapshot
+    /// lookup. Tests and alternate adapters may omit it and let Scheduler call
+    /// the CachePort itself.
+    pub fn with_prepared_inventory(
+        mut self,
+        inventory: Vec<InventoryRecord>,
+        existed_before: HashSet<String>,
+        duration_ms: u64,
+    ) -> Result<Self, SchedulerFailure> {
+        if inventory.len() != self.discovery.len()
+            || inventory.iter().zip(&self.discovery).any(|(record, file)| {
+                record.file_identity != file.file_identity
+                    || record.source_version != file.source_version
+            })
+            || existed_before
+                .iter()
+                .any(|identity| !inventory.iter().any(|row| &row.file_identity == identity))
+        {
+            return Err(SchedulerFailure::internal(
+                "prepared inventory receipt disagrees with discovery",
+            ));
+        }
+        self.prepared_inventory = Some(inventory);
+        self.prepared_inventory_existed_before = Some(existed_before);
+        self.prepared_inventory_duration_ms = duration_ms;
+        Ok(self)
     }
 }
 
@@ -433,7 +468,8 @@ pub struct BudgetedScanOutcome {
     /// the classifier and `not_classified_by_budget` PDFs have an entry; files
     /// rejected before classification and non-PDFs are absent. Consumed by the
     /// artifact write path to persist immutable classifier provenance.
-    pub classifications: std::collections::BTreeMap<String, crate::admission::PdfClassificationResult>,
+    pub classifications:
+        std::collections::BTreeMap<String, crate::admission::PdfClassificationResult>,
     pub diagnostics: Vec<RunDiagnosticRecord>,
     pub stage_metrics: Vec<StageMetric>,
     pub extension_metrics: Vec<ExtensionMetric>,
@@ -521,7 +557,10 @@ impl BudgetedContextScheduler {
         }
     }
 
-    pub fn execute(mut self, input: ScheduledRunInput) -> Result<BudgetedScanOutcome, SchedulerFailure> {
+    pub fn execute(
+        mut self,
+        input: ScheduledRunInput,
+    ) -> Result<BudgetedScanOutcome, SchedulerFailure> {
         if self.clock.now_ms() >= input.absolute_deadline_ms {
             return Err(SchedulerFailure::internal(
                 "absolute deadline already exhausted before execution",
@@ -578,15 +617,33 @@ impl BudgetedContextScheduler {
             .iter()
             .map(discovery_issue_warning)
             .collect();
-        let inventory = build_inventory(&input.discovery, &input.work_dir)?;
-        let cache_started = self.clock.now_ms();
-        let existed_before = self
-            .cache
-            .prepare_inventory(input.scan_run_id, input.started_at_ms, &inventory)
-            .map_err(|error| SchedulerFailure {
-                diagnostic: error.diagnostic(DiagnosticStage::Cache),
-            })?;
-        let cache_duration_ms = self.clock.now_ms().saturating_sub(cache_started);
+        let (inventory, existed_before, cache_duration_ms) = match (
+            input.prepared_inventory,
+            input.prepared_inventory_existed_before,
+        ) {
+            (Some(inventory), Some(existed_before)) => (
+                inventory,
+                existed_before,
+                input.prepared_inventory_duration_ms,
+            ),
+            (None, None) => {
+                let inventory = build_inventory(&input.discovery, &input.work_dir)?;
+                let cache_started = self.clock.now_ms();
+                let existed_before = self
+                    .cache
+                    .prepare_inventory(input.scan_run_id, input.started_at_ms, &inventory)
+                    .map_err(|error| SchedulerFailure {
+                        diagnostic: error.diagnostic(DiagnosticStage::Cache),
+                    })?;
+                let cache_duration_ms = self.clock.now_ms().saturating_sub(cache_started);
+                (inventory, existed_before, cache_duration_ms)
+            }
+            _ => {
+                return Err(SchedulerFailure::internal(
+                    "prepared inventory receipt is incomplete",
+                ))
+            }
+        };
 
         let discovery_count = input.discovery.len() as u64;
         let profile = input.profile.clone();
@@ -609,7 +666,12 @@ impl BudgetedContextScheduler {
             .count() as u64;
         metrics.classification_slot_count = classified
             .iter()
-            .filter(|plan| matches!(plan.pdf_classification, crate::admission::PdfClassificationPlan::Classify { .. }))
+            .filter(|plan| {
+                matches!(
+                    plan.pdf_classification,
+                    crate::admission::PdfClassificationPlan::Classify { .. }
+                )
+            })
             .count() as u64;
         metrics.nominal_charged_pages_total = classified
             .iter()
@@ -652,6 +714,7 @@ impl BudgetedContextScheduler {
             classification_audits,
             runtime_classification,
             classification_fresh_hits,
+            classification_cache_receipts,
             classification_cache_write_warnings,
         ) = self.run_classifications(
             &classified,
@@ -709,15 +772,21 @@ impl BudgetedContextScheduler {
         metrics.extraction_slot_count = admission
             .iter()
             .filter(|decision| {
-                matches!(decision.action, PlanAction::Admit { route: RouteKind::Pdf })
-                    && classifications.get(&decision.file_identity).map(|r| r.status)
-                        == Some(PdfClassificationStatus::TextInParseWindow)
+                matches!(
+                    decision.action,
+                    PlanAction::Admit {
+                        route: RouteKind::Pdf
+                    }
+                ) && classifications
+                    .get(&decision.file_identity)
+                    .map(|r| r.status)
+                    == Some(PdfClassificationStatus::TextInParseWindow)
             })
             .count() as u64;
 
         // ---- Execute admitted parses ----
         let parse_started = self.clock.now_ms();
-        let parse_outputs = self.run_parses(
+        let mut parse_outputs = self.run_parses(
             &admission,
             &snapshot,
             &classifications,
@@ -727,7 +796,34 @@ impl BudgetedContextScheduler {
             &mut metrics,
             &executor,
         )?;
+        parse_outputs.classification_cache_receipts = classification_cache_receipts;
         let parse_duration_ms = self.clock.now_ms().saturating_sub(parse_started);
+
+        // Cache-access touches are optional metadata, but they still obey the
+        // shared WorkDeadline and must never fail silently. A deadline becomes
+        // the normal run-level deadline terminal state; other store failures are
+        // projected as a bounded cache-write warning.
+        match self.cache.touch_access(
+            self.clock.now_ms(),
+            &parse_outputs.parse_fresh_hits,
+            &classification_fresh_hits,
+        ) {
+            Ok(()) => {}
+            Err(CachePortError::DeadlineExhausted { .. }) => {
+                metrics.stage_deadline_exhausted_count = 1;
+            }
+            Err(error) => {
+                let diagnostic = error.diagnostic(DiagnosticStage::Cache);
+                parse_outputs.cache_write_warnings.push(Diagnostic {
+                    error_code: ErrorCode::CacheWriteFailed,
+                    message: format!("cache access touch skipped: {}", diagnostic.message),
+                    retryable: true,
+                    stage: DiagnosticStage::Cache,
+                    file_path: Nullable(None),
+                    backend: Nullable(None),
+                });
+            }
+        }
 
         // ---- Build per-file evidence + decide + render ----
         let evidence = build_evidence(
@@ -888,14 +984,6 @@ impl BudgetedContextScheduler {
             }
         };
 
-        // spec Part 4: batch `last_accessed_bucket` touch for cache hits, all in
-        // one transaction. Best-effort: a busy/deadline failure never fails the run.
-        let _ = self.cache.touch_access(
-            self.clock.now_ms(),
-            &parse_outputs.parse_fresh_hits,
-            &classification_fresh_hits,
-        );
-
         metrics.deadline_precommit_elapsed_ms = self.clock.now_ms();
 
         Ok(BudgetedScanOutcome {
@@ -950,8 +1038,9 @@ pub(crate) fn source_guard_metrics(discovery: &[DiscoveredFileOut]) -> Execution
             Some(SourceGuardKind::Unavailable) => metrics.source_guard_unavailable_count += 1,
             Some(SourceGuardKind::ContentSha256V1) => {
                 metrics.source_guard_content_hash_file_count += 1;
-                metrics.source_guard_bytes_read =
-                    metrics.source_guard_bytes_read.saturating_add(file.size_bytes);
+                metrics.source_guard_bytes_read = metrics
+                    .source_guard_bytes_read
+                    .saturating_add(file.size_bytes);
             }
             _ => {}
         }
@@ -970,11 +1059,7 @@ fn discovery_issue_warning(issue: &DiscoveryIssue) -> RunDiagnosticRecord {
         severity: DiagnosticSeverity::Warning,
         diagnostic: Diagnostic {
             error_code: ErrorCode::DiscoveryEntryUnreadable,
-            message: issue
-                .message
-                .chars()
-                .take(4_096)
-                .collect(),
+            message: issue.message.chars().take(4_096).collect(),
             retryable: true,
             stage: DiagnosticStage::Discovery,
             file_path: Nullable(file_path.cloned()),
@@ -1037,7 +1122,10 @@ fn classifier_error_line(
     classifications: &BTreeMap<String, crate::admission::PdfClassificationResult>,
     runtime: &HashSet<String>,
 ) -> Option<String> {
-    if !matches!(plan.pdf_classification, crate::admission::PdfClassificationPlan::Classify { .. }) {
+    if !matches!(
+        plan.pdf_classification,
+        crate::admission::PdfClassificationPlan::Classify { .. }
+    ) {
         return None;
     }
     if runtime.contains(&plan.file_identity) {
@@ -1047,10 +1135,7 @@ fn classifier_error_line(
     let status = result.map(|r| r.status);
     match status {
         Some(PdfClassificationStatus::Unknown) => {
-            let code = if result
-                .and_then(|r| r.error_code.as_deref())
-                == Some("PARSER_TIMEOUT")
-            {
+            let code = if result.and_then(|r| r.error_code.as_deref()) == Some("PARSER_TIMEOUT") {
                 "PARSER_TIMEOUT"
             } else {
                 "PARSER_FAILED"
@@ -1164,6 +1249,7 @@ impl BudgetedContextScheduler {
             BTreeMap<String, PdfClassificationAuditV1>,
             HashSet<String>,
             Vec<String>,
+            Vec<ClassificationCacheWriteRecord>,
             Vec<Diagnostic>,
         ),
         SchedulerFailure,
@@ -1173,6 +1259,7 @@ impl BudgetedContextScheduler {
         let mut audits = BTreeMap::new();
         let mut runtime_not_parsed = HashSet::new();
         let mut classification_fresh_hits = Vec::new();
+        let mut classification_cache_receipts = Vec::new();
         let mut classification_cache_write_warnings: Vec<Diagnostic> = Vec::new();
         let mut any_lookup = false;
         let mut any_miss = false;
@@ -1336,6 +1423,7 @@ impl BudgetedContextScheduler {
                 &mut results,
                 &mut audits,
                 metrics,
+                &mut classification_cache_receipts,
                 &mut classification_cache_write_warnings,
             );
             index = wave_end;
@@ -1347,6 +1435,7 @@ impl BudgetedContextScheduler {
             audits,
             runtime_not_parsed,
             classification_fresh_hits,
+            classification_cache_receipts,
             classification_cache_write_warnings,
         ))
     }
@@ -1363,6 +1452,7 @@ impl BudgetedContextScheduler {
         results: &mut BTreeMap<String, PdfClassificationResult>,
         audits: &mut BTreeMap<String, PdfClassificationAuditV1>,
         metrics: &mut ExecutionMetrics,
+        cache_receipts: &mut Vec<ClassificationCacheWriteRecord>,
         cache_write_warnings: &mut Vec<Diagnostic>,
     ) {
         let remaining = work_deadline.saturating_sub(self.clock.now_ms());
@@ -1468,8 +1558,9 @@ impl BudgetedContextScheduler {
             };
             match run_inspected_pages {
                 Some(pages) => {
-                    metrics.confirmed_run_inspected_pages_total =
-                        metrics.confirmed_run_inspected_pages_total.saturating_add(pages)
+                    metrics.confirmed_run_inspected_pages_total = metrics
+                        .confirmed_run_inspected_pages_total
+                        .saturating_add(pages)
                 }
                 None => {
                     let unobserved_attempts = if result_examined_pages.is_some() {
@@ -1512,21 +1603,27 @@ impl BudgetedContextScheduler {
                     page_count,
                     result_examined_pages,
                 ) {
-                    if let Err(error) = self
+                    match self
                         .cache
-                        .write_classification(self.clock.now_ms(), &[record])
+                        .write_classification(self.clock.now_ms(), std::slice::from_ref(&record))
                     {
-                        cache_write_warnings.push(Diagnostic {
-                            error_code: ErrorCode::CacheWriteFailed,
-                            message: format!(
-                                "classification cache write skipped: {}",
-                                error.diagnostic(DiagnosticStage::Cache).message
-                            ),
-                            retryable: true,
-                            stage: DiagnosticStage::Cache,
-                            file_path: Nullable(Some(task.file.path.clone())),
-                            backend: Nullable(Some("pdf_text_v1".to_string())),
-                        });
+                        Ok(()) => cache_receipts.push(record),
+                        Err(CachePortError::DeadlineExhausted { .. }) => {
+                            metrics.stage_deadline_exhausted_count = 1;
+                        }
+                        Err(error) => {
+                            cache_write_warnings.push(Diagnostic {
+                                error_code: ErrorCode::CacheWriteFailed,
+                                message: format!(
+                                    "classification cache write skipped: {}",
+                                    error.diagnostic(DiagnosticStage::Cache).message
+                                ),
+                                retryable: true,
+                                stage: DiagnosticStage::Cache,
+                                file_path: Nullable(Some(task.file.path.clone())),
+                                backend: Nullable(Some("pdf_text_v1".to_string())),
+                            });
+                        }
                     }
                 }
             }
@@ -1616,9 +1713,16 @@ impl BudgetedContextScheduler {
                 // spec Part 1.2/3.2: a no-text PDF admitted as a metadata-only
                 // draft never starts a body parser.
                 if *route == RouteKind::Pdf
-                    && classifications.get(&decision.file_identity).map(|r| r.status)
+                    && classifications
+                        .get(&decision.file_identity)
+                        .map(|r| r.status)
                         == Some(PdfClassificationStatus::NoTextInParseWindow)
                 {
+                    continue;
+                }
+                if self.clock.now_ms() >= work_deadline {
+                    runtime_not_parsed.insert(decision.file_identity.clone());
+                    metrics.stage_deadline_exhausted_count = 1;
                     continue;
                 }
                 metrics.parse_cache_lookup_count += 1;
@@ -1648,8 +1752,7 @@ impl BudgetedContextScheduler {
                                 .insert(decision.file_identity.clone(), profile_hash);
                             continue;
                         }
-                        parse_profile_hashes
-                            .insert(decision.file_identity.clone(), profile_hash);
+                        parse_profile_hashes.insert(decision.file_identity.clone(), profile_hash);
                         parse_cache_status
                             .insert(decision.file_identity.clone(), CacheStatus::Fresh);
                         parse_cache_miss_reason
@@ -1682,8 +1785,7 @@ impl BudgetedContextScheduler {
                         any_miss = true;
                         parse_cache_status
                             .insert(decision.file_identity.clone(), CacheStatus::Miss);
-                        parse_cache_miss_reason
-                            .insert(decision.file_identity.clone(), reason);
+                        parse_cache_miss_reason.insert(decision.file_identity.clone(), reason);
                         if self.clock.now_ms() >= work_deadline {
                             runtime_not_parsed.insert(decision.file_identity.clone());
                             metrics.stage_deadline_exhausted_count = 1;
@@ -1749,8 +1851,7 @@ impl BudgetedContextScheduler {
                 ));
             }
             let outputs = executor.map(&requests, |request| self.parser.parse(request));
-            for ((file, guard, route, profile_hash), result) in wave_meta.into_iter().zip(outputs)
-            {
+            for ((file, guard, route, profile_hash), result) in wave_meta.into_iter().zip(outputs) {
                 metrics.parse_attempt_count = metrics
                     .parse_attempt_count
                     .saturating_add(result.parse_attempt_count);
@@ -1775,12 +1876,11 @@ impl BudgetedContextScheduler {
                         let record = CacheWriteRecord {
                             file_identity: file.file_identity.clone(),
                             source_version: file.source_version.clone(),
-                            source_guard_kind:
-                                crate::source_guard::source_guard_kind_text(guard.kind).to_string(),
-                            source_guard_sha256: guard
-                                .guard_sha256
-                                .clone()
-                                .unwrap_or_default(),
+                            source_guard_kind: crate::source_guard::source_guard_kind_text(
+                                guard.kind,
+                            )
+                            .to_string(),
+                            source_guard_sha256: guard.guard_sha256.clone().unwrap_or_default(),
                             parse_profile_hash: profile_hash.clone(),
                             content: result.content.clone(),
                             content_sha256: result.content_sha256.clone(),
@@ -1793,8 +1893,14 @@ impl BudgetedContextScheduler {
                         };
                         // spec Solution: cache COMMIT is a receipt; a failed write
                         // is a SKIPPED receipt with a warning, never a committed one.
-                        match self.cache.write_parse(self.clock.now_ms(), &[record.clone()]) {
+                        match self
+                            .cache
+                            .write_parse(self.clock.now_ms(), std::slice::from_ref(&record))
+                        {
                             Ok(()) => parse_cache_receipts.push(record),
+                            Err(CachePortError::DeadlineExhausted { .. }) => {
+                                metrics.stage_deadline_exhausted_count = 1;
+                            }
                             Err(error) => cache_write_warnings.push(Diagnostic {
                                 error_code: ErrorCode::CacheWriteFailed,
                                 message: format!(
@@ -1831,9 +1937,7 @@ impl BudgetedContextScheduler {
     }
 }
 
-fn source_version_changed_classification(
-    identity: &str,
-) -> PdfClassificationResult {
+fn source_version_changed_classification(identity: &str) -> PdfClassificationResult {
     PdfClassificationResult {
         file_identity: identity.to_string(),
         status: PdfClassificationStatus::Error,
@@ -1858,9 +1962,7 @@ fn classifier_failure_semantics(
         (PdfClassificationStatus::Unknown, false) => {
             (ParseStatus::Error, ErrorCode::ParserFailed, true)
         }
-        (PdfClassificationStatus::Error, _) => {
-            (ParseStatus::Error, ErrorCode::ParserFailed, false)
-        }
+        (PdfClassificationStatus::Error, _) => (ParseStatus::Error, ErrorCode::ParserFailed, false),
         _ => (ParseStatus::Error, ErrorCode::ParserFailed, false),
     }
 }
@@ -1947,11 +2049,12 @@ fn build_evidence(
         .collect();
     let mut evidence = Vec::with_capacity(discovery.len());
     for plan in classified {
-        let file = snapshot.get(&plan.file_identity).ok_or_else(|| {
-            SchedulerFailure::internal("classified plan has no discovery file")
-        })?;
-        let relative_path = crate::context_audit::relative_contract_path(Path::new(work_dir), &file.path)
-            .map_err(|message| SchedulerFailure::internal(&message))?;
+        let file = snapshot
+            .get(&plan.file_identity)
+            .ok_or_else(|| SchedulerFailure::internal("classified plan has no discovery file"))?;
+        let relative_path =
+            crate::context_audit::relative_contract_path(Path::new(work_dir), &file.path)
+                .map_err(|message| SchedulerFailure::internal(&message))?;
         let admission_action = admission
             .iter()
             .find(|decision| decision.file_identity == plan.file_identity)
@@ -2026,10 +2129,8 @@ fn file_evidence(
             // Timeout; crash / transient I/O / protocol failure maps to unknown ->
             // Error with retryable=true. The classification error_code carries
             // the distinguishing PARSER_TIMEOUT / PARSER_FAILED marker.
-            let (parse_status, code, retryable) = classifier_failure_semantics(
-                status,
-                classifications.get(&file.file_identity),
-            );
+            let (parse_status, code, retryable) =
+                classifier_failure_semantics(status, classifications.get(&file.file_identity));
             ContextFileEvidence {
                 file_identity: file.file_identity.clone(),
                 absolute_path: file.path.clone(),
@@ -2055,7 +2156,9 @@ fn file_evidence(
         }
         PlanAction::Admit { .. } => {
             if runtime_classification.contains(&file.file_identity)
-                || parse_outputs.runtime_not_parsed.contains(&file.file_identity)
+                || parse_outputs
+                    .runtime_not_parsed
+                    .contains(&file.file_identity)
             {
                 // spec Part 2.3: runtime NotParsed (deadline) — NEVER snapshot.
                 ContextFileEvidence {
@@ -2151,8 +2254,7 @@ fn enforce_rendered_within_reserved(
 ) -> Result<(), SchedulerFailure> {
     for decision in admission {
         if let PlanAction::Admit { .. } = decision.action {
-            if let Some(rendered_chars) =
-                rendered.rendered_by_identity.get(&decision.file_identity)
+            if let Some(rendered_chars) = rendered.rendered_by_identity.get(&decision.file_identity)
             {
                 model
                     .check_rendered_within_reserved(*rendered_chars, decision.reserved_chars)
@@ -2300,7 +2402,11 @@ fn aggregate_warning(folded: &[RunDiagnosticRecord]) -> RunDiagnosticRecord {
     if other_count > 0 {
         parts.push(format!("other:{other_count}"));
     }
-    let message = format!("aggregated {} diagnostics: {}", folded.len(), parts.join(","));
+    let message = format!(
+        "aggregated {} diagnostics: {}",
+        folded.len(),
+        parts.join(",")
+    );
     RunDiagnosticRecord {
         severity: DiagnosticSeverity::Warning,
         diagnostic: Diagnostic {
@@ -2369,46 +2475,83 @@ fn build_file_results(
 ) -> Result<Vec<FileResultRecord>, SchedulerFailure> {
     let mut records = Vec::with_capacity(classified.len());
     for plan in classified {
-        let file = snapshot.get(&plan.file_identity).ok_or_else(|| {
-            SchedulerFailure::internal("classified plan has no discovery file")
-        })?;
-        let relative_path = crate::context_audit::relative_contract_path(Path::new(work_dir), &file.path)
-            .map_err(|message| SchedulerFailure::internal(&message))?;
+        let file = snapshot
+            .get(&plan.file_identity)
+            .ok_or_else(|| SchedulerFailure::internal("classified plan has no discovery file"))?;
+        let relative_path =
+            crate::context_audit::relative_contract_path(Path::new(work_dir), &file.path)
+                .map_err(|message| SchedulerFailure::internal(&message))?;
         let admission_action = admission
             .iter()
             .find(|decision| decision.file_identity == plan.file_identity)
             .map(|decision| decision.action.clone());
         let action = admission_action.as_ref().unwrap_or(&plan.action);
-        let (parse_status, backend, lane, error, content_sha256, truncated, primary_ms, fallback_ms, total_ms, failure_class, fallback_backend, fallback_reason) =
-            match action {
-                PlanAction::NotParsed { .. } => (
-                    ParseStatus::NotParsed,
-                    "not_parsed".to_string(),
-                    AuditWorkerLane::NotParsed,
-                    None,
-                    crate::store::sha256_hex(b""),
-                    false,
-                    0,
-                    0,
-                    0,
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                ),
-                PlanAction::Reject { reason } => (
-                    ParseStatus::Error,
+        let (
+            parse_status,
+            backend,
+            lane,
+            error,
+            content_sha256,
+            truncated,
+            primary_ms,
+            fallback_ms,
+            total_ms,
+            failure_class,
+            fallback_backend,
+            fallback_reason,
+        ) = match action {
+            PlanAction::NotParsed { .. } => (
+                ParseStatus::NotParsed,
+                "not_parsed".to_string(),
+                AuditWorkerLane::NotParsed,
+                None,
+                crate::store::sha256_hex(b""),
+                false,
+                0,
+                0,
+                0,
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            PlanAction::Reject { reason } => (
+                ParseStatus::Error,
+                "not_parsed".to_string(),
+                AuditWorkerLane::NotParsed,
+                Some(Diagnostic {
+                    error_code: match reason {
+                        RejectReason::SourceGuardUnavailable => ErrorCode::SourceGuardUnavailable,
+                        RejectReason::ProfileRouteInvariant => ErrorCode::ProfileRouteInvariant,
+                    },
+                    message: reason.as_str().to_string(),
+                    retryable: reason == &RejectReason::SourceGuardUnavailable,
+                    stage: DiagnosticStage::Parse,
+                    file_path: Nullable(Some(file.path.clone())),
+                    backend: Nullable(None),
+                }),
+                crate::store::sha256_hex(b""),
+                false,
+                0,
+                0,
+                0,
+                String::new(),
+                String::new(),
+                String::new(),
+            ),
+            PlanAction::ClassifierFailed { status } => {
+                let (parse_status, error_code, retryable) =
+                    classifier_failure_semantics(status, classifications.get(&file.file_identity));
+                (
+                    parse_status,
                     "not_parsed".to_string(),
                     AuditWorkerLane::NotParsed,
                     Some(Diagnostic {
-                        error_code: match reason {
-                            RejectReason::SourceGuardUnavailable => ErrorCode::SourceGuardUnavailable,
-                            RejectReason::ProfileRouteInvariant => ErrorCode::ProfileRouteInvariant,
-                        },
-                        message: reason.as_str().to_string(),
-                        retryable: reason == &RejectReason::SourceGuardUnavailable,
+                        error_code,
+                        message: format!("pdf classification {status:?}"),
+                        retryable,
                         stage: DiagnosticStage::Parse,
                         file_path: Nullable(Some(file.path.clone())),
-                        backend: Nullable(None),
+                        backend: Nullable(Some("pdf_classifier".to_string())),
                     }),
                     crate::store::sha256_hex(b""),
                     false,
@@ -2418,24 +2561,49 @@ fn build_file_results(
                     String::new(),
                     String::new(),
                     String::new(),
-                ),
-                PlanAction::ClassifierFailed { status } => {
-                    let (parse_status, error_code, retryable) = classifier_failure_semantics(
-                        status,
-                        classifications.get(&file.file_identity),
-                    );
+                )
+            }
+            PlanAction::Admit { .. } => {
+                if runtime_classification.contains(&file.file_identity)
+                    || parse_outputs
+                        .runtime_not_parsed
+                        .contains(&file.file_identity)
+                {
                     (
-                        parse_status,
+                        ParseStatus::NotParsed,
                         "not_parsed".to_string(),
                         AuditWorkerLane::NotParsed,
-                        Some(Diagnostic {
-                            error_code,
-                            message: format!("pdf classification {status:?}"),
-                            retryable,
-                            stage: DiagnosticStage::Parse,
-                            file_path: Nullable(Some(file.path.clone())),
-                            backend: Nullable(Some("pdf_classifier".to_string())),
-                        }),
+                        None,
+                        crate::store::sha256_hex(b""),
+                        false,
+                        0,
+                        0,
+                        0,
+                        String::new(),
+                        String::new(),
+                        String::new(),
+                    )
+                } else if let Some(result) = parse_outputs.results.get(&file.file_identity) {
+                    (
+                        result.parse_status,
+                        result.parser_backend.clone(),
+                        parse_worker_lane(&result.worker_lane),
+                        result.error.clone(),
+                        result.content_sha256.clone(),
+                        result.truncated,
+                        result.primary_duration_ms,
+                        result.fallback_duration_ms,
+                        result.parse_duration_ms,
+                        result.failure_class.clone(),
+                        result.fallback_backend.clone(),
+                        result.fallback_reason_code.clone(),
+                    )
+                } else {
+                    (
+                        ParseStatus::Success,
+                        "pdf_metadata_v1".to_string(),
+                        AuditWorkerLane::RustCore,
+                        None,
                         crate::store::sha256_hex(b""),
                         false,
                         0,
@@ -2446,57 +2614,8 @@ fn build_file_results(
                         String::new(),
                     )
                 }
-                PlanAction::Admit { .. } => {
-                    if runtime_classification.contains(&file.file_identity)
-                        || parse_outputs.runtime_not_parsed.contains(&file.file_identity)
-                    {
-                        (
-                            ParseStatus::NotParsed,
-                            "not_parsed".to_string(),
-                            AuditWorkerLane::NotParsed,
-                            None,
-                            crate::store::sha256_hex(b""),
-                            false,
-                            0,
-                            0,
-                            0,
-                            String::new(),
-                            String::new(),
-                            String::new(),
-                        )
-                    } else if let Some(result) = parse_outputs.results.get(&file.file_identity) {
-                        (
-                            result.parse_status,
-                            result.parser_backend.clone(),
-                            parse_worker_lane(&result.worker_lane),
-                            result.error.clone(),
-                            result.content_sha256.clone(),
-                            result.truncated,
-                            result.primary_duration_ms,
-                            result.fallback_duration_ms,
-                            result.parse_duration_ms,
-                            result.failure_class.clone(),
-                            result.fallback_backend.clone(),
-                            result.fallback_reason_code.clone(),
-                        )
-                    } else {
-                        (
-                            ParseStatus::Success,
-                            "pdf_metadata_v1".to_string(),
-                            AuditWorkerLane::RustCore,
-                            None,
-                            crate::store::sha256_hex(b""),
-                            false,
-                            0,
-                            0,
-                            0,
-                            String::new(),
-                            String::new(),
-                            String::new(),
-                        )
-                    }
-                }
-            };
+            }
+        };
         let profile_hash = match action {
             PlanAction::Admit { .. } => parse_outputs
                 .parse_profile_hashes
@@ -2592,10 +2711,26 @@ fn build_stage_metrics(
 /// terminal batch carries four all-zero stage metrics instead of none.
 pub(crate) fn zero_stage_metrics() -> Vec<StageMetric> {
     vec![
-        StageMetric { stage: StageName::Discovery, item_count: 0, duration_ms: 0 },
-        StageMetric { stage: StageName::Cache, item_count: 0, duration_ms: 0 },
-        StageMetric { stage: StageName::Parse, item_count: 0, duration_ms: 0 },
-        StageMetric { stage: StageName::Context, item_count: 0, duration_ms: 0 },
+        StageMetric {
+            stage: StageName::Discovery,
+            item_count: 0,
+            duration_ms: 0,
+        },
+        StageMetric {
+            stage: StageName::Cache,
+            item_count: 0,
+            duration_ms: 0,
+        },
+        StageMetric {
+            stage: StageName::Parse,
+            item_count: 0,
+            duration_ms: 0,
+        },
+        StageMetric {
+            stage: StageName::Context,
+            item_count: 0,
+            duration_ms: 0,
+        },
     ]
 }
 
@@ -2667,7 +2802,10 @@ mod tests {
             .find(|record| record.diagnostic.error_code == ErrorCode::DiagnosticsAggregated)
             .expect("aggregate");
         assert_eq!(aggregate.diagnostic.stage, DiagnosticStage::Internal);
-        assert!(aggregate.diagnostic.retryable, "any folded retryable => true");
+        assert!(
+            aggregate.diagnostic.retryable,
+            "any folded retryable => true"
+        );
         assert!(aggregate.diagnostic.file_path.0.is_none());
         assert!(aggregate.diagnostic.backend.0.is_none());
         assert_eq!(errors.len(), 1, "error diagnostics pass through untouched");
