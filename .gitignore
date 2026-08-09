@@ -54,3 +54,7 @@ scripts/corpus/
 
 # acceptance: scratch DBs contain real paths; only the aggregate JSON is tracked
 .artifacts/acceptance-real-dir/
+
+# snapshot benchmark: scratch DBs/markers contain local paths; evidence is tracked
+.artifacts/snapshot-warm/*/
+.artifacts/snapshot-warm/*.marker.json

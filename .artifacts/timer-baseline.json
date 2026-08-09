@@ -1,20 +1,133 @@
 {
-  "scanner_sha256": "bded9c018241db204f6741e0019159e19ede3c68e89124a8e5f7c7c38aa36391",
-  "corpus": "tests/fixtures/worker_documents",
+  "schema": "timer_baseline_v2",
+  "timer_contract": {
+    "pass_fail_metric": "benchmark_wall_ms",
+    "legacy_347ms_engine_summary_is_comparable": false
+  },
+  "hardware": {
+    "platform": "Windows-10-10.0.26200-SP0",
+    "machine": "AMD64",
+    "processor": "AMD64 Family 23 Model 96 Stepping 1, AuthenticAMD",
+    "python": "3.11.15"
+  },
+  "window": {
+    "start": "2026-08-02",
+    "end": "2026-08-08"
+  },
+  "report_mode": "weekly",
+  "os_page_cache_declared_not_cleared": true,
+  "build": {
+    "scanner_sha256": "baa1e65d23e003eed5366b9cff46eaa124753afe2ae1293e976eacfb207ef842",
+    "office_worker_sha256": "881109497cb5a835db339b885ed58de4e8c798d8bfa5de65c75d5850845fb8cc",
+    "engine_version": "0.1.0",
+    "engine_build": "sha256-source-v1:f0fbafd47ba8e308620f7c84b558a5d28aa73e3335cc39f0163e77a88df4a912",
+    "target_triple": "x86_64-pc-windows-msvc",
+    "run_identity": {
+      "engine_build": "sha256-source-v1:f0fbafd47ba8e308620f7c84b558a5d28aa73e3335cc39f0163e77a88df4a912",
+      "workers": {
+        "office_contract": "ai_daily_worker_v1",
+        "office_version": "0.1.0",
+        "office_build": "sha256-source-v1:f0fbafd47ba8e308620f7c84b558a5d28aa73e3335cc39f0163e77a88df4a912",
+        "python_contract": "ai_daily_worker_v1",
+        "python_version": "0.1.0",
+        "python_build": "5636b389db22234e5c3f3d28bcb32ddee8103916409bdc2ac3d6b6e5ed5691ff"
+      },
+      "session": {
+        "capability": "session",
+        "contract": "ai_daily_python_session_v1",
+        "version": "0.1.0",
+        "build": "5636b389db22234e5c3f3d28bcb32ddee8103916409bdc2ac3d6b6e5ed5691ff"
+      },
+      "classifier": {
+        "contract": "ai_daily_pdf_classifier_v1",
+        "build": "e76761f80534a1a7f11e450471971b9f7b36cc5680315b97afdc55d9d82083b7",
+        "profile_hash": "3589cf58a0c1871ddddfc78e3b62b72174d44fa5ef1ca26d17f5a80339c054f4"
+      }
+    }
+  },
+  "corpus": "repository-fixture",
+  "corpus_manifest": {
+    "anonymous_manifest_sha256": "6519d82903b8a2c34363e89502dce0956ddb22d59aa4d5af81ea48e3e91eae60",
+    "source_count": 3
+  },
+  "corpus_manifest_provenance": {
+    "source": "file_inventory",
+    "ordered_fields": [
+      "sha256(file_identity)",
+      "source_version",
+      "size_bytes"
+    ],
+    "hash_algorithm": "sha256"
+  },
+  "cold_corpus_manifests": [
+    {
+      "anonymous_manifest_sha256": "6519d82903b8a2c34363e89502dce0956ddb22d59aa4d5af81ea48e3e91eae60",
+      "source_count": 3
+    },
+    {
+      "anonymous_manifest_sha256": "6519d82903b8a2c34363e89502dce0956ddb22d59aa4d5af81ea48e3e91eae60",
+      "source_count": 3
+    },
+    {
+      "anonymous_manifest_sha256": "6519d82903b8a2c34363e89502dce0956ddb22d59aa4d5af81ea48e3e91eae60",
+      "source_count": 3
+    }
+  ],
   "source_count": 3,
   "source_count_consistent": true,
-  "cold_median_ms": 932.7918999988469,
-  "cold_max_ms": 948.7662999999884,
-  "warm_median_ms": 74.98959999793442,
-  "warm_max_ms": 76.6260999989754,
-  "all_samples": [
-    948.7662999999884,
-    932.7918999988469,
-    905.4169999981241,
-    76.6260999989754,
-    74.98959999793442,
-    73.08820000253036
+  "normalized_profile_json": "{\"admission_policy_version\":\"budget_admission_v2\",\"classifier_policy_version\":\"pdf_text_presence_v1\",\"context\":{\"compression_policy_version\":\"markdown_context_v2\",\"global_max_chars\":50000,\"large_file_max_bytes\":10485760,\"medium_file_max_bytes\":1048576,\"per_file_max_chars\":5000,\"priority_policy_version\":\"budget_nominal_v2\",\"profile_name\":\"weekly_balanced_v1\",\"small_file_max_bytes\":65536},\"discovery\":{\"allowed_extensions\":[\".csv\",\".docx\",\".json\",\".log\",\".md\",\".pdf\",\".pptx\",\".txt\",\".xls\",\".xlsx\"],\"excluded_dirs\":[],\"ignored_patterns\":[\"*.tmp\",\"~$*\"]},\"execution\":{\"discovery_timeout_ms\":30000,\"file_timeout_by_extension_ms\":{\".pdf\":45000,\".xls\":60000,\".xlsx\":60000},\"file_timeout_ms\":30000,\"max_file_size_bytes\":52428800,\"max_workers\":4},\"max_candidate_files\":192,\"max_pdf_text_extractions\":12,\"max_requests_per_session\":128,\"max_total_pdf_classification_pages\":100,\"parse\":{\"aggregate_max_chars\":50000,\"office\":{\"document_excerpt_max_chars\":2000,\"docx_max_paragraphs\":80,\"docx_max_tables\":8,\"docx_table_max_cols\":8,\"docx_table_max_rows\":20,\"excel_max_columns\":12,\"excel_max_rows\":10,\"excel_max_sheets\":2,\"fallback_after_timeout\":false,\"fallback_enabled\":true,\"fallback_order\":[\"python_office_v1\",\"python_sharepoint_text_v1\"],\"fallback_policy_version\":\"hybrid_v1\",\"legacy_extensions_enabled\":false,\"pptx_include_notes\":true,\"pptx_max_slides\":15,\"primary_backend\":\"rust_office_oxide_v1\"},\"pdf\":{\"backend\":\"pdf_text_v1\",\"excerpt_max_chars\":2000,\"max_pages\":2},\"text\":{\"backend\":\"light_text_v1\",\"excerpt_max_chars\":2000,\"max_chars\":2000,\"read_head_bytes\":262144,\"read_tail_bytes\":262144}},\"parser_profile_version\":\"v1\",\"pdf_classification_timeout_ms\":2000,\"report_mode\":\"weekly\",\"schema_version\":\"normalized_scanner_profile_v2\",\"session_concurrency\":4,\"session_idle_ttl_ms\":30000,\"session_rss_limit_bytes\":536870912,\"total_deadline_ms\":15000}",
+  "normalized_profile_hash_algorithm": "sha256(sorted-key-json-utf8)",
+  "normalized_profile_sha256": "9235e1d2595c1e343793e359357f546d7fe1c469f84405dd48ab8e31732c5a7b",
+  "profile_and_build_provenance": "context_artifacts.snapshot_key_json",
+  "cold_median_ms": 842.5868000012997,
+  "cold_max_ms": 882.2405999999319,
+  "cold_benchmark_wall_ms": [
+    882.2405999999319,
+    833.5955999973521,
+    842.5868000012997
+  ],
+  "warm_median_ms": 98.16510000018752,
+  "warm_max_ms": 100.25300000052084,
+  "warm_benchmark_wall_ms": [
+    100.25300000052084,
+    97.49109999756911,
+    98.16510000018752
+  ],
+  "all_benchmark_wall_ms": [
+    882.2405999999319,
+    833.5955999973521,
+    842.5868000012997,
+    100.25300000052084,
+    97.49109999756911,
+    98.16510000018752
   ],
   "samples_clean": true,
-  "warm_median_ms_over_400": false
+  "warm_median_ms_over_400": false,
+  "reproducibility_gates": {
+    "cold": {
+      "sample_count_nonzero": true,
+      "cold_corpus_manifests_complete": true,
+      "cold_corpus_manifests_identical": true,
+      "sample_normalized_profiles_complete": true,
+      "sample_normalized_profiles_identical": true,
+      "sample_build_identities_complete": true,
+      "sample_build_identities_identical": true,
+      "sample_build_cross_checks_passed": true,
+      "passes": true
+    },
+    "all_samples": {
+      "sample_count_nonzero": true,
+      "cold_corpus_manifests_complete": true,
+      "cold_corpus_manifests_identical": true,
+      "sample_normalized_profiles_complete": true,
+      "sample_normalized_profiles_identical": true,
+      "sample_build_identities_complete": true,
+      "sample_build_identities_identical": true,
+      "sample_build_cross_checks_passed": true,
+      "passes": true
+    },
+    "envelope_source_count_consistent": true,
+    "version_engine_build_matches_run": true,
+    "passes": true
+  }
 }

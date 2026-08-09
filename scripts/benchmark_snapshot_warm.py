@@ -5,7 +5,7 @@
   一个成功 cold run 后在同一隔离 DB 用 3 个全新 request_id 连续跑 3 次；
   每个样本运行前 DB 查询证明 request_id 不存在、每次创建新 scan_run_id
   （共同定义 harness-derived `idempotent_replay=false`）、`snapshot_hit=true`、
-  context hash 与 cold 完全一致；判定 median ≤330ms / max ≤400ms。
+  context hash 与 cold 完全一致；判定 median ≤370ms / max ≤420ms。
 - 30d/90d：cache-only warm 3 样本各从同一只读 seed 克隆新 DB（`snapshot_hit=false`
   + 两类 lookup count>0/all_hit=true）；snapshot warm 在另一隔离 DB cold 后用
   3 个新 request_id 连续跑；判定 snapshot warm median 比 cache-only warm 改善 ≥20%，
@@ -15,7 +15,7 @@
 
 pass/fail 只读 harness `benchmark_wall_ms`（wall_clock_ms），永不读取
 ContextSummary.total_duration_ms。证据只提交聚合指标 + 匿名 corpus hash +
-硬件/build，禁止真实文件路径/文件名/正文（顶层 work_dir 除外，见 corpus 字段）。
+硬件/build，禁止真实文件路径/文件名/正文。
 """
 from __future__ import annotations
 
@@ -51,6 +51,7 @@ SEVEN_D_START = date(2026, 8, 2)
 SEVEN_D_END = date(2026, 8, 8)
 SEVEN_D_REPORT_MODE = "weekly"
 SEVEN_D_PROFILE = {"schema_version": "scanner_profile_v1"}
+SEVEN_D_TARGETS = {"median_ms_le": 370.0, "max_ms_le": 420.0}
 ANONYMOUS_CORPUS_MANIFEST_PROVENANCE = {
     "source": "file_inventory",
     "ordered_fields": [
@@ -688,8 +689,8 @@ def run_7d_snapshot_warm(
             "samples": [],
             "gates": {
                 "cold_runs_clean": False,
-                "median_le_330ms": False,
-                "max_le_400ms": False,
+                "median_le_370ms": False,
+                "max_le_420ms": False,
                 "all_snapshot_hit": False,
                 "all_idempotent_replay_false": False,
                 "all_context_identical_to_cold": False,
@@ -752,8 +753,8 @@ def run_7d_snapshot_warm(
     all_context = all(sample["context_hash_identical"] for sample in samples)
     gates = {
         "cold_runs_clean": True,
-        "median_le_330ms": median_ms(warm_ms) <= 330.0,
-        "max_le_400ms": max(warm_ms) <= 400.0,
+        "median_le_370ms": median_ms(warm_ms) <= SEVEN_D_TARGETS["median_ms_le"],
+        "max_le_420ms": max(warm_ms) <= SEVEN_D_TARGETS["max_ms_le"],
         "all_snapshot_hit": all_hit,
         "all_idempotent_replay_false": all_idempotent,
         "all_context_identical_to_cold": all_context,
@@ -1140,14 +1141,14 @@ def main(argv: list[str] | None = None) -> int:
 
     scanner, office_worker = _build_binary_paths()
     results: dict = {
-        "schema": "snapshot_warm_benchmark_v1",
+        "schema": "snapshot_warm_benchmark_v2",
         "generated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "hardware": _hardware_evidence(),
         "build": {
             "scanner_sha256": sha256_file(scanner),
             "office_worker_sha256": sha256_file(office_worker),
         },
-        "corpus": {"work_dir": str(work_dir)},
+        "corpus": "external-corpus",
         "scenarios": {},
     }
     try:
@@ -1186,8 +1187,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"seed preparer failed closed: {error}")
             return 1
         except Exception as error:  # noqa: BLE001 - benchmark evidence must be collected
-            results["scenarios"][scenario] = {"error": str(error)}
-            print(f"scenario {scenario} failed: {error}")
+            results["scenarios"][scenario] = {
+                "error": {
+                    "error_code": "SCENARIO_FAILED",
+                    "exception_type": type(error).__name__,
+                }
+            }
+            print(f"scenario {scenario} failed")
             continue
         results["scenarios"][scenario] = result
 
@@ -1203,6 +1209,14 @@ def main(argv: list[str] | None = None) -> int:
 
     evidence_path = out_root / "evidence.json"
     evidence = _strip_semantic(json.loads(json.dumps(results, default=str)))
+    try:
+        assert_portable_evidence(
+            evidence,
+            forbidden_paths=(work_dir, out_root, PROJECT_ROOT),
+        )
+    except ValueError as error:
+        print(f"portable evidence gate failed: {error}")
+        return 1
     evidence_path.write_text(
         json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8"
     )

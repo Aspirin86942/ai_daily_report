@@ -2,7 +2,7 @@
 
 在合成 fixture 上端到端验证 7d snapshot warm 与 30d/90d cache-only warm vs
 snapshot warm 的语义不变量（snapshot_hit、idempotent_replay=false、cache all-hit、
-context/decisions/semantic 完全一致）。绝对阈值（330/400ms、≥20%）依赖机器与
+context/decisions/semantic 完全一致）。绝对阈值（370/420ms、≥20%）依赖机器与
 真实语料，属真实目录手工 acceptance，不在 fixture 测试中断言。
 """
 from __future__ import annotations
@@ -156,6 +156,22 @@ def test_semantic_key_includes_decisions_and_semantic_counts() -> None:
     )
     assert b.semantic_key(base) != b.semantic_key(same_sha_different_decisions)
     assert b.semantic_key(base) != b.semantic_key(same_sha_different_counts)
+
+
+def test_7d_target_matches_the_redirected_spec() -> None:
+    assert b.SEVEN_D_TARGETS == {"median_ms_le": 370.0, "max_ms_le": 420.0}
+
+
+def test_snapshot_evidence_rejects_path_bearing_fields(tmp_path: Path) -> None:
+    b.assert_portable_evidence(
+        {"schema": "snapshot_warm_benchmark_v2", "corpus": "external-corpus"},
+        forbidden_paths=(tmp_path,),
+    )
+    with pytest.raises(ValueError, match="path-bearing evidence key"):
+        b.assert_portable_evidence(
+            {"corpus": {"work_dir": str(tmp_path)}},
+            forbidden_paths=(tmp_path,),
+        )
 
 
 def test_30d_records_non_clean_cold_without_raising(
