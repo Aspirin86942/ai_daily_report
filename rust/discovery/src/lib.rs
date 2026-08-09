@@ -108,6 +108,25 @@ fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryRepo
             continue;
         }
 
+        // Most eligible files are outside a report's date window. A cheap
+        // metadata prefilter avoids resolving every historical path; accepted
+        // rows still run the canonicalize + metadata path below unchanged.
+        if let Ok(metadata) = fs::metadata(entry.path()) {
+            if !metadata.is_file() {
+                continue;
+            }
+            if let Ok(modified_local) = metadata_modified_local(&metadata) {
+                let modified_naive = modified_local.naive_local();
+                if !is_within_date_range(
+                    modified_naive,
+                    request.start_date,
+                    request.end_date,
+                )? {
+                    continue;
+                }
+            }
+        }
+
         let resolved_path = match fs::canonicalize(entry.path()) {
             Ok(value) => value,
             Err(error) => {
@@ -366,6 +385,9 @@ fn matches_ignored_pattern(file_name_lower: &str, patterns: &[Pattern]) -> bool 
 }
 
 fn is_excluded_dir(path: &Path, excluded_dirs: &[PathBuf]) -> bool {
+    if excluded_dirs.is_empty() {
+        return false;
+    }
     let comparable = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     excluded_dirs
         .iter()

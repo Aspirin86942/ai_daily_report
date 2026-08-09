@@ -9,28 +9,16 @@
 
 from __future__ import annotations
 
-import hashlib
-import importlib.metadata
-import json
-import platform
-import sys
 import unicodedata
-from pathlib import Path
 
-import pypdfium2 as pdfium
-from pypdfium2 import PdfiumError
-
-POLICY_VERSION = "pdf_text_presence_v1"
-CLASSIFIER_CONTRACT_VERSION = "ai_daily_pdf_classifier_v1"
-CLASSIFIER_PROTOCOL_VERSION = 1
-_CLASSIFIER_DOMAIN = b"classifier-build-v1\0"
-
-# 冻结的 classifier 源码 allowlist：这些文件内容变化必须改变 classifier build。
-CLASSIFIER_BUILD_INPUTS = (
-    "requirements.lock",
-    "src/models/scanner_contract.py",
-    "src/workers/document_parser_worker.py",
-    "src/workers/pdf_classifier.py",
+from .pdf_classifier_identity import (
+    CLASSIFIER_BUILD,
+    CLASSIFIER_BUILD_INPUTS,
+    CLASSIFIER_CONTRACT_VERSION,
+    CLASSIFIER_PROTOCOL_VERSION,
+    POLICY_VERSION,
+    classifier_version_json,
+    classifier_version_payload,
 )
 
 
@@ -39,91 +27,6 @@ def _is_valid_text_char(ch: str) -> bool:
     if ch.isspace() or ch == "�":
         return False
     return unicodedata.category(ch) not in ("Cc", "Cf", "Cs", "Co")
-
-
-def _target_triple() -> str:
-    arch = platform.machine().lower()
-    if sys.platform == "win32":
-        return f"{arch}-pc-windows-msvc"
-    if sys.platform == "darwin":
-        return f"{arch}-apple-darwin"
-    return f"{arch}-unknown-linux-gnu"
-
-
-def _pdfium_native_version() -> str:
-    return str(pdfium.internal.PDFIUM_INFO)
-
-
-def _pypdfium2_version() -> str:
-    return importlib.metadata.version("pypdfium2")
-
-
-def _compute_classifier_build() -> str:
-    """独立 domain-separated SHA-256（spec Part 7.1）。
-
-    输入为冻结 source allowlist + policy + 运行时身份 + exact pypdfium2/PDFium
-    native 版本 + target triple；不使用含安装路径/编译时间的 ``sys.version``。
-    """
-    repository_root = Path(__file__).resolve().parents[2]
-    digest = hashlib.sha256()
-    digest.update(_CLASSIFIER_DOMAIN)
-    for relative_path in CLASSIFIER_BUILD_INPUTS:
-        path_bytes = relative_path.encode("utf-8", errors="strict")
-        file_bytes = (repository_root / relative_path).read_bytes()
-        digest.update(len(path_bytes).to_bytes(8, "little"))
-        digest.update(path_bytes)
-        digest.update(len(file_bytes).to_bytes(8, "little"))
-        digest.update(file_bytes)
-    metadata = {
-        "policy_version": POLICY_VERSION,
-        "python_implementation": sys.implementation.name,
-        "python_version": platform.python_version(),
-        "unicode_data_version": unicodedata.unidata_version,
-        "pypdfium2_version": _pypdfium2_version(),
-        "pdfium_version": _pdfium_native_version(),
-        "target_triple": _target_triple(),
-    }
-    canonical = json.dumps(
-        metadata,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8", errors="strict")
-    digest.update(len(canonical).to_bytes(8, "little"))
-    digest.update(canonical)
-    return digest.hexdigest()
-
-
-CLASSIFIER_BUILD = _compute_classifier_build()
-
-
-def classifier_version_payload() -> dict[str, object]:
-    """严格 ``ClassifierVersionResponseV1`` 的字段形状。"""
-    return {
-        "contract": "ai_daily_pdf_classifier",
-        "protocol_version": CLASSIFIER_PROTOCOL_VERSION,
-        "classifier_contract_version": CLASSIFIER_CONTRACT_VERSION,
-        "classifier_build": CLASSIFIER_BUILD,
-        "policy_version": POLICY_VERSION,
-        "python_implementation": sys.implementation.name,
-        "python_version": platform.python_version(),
-        "unicode_data_version": unicodedata.unidata_version,
-        "pypdfium2_version": _pypdfium2_version(),
-        "pdfium_version": _pdfium_native_version(),
-        "target_triple": _target_triple(),
-    }
-
-
-_CLASSIFIER_VERSION_JSON = json.dumps(
-    classifier_version_payload(),
-    ensure_ascii=False,
-    separators=(",", ":"),
-).encode("utf-8", errors="strict")
-
-
-def classifier_version_json() -> bytes:
-    """返回严格 ``classifier-version`` 单帧输出。"""
-    return _CLASSIFIER_VERSION_JSON + b"\n"
 
 
 def _diagnostic(
@@ -151,6 +54,20 @@ def classify_pdf(path: str, max_pages: int, timeout_ms: int = 2000) -> dict[str,
     unknown/error 携带 ``PythonOperationDiagnosticV1`` 形状的 diagnostic，
     不抛裸异常。``timeout_ms`` 由进程级 runner 在调用方强制执行。
     """
+    # Capability handshakes only need package/source identity. Load the native
+    # PDF runtime here so snapshot-warm preflight does not pay DLL startup.
+    try:
+        import pypdfium2 as pdfium
+        from pypdfium2 import PdfiumError
+    except (ImportError, OSError) as error:
+        return _failure_result(
+            path=path,
+            status="unknown",
+            error_code="PARSER_START_FAILED",
+            message=f"pdf runtime is unavailable: {error}",
+            retryable=True,
+        )
+
     try:
         pdf = pdfium.PdfDocument(path)
     except PdfiumError as error:

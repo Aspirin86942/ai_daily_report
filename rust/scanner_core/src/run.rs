@@ -1255,6 +1255,18 @@ fn execute_active_build(
         }
     };
     let exit_code = i32::from(run_status == RunStatus::Error);
+    if let Some(output) = persist_post_outcome_failure_if_invalid(
+        request,
+        version,
+        store,
+        active,
+        &batch,
+        worker_handshake_ms,
+        discovery_duration_ms,
+        &rss_tracker,
+    ) {
+        return output;
+    }
     match store.finalize(active, &batch, finalize_now_ms) {
         Ok(_timings) => {
             // spec Part 4 opportunistic GC: only when >=10ms remain to the
@@ -1272,17 +1284,14 @@ fn execute_active_build(
             }
             CommandOutput::canonical_json(envelope_json, exit_code)
         }
-        Err(error) => build_error_output(
+        Err(error) => abandon_after_finalization_failure(
             request,
             version,
-            error.diagnostic(DiagnosticStage::Cache),
+            store,
+            active,
+            error,
             warnings,
-            batch
-                .context
-                .as_ref()
-                .map(|context| context.summary.clone())
-                .unwrap_or_else(empty_summary),
-            Some(active.scan_run_id()),
+            empty_summary(),
         ),
     }
 }
@@ -1856,19 +1865,28 @@ fn finalize_snapshot_hit(
             );
         }
     };
+    if let Some(output) = persist_post_outcome_failure_if_invalid(
+        request,
+        version,
+        store,
+        active,
+        &batch,
+        worker_handshake_ms,
+        discovery_duration_ms,
+        rss_tracker,
+    ) {
+        return output;
+    }
     match store.finalize(active, &batch, finalize_now_ms) {
         Ok(_timings) => CommandOutput::canonical_json(envelope_json, 0),
-        Err(error) => build_error_output(
+        Err(error) => abandon_after_finalization_failure(
             request,
             version,
-            error.diagnostic(DiagnosticStage::Cache),
+            store,
+            active,
+            error,
             Vec::new(),
-            batch
-                .context
-                .as_ref()
-                .map(|context| context.summary.clone())
-                .unwrap_or_else(empty_summary),
-            Some(active.scan_run_id()),
+            empty_summary(),
         ),
     }
 }
@@ -2388,6 +2406,8 @@ fn persist_active_error_without_heartbeat(
     discovery_ms: u64,
     rss_tracker: &WorkerRssTracker,
 ) -> Result<CommandOutput, EngineShellError> {
+    let discovery_observed_file_count = summary.source_file_count;
+    let summary = empty_summary();
     let peak_worker_rss_bytes = rss_tracker.peak_worker_rss_bytes();
     if peak_worker_rss_bytes.is_none()
         && !warnings
@@ -2407,7 +2427,7 @@ fn persist_active_error_without_heartbeat(
         file_context: String::new(),
         summary: summary.clone(),
         scan_run_id: Nullable(Some(active.scan_run_id())),
-        context_run_id: Nullable(None),
+        context_run_id: Nullable(Some(active.context_run_id())),
         warnings: warnings.clone(),
         error: Nullable(Some(error.clone())),
     };
@@ -2443,9 +2463,16 @@ fn persist_active_error_without_heartbeat(
         cache_writes: Vec::new(),
         file_results: Vec::new(),
         diagnostics,
-        stage_metrics: Vec::new(),
+        stage_metrics: crate::scheduler::zero_stage_metrics(),
         extension_metrics: Vec::new(),
-        context: None,
+        context: Some(ContextRunRecord {
+            context_profile_hash: crate::store::sha256_hex(b"terminal_failure_v1"),
+            status: RunStatus::Error,
+            final_context: String::new(),
+            context_sha256: crate::store::sha256_hex(b""),
+            summary: summary.clone(),
+            decisions: Vec::new(),
+        }),
         artifact: None,
         snapshot_key: None,
         snapshot_hit: None,
@@ -2455,7 +2482,7 @@ fn persist_active_error_without_heartbeat(
         execution_metrics: Some(assemble_engine_error_execution_metrics(
             worker_handshake_ms,
             discovery_ms,
-            summary.source_file_count,
+            discovery_observed_file_count,
             peak_worker_rss_bytes,
         )),
     };
@@ -2474,15 +2501,74 @@ fn persist_active_error_without_heartbeat(
     };
     match store.finalize(active, &batch, now_ms) {
         Ok(_timings) => CommandOutput::canonical_json(envelope_json, 1),
-        Err(write_error) => build_error_output(
+        Err(write_error) => abandon_after_finalization_failure(
             request,
             version,
-            write_error.diagnostic(DiagnosticStage::Cache),
+            store,
+            active,
+            write_error,
             warnings,
             summary,
-            Some(active.scan_run_id()),
         ),
     }
+}
+
+fn abandon_after_finalization_failure(
+    request: &BuildContextRequest,
+    version: &VersionResponse,
+    store: &mut ScannerStore,
+    active: &ActiveRun,
+    error: StoreError,
+    mut warnings: Vec<Diagnostic>,
+    summary: ContextSummary,
+) -> Result<CommandOutput, EngineShellError> {
+    let cleanup = current_time_millis()
+        .and_then(|now_ms| store.abandon_active_run(active, now_ms));
+    if let Err(cleanup_error) = cleanup {
+        warnings.push(cleanup_error.diagnostic(DiagnosticStage::Cache));
+    }
+    build_error_output(
+        request,
+        version,
+        error.diagnostic(DiagnosticStage::Cache),
+        warnings,
+        summary,
+        Some(active.scan_run_id()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn persist_post_outcome_failure_if_invalid(
+    request: &BuildContextRequest,
+    version: &VersionResponse,
+    store: &mut ScannerStore,
+    active: &ActiveRun,
+    batch: &FinalizationBatch,
+    worker_handshake_ms: u64,
+    discovery_ms: u64,
+    rss_tracker: &WorkerRssTracker,
+) -> Option<Result<CommandOutput, EngineShellError>> {
+    let error = match store.validate_finalization_batch(active, batch) {
+        Ok(()) => return None,
+        Err(error) => error,
+    };
+    let observed_summary = batch
+        .context
+        .as_ref()
+        .map(|context| context.summary.clone())
+        .unwrap_or_else(empty_summary);
+    Some(persist_active_error_without_heartbeat(
+        request,
+        version,
+        store,
+        active,
+        Vec::new(),
+        error.diagnostic(DiagnosticStage::Cache),
+        observed_summary,
+        worker_handshake_ms,
+        discovery_ms,
+        rss_tracker,
+    ))
 }
 
 fn build_error_output(
@@ -2770,6 +2856,110 @@ mod tests {
                 .expect("temporary directory should remain readable")
                 .count(),
             0
+        );
+    }
+
+    #[test]
+    fn post_outcome_rejection_commits_a_replayable_minimal_error() {
+        let directory = tempdir().expect("temporary directory should be created");
+        let scan_db = directory.path().join(crate::store::SCAN_DB_FILENAME);
+        let mut request: BuildContextRequest = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/scanner_contract/v1/request.json"
+        ))
+        .expect("request fixture");
+        request.request_id = "00000000-0000-4000-8000-000000000001".to_string();
+        request.work_dir = directory.path().to_string_lossy().into_owned();
+        request.scan_db_path = scan_db.to_string_lossy().into_owned();
+        request.adapters.office_worker_path = directory
+            .path()
+            .join("office-worker.exe")
+            .to_string_lossy()
+            .into_owned();
+        request.adapters.python_executable = directory
+            .path()
+            .join("python.exe")
+            .to_string_lossy()
+            .into_owned();
+        request.adapters.python_module_root = directory.path().to_string_lossy().into_owned();
+
+        let profile = normalize_scanner_profile_for_request(
+            &request.scanner_profile,
+            request.report_mode,
+        )
+        .expect("normalized scanner profile");
+        let canonical = ScannerStore::canonicalize_request(&request, &profile)
+            .expect("canonical request");
+        let runtime = AttemptRuntime::from_request(&request, &version_response())
+            .expect("attempt runtime");
+        let mut store = ScannerStore::open(&scan_db).expect("scanner store");
+        let now_ms = current_time_millis().expect("current time");
+        let active = match store
+            .begin_run(
+                &request.request_id,
+                &canonical,
+                &runtime,
+                now_ms,
+            )
+            .expect("begin run")
+        {
+            BeginRunOutcome::Started(active) => active,
+            BeginRunOutcome::Stored(_) => panic!("expected a new active run"),
+        };
+        let office = WorkerFingerprint {
+            contract: "ai_daily_worker_v1".to_string(),
+            version: "0.1.0".to_string(),
+            build: "office-build".to_string(),
+        };
+        let python = WorkerFingerprint {
+            contract: "ai_daily_worker_v1".to_string(),
+            version: "0.1.0".to_string(),
+            build: "python-build".to_string(),
+        };
+        store
+            .record_worker_fingerprints(&active, Some(&office), Some(&python), now_ms)
+            .expect("worker fingerprints");
+        let invalid_outcome = FinalizationBatch {
+            status: RunStatus::Success,
+            envelope_json: "{}".to_string(),
+            inventory: Vec::new(),
+            cache_writes: Vec::new(),
+            file_results: Vec::new(),
+            diagnostics: Vec::new(),
+            stage_metrics: Vec::new(),
+            extension_metrics: Vec::new(),
+            context: None,
+            artifact: None,
+            snapshot_key: None,
+            snapshot_hit: None,
+            execution_metrics: None,
+        };
+
+        let output = persist_post_outcome_failure_if_invalid(
+            &request,
+            &version_response(),
+            &mut store,
+            &active,
+            &invalid_outcome,
+            0,
+            0,
+            &WorkerRssTracker::default(),
+        )
+        .expect("invalid outcome must be converted")
+        .expect("terminal failure output");
+        assert_eq!(output.exit_code, 1);
+
+        let stored = store
+            .load_terminal_envelope(active.scan_run_id())
+            .unwrap_or_else(|error| {
+                panic!(
+                    "committed terminal failure must be replayable: {error}; output={}",
+                    output.json
+                )
+            });
+        assert_eq!(stored.envelope.scan_run_id.0, Some(active.scan_run_id()));
+        assert_eq!(
+            stored.envelope.context_run_id.0,
+            Some(active.context_run_id())
         );
     }
 

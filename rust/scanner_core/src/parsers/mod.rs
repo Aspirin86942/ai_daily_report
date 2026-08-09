@@ -102,7 +102,7 @@ pub struct WorkerCommand {
 impl WorkerCommand {
     fn args_for(&self, operation: &str) -> Vec<OsString> {
         let mut args = Vec::with_capacity(self.base_args.len() + 2);
-        if operation == "version"
+        if matches!(operation, "version" | "classifier-version" | "session-version")
             && self.expected_kind == WorkerKind::PythonDocument
             && !self.base_args.iter().any(|value| value == "-S")
         {
@@ -1650,5 +1650,25 @@ mod tests {
                 python_document: true,
             }
         );
+    }
+
+    #[test]
+    fn python_capability_handshakes_skip_site_startup() {
+        let command = WorkerCommand {
+            program: PathBuf::from("python"),
+            base_args: vec![
+                OsString::from("-m"),
+                OsString::from("src.workers.document_parser_worker"),
+            ],
+            current_dir: None,
+            expected_kind: WorkerKind::PythonDocument,
+            required_backends: Vec::new(),
+            required_extensions: Vec::new(),
+        };
+
+        for operation in ["version", "classifier-version", "session-version"] {
+            assert_eq!(command.args_for(operation).first(), Some(&OsString::from("-S")));
+        }
+        assert_ne!(command.args_for("session").first(), Some(&OsString::from("-S")));
     }
 }

@@ -18,7 +18,7 @@ def main(argv: list[str] | tuple[str, ...] | None = None) -> int:
         return 0
 
     if args == ["classifier-version"]:
-        from .pdf_classifier import classifier_version_json
+        from .pdf_classifier_identity import classifier_version_json
 
         sys.stdout.buffer.write(classifier_version_json())
         return 0
@@ -58,27 +58,18 @@ def main(argv: list[str] | tuple[str, ...] | None = None) -> int:
 
 def _handle_session_version() -> int:
     """输出严格 ``PythonSessionVersionResponseV1`` 单帧（spec Part 7.1）。"""
-    import json
-
-    from src.models.scanner_contract import PythonSessionVersionResponseV1
-    from src.workers.pdf_classifier import CLASSIFIER_BUILD
+    from src.workers.pdf_classifier_identity import CLASSIFIER_BUILD
     from .python_worker_identity import PYTHON_WORKER_BUILD
 
-    payload = PythonSessionVersionResponseV1(
-        contract="ai_daily_python_session",
-        protocol_version=1,
-        session_contract_version=SESSION_CONTRACT_VERSION,
-        worker_build=PYTHON_WORKER_BUILD,
-        classifier_build=CLASSIFIER_BUILD,
-        supported_operations=["classify_pdf_v1", "parse_v1"],
-    )
-    sys.stdout.buffer.write(
-        json.dumps(
-            payload.model_dump(mode="json"),
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8", errors="strict")
-        + b"\n"
+    _emit_json(
+        {
+            "contract": "ai_daily_python_session",
+            "protocol_version": 1,
+            "session_contract_version": SESSION_CONTRACT_VERSION,
+            "worker_build": PYTHON_WORKER_BUILD,
+            "classifier_build": CLASSIFIER_BUILD,
+            "supported_operations": ["classify_pdf_v1", "parse_v1"],
+        }
     )
     return 0
 
@@ -99,7 +90,7 @@ def _handle_session() -> int:
         PythonSessionResponseV1,
     )
     from .python_worker_identity import PYTHON_WORKER_BUILD
-    from .pdf_classifier import CLASSIFIER_BUILD
+    from .pdf_classifier_identity import CLASSIFIER_BUILD
 
     hello = PythonSessionHelloV1(
         contract="ai_daily_python_session",

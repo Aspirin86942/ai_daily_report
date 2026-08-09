@@ -20,7 +20,7 @@ RawScannerProfileV2 `summary_pdf_max_pages=5`：
 
 pass/fail 只读 harness `benchmark_wall_ms`（wall_clock_ms），永不读取
 ContextSummary.total_duration_ms。证据只提交聚合值 + 匿名 corpus hash + 硬件/build；
-禁止真实路径/文件名/正文（顶层 work_dir 除外）。
+禁止真实路径/文件名/正文。
 """
 from __future__ import annotations
 
@@ -506,7 +506,11 @@ def run_cold_acceptance_and_warm(
         context = None
         if run["scan_run_id"] is not None:
             inspect_result = run_inspect_v2(scanner, cold_db, run["scan_run_id"])
-            if inspect_result and inspect_result["ok"]:
+            if (
+                inspect_result
+                and inspect_result["ok"]
+                and run["status"] in {"ok", "partial"}
+            ):
                 metrics = inspect_result["payload"].get("execution_metrics") or {}
                 conn = sqlite3.connect(cold_db)
                 try:
@@ -528,17 +532,41 @@ def run_cold_acceptance_and_warm(
     for index, cold in enumerate(colds):
         run = cold["run"]
         inspect_ok = bool(cold["inspect_result"] and cold["inspect_result"]["ok"])
-        evidence = _derive_sample_evidence(
-            cold["db"],
-            run["scan_run_id"],
-            cold["metrics"],
-            session_capability_present=session_capability["session_capability_present"],
-            validated=run["validated"] and inspect_ok,
-        )
+        try:
+            evidence = _derive_sample_evidence(
+                cold["db"],
+                run["scan_run_id"],
+                cold["metrics"],
+                session_capability_present=session_capability[
+                    "session_capability_present"
+                ],
+                validated=run["validated"] and inspect_ok,
+            )
+        except RuntimeError as error:
+            # A failed/abandoned run may honestly have no context row. Preserve
+            # that as an explicit failed sample instead of inventing zeroes or
+            # aborting before the aggregate evidence is written.
+            evidence = {
+                "validated": False,
+                "collection_error": str(error),
+                "stage_deadline_exhausted_count": None,
+                "runtime_not_parsed_count": None,
+                "unknown_count": None,
+                "error_count": None,
+                "timeout_count": None,
+                "text_pdf_coverage": None,
+                "no_text_pdfplumber_invocations": None,
+                "source_guard_unavailable_count": None,
+                "session_capability_present": session_capability[
+                    "session_capability_present"
+                ],
+                "session_fallback_count": None,
+            }
         sample = {
             "index": index,
             "wall_ms": run["wall_ms"],
             "status": run["status"],
+            "response_error": run.get("response_error"),
             "scan_run_id": run["scan_run_id"],
             "inspect_ok": inspect_ok,
             "inspect_error": None
@@ -580,7 +608,9 @@ def run_cold_acceptance_and_warm(
         "window": {"start": start.isoformat(), "end": end.isoformat()},
         "report_mode": report_mode,
         "profile": profile,
-        "profile_hash_30d_sample": cold_samples[0]["anti_cheat"]["context_profile_hash"]
+        "profile_hash_30d_sample": cold_samples[0]["anti_cheat"].get(
+            "context_profile_hash"
+        )
         if cold_samples
         else None,
         "corpus": corpus,
@@ -1039,7 +1069,6 @@ def main(argv: list[str] | None = None) -> int:
             "office_worker_sha256": sha256_file(office_worker),
             "session_capability": session_capability,
         },
-        "corpus": {"work_dir": str(work_dir)},
         "os_page_cache_declared_not_cleared": True,
         "scenarios": {},
     }

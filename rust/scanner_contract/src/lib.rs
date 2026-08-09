@@ -3562,10 +3562,12 @@ pub fn validate_v2_parse_provenance(
 
     match classification_status {
         Some(PdfClassificationStatus::NoTextInParseWindow)
-            if parse_status != ParseStatus::Success || !metadata =>
+            if !((parse_status == ParseStatus::Success && metadata)
+                || (parse_status == ParseStatus::NotParsed && not_parsed)) =>
         {
             return Err(
-                "no-text classification requires metadata-only success provenance".to_string(),
+                "no-text classification requires metadata-only success or budget-omitted provenance"
+                    .to_string(),
             );
         }
         Some(status @ (PdfClassificationStatus::Unknown | PdfClassificationStatus::Error)) => {

@@ -128,6 +128,20 @@ def test_classifier_version_json_is_one_frame():
     assert len(parsed["classifier_build"]) == 64
 
 
+def test_lightweight_identity_matches_loaded_pdf_runtime():
+    import importlib.metadata
+
+    import pypdfium2
+
+    from src.workers.pdf_classifier_identity import (
+        _pdfium_native_version,
+        _pypdfium2_version,
+    )
+
+    assert _pypdfium2_version() == importlib.metadata.version("pypdfium2")
+    assert _pdfium_native_version() == str(pypdfium2.internal.PDFIUM_INFO)
+
+
 # ---------------------------------------------------------------------------
 # 数值门禁（spec Part 3.3）：固定 corpus manifest
 # ---------------------------------------------------------------------------

@@ -275,12 +275,30 @@ def run_build_context(
         json.dumps(request).encode("utf-8"),
         response_validator=validator,
     )
+    response_error = envelope.get("error")
+    if isinstance(response_error, dict):
+        message = str(response_error.get("message") or "")[:1024]
+        for sensitive in (
+            response_error.get("file_path"),
+            str(work_dir),
+            str(db_path),
+        ):
+            if sensitive:
+                message = message.replace(str(sensitive), "<redacted-path>")
+        response_error = {
+            key: response_error.get(key)
+            for key in ("error_code", "retryable", "stage", "backend")
+        }
+        response_error["message"] = message
+    else:
+        response_error = None
     return {
         "wall_ms": result.wall_ms,
         "exit_code": result.exit_code,
         "request_id": result.request_id,
         "validated": result.validated,
         "status": envelope.get("status"),
+        "response_error": response_error,
         "scan_run_id": envelope.get("scan_run_id"),
         "context_run_id": envelope.get("context_run_id"),
     }

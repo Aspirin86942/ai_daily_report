@@ -2590,7 +2590,7 @@ fn build_stage_metrics(
 /// BUDGET_MODEL_MISMATCH, enforced-render mismatch) still commit a `context_runs`
 /// row whose relational summary must reconcile with exactly 4 stage rows, so the
 /// terminal batch carries four all-zero stage metrics instead of none.
-fn zero_stage_metrics() -> Vec<StageMetric> {
+pub(crate) fn zero_stage_metrics() -> Vec<StageMetric> {
     vec![
         StageMetric { stage: StageName::Discovery, item_count: 0, duration_ms: 0 },
         StageMetric { stage: StageName::Cache, item_count: 0, duration_ms: 0 },

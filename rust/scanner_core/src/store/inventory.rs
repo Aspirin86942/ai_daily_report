@@ -674,6 +674,37 @@ mod tests {
     }
 
     #[test]
+    fn no_text_pdf_omitted_by_global_budget_is_valid_persistence_provenance() {
+        let mut omitted = valid_body_parse_result();
+        omitted.parse_status = ParseStatus::NotParsed;
+        omitted.parser_backend = "not_parsed".to_string();
+        omitted.worker_lane = AuditWorkerLane::NotParsed;
+        omitted.primary_duration_ms = 0;
+        omitted.parse_duration_ms = 0;
+        omitted.parse_transport = ParseTransport::NotApplicable;
+        omitted.parse_attempt_count = 0;
+        omitted.pdf_classification = Some(PdfClassificationAuditV1 {
+            status: ai_daily_scanner_contract::PdfClassificationStatus::NoTextInParseWindow,
+            page_count: ai_daily_scanner_contract::Nullable(Some(2)),
+            classification_cache_status:
+                ai_daily_scanner_contract::ClassificationCacheStatus::Miss,
+            classification_cache_miss_reason: "new_file".to_string(),
+            result_examined_pages: ai_daily_scanner_contract::Nullable(Some(2)),
+            run_inspected_pages: ai_daily_scanner_contract::Nullable(Some(2)),
+            nominal_charged_pages: 2,
+            duration_ms: 1,
+            transport: ai_daily_scanner_contract::ClassificationTransport::OneShot,
+            attempt_count: 1,
+            classifier_build: "c".repeat(64),
+            classifier_profile_hash: "d".repeat(64),
+        });
+
+        omitted
+            .validate_for_persistence(false)
+            .expect("a classified no-text PDF may be omitted when its metadata section exceeds the global context budget");
+    }
+
+    #[test]
     fn snapshot_budget_exclusion_preserves_zero_execution_classification_shape() {
         let classification = PdfClassificationAuditV1 {
             status: ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget,

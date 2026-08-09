@@ -891,6 +891,60 @@ impl ScannerStore {
         transaction.commit().map_err(cache_write)
     }
 
+    pub fn abandon_active_run(
+        &mut self,
+        active: &ActiveRun,
+        now_ms: u64,
+    ) -> Result<(), StoreError> {
+        let now_ms = checked_i64(now_ms, "abandon timestamp")?;
+        self.connection
+            .busy_timeout(Duration::from_millis(0))
+            .map_err(cache_open)?;
+        let outcome = (|| -> Result<(), StoreError> {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(cache_write)?;
+            ensure_owner(&transaction, active)?;
+            let run_updated = transaction
+                .execute(
+                    "UPDATE scan_runs
+                     SET status='abandoned', updated_at_ms=?1, finished_at_ms=?1
+                     WHERE scan_run_id=?2 AND owner_id=?3 AND status='running'",
+                    params![now_ms, active.scan_run_id, active.owner_id],
+                )
+                .map_err(cache_write)?;
+            let attempt_updated = transaction
+                .execute(
+                    "UPDATE scan_run_attempts
+                     SET status='abandoned', finished_at_ms=?1
+                     WHERE scan_run_id=?2 AND attempt_number=?3
+                       AND owner_id=?4 AND status='running'",
+                    params![
+                        now_ms,
+                        active.scan_run_id,
+                        active.attempt_number,
+                        active.owner_id,
+                    ],
+                )
+                .map_err(cache_write)?;
+            let lease_deleted = transaction
+                .execute(
+                    "DELETE FROM engine_lease WHERE lease_key=1 AND owner_id=?1",
+                    [&active.owner_id],
+                )
+                .map_err(cache_write)?;
+            if run_updated != 1 || attempt_updated != 1 || lease_deleted != 1 {
+                return Err(StoreError::LeaseLost);
+            }
+            transaction.commit().map_err(cache_write)
+        })();
+        let _ = self
+            .connection
+            .busy_timeout(Duration::from_millis(BUSY_TIMEOUT_MS));
+        outcome
+    }
+
     pub fn lookup_cache(
         &self,
         file_identity: &str,
@@ -1341,6 +1395,14 @@ impl ScannerStore {
             envelope_rebuild_ms,
             terminal_rows_written,
         })
+    }
+
+    pub(crate) fn validate_finalization_batch(
+        &self,
+        active: &ActiveRun,
+        batch: &FinalizationBatch,
+    ) -> Result<(), StoreError> {
+        validate_finalization(active, batch).map(|_| ())
     }
 
     pub fn load_terminal_envelope(&self, scan_run_id: u64) -> Result<StoredEnvelope, StoreError> {
@@ -5495,6 +5557,62 @@ mod tests {
             )
             .unwrap();
         assert_eq!(first_status, "abandoned");
+    }
+
+    #[test]
+    fn explicit_abandon_atomically_releases_the_lease_and_allows_retry() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000108");
+        let active = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1_000,
+                )
+                .expect("begin run"),
+        );
+
+        harness
+            .store
+            .abandon_active_run(&active, 1_001)
+            .expect("explicit abandon");
+
+        let state: (String, String, i64) = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT r.status, a.status,
+                        (SELECT count(*) FROM engine_lease)
+                 FROM scan_runs r
+                 JOIN scan_run_attempts a ON a.scan_run_id=r.scan_run_id
+                 WHERE r.scan_run_id=?1 AND a.attempt_number=1",
+                [active.scan_run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("abandoned state");
+        assert_eq!(state, ("abandoned".to_string(), "abandoned".to_string(), 0));
+        let restored_busy_timeout_ms: i64 = harness
+            .store
+            .connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("busy timeout should remain readable");
+        assert_eq!(restored_busy_timeout_ms, BUSY_TIMEOUT_MS as i64);
+
+        let retried = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1_002,
+                )
+                .expect("retry abandoned run"),
+        );
+        assert_eq!(retried.scan_run_id(), active.scan_run_id());
+        assert_eq!(retried.attempt_number(), 2);
     }
 
     #[test]

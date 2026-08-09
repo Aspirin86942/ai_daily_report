@@ -93,6 +93,32 @@ def _session_version_payload() -> dict[str, object]:
     return PythonSessionVersionResponseV1.model_validate(payload).model_dump(mode="json")
 
 
+@pytest.mark.parametrize("operation", ["classifier-version", "session-version"])
+def test_capability_preflight_does_not_import_heavy_pdf_runtime(
+    operation: str,
+) -> None:
+    """Snapshot warm preflight must not load PDFium or the Pydantic model graph."""
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-X",
+            "importtime",
+            "-m",
+            "src.workers.document_parser_worker",
+            operation,
+        ],
+        cwd=PROJECT_ROOT,
+        input=b"",
+        capture_output=True,
+        check=False,
+    )
+    assert completed.returncode == 0
+    imports = completed.stderr.decode("utf-8", errors="replace")
+    assert "pypdfium2" not in imports
+    assert "pydantic" not in imports
+
+
 def _classify_request(tmp_path: Path, request_id: str) -> dict[str, object]:
     pdf = TEXT_PDF
     if not pdf.is_file():
