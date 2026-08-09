@@ -51,3 +51,6 @@ target/
 # corpus gate: generated fixed corpus + scratch DBs (evidence json is tracked)
 scripts/corpus/
 .artifacts/corpus-gate-run/
+
+# acceptance: scratch DBs contain real paths; only the aggregate JSON is tracked
+.artifacts/acceptance-real-dir/
