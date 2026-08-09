@@ -350,6 +350,12 @@ pub(crate) fn insert_file_results(
 fn parse_cache_status_text(record: &FileResultRecord) -> &'static str {
     match (record.parse_status, record.cache_status) {
         (ParseStatus::Success, CacheStatus::Fresh) => "fresh",
+        // spec Part 5.2: a no-text PDF metadata-only draft never ran a body
+        // parser, so its v2 parse provenance is not_applicable (not a miss,
+        // and the cache_miss_reason stays empty per Part 4).
+        (ParseStatus::Success, CacheStatus::Miss) if record.parser_backend == "pdf_metadata_v1" => {
+            "not_applicable"
+        }
         (ParseStatus::Success, CacheStatus::Miss) => "miss",
         (ParseStatus::Error | ParseStatus::Timeout, _) if record.parser_backend == "not_parsed" => {
             "not_applicable"

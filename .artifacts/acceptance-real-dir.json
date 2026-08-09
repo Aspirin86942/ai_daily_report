@@ -1,6 +1,6 @@
 {
   "schema": "acceptance_real_dir_v1",
-  "generated_at_utc": "2026-08-09T03:52:46Z",
+  "generated_at_utc": "2026-08-09T04:19:23Z",
   "hardware": {
     "platform": "Windows-10-10.0.26200-SP0",
     "machine": "AMD64",
@@ -8,8 +8,8 @@
     "python": "3.11.15"
   },
   "build": {
-    "scanner_sha256": "07e469f541edde77fd8642929391958dc5051aef2fbe65e3c12be14d8b95de97",
-    "office_worker_sha256": "10de181b8bcde3a5d16f21192ac4e5077aaaf735f1dfaa514670d6132bcb5598",
+    "scanner_sha256": "5efdc21bbc87a223330f15b18d6b548800fffe0459950f8e7bc79133839fdcd2",
+    "office_worker_sha256": "6f42f4739f03900d13faeb04e76a4c6107a822b3b75e5bcfe72b1256d03e77dc",
     "session_capability": {
       "scanner_advertises_session_contract": true,
       "python_worker_supports_session_version": true,
@@ -22,7 +22,7 @@
       }
     },
     "engine_version": "0.1.0",
-    "engine_build": "sha256-source-v1:0406908cd7a12cfbf3f35d76b80426015c1f20837927d3a678d0a4468b8c4db8",
+    "engine_build": "sha256-source-v1:f813080ecc71154d4259e8f13903b3772f40e715ea33d9c14175c6b57a9e64ee",
     "target_triple": "x86_64-pc-windows-msvc",
     "classifier": {
       "classifier_contract_versions": [
@@ -48,44 +48,74 @@
         "source_count": 136
       },
       "corpus_changed_since_previous": false,
-      "cold_wall_ms": 1830.7003999943845,
+      "cold_wall_ms": 1849.5269999984885,
       "cold_status": "ok",
       "cold_inspect_ok": true,
       "cold_inspect_error": null,
       "snapshot_warm_wall_ms": [
-        792.0404000033159,
-        763.2202999957372,
-        784.9797999951988
+        748.654399998486,
+        770.3792999964207,
+        749.0381000097841
       ],
-      "snapshot_warm_median_ms": 784.9797999951988,
-      "snapshot_warm_max_ms": 792.0404000033159,
+      "snapshot_warm_median_ms": 749.0381000097841,
+      "snapshot_warm_max_ms": 770.3792999964207,
       "samples": [
         {
           "index": 0,
-          "wall_ms": 792.0404000033159,
+          "wall_ms": 748.654399998486,
           "scan_run_id": 2,
           "idempotent_replay_false": true,
           "snapshot_hit": true,
           "inspect_error": null,
-          "context_hash_identical": true
+          "context_hash_identical": true,
+          "timing_ms": {
+            "worker_handshake_ms": 445,
+            "discovery_ms": 254,
+            "snapshot_lookup_ms": 0,
+            "current_run_audit_write_ms": 3,
+            "terminal_precommit_ms": 6,
+            "envelope_rebuild_ms": 0,
+            "terminal_rows_written": 421,
+            "deadline_precommit_elapsed_ms": 722
+          }
         },
         {
           "index": 1,
-          "wall_ms": 763.2202999957372,
+          "wall_ms": 770.3792999964207,
           "scan_run_id": 3,
           "idempotent_replay_false": true,
           "snapshot_hit": true,
           "inspect_error": null,
-          "context_hash_identical": true
+          "context_hash_identical": true,
+          "timing_ms": {
+            "worker_handshake_ms": 441,
+            "discovery_ms": 279,
+            "snapshot_lookup_ms": 0,
+            "current_run_audit_write_ms": 4,
+            "terminal_precommit_ms": 6,
+            "envelope_rebuild_ms": 0,
+            "terminal_rows_written": 421,
+            "deadline_precommit_elapsed_ms": 742
+          }
         },
         {
           "index": 2,
-          "wall_ms": 784.9797999951988,
+          "wall_ms": 749.0381000097841,
           "scan_run_id": 4,
           "idempotent_replay_false": true,
           "snapshot_hit": true,
           "inspect_error": null,
-          "context_hash_identical": true
+          "context_hash_identical": true,
+          "timing_ms": {
+            "worker_handshake_ms": 447,
+            "discovery_ms": 250,
+            "snapshot_lookup_ms": 0,
+            "current_run_audit_write_ms": 4,
+            "terminal_precommit_ms": 7,
+            "envelope_rebuild_ms": 0,
+            "terminal_rows_written": 421,
+            "deadline_precommit_elapsed_ms": 719
+          }
         }
       ],
       "gates": {
@@ -112,7 +142,7 @@
         "max_pdf_text_extractions": 16,
         "total_deadline_ms": 25000
       },
-      "profile_hash_30d_sample": "6e3d08f5fa8d2c272c73850bb028eb2a513b3fb71b75dbb232436419f204909c",
+      "profile_hash_30d_sample": "9335d6f318e83f38ad3ef85587cde0ea191d845c12e67c918ac6d95990d88049",
       "corpus": {
         "anonymous_manifest_sha256": "99f1d4e36e2567b7429a4019a9677ec5c2fb9053dbbce23138ea020052bc70a3",
         "source_count": 318
@@ -124,16 +154,16 @@
         "max_ms_le": 25000.0
       },
       "cold_wall_ms": [
-        14147.49090000987,
-        13616.652099997737,
-        13834.844600001816
+        12412.921600000118,
+        12765.769200006616,
+        12935.45640000957
       ],
-      "cold_median_ms": 13834.844600001816,
-      "cold_max_ms": 14147.49090000987,
+      "cold_median_ms": 12765.769200006616,
+      "cold_max_ms": 12935.45640000957,
       "cold_samples": [
         {
           "index": 0,
-          "wall_ms": 14147.49090000987,
+          "wall_ms": 12412.921600000118,
           "status": "ok",
           "scan_run_id": 1,
           "inspect_ok": true,
@@ -147,11 +177,11 @@
             "timeout_count": 0,
             "text_pdf_coverage": 1.0,
             "no_text_pdfplumber_invocations": 0,
-            "no_text_action_label_anomaly_count": 1,
+            "no_text_action_label_anomaly_count": 0,
             "source_guard_unavailable_count": 0,
             "session_capability_present": true,
             "session_fallback_count": 0,
-            "context_profile_hash": "6e3d08f5fa8d2c272c73850bb028eb2a513b3fb71b75dbb232436419f204909c",
+            "context_profile_hash": "9335d6f318e83f38ad3ef85587cde0ea191d845c12e67c918ac6d95990d88049",
             "summary": {
               "source_file_count": 318,
               "success_count": 19,
@@ -179,27 +209,34 @@
               "source_guard_content_hash_file_count": 0,
               "source_guard_bytes_read": 0,
               "reserved_chars": 59522,
-              "rendered_chars": 32282,
+              "rendered_chars": 32359,
               "peak_worker_rss_bytes": null,
+              "worker_handshake_ms": 439,
+              "discovery_ms": 248,
+              "snapshot_lookup_ms": 0,
+              "current_run_audit_write_ms": 15,
+              "terminal_precommit_ms": 29,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 1625,
               "stage_durations_ms": {
                 "cache": {
                   "item_count": 318,
-                  "duration_ms": 25
+                  "duration_ms": 26
                 },
                 "context": {
                   "item_count": 318,
-                  "duration_ms": 4
+                  "duration_ms": 6
                 },
                 "discovery": {
                   "item_count": 318,
-                  "duration_ms": 265
+                  "duration_ms": 248
                 },
                 "parse": {
                   "item_count": 18,
-                  "duration_ms": 453
+                  "duration_ms": 545
                 }
               },
-              "deadline_precommit_elapsed_ms": 13323
+              "deadline_precommit_elapsed_ms": 11620
             },
             "quota_actual": {
               "candidate_file_count": 318,
@@ -217,7 +254,7 @@
         },
         {
           "index": 1,
-          "wall_ms": 13616.652099997737,
+          "wall_ms": 12765.769200006616,
           "status": "ok",
           "scan_run_id": 1,
           "inspect_ok": true,
@@ -231,11 +268,11 @@
             "timeout_count": 0,
             "text_pdf_coverage": 1.0,
             "no_text_pdfplumber_invocations": 0,
-            "no_text_action_label_anomaly_count": 1,
+            "no_text_action_label_anomaly_count": 0,
             "source_guard_unavailable_count": 0,
             "session_capability_present": true,
             "session_fallback_count": 0,
-            "context_profile_hash": "6e3d08f5fa8d2c272c73850bb028eb2a513b3fb71b75dbb232436419f204909c",
+            "context_profile_hash": "9335d6f318e83f38ad3ef85587cde0ea191d845c12e67c918ac6d95990d88049",
             "summary": {
               "source_file_count": 318,
               "success_count": 19,
@@ -263,12 +300,19 @@
               "source_guard_content_hash_file_count": 0,
               "source_guard_bytes_read": 0,
               "reserved_chars": 59522,
-              "rendered_chars": 32282,
+              "rendered_chars": 32359,
               "peak_worker_rss_bytes": null,
+              "worker_handshake_ms": 474,
+              "discovery_ms": 293,
+              "snapshot_lookup_ms": 0,
+              "current_run_audit_write_ms": 7,
+              "terminal_precommit_ms": 15,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 1625,
               "stage_durations_ms": {
                 "cache": {
                   "item_count": 318,
-                  "duration_ms": 25
+                  "duration_ms": 28
                 },
                 "context": {
                   "item_count": 318,
@@ -276,14 +320,14 @@
                 },
                 "discovery": {
                   "item_count": 318,
-                  "duration_ms": 281
+                  "duration_ms": 293
                 },
                 "parse": {
                   "item_count": 18,
-                  "duration_ms": 424
+                  "duration_ms": 428
                 }
               },
-              "deadline_precommit_elapsed_ms": 12757
+              "deadline_precommit_elapsed_ms": 11916
             },
             "quota_actual": {
               "candidate_file_count": 318,
@@ -301,7 +345,7 @@
         },
         {
           "index": 2,
-          "wall_ms": 13834.844600001816,
+          "wall_ms": 12935.45640000957,
           "status": "ok",
           "scan_run_id": 1,
           "inspect_ok": true,
@@ -315,11 +359,11 @@
             "timeout_count": 0,
             "text_pdf_coverage": 1.0,
             "no_text_pdfplumber_invocations": 0,
-            "no_text_action_label_anomaly_count": 1,
+            "no_text_action_label_anomaly_count": 0,
             "source_guard_unavailable_count": 0,
             "session_capability_present": true,
             "session_fallback_count": 0,
-            "context_profile_hash": "6e3d08f5fa8d2c272c73850bb028eb2a513b3fb71b75dbb232436419f204909c",
+            "context_profile_hash": "9335d6f318e83f38ad3ef85587cde0ea191d845c12e67c918ac6d95990d88049",
             "summary": {
               "source_file_count": 318,
               "success_count": 19,
@@ -347,12 +391,19 @@
               "source_guard_content_hash_file_count": 0,
               "source_guard_bytes_read": 0,
               "reserved_chars": 59522,
-              "rendered_chars": 32282,
+              "rendered_chars": 32359,
               "peak_worker_rss_bytes": null,
+              "worker_handshake_ms": 442,
+              "discovery_ms": 259,
+              "snapshot_lookup_ms": 0,
+              "current_run_audit_write_ms": 7,
+              "terminal_precommit_ms": 15,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 1625,
               "stage_durations_ms": {
                 "cache": {
                   "item_count": 318,
-                  "duration_ms": 33
+                  "duration_ms": 26
                 },
                 "context": {
                   "item_count": 318,
@@ -360,14 +411,14 @@
                 },
                 "discovery": {
                   "item_count": 318,
-                  "duration_ms": 263
+                  "duration_ms": 259
                 },
                 "parse": {
                   "item_count": 18,
-                  "duration_ms": 478
+                  "duration_ms": 428
                 }
               },
-              "deadline_precommit_elapsed_ms": 13027
+              "deadline_precommit_elapsed_ms": 12148
             },
             "quota_actual": {
               "candidate_file_count": 318,
@@ -394,9 +445,9 @@
       "warm_comparison": {
         "warm_comparison": "completed",
         "seed": {
-          "source_sha256": "e3b6c2e311eaa69bd969b6cc1bbad1ca20d755e35c2118e83fb1f0ef26d45232",
-          "seed_sha256": "8f675b95bcfd8f705400dc2de3ed3d6882d246c361f37ebbbe69ee26c216a15f",
-          "nonce_prefix": "87197e37",
+          "source_sha256": "c9d8c7f32d65027d3045bc97ffe019cf1bf929eda8422c3a96e47ad4628cc873",
+          "seed_sha256": "65cad12e84ed12bf008d16da98a126bfb0ba187f82ac09e53693047bbca218d8",
+          "nonce_prefix": "edca2207",
           "cold_cache_state": {
             "file_inventory": {
               "count": 318,
@@ -404,7 +455,7 @@
             },
             "parse_cache": {
               "count": 18,
-              "sha256": "0336a735a43e5761171173abbd086f20c8eaa3268732d440c1b2788d65a9e99d"
+              "sha256": "e8ddd40261930ea57a63ef280dce5f87367da65bade503f41d35b24186c2b8a7"
             },
             "classification_cache": {
               "count": 74,
@@ -413,15 +464,15 @@
           }
         },
         "cache_only_warm_wall_ms": [
-          2101.5354999981355,
-          2100.567300003604,
-          1982.916099994327
+          1926.8730000039795,
+          1888.7694000004558,
+          1923.3455000066897
         ],
-        "cache_only_warm_median_ms": 2100.567300003604,
+        "cache_only_warm_median_ms": 1923.3455000066897,
         "cache_only_warm_samples": [
           {
             "index": 0,
-            "wall_ms": 2101.5354999981355,
+            "wall_ms": 1926.8730000039795,
             "scan_run_id": 2,
             "idempotent_replay_false": true,
             "snapshot_hit": false,
@@ -430,11 +481,21 @@
             "parse_cache_all_hit": true,
             "classification_cache_all_hit": true,
             "inspect_error": null,
-            "context_sha256": "b221988a686c3d8ed62cf03470fe1999408033c99cb0a83e459b300951d74e36"
+            "context_sha256": "0424e0a7b61303105b5d24f412e6ec418104140de8702c1ea278ab3e1ebc5aec",
+            "timing_ms": {
+              "worker_handshake_ms": 480,
+              "discovery_ms": 268,
+              "snapshot_lookup_ms": 0,
+              "current_run_audit_write_ms": 7,
+              "terminal_precommit_ms": 14,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 1607,
+              "deadline_precommit_elapsed_ms": 1104
+            }
           },
           {
             "index": 1,
-            "wall_ms": 2100.567300003604,
+            "wall_ms": 1888.7694000004558,
             "scan_run_id": 2,
             "idempotent_replay_false": true,
             "snapshot_hit": false,
@@ -443,11 +504,21 @@
             "parse_cache_all_hit": true,
             "classification_cache_all_hit": true,
             "inspect_error": null,
-            "context_sha256": "b221988a686c3d8ed62cf03470fe1999408033c99cb0a83e459b300951d74e36"
+            "context_sha256": "0424e0a7b61303105b5d24f412e6ec418104140de8702c1ea278ab3e1ebc5aec",
+            "timing_ms": {
+              "worker_handshake_ms": 469,
+              "discovery_ms": 256,
+              "snapshot_lookup_ms": 0,
+              "current_run_audit_write_ms": 8,
+              "terminal_precommit_ms": 16,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 1607,
+              "deadline_precommit_elapsed_ms": 1085
+            }
           },
           {
             "index": 2,
-            "wall_ms": 1982.916099994327,
+            "wall_ms": 1923.3455000066897,
             "scan_run_id": 2,
             "idempotent_replay_false": true,
             "snapshot_hit": false,
@@ -456,49 +527,89 @@
             "parse_cache_all_hit": true,
             "classification_cache_all_hit": true,
             "inspect_error": null,
-            "context_sha256": "b221988a686c3d8ed62cf03470fe1999408033c99cb0a83e459b300951d74e36"
+            "context_sha256": "0424e0a7b61303105b5d24f412e6ec418104140de8702c1ea278ab3e1ebc5aec",
+            "timing_ms": {
+              "worker_handshake_ms": 456,
+              "discovery_ms": 256,
+              "snapshot_lookup_ms": 0,
+              "current_run_audit_write_ms": 8,
+              "terminal_precommit_ms": 15,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 1607,
+              "deadline_precommit_elapsed_ms": 1138
+            }
           }
         ],
         "snapshot_warm_wall_ms": [
-          901.634699999704,
-          890.6464000028791,
-          866.2708000047132
+          833.4642999980133,
+          832.5659000111045,
+          820.0304999918444
         ],
-        "snapshot_warm_median_ms": 890.6464000028791,
-        "snapshot_warm_max_ms": 901.634699999704,
+        "snapshot_warm_median_ms": 832.5659000111045,
+        "snapshot_warm_max_ms": 833.4642999980133,
         "snapshot_warm_samples": [
           {
             "index": 0,
-            "wall_ms": 901.634699999704,
+            "wall_ms": 833.4642999980133,
             "scan_run_id": 2,
             "idempotent_replay_false": true,
             "snapshot_hit": true,
             "inspect_error": null,
-            "context_sha256": "b221988a686c3d8ed62cf03470fe1999408033c99cb0a83e459b300951d74e36",
-            "context_identical_to_cold": true
+            "context_sha256": "0424e0a7b61303105b5d24f412e6ec418104140de8702c1ea278ab3e1ebc5aec",
+            "context_identical_to_cold": true,
+            "timing_ms": {
+              "worker_handshake_ms": 490,
+              "discovery_ms": 270,
+              "snapshot_lookup_ms": 1,
+              "current_run_audit_write_ms": 9,
+              "terminal_precommit_ms": 13,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 970,
+              "deadline_precommit_elapsed_ms": 795
+            }
           },
           {
             "index": 1,
-            "wall_ms": 890.6464000028791,
+            "wall_ms": 832.5659000111045,
             "scan_run_id": 3,
             "idempotent_replay_false": true,
             "snapshot_hit": true,
             "inspect_error": null,
-            "context_sha256": "b221988a686c3d8ed62cf03470fe1999408033c99cb0a83e459b300951d74e36",
-            "context_identical_to_cold": true
+            "context_sha256": "0424e0a7b61303105b5d24f412e6ec418104140de8702c1ea278ab3e1ebc5aec",
+            "context_identical_to_cold": true,
+            "timing_ms": {
+              "worker_handshake_ms": 485,
+              "discovery_ms": 273,
+              "snapshot_lookup_ms": 1,
+              "current_run_audit_write_ms": 9,
+              "terminal_precommit_ms": 14,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 970,
+              "deadline_precommit_elapsed_ms": 790
+            }
           },
           {
             "index": 2,
-            "wall_ms": 866.2708000047132,
+            "wall_ms": 820.0304999918444,
             "scan_run_id": 4,
             "idempotent_replay_false": true,
             "snapshot_hit": true,
             "inspect_error": null,
-            "context_sha256": "b221988a686c3d8ed62cf03470fe1999408033c99cb0a83e459b300951d74e36",
-            "context_identical_to_cold": true
+            "context_sha256": "0424e0a7b61303105b5d24f412e6ec418104140de8702c1ea278ab3e1ebc5aec",
+            "context_identical_to_cold": true,
+            "timing_ms": {
+              "worker_handshake_ms": 489,
+              "discovery_ms": 257,
+              "snapshot_lookup_ms": 0,
+              "current_run_audit_write_ms": 8,
+              "terminal_precommit_ms": 12,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 970,
+              "deadline_precommit_elapsed_ms": 778
+            }
           }
         ],
-        "improvement": 0.5759972079916931,
+        "improvement": 0.5671261871524338,
         "gates": {
           "snapshot_warm_median_improvement_ge_20pct": true,
           "cache_warm_all_snapshot_miss_and_cache_all_hit": true,
@@ -522,7 +633,7 @@
         "max_pdf_text_extractions": 32,
         "total_deadline_ms": 45000
       },
-      "profile_hash_30d_sample": "6e3d08f5fa8d2c272c73850bb028eb2a513b3fb71b75dbb232436419f204909c",
+      "profile_hash_30d_sample": "9335d6f318e83f38ad3ef85587cde0ea191d845c12e67c918ac6d95990d88049",
       "corpus": {
         "anonymous_manifest_sha256": "c4fb4d457f1d2ddc8622e6ee1edeabc817c718948b144f475fb97d0ebf180037",
         "source_count": 729
@@ -534,16 +645,16 @@
         "max_ms_le": 50000.0
       },
       "cold_wall_ms": [
-        27861.973299994133,
-        29404.155600001104,
-        27737.188800005242
+        26496.396500006085,
+        27121.81129999226,
+        26625.57819999347
       ],
-      "cold_median_ms": 27861.973299994133,
-      "cold_max_ms": 29404.155600001104,
+      "cold_median_ms": 26625.57819999347,
+      "cold_max_ms": 27121.81129999226,
       "cold_samples": [
         {
           "index": 0,
-          "wall_ms": 27861.973299994133,
+          "wall_ms": 26496.396500006085,
           "status": "ok",
           "scan_run_id": 1,
           "inspect_ok": true,
@@ -561,7 +672,7 @@
             "source_guard_unavailable_count": 0,
             "session_capability_present": true,
             "session_fallback_count": 0,
-            "context_profile_hash": "6e3d08f5fa8d2c272c73850bb028eb2a513b3fb71b75dbb232436419f204909c",
+            "context_profile_hash": "9335d6f318e83f38ad3ef85587cde0ea191d845c12e67c918ac6d95990d88049",
             "summary": {
               "source_file_count": 729,
               "success_count": 19,
@@ -591,25 +702,32 @@
               "reserved_chars": 59586,
               "rendered_chars": 40116,
               "peak_worker_rss_bytes": null,
+              "worker_handshake_ms": 500,
+              "discovery_ms": 264,
+              "snapshot_lookup_ms": 1,
+              "current_run_audit_write_ms": 18,
+              "terminal_precommit_ms": 38,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 3682,
               "stage_durations_ms": {
                 "cache": {
                   "item_count": 729,
-                  "duration_ms": 30
+                  "duration_ms": 34
                 },
                 "context": {
                   "item_count": 729,
-                  "duration_ms": 9
+                  "duration_ms": 8
                 },
                 "discovery": {
                   "item_count": 729,
-                  "duration_ms": 333
+                  "duration_ms": 264
                 },
                 "parse": {
                   "item_count": 19,
-                  "duration_ms": 465
+                  "duration_ms": 478
                 }
               },
-              "deadline_precommit_elapsed_ms": 26859
+              "deadline_precommit_elapsed_ms": 25598
             },
             "quota_actual": {
               "candidate_file_count": 492,
@@ -627,7 +745,7 @@
         },
         {
           "index": 1,
-          "wall_ms": 29404.155600001104,
+          "wall_ms": 27121.81129999226,
           "status": "ok",
           "scan_run_id": 1,
           "inspect_ok": true,
@@ -645,7 +763,7 @@
             "source_guard_unavailable_count": 0,
             "session_capability_present": true,
             "session_fallback_count": 0,
-            "context_profile_hash": "6e3d08f5fa8d2c272c73850bb028eb2a513b3fb71b75dbb232436419f204909c",
+            "context_profile_hash": "9335d6f318e83f38ad3ef85587cde0ea191d845c12e67c918ac6d95990d88049",
             "summary": {
               "source_file_count": 729,
               "success_count": 19,
@@ -675,6 +793,13 @@
               "reserved_chars": 59586,
               "rendered_chars": 40116,
               "peak_worker_rss_bytes": null,
+              "worker_handshake_ms": 463,
+              "discovery_ms": 267,
+              "snapshot_lookup_ms": 1,
+              "current_run_audit_write_ms": 17,
+              "terminal_precommit_ms": 36,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 3682,
               "stage_durations_ms": {
                 "cache": {
                   "item_count": 729,
@@ -682,18 +807,18 @@
                 },
                 "context": {
                   "item_count": 729,
-                  "duration_ms": 9
+                  "duration_ms": 8
                 },
                 "discovery": {
                   "item_count": 729,
-                  "duration_ms": 280
+                  "duration_ms": 267
                 },
                 "parse": {
                   "item_count": 19,
-                  "duration_ms": 504
+                  "duration_ms": 491
                 }
               },
-              "deadline_precommit_elapsed_ms": 28477
+              "deadline_precommit_elapsed_ms": 26256
             },
             "quota_actual": {
               "candidate_file_count": 492,
@@ -711,7 +836,7 @@
         },
         {
           "index": 2,
-          "wall_ms": 27737.188800005242,
+          "wall_ms": 26625.57819999347,
           "status": "ok",
           "scan_run_id": 1,
           "inspect_ok": true,
@@ -729,7 +854,7 @@
             "source_guard_unavailable_count": 0,
             "session_capability_present": true,
             "session_fallback_count": 0,
-            "context_profile_hash": "6e3d08f5fa8d2c272c73850bb028eb2a513b3fb71b75dbb232436419f204909c",
+            "context_profile_hash": "9335d6f318e83f38ad3ef85587cde0ea191d845c12e67c918ac6d95990d88049",
             "summary": {
               "source_file_count": 729,
               "success_count": 19,
@@ -759,25 +884,32 @@
               "reserved_chars": 59586,
               "rendered_chars": 40116,
               "peak_worker_rss_bytes": null,
+              "worker_handshake_ms": 465,
+              "discovery_ms": 264,
+              "snapshot_lookup_ms": 1,
+              "current_run_audit_write_ms": 18,
+              "terminal_precommit_ms": 38,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 3682,
               "stage_durations_ms": {
                 "cache": {
                   "item_count": 729,
-                  "duration_ms": 33
+                  "duration_ms": 35
                 },
                 "context": {
                   "item_count": 729,
-                  "duration_ms": 10
+                  "duration_ms": 8
                 },
                 "discovery": {
                   "item_count": 729,
-                  "duration_ms": 282
+                  "duration_ms": 264
                 },
                 "parse": {
                   "item_count": 19,
-                  "duration_ms": 475
+                  "duration_ms": 509
                 }
               },
-              "deadline_precommit_elapsed_ms": 26755
+              "deadline_precommit_elapsed_ms": 25761
             },
             "quota_actual": {
               "candidate_file_count": 492,
@@ -804,9 +936,9 @@
       "warm_comparison": {
         "warm_comparison": "completed",
         "seed": {
-          "source_sha256": "89a4f5e626f92955690c23fea1572897b3f9f0e7e5a95c2acce7054f84223659",
-          "seed_sha256": "7aa75ea7f5dc4e2abfe79a559472fe3578ffeaffea8434cf4ba6079e79f6dba9",
-          "nonce_prefix": "61eb277d",
+          "source_sha256": "d71818db294c346bb68f728ed4fe6867587cd50fc63ee798146d5c84cf8ae7e0",
+          "seed_sha256": "b00cad392c0dd4e23e0007a99490d72f9dcecf2fc0b5d349177e3a75057ca8cd",
+          "nonce_prefix": "d13dc593",
           "cold_cache_state": {
             "file_inventory": {
               "count": 729,
@@ -814,7 +946,7 @@
             },
             "parse_cache": {
               "count": 19,
-              "sha256": "09d3ce16c697b8c894e2b46c4ad3315802638d098e6705d1471580dea9b0b9a6"
+              "sha256": "352c8493d76741443b84bc2c2bee46f598135ee8cf0a9108dad08033a1a04df7"
             },
             "classification_cache": {
               "count": 160,
@@ -823,15 +955,15 @@
           }
         },
         "cache_only_warm_wall_ms": [
-          3011.9927000050666,
-          3027.318299995386,
-          2981.6124999924796
+          3362.0863999967696,
+          2965.2806999947643,
+          3353.2580000028247
         ],
-        "cache_only_warm_median_ms": 3011.9927000050666,
+        "cache_only_warm_median_ms": 3353.2580000028247,
         "cache_only_warm_samples": [
           {
             "index": 0,
-            "wall_ms": 3011.9927000050666,
+            "wall_ms": 3362.0863999967696,
             "scan_run_id": 2,
             "idempotent_replay_false": true,
             "snapshot_hit": false,
@@ -840,11 +972,21 @@
             "parse_cache_all_hit": true,
             "classification_cache_all_hit": true,
             "inspect_error": null,
-            "context_sha256": "8760f06d5b7edbc0775cdc7065b327c6ba089ec24b7b11db15f0c7a61de533aa"
+            "context_sha256": "8760f06d5b7edbc0775cdc7065b327c6ba089ec24b7b11db15f0c7a61de533aa",
+            "timing_ms": {
+              "worker_handshake_ms": 482,
+              "discovery_ms": 352,
+              "snapshot_lookup_ms": 1,
+              "current_run_audit_write_ms": 17,
+              "terminal_precommit_ms": 44,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 3663,
+              "deadline_precommit_elapsed_ms": 2393
+            }
           },
           {
             "index": 1,
-            "wall_ms": 3027.318299995386,
+            "wall_ms": 2965.2806999947643,
             "scan_run_id": 2,
             "idempotent_replay_false": true,
             "snapshot_hit": false,
@@ -853,11 +995,21 @@
             "parse_cache_all_hit": true,
             "classification_cache_all_hit": true,
             "inspect_error": null,
-            "context_sha256": "8760f06d5b7edbc0775cdc7065b327c6ba089ec24b7b11db15f0c7a61de533aa"
+            "context_sha256": "8760f06d5b7edbc0775cdc7065b327c6ba089ec24b7b11db15f0c7a61de533aa",
+            "timing_ms": {
+              "worker_handshake_ms": 477,
+              "discovery_ms": 265,
+              "snapshot_lookup_ms": 1,
+              "current_run_audit_write_ms": 17,
+              "terminal_precommit_ms": 42,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 3663,
+              "deadline_precommit_elapsed_ms": 2095
+            }
           },
           {
             "index": 2,
-            "wall_ms": 2981.6124999924796,
+            "wall_ms": 3353.2580000028247,
             "scan_run_id": 2,
             "idempotent_replay_false": true,
             "snapshot_hit": false,
@@ -866,49 +1018,89 @@
             "parse_cache_all_hit": true,
             "classification_cache_all_hit": true,
             "inspect_error": null,
-            "context_sha256": "8760f06d5b7edbc0775cdc7065b327c6ba089ec24b7b11db15f0c7a61de533aa"
+            "context_sha256": "8760f06d5b7edbc0775cdc7065b327c6ba089ec24b7b11db15f0c7a61de533aa",
+            "timing_ms": {
+              "worker_handshake_ms": 505,
+              "discovery_ms": 288,
+              "snapshot_lookup_ms": 1,
+              "current_run_audit_write_ms": 17,
+              "terminal_precommit_ms": 43,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 3663,
+              "deadline_precommit_elapsed_ms": 2430
+            }
           }
         ],
         "snapshot_warm_wall_ms": [
-          860.5602000025101,
-          879.896699989331,
-          877.8897000011057
+          835.1618000015151,
+          1087.8112999926088,
+          1161.9443999952637
         ],
-        "snapshot_warm_median_ms": 877.8897000011057,
-        "snapshot_warm_max_ms": 879.896699989331,
+        "snapshot_warm_median_ms": 1087.8112999926088,
+        "snapshot_warm_max_ms": 1161.9443999952637,
         "snapshot_warm_samples": [
           {
             "index": 0,
-            "wall_ms": 860.5602000025101,
+            "wall_ms": 835.1618000015151,
             "scan_run_id": 2,
             "idempotent_replay_false": true,
             "snapshot_hit": true,
             "inspect_error": null,
             "context_sha256": "8760f06d5b7edbc0775cdc7065b327c6ba089ec24b7b11db15f0c7a61de533aa",
-            "context_identical_to_cold": true
+            "context_identical_to_cold": true,
+            "timing_ms": {
+              "worker_handshake_ms": 457,
+              "discovery_ms": 263,
+              "snapshot_lookup_ms": 2,
+              "current_run_audit_write_ms": 19,
+              "terminal_precommit_ms": 29,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 2204,
+              "deadline_precommit_elapsed_ms": 768
+            }
           },
           {
             "index": 1,
-            "wall_ms": 879.896699989331,
+            "wall_ms": 1087.8112999926088,
             "scan_run_id": 3,
             "idempotent_replay_false": true,
             "snapshot_hit": true,
             "inspect_error": null,
             "context_sha256": "8760f06d5b7edbc0775cdc7065b327c6ba089ec24b7b11db15f0c7a61de533aa",
-            "context_identical_to_cold": true
+            "context_identical_to_cold": true,
+            "timing_ms": {
+              "worker_handshake_ms": 610,
+              "discovery_ms": 328,
+              "snapshot_lookup_ms": 2,
+              "current_run_audit_write_ms": 24,
+              "terminal_precommit_ms": 39,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 2204,
+              "deadline_precommit_elapsed_ms": 997
+            }
           },
           {
             "index": 2,
-            "wall_ms": 877.8897000011057,
+            "wall_ms": 1161.9443999952637,
             "scan_run_id": 4,
             "idempotent_replay_false": true,
             "snapshot_hit": true,
             "inspect_error": null,
             "context_sha256": "8760f06d5b7edbc0775cdc7065b327c6ba089ec24b7b11db15f0c7a61de533aa",
-            "context_identical_to_cold": true
+            "context_identical_to_cold": true,
+            "timing_ms": {
+              "worker_handshake_ms": 685,
+              "discovery_ms": 319,
+              "snapshot_lookup_ms": 1,
+              "current_run_audit_write_ms": 21,
+              "terminal_precommit_ms": 33,
+              "envelope_rebuild_ms": 0,
+              "terminal_rows_written": 2204,
+              "deadline_precommit_elapsed_ms": 1068
+            }
           }
         ],
-        "improvement": 0.7085352497701509,
+        "improvement": 0.6755957042399683,
         "gates": {
           "snapshot_warm_median_improvement_ge_20pct": true,
           "cache_warm_all_snapshot_miss_and_cache_all_hit": true,
@@ -916,26 +1108,7 @@
           "semantic_identical": true,
           "passes": true
         }
-      },
-      "run_history": {
-        "formal_full_run_90d": {
-          "cold_wall_ms": [
-            25660.7,
-            28397.3,
-            28123.5
-          ],
-          "cold_median_ms": 28123.5,
-          "cold_max_ms": 28397.3,
-          "failures": [
-            "sample0: systematic classifier typed-error failure (all 160 classify-pdf invocations returned error; classification_cache empty) - environmental memory-pressure flake",
-            "sample1: 9 xlsx files changed on disk during scan (SOURCE_VERSION_CHANGED) - live-directory modification",
-            "sample2: clean"
-          ]
-        },
-        "re_run_clean": true,
-        "note": "90d wall-clock target (median<=40s/max<=50s) met in both formal run and re-run; anti-cheat met on re-run; formal run anti-cheat failed due to environmental flake + live-directory changes."
       }
     }
-  },
-  "merge_note": "scenarios 7d/30d from formal full run; scenario 90d replaced with clean re-run; formal 90d failure documented in scenarios.90d.run_history."
+  }
 }

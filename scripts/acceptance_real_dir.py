@@ -310,6 +310,18 @@ def _derive_sample_evidence(
             "reserved_chars": int(metrics.get("reserved_chars", 0) or 0),
             "rendered_chars": int(metrics.get("rendered_chars", 0) or 0),
             "peak_worker_rss_bytes": metrics.get("peak_worker_rss_bytes"),
+            # spec Part 6: 持久化可重放的 wall-clock 拆分（handshake/discovery/
+            # snapshot lookup/audit write/precommit/rebuild）。7d FAIL 的 handshake
+            # 归属必须能从证据直接读出。
+            "worker_handshake_ms": int(metrics.get("worker_handshake_ms", 0) or 0),
+            "discovery_ms": int(metrics.get("discovery_ms", 0) or 0),
+            "snapshot_lookup_ms": int(metrics.get("snapshot_lookup_ms", 0) or 0),
+            "current_run_audit_write_ms": int(
+                metrics.get("current_run_audit_write_ms", 0) or 0
+            ),
+            "terminal_precommit_ms": int(metrics.get("terminal_precommit_ms", 0) or 0),
+            "envelope_rebuild_ms": int(metrics.get("envelope_rebuild_ms", 0) or 0),
+            "terminal_rows_written": int(metrics.get("terminal_rows_written", 0) or 0),
             "stage_durations_ms": stage_durations_ms,
             "deadline_precommit_elapsed_ms": int(
                 metrics.get("deadline_precommit_elapsed_ms", 0) or 0
@@ -671,6 +683,7 @@ def run_warm_comparison(
                 "classification_cache_all_hit": metrics.get("classification_cache_all_hit"),
                 "inspect_error": inspect_result["error"],
                 "context_sha256": context["context_sha256"],
+                "timing_ms": _timing_ms(metrics),
                 "semantic": context,
             }
         )
@@ -722,6 +735,7 @@ def run_warm_comparison(
                 "context_sha256": context["context_sha256"],
                 "context_identical_to_cold": context["context_sha256"]
                 == snap_cold["context"]["context_sha256"],
+                "timing_ms": _timing_ms(metrics),
                 "semantic": context,
             }
         )
@@ -793,6 +807,24 @@ def _strip_semantic_from_samples(samples: list[dict]) -> list[dict]:
     """从证据中剥离 `semantic`（含 decisions 的 file_identity 哈希集合，避免体积与
     不必要的内部细节）。scope：证据只留聚合值。"""
     return [{k: v for k, v in sample.items() if k != "semantic"} for sample in samples]
+
+
+def _timing_ms(metrics: dict) -> dict:
+    """spec Part 6 持久化可重放的 wall-clock 拆分（来自 inspect execution_metrics）。"""
+    return {
+        "worker_handshake_ms": int(metrics.get("worker_handshake_ms", 0) or 0),
+        "discovery_ms": int(metrics.get("discovery_ms", 0) or 0),
+        "snapshot_lookup_ms": int(metrics.get("snapshot_lookup_ms", 0) or 0),
+        "current_run_audit_write_ms": int(
+            metrics.get("current_run_audit_write_ms", 0) or 0
+        ),
+        "terminal_precommit_ms": int(metrics.get("terminal_precommit_ms", 0) or 0),
+        "envelope_rebuild_ms": int(metrics.get("envelope_rebuild_ms", 0) or 0),
+        "terminal_rows_written": int(metrics.get("terminal_rows_written", 0) or 0),
+        "deadline_precommit_elapsed_ms": int(
+            metrics.get("deadline_precommit_elapsed_ms", 0) or 0
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -908,6 +940,9 @@ def run_7d_snapshot_warm_recheck(
                 "inspect_error": inspect_result["error"],
                 "context_hash_identical": context["context_sha256"]
                 == cold_context["context_sha256"],
+                # spec Part 6: snapshot-warm wall 拆分（handshake/discovery/lookup/
+                # finalization）必须证据可查，7d FAIL 归属才能验证。
+                "timing_ms": _timing_ms(metrics),
             }
         )
         seen_run_ids.add(run["scan_run_id"])

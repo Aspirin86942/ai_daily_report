@@ -1,12 +1,12 @@
 {
   "schema": "corpus_gate_evidence_v1",
-  "generated_at_utc": "2026-08-09T03:15:46Z",
-  "manifest_hash": "a66a725a852748c492b2d33b033b5870ee53e0262e05b903bce7efaa0b8f4a43",
+  "generated_at_utc": "2026-08-09T04:18:49Z",
+  "manifest_hash": "e37a4838b84992a623b2128807ade133520a78df80bca0007873f03324a511a1",
   "build": {
-    "scanner_sha256": "29dce482778ca83aeded141c754d988233c317c319badb0b4de7153b575f1956",
-    "office_worker_sha256": "eca06f66e269193822500d4ffaf8d4d083f462eadc0b111f0673517361f03cc2",
+    "scanner_sha256": "5efdc21bbc87a223330f15b18d6b548800fffe0459950f8e7bc79133839fdcd2",
+    "office_worker_sha256": "6f42f4739f03900d13faeb04e76a4c6107a822b3b75e5bcfe72b1256d03e77dc",
     "engine_version": "0.1.0",
-    "engine_build": "sha256-source-v1:f61d3d160fb930a546432b7c8c5664229b034003de147cd11d8b1cac7697d10f",
+    "engine_build": "sha256-source-v1:f813080ecc71154d4259e8f13903b3772f40e715ea33d9c14175c6b57a9e64ee",
     "target_triple": "x86_64-pc-windows-msvc"
   },
   "corpus": {
@@ -17,7 +17,7 @@
     {
       "combo": "empty_empty",
       "status": "ok",
-      "wall_ms": 2440.59419631958,
+      "wall_ms": 2791.158676147461,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -25,8 +25,8 @@
         "included_file_count": 4,
         "omitted_file_count": 2,
         "error_file_count": 0,
-        "input_chars": 2097391,
-        "output_chars": 1506
+        "input_chars": 2100306,
+        "output_chars": 1648
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -56,7 +56,7 @@
     {
       "combo": "empty_partial",
       "status": "ok",
-      "wall_ms": 2549.6890544891357,
+      "wall_ms": 2844.0651893615723,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -64,8 +64,8 @@
         "included_file_count": 4,
         "omitted_file_count": 2,
         "error_file_count": 0,
-        "input_chars": 2097391,
-        "output_chars": 1506
+        "input_chars": 2100306,
+        "output_chars": 1648
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -95,7 +95,7 @@
     {
       "combo": "empty_full",
       "status": "ok",
-      "wall_ms": 2019.3462371826172,
+      "wall_ms": 2378.7269592285156,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -103,8 +103,8 @@
         "included_file_count": 4,
         "omitted_file_count": 2,
         "error_file_count": 0,
-        "input_chars": 2097391,
-        "output_chars": 1506
+        "input_chars": 2100306,
+        "output_chars": 1648
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -134,7 +134,7 @@
     {
       "combo": "partial_empty",
       "status": "ok",
-      "wall_ms": 670.6283092498779,
+      "wall_ms": 1096.9398021697998,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -142,8 +142,8 @@
         "included_file_count": 4,
         "omitted_file_count": 2,
         "error_file_count": 0,
-        "input_chars": 2097391,
-        "output_chars": 1506
+        "input_chars": 2100306,
+        "output_chars": 1648
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -173,7 +173,7 @@
     {
       "combo": "partial_partial",
       "status": "ok",
-      "wall_ms": 616.168737411499,
+      "wall_ms": 1051.0585308074951,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -181,8 +181,8 @@
         "included_file_count": 4,
         "omitted_file_count": 2,
         "error_file_count": 0,
-        "input_chars": 2097391,
-        "output_chars": 1506
+        "input_chars": 2100306,
+        "output_chars": 1648
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -212,7 +212,7 @@
     {
       "combo": "partial_full",
       "status": "ok",
-      "wall_ms": 179.93640899658203,
+      "wall_ms": 579.3070793151855,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -220,8 +220,8 @@
         "included_file_count": 4,
         "omitted_file_count": 2,
         "error_file_count": 0,
-        "input_chars": 2097391,
-        "output_chars": 1506
+        "input_chars": 2100306,
+        "output_chars": 1648
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -251,7 +251,7 @@
     {
       "combo": "full_empty",
       "status": "ok",
-      "wall_ms": 656.2869548797607,
+      "wall_ms": 1070.7828998565674,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -259,8 +259,8 @@
         "included_file_count": 4,
         "omitted_file_count": 2,
         "error_file_count": 0,
-        "input_chars": 2097391,
-        "output_chars": 1506
+        "input_chars": 2100306,
+        "output_chars": 1648
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -290,7 +290,7 @@
     {
       "combo": "full_partial",
       "status": "ok",
-      "wall_ms": 627.2768974304199,
+      "wall_ms": 979.9456596374512,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -298,8 +298,8 @@
         "included_file_count": 4,
         "omitted_file_count": 2,
         "error_file_count": 0,
-        "input_chars": 2097391,
-        "output_chars": 1506
+        "input_chars": 2100306,
+        "output_chars": 1648
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -329,7 +329,7 @@
     {
       "combo": "full_full",
       "status": "ok",
-      "wall_ms": 168.49327087402344,
+      "wall_ms": 557.7728748321533,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -337,8 +337,8 @@
         "included_file_count": 4,
         "omitted_file_count": 2,
         "error_file_count": 0,
-        "input_chars": 2097391,
-        "output_chars": 1506
+        "input_chars": 2100306,
+        "output_chars": 1648
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,

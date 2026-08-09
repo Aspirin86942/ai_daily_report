@@ -178,7 +178,18 @@ pub(crate) fn decide_files(
                     .expect("not-parsed evidence must carry a budget reason"),
             ),
             ParseStatus::Success => {
-                if observed_size > profile.large_file_max_bytes() {
+                // spec Part 3.2: a no-text PDF metadata-only draft (body parser
+                // never ran) keeps its frozen metadata_only action and
+                // `pdf_no_text_in_parse_window` reason; the size/content
+                // heuristics must not relabel it Keep/Compress.
+                if evidence.parser_backend == "pdf_metadata_v1"
+                    && evidence.reason.as_deref() == Some("pdf_no_text_in_parse_window")
+                {
+                    (
+                        ContextAction::MetadataOnly,
+                        "pdf_no_text_in_parse_window".to_string(),
+                    )
+                } else if observed_size > profile.large_file_max_bytes() {
                     (ContextAction::MetadataOnly, "file_size_policy".to_string())
                 } else if content_chars <= profile.per_file_max_chars() && !evidence.truncated {
                     (ContextAction::Keep, "small_file_keep".to_string())

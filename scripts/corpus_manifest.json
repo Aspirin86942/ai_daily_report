@@ -1,6 +1,6 @@
 {
   "schema": "corpus_gate_manifest_v1",
-  "generated_at_utc": "2026-08-09T03:14:25Z",
+  "generated_at_utc": "2026-08-09T04:18:22Z",
   "window": {
     "start": "2026-08-01",
     "end": "2026-08-08"
@@ -80,7 +80,7 @@
     ]
   },
   "semantic": {
-    "context_sha256": "ab6abcd106e78a24ca0cfdd62bfc2c060ec5f7e39b73069ecd8cd9a0bb5fc942",
+    "context_sha256": "0c28f42700d71a04035ccd1cb2fcdc9edf7e442b709b7e92a4d586e6da3b3410",
     "semantic_counts": {
       "source_file_count": 6,
       "success_count": 4,
@@ -88,8 +88,8 @@
       "included_file_count": 4,
       "omitted_file_count": 2,
       "error_file_count": 0,
-      "input_chars": 2097391,
-      "output_chars": 1506
+      "input_chars": 2100306,
+      "output_chars": 1648
     },
     "decisions": [
       [
@@ -114,20 +114,20 @@
       ],
       [
         "pdf\\no_text_blank_01.pdf",
-        "keep",
-        "small_file_keep",
+        "metadata_only",
+        "pdf_no_text_in_parse_window",
         20,
-        0,
+        1372,
         0,
         0,
         ""
       ],
       [
         "pdf\\no_text_image_01.pdf",
-        "keep",
-        "small_file_keep",
+        "metadata_only",
+        "pdf_no_text_in_parse_window",
         20,
-        0,
+        1543,
         0,
         0,
         ""
