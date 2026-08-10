@@ -36,3 +36,6 @@ link-mode = "hardlink"
 testpaths = ["tests"]
 addopts = "-q --tb=short"
 pythonpath = [".", "scripts"]
+markers = [
+    "perf_gate: 性能门禁测试,断言时间/性能预算,仅 CI 全跑;本地默认 skip",
+]

@@ -177,6 +177,7 @@ def _run_cold(tmp_path: Path) -> tuple[Path, str]:
     return db_path, sha256_file(db_path)
 
 
+@pytest.mark.perf_gate
 def test_seed_clone_keeps_caches_and_zeroes_runs(tmp_path: Path) -> None:
     cold_db, before = _run_cold(tmp_path)
     seed_dir = tmp_path / "seed"
@@ -247,6 +248,7 @@ def test_seed_clone_keeps_caches_and_zeroes_runs(tmp_path: Path) -> None:
     verify_cache_only_seed_marker(marker, seed_dir)
 
 
+@pytest.mark.perf_gate
 def test_preparer_fails_closed_on_path_escape(tmp_path: Path) -> None:
     cold_db, _ = _run_cold(tmp_path)
     seed_dir = tmp_path / "seed"
@@ -336,6 +338,7 @@ def test_preparer_fails_closed_on_path_escape(tmp_path: Path) -> None:
     verify_cache_only_seed_marker(marker, seed_dir)
 
 
+@pytest.mark.perf_gate
 def test_preparer_rejects_forbidden_default_config_db(tmp_path: Path) -> None:
     """clone 等于当前配置/default DB 时 fail closed。"""
     cold_db, _ = _run_cold(tmp_path)

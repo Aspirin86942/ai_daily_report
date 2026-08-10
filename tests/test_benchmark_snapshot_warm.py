@@ -63,6 +63,7 @@ def _build_fixture(root: Path) -> Path:
     return work_dir
 
 
+@pytest.mark.perf_gate
 def test_7d_snapshot_warm_semantics(tmp_path: Path) -> None:
     scanner = SCANNER_BIN
     office_worker = OFFICE_BIN
@@ -88,6 +89,7 @@ def test_7d_snapshot_warm_semantics(tmp_path: Path) -> None:
     assert result["gates"]["all_context_identical_to_cold"] is True
 
 
+@pytest.mark.perf_gate
 def test_30d_cache_only_vs_snapshot_semantics(tmp_path: Path) -> None:
     scanner = SCANNER_BIN
     office_worker = OFFICE_BIN

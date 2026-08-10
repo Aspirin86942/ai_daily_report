@@ -27,6 +27,7 @@ if not (SCANNER_BIN.is_file() and OFFICE_BIN.is_file()):
     pytest.skip("Rust scanner release binaries are not built", allow_module_level=True)
 
 
+@pytest.mark.perf_gate
 def test_nine_cache_combo_semantic_output_identical(tmp_path: Path) -> None:
     """九个组合（各独立新 DB）的完整 semantic tuple 完全一致，且门禁全绿。"""
     result = corpus_gate.run_gate(
