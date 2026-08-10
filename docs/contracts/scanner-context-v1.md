@@ -83,9 +83,8 @@ copies only scanner leaves actually present in effective configuration. It
 does not inject infrastructure keys or expand defaults.
 
 The following infrastructure-like leaves are specifically forbidden inside
-the raw profile: `discovery_backend`, `rust_discovery_bin`,
-`rust_office_parser_bin`, `index_db_path`, `worker_lane_mode`, and
-`office_external_fallback`.
+the raw profile: `engine`, `rust_scanner_bin`, `rust_index_db_path`,
+`rust_office_parser_bin`, and `rust_process_timeout_seconds`.
 
 ### Frozen defaults
 
