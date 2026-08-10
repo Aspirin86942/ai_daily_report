@@ -1428,11 +1428,13 @@ mod tests {
         timeout.pdf_classification_timeout_ms += 1_000;
         let mut pages = profile.clone();
         pages.parse.pdf.max_pages += 1;
+        // 预算提额后 pdf 页上限跨模式统一（daily/weekly/monthly 均为 100），
+        // classifier 身份与 report mode 无关：daily 与 monthly 哈希一致。
         let report_mode = v2_profile(ReportMode::Monthly);
 
         assert_ne!(base, classifier_profile_hash(&timeout).unwrap());
         assert_ne!(base, classifier_profile_hash(&pages).unwrap());
-        assert_ne!(base, classifier_profile_hash(&report_mode).unwrap());
+        assert_eq!(base, classifier_profile_hash(&report_mode).unwrap());
         // 同一 profile 稳定
         assert_eq!(base, classifier_profile_hash(&profile).unwrap());
         // 与全局 quota/session 无关

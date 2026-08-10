@@ -701,7 +701,7 @@ impl Validate for RawScannerProfileV1 {
 pub const ADMISSION_POLICY_VERSION: &str = "budget_admission_v2";
 pub const CLASSIFIER_POLICY_VERSION: &str = "pdf_text_presence_v1";
 pub const PRIORITY_POLICY_VERSION: &str = "budget_nominal_v2";
-pub const COMPRESSION_POLICY_VERSION: &str = "markdown_context_v2";
+pub const COMPRESSION_POLICY_VERSION: &str = "markdown_context_v3";
 pub const MAX_SOURCE_FILES_PER_RUN: u64 = 1_000_000;
 
 /// v2-only leaves（spec Part 8.1 表）。v1 请求归一化为 v2 时这些叶子缺省，
@@ -1486,9 +1486,9 @@ impl Validate for NormalizedScannerProfileV1 {
         self.parse.validate()?;
         self.context.validate()?;
         let expected = match self.report_mode {
-            ReportMode::Daily => ("daily_balanced_v1", 50_000, 8_000),
-            ReportMode::Weekly => ("weekly_balanced_v1", 50_000, 5_000),
-            ReportMode::Monthly => ("monthly_balanced_v1", 60_000, 4_000),
+            ReportMode::Daily => ("daily_balanced_v1", 500_000, 100_000),
+            ReportMode::Weekly => ("weekly_balanced_v1", 500_000, 100_000),
+            ReportMode::Monthly => ("monthly_balanced_v1", 500_000, 100_000),
         };
         let actual = (
             self.context.profile_name.as_str(),
@@ -1577,9 +1577,9 @@ impl Validate for NormalizedScannerProfileV2 {
         self.parse.validate()?;
         self.context.validate()?;
         let expected = match self.report_mode {
-            ReportMode::Daily => ("daily_balanced_v1", 50_000, 8_000),
-            ReportMode::Weekly => ("weekly_balanced_v1", 50_000, 5_000),
-            ReportMode::Monthly => ("monthly_balanced_v1", 60_000, 4_000),
+            ReportMode::Daily => ("daily_balanced_v1", 500_000, 100_000),
+            ReportMode::Weekly => ("weekly_balanced_v1", 500_000, 100_000),
+            ReportMode::Monthly => ("monthly_balanced_v1", 500_000, 100_000),
         };
         let actual = (
             self.context.profile_name.as_str(),

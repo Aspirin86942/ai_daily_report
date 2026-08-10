@@ -21,11 +21,11 @@ pub fn normalize_scanner_profile(
     raw.validate()?;
     let summary_mode = !matches!(report_mode, ReportMode::Daily);
     let text_max_chars = if summary_mode {
-        raw.summary_text_max_chars.unwrap_or(2_000)
+        raw.summary_text_max_chars.unwrap_or(100_000)
     } else {
-        raw.text_max_chars.unwrap_or(6_000)
+        raw.text_max_chars.unwrap_or(100_000)
     };
-    let default_head_bytes = raw.direct_text_max_bytes.unwrap_or(262_144);
+    let default_head_bytes = raw.direct_text_max_bytes.unwrap_or(2 * 1024 * 1024);
     let document_excerpt_max_chars = if summary_mode {
         raw.summary_document_excerpt_max_chars
             .unwrap_or(text_max_chars)
@@ -44,33 +44,33 @@ pub fn normalize_scanner_profile(
         pdf_max_pages,
     ) = if summary_mode {
         (
-            raw.summary_excel_max_sheets.unwrap_or(2),
-            raw.summary_excel_max_rows.unwrap_or(10),
-            raw.summary_excel_max_columns.unwrap_or(12),
-            raw.summary_docx_max_paragraphs.unwrap_or(80),
-            raw.summary_docx_max_tables.unwrap_or(8),
-            raw.summary_docx_table_max_rows.unwrap_or(20),
-            raw.summary_docx_table_max_cols.unwrap_or(8),
-            raw.summary_pptx_max_slides.unwrap_or(15),
-            raw.summary_pdf_max_pages.unwrap_or(2),
+            raw.summary_excel_max_sheets.unwrap_or(100),
+            raw.summary_excel_max_rows.unwrap_or(20_000),
+            raw.summary_excel_max_columns.unwrap_or(50),
+            raw.summary_docx_max_paragraphs.unwrap_or(50_000),
+            raw.summary_docx_max_tables.unwrap_or(100),
+            raw.summary_docx_table_max_rows.unwrap_or(10_000),
+            raw.summary_docx_table_max_cols.unwrap_or(50),
+            raw.summary_pptx_max_slides.unwrap_or(500),
+            raw.summary_pdf_max_pages.unwrap_or(100),
         )
     } else {
         (
-            raw.excel_max_sheets.unwrap_or(5),
-            raw.excel_max_rows.unwrap_or(50),
-            raw.excel_max_columns.unwrap_or(20),
-            raw.docx_max_paragraphs.unwrap_or(200),
-            raw.docx_max_tables.unwrap_or(20),
-            raw.docx_table_max_rows.unwrap_or(50),
-            raw.docx_table_max_cols.unwrap_or(12),
-            raw.pptx_max_slides.unwrap_or(50),
-            raw.pdf_max_pages.unwrap_or(5),
+            raw.excel_max_sheets.unwrap_or(100),
+            raw.excel_max_rows.unwrap_or(20_000),
+            raw.excel_max_columns.unwrap_or(50),
+            raw.docx_max_paragraphs.unwrap_or(50_000),
+            raw.docx_max_tables.unwrap_or(100),
+            raw.docx_table_max_rows.unwrap_or(10_000),
+            raw.docx_table_max_cols.unwrap_or(50),
+            raw.pptx_max_slides.unwrap_or(500),
+            raw.pdf_max_pages.unwrap_or(100),
         )
     };
     let (profile_name, global_max_chars, per_file_max_chars) = match report_mode {
-        ReportMode::Daily => ("daily_balanced_v1", 50_000, 8_000),
-        ReportMode::Weekly => ("weekly_balanced_v1", 50_000, 5_000),
-        ReportMode::Monthly => ("monthly_balanced_v1", 60_000, 4_000),
+        ReportMode::Daily => ("daily_balanced_v1", 500_000, 100_000),
+        ReportMode::Weekly => ("weekly_balanced_v1", 500_000, 100_000),
+        ReportMode::Monthly => ("monthly_balanced_v1", 500_000, 100_000),
     };
     let max_file_size_bytes = raw
         .max_file_size_mb
@@ -114,11 +114,11 @@ pub fn normalize_scanner_profile(
             )?,
         },
         parse: ParseProfile {
-            aggregate_max_chars: raw.total_max_chars.unwrap_or(50_000),
+            aggregate_max_chars: raw.total_max_chars.unwrap_or(500_000),
             text: TextParseProfile {
                 backend: "light_text_v1".to_string(),
                 read_head_bytes: raw.direct_text_read_bytes.unwrap_or(default_head_bytes),
-                read_tail_bytes: raw.log_tail_read_bytes.unwrap_or(262_144),
+                read_tail_bytes: raw.log_tail_read_bytes.unwrap_or(2 * 1024 * 1024),
                 max_chars: text_max_chars,
                 excerpt_max_chars: raw.text_excerpt_max_chars.unwrap_or(text_max_chars),
             },
@@ -225,7 +225,8 @@ fn seconds_to_millis(seconds: u64, field: &str) -> Result<u64, String> {
 /// Normalize a tagged union scanner profile (v1 or v2) into the fully-required
 /// canonical v2 profile. v1 requests are converted to a raw v2 profile first,
 /// so the v2-only leaves fall back to the frozen report-mode default table
-/// (spec Part 8.1). PDF page defaults stay daily=5, weekly/monthly=2.
+/// (spec Part 8.1). Parse budget defaults unify at 100k per file / 500k global
+/// across report modes.
 pub fn normalize_scanner_profile_v2(
     profile: &ScannerProfile,
     report_mode: ReportMode,
@@ -242,8 +243,8 @@ pub fn normalize_scanner_profile_v2(
 
 /// Normalize a raw scanner profile v2 into the fully-required canonical v2
 /// profile. The v2 path merges raw leaves with the frozen report-mode default
-/// table (spec Part 8.1) and keeps the existing PDF page defaults (daily=5,
-/// weekly/monthly=2).
+/// table (spec Part 8.1) and unifies the parse budget defaults at 100k per
+/// file / 500k global across report modes.
 fn normalize_scanner_profile_v2_raw(
     raw: &RawScannerProfileV2,
     report_mode: ReportMode,
@@ -251,11 +252,11 @@ fn normalize_scanner_profile_v2_raw(
     raw.validate()?;
     let summary_mode = !matches!(report_mode, ReportMode::Daily);
     let text_max_chars = if summary_mode {
-        raw.summary_text_max_chars.unwrap_or(2_000)
+        raw.summary_text_max_chars.unwrap_or(100_000)
     } else {
-        raw.text_max_chars.unwrap_or(6_000)
+        raw.text_max_chars.unwrap_or(100_000)
     };
-    let default_head_bytes = raw.direct_text_max_bytes.unwrap_or(262_144);
+    let default_head_bytes = raw.direct_text_max_bytes.unwrap_or(2 * 1024 * 1024);
     let document_excerpt_max_chars = if summary_mode {
         raw.summary_document_excerpt_max_chars
             .unwrap_or(text_max_chars)
@@ -274,33 +275,33 @@ fn normalize_scanner_profile_v2_raw(
         pdf_max_pages,
     ) = if summary_mode {
         (
-            raw.summary_excel_max_sheets.unwrap_or(2),
-            raw.summary_excel_max_rows.unwrap_or(10),
-            raw.summary_excel_max_columns.unwrap_or(12),
-            raw.summary_docx_max_paragraphs.unwrap_or(80),
-            raw.summary_docx_max_tables.unwrap_or(8),
-            raw.summary_docx_table_max_rows.unwrap_or(20),
-            raw.summary_docx_table_max_cols.unwrap_or(8),
-            raw.summary_pptx_max_slides.unwrap_or(15),
-            raw.summary_pdf_max_pages.unwrap_or(2),
+            raw.summary_excel_max_sheets.unwrap_or(100),
+            raw.summary_excel_max_rows.unwrap_or(20_000),
+            raw.summary_excel_max_columns.unwrap_or(50),
+            raw.summary_docx_max_paragraphs.unwrap_or(50_000),
+            raw.summary_docx_max_tables.unwrap_or(100),
+            raw.summary_docx_table_max_rows.unwrap_or(10_000),
+            raw.summary_docx_table_max_cols.unwrap_or(50),
+            raw.summary_pptx_max_slides.unwrap_or(500),
+            raw.summary_pdf_max_pages.unwrap_or(100),
         )
     } else {
         (
-            raw.excel_max_sheets.unwrap_or(5),
-            raw.excel_max_rows.unwrap_or(50),
-            raw.excel_max_columns.unwrap_or(20),
-            raw.docx_max_paragraphs.unwrap_or(200),
-            raw.docx_max_tables.unwrap_or(20),
-            raw.docx_table_max_rows.unwrap_or(50),
-            raw.docx_table_max_cols.unwrap_or(12),
-            raw.pptx_max_slides.unwrap_or(50),
-            raw.pdf_max_pages.unwrap_or(5),
+            raw.excel_max_sheets.unwrap_or(100),
+            raw.excel_max_rows.unwrap_or(20_000),
+            raw.excel_max_columns.unwrap_or(50),
+            raw.docx_max_paragraphs.unwrap_or(50_000),
+            raw.docx_max_tables.unwrap_or(100),
+            raw.docx_table_max_rows.unwrap_or(10_000),
+            raw.docx_table_max_cols.unwrap_or(50),
+            raw.pptx_max_slides.unwrap_or(500),
+            raw.pdf_max_pages.unwrap_or(100),
         )
     };
     let (profile_name, global_max_chars, per_file_max_chars) = match report_mode {
-        ReportMode::Daily => ("daily_balanced_v1", 50_000, 8_000),
-        ReportMode::Weekly => ("weekly_balanced_v1", 50_000, 5_000),
-        ReportMode::Monthly => ("monthly_balanced_v1", 60_000, 4_000),
+        ReportMode::Daily => ("daily_balanced_v1", 500_000, 100_000),
+        ReportMode::Weekly => ("weekly_balanced_v1", 500_000, 100_000),
+        ReportMode::Monthly => ("monthly_balanced_v1", 500_000, 100_000),
     };
     let max_file_size_bytes = raw
         .max_file_size_mb
@@ -352,11 +353,11 @@ fn normalize_scanner_profile_v2_raw(
             )?,
         },
         parse: ParseProfile {
-            aggregate_max_chars: raw.total_max_chars.unwrap_or(50_000),
+            aggregate_max_chars: raw.total_max_chars.unwrap_or(500_000),
             text: TextParseProfile {
                 backend: "light_text_v1".to_string(),
                 read_head_bytes: raw.direct_text_read_bytes.unwrap_or(default_head_bytes),
-                read_tail_bytes: raw.log_tail_read_bytes.unwrap_or(262_144),
+                read_tail_bytes: raw.log_tail_read_bytes.unwrap_or(2 * 1024 * 1024),
                 max_chars: text_max_chars,
                 excerpt_max_chars: raw.text_excerpt_max_chars.unwrap_or(text_max_chars),
             },

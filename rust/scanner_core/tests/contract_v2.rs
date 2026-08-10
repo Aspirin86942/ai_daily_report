@@ -5,7 +5,8 @@
 //! fall back to the frozen report-mode defaults during normalization.
 
 use ai_daily_scanner_contract::{
-    BuildContextRequest, RawScannerProfileV2, ReportMode, ScannerProfile, Validate,
+    BuildContextRequest, RawScannerProfileV1, RawScannerProfileV2, ReportMode, ScannerProfile,
+    Validate,
 };
 
 #[test]
@@ -196,7 +197,50 @@ fn normalize_v2_merges_frozen_report_mode_defaults() {
 }
 
 #[test]
-fn normalize_v2_keeps_report_mode_pdf_page_defaults() {
+fn normalize_defaults_preserve_full_file_content_budget() {
+    use ai_daily_scanner_core::config::{normalize_scanner_profile, normalize_scanner_profile_v2};
+
+    for mode in [
+        ReportMode::Daily,
+        ReportMode::Weekly,
+        ReportMode::Monthly,
+    ] {
+        let raw_v2: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
+            "schema_version": "scanner_profile_v2"
+        }))
+        .expect("minimal v2 raw profile should decode");
+        let normalized = normalize_scanner_profile_v2(&ScannerProfile::V2(raw_v2), mode)
+            .expect("minimal v2 profile should normalize");
+        assert_eq!(normalized.context.global_max_chars, 500_000, "{mode:?}");
+        assert_eq!(normalized.context.per_file_max_chars, 100_000, "{mode:?}");
+        assert_eq!(normalized.context.compression_policy_version, "markdown_context_v3");
+        assert_eq!(normalized.parse.text.max_chars, 100_000, "{mode:?}");
+        assert_eq!(normalized.parse.text.read_head_bytes, 2 * 1024 * 1024, "{mode:?}");
+        assert_eq!(normalized.parse.text.read_tail_bytes, 2 * 1024 * 1024, "{mode:?}");
+        assert_eq!(normalized.parse.pdf.max_pages, 100, "{mode:?}");
+        assert_eq!(normalized.parse.office.excel_max_rows, 20_000, "{mode:?}");
+        assert_eq!(normalized.parse.office.excel_max_sheets, 100, "{mode:?}");
+        assert_eq!(normalized.parse.office.docx_max_paragraphs, 50_000, "{mode:?}");
+        assert_eq!(normalized.parse.office.pptx_max_slides, 500, "{mode:?}");
+        assert_eq!(normalized.parse.office.document_excerpt_max_chars, 100_000, "{mode:?}");
+        assert_eq!(normalized.parse.aggregate_max_chars, 500_000, "{mode:?}");
+
+        let raw_v1: RawScannerProfileV1 = serde_json::from_value(serde_json::json!({
+            "schema_version": "scanner_profile_v1"
+        }))
+        .expect("minimal v1 raw profile should decode");
+        let v1 = normalize_scanner_profile(&raw_v1, mode).expect("minimal v1 profile should normalize");
+        assert_eq!(v1.context.global_max_chars, 500_000, "{mode:?}");
+        assert_eq!(v1.context.per_file_max_chars, 100_000, "{mode:?}");
+        assert_eq!(v1.parse.text.max_chars, 100_000, "{mode:?}");
+        assert_eq!(v1.parse.office.document_excerpt_max_chars, 100_000, "{mode:?}");
+        assert_eq!(v1.parse.pdf.max_pages, 100, "{mode:?}");
+        assert_eq!(v1.parse.aggregate_max_chars, 500_000, "{mode:?}");
+    }
+}
+
+#[test]
+fn normalize_v2_unifies_pdf_page_defaults() {
     use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
 
     let raw: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
@@ -206,20 +250,20 @@ fn normalize_v2_keeps_report_mode_pdf_page_defaults() {
 
     let daily = normalize_scanner_profile_v2(&ScannerProfile::V2(raw.clone()), ReportMode::Daily)
         .expect("daily profile should normalize");
-    assert_eq!(daily.parse.pdf.max_pages, 5, "daily keeps pdf_max_pages=5");
+    assert_eq!(daily.parse.pdf.max_pages, 100, "daily pdf_max_pages unifies at 100");
 
     let weekly = normalize_scanner_profile_v2(&ScannerProfile::V2(raw.clone()), ReportMode::Weekly)
         .expect("weekly profile should normalize");
     assert_eq!(
-        weekly.parse.pdf.max_pages, 2,
-        "weekly keeps summary_pdf_max_pages=2"
+        weekly.parse.pdf.max_pages, 100,
+        "weekly pdf_max_pages unifies at 100"
     );
 
     let monthly = normalize_scanner_profile_v2(&ScannerProfile::V2(raw), ReportMode::Monthly)
         .expect("monthly profile should normalize");
     assert_eq!(
-        monthly.parse.pdf.max_pages, 2,
-        "monthly keeps summary_pdf_max_pages=2"
+        monthly.parse.pdf.max_pages, 100,
+        "monthly pdf_max_pages unifies at 100"
     );
 }
 
@@ -297,8 +341,8 @@ fn v1_requests_are_normalized_to_v2_with_frozen_defaults() {
     assert_eq!(normalized.max_total_pdf_classification_pages, 370);
     assert_eq!(normalized.max_pdf_text_extractions, 16);
     assert_eq!(
-        normalized.parse.pdf.max_pages, 2,
-        "monthly keeps summary_pdf_max_pages=2"
+        normalized.parse.pdf.max_pages, 100,
+        "monthly unifies pdf max pages at 100"
     );
     assert_eq!(
         normalized.pdf_classification_timeout_ms, 2_000,

@@ -28,6 +28,21 @@ fn v2_profile(mode: ReportMode) -> ai_daily_scanner_contract::NormalizedScannerP
     normalize_scanner_profile_v2(&ScannerProfile::V2(raw), mode).expect("normalized v2 profile")
 }
 
+/// Daily profile with an explicit small pdf_max_pages so classification plan
+/// arithmetic stays deterministic (80-page budget / 5 pages per pdf = 16
+/// slots). Budget defaults were raised to 500k/100k and pdf pages unified at
+/// 100, which would otherwise leave no PDF classified within the frozen
+/// 80-page daily classification budget.
+fn v2_daily_pdf_profile() -> ai_daily_scanner_contract::NormalizedScannerProfileV2 {
+    let raw: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
+        "schema_version": "scanner_profile_v2",
+        "pdf_max_pages": 5
+    }))
+    .expect("minimal v2 raw profile");
+    normalize_scanner_profile_v2(&ScannerProfile::V2(raw), ReportMode::Daily)
+        .expect("normalized v2 profile")
+}
+
 fn candidate(path: &str, extension: &str, size_bytes: u64) -> PlanCandidate {
     PlanCandidate {
         file_identity: format!("fixture:{path}"),
@@ -310,7 +325,7 @@ fn every_route_reserved_covers_rendered() {
 
 #[test]
 fn classification_plan_handles_no_io_dispositions_before_candidate_slots() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = v2_daily_pdf_profile();
     let files = vec![
         candidate(r"\big.log", ".log", 1024 * 1024 * 1024), // file too large -> policy
         candidate(r"\a.docx", ".docx", 100),                // office candidate
@@ -372,7 +387,7 @@ fn classification_plan_marks_source_guard_unavailable_as_error_reject() {
 
 #[test]
 fn classification_plan_reserves_full_pdf_max_pages_per_pdf_in_nominal_order() {
-    let profile = v2_profile(ReportMode::Daily); // page budget 80, pdf_max_pages 5
+    let profile = v2_daily_pdf_profile(); // page budget 80, pdf_max_pages 5
     let files: Vec<PlanCandidate> = (0..17)
         .map(|index| candidate(&format!(r"\p{index:02}.pdf"), ".pdf", 100))
         .collect();
@@ -408,7 +423,7 @@ fn classification_plan_reserves_full_pdf_max_pages_per_pdf_in_nominal_order() {
 
 #[test]
 fn classification_plan_assigns_candidate_slots_by_nominal_rank() {
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = v2_daily_pdf_profile();
     profile.max_candidate_files = 2;
     let files = vec![
         candidate(r"\z.pdf", ".pdf", 100),
@@ -522,8 +537,7 @@ fn content_admission_continues_to_smaller_files_after_a_budget_omit() {
 
 #[test]
 fn content_admission_text_pdf_requires_budget_and_extraction_slot() {
-    let profile = v2_profile(ReportMode::Daily); // max_pdf_text_extractions 8
-    let mut profile = profile;
+    let mut profile = v2_daily_pdf_profile(); // extraction slots capped below the default
     profile.max_pdf_text_extractions = 1;
     let model = admission_context(50_000, 8_000);
     let files = vec![
@@ -582,7 +596,7 @@ fn content_admission_text_pdf_requires_budget_and_extraction_slot() {
 
 #[test]
 fn content_admission_no_text_pdf_is_metadata_only_without_extraction_slot() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = v2_daily_pdf_profile();
     let model = admission_context(50_000, 8_000);
     let files = vec![
         candidate(r"\image.pdf", ".pdf", 100),
@@ -633,7 +647,7 @@ fn content_admission_no_text_pdf_is_metadata_only_without_extraction_slot() {
 
 #[test]
 fn content_admission_classifier_failure_is_not_admitted() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = v2_daily_pdf_profile();
     let model = admission_context(50_000, 8_000);
     let files = vec![candidate(r"\broken.pdf", ".pdf", 100)];
     let classified =
@@ -1403,7 +1417,7 @@ fn cache_state_does_not_change_semantic_output() {
         discovered("notes/b.txt", ".txt", 128),
         discovered("report.pdf", ".pdf", 256),
     ];
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = v2_daily_pdf_profile();
     let parser = TestParser {
         results: HashMap::from([
             (
@@ -2113,7 +2127,7 @@ fn post_parse_source_change_discards_content_but_keeps_execution_provenance() {
 #[test]
 fn classifier_pre_and_post_source_changes_keep_source_changed_semantics() {
     for (fail_on_pdf_call, expected_attempts) in [(0, 0), (1, 1)] {
-        let profile = v2_profile(ReportMode::Daily);
+        let profile = v2_daily_pdf_profile();
         let pdf = discovered("changed.pdf", ".pdf", 128);
         let text = discovered("notes.md", ".md", 64);
         let clock = FakeClock::new();
@@ -2377,7 +2391,7 @@ fn discovery_issues_mark_the_run_partial_with_warnings() {
 fn classification_cache_persists_real_page_counts() {
     // spec Part 3.2: the classification cache stores the classifier's REAL
     // page counts (page_count / result_examined_pages), never a hardcoded 1.
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = v2_daily_pdf_profile();
     let discovery = vec![discovered("report.pdf", ".pdf", 256)];
     let classifier = TestClassifier {
         results: HashMap::from([(
@@ -2445,7 +2459,7 @@ fn source_file_limit_exceeds_fail_closed() {
 fn classification_lookup_failure_propagates_as_run_level() {
     // spec Part 4: a classification cache lookup failure is a run-level
     // adapter/store error, NEVER a per-file miss disposition.
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = v2_daily_pdf_profile();
     let discovery = vec![discovered("report.pdf", ".pdf", 256)];
     let cache = TestCache {
         classification_lookup_error: Some(CachePortError::Store {
@@ -2552,7 +2566,7 @@ fn classifier_unknown_maps_timeout_vs_crash() {
 
 #[test]
 fn classification_executes_in_parallel_waves() {
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = v2_daily_pdf_profile();
     profile.session_concurrency = 2;
     let discovery = vec![
         discovered("one.pdf", ".pdf", 128),
