@@ -547,3 +547,11 @@ git add -A
 git commit -m "test: align assertions with generous default budgets"
 ```
 （无修复则跳过。）
+
+---
+
+## 实施修正
+
+- **分类页数配额提额**：`v2_quota_defaults` classification 槽位 daily 80→800、weekly 100→1200、monthly 370→1600（元组顺序 `(max_candidate_files, max_total_pdf_classification_pages, max_pdf_text_extractions, total_deadline_ms)`）；extraction 槽位 8/12/16 不变。
+- **Task 1 fixture 算术修正**：`RECENT_TAIL` 实为 11 字符（非 10）；实现时 fixture 调整为 810 字符（头部 799 + RECENT_TAIL 11），保留约定的「省略头部约 574 字符」断言。
+- **settings.windows.yaml 保持未跟踪**：该文件被 `.gitignore` 忽略（敏感本地配置），Task 3 仅提交 example 配置。

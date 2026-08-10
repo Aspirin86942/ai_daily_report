@@ -93,6 +93,16 @@ Cold and warm runs over unchanged inputs must produce identical context bytes.
 Cache state is available through `inspect-run` and is not embedded in the
 report prompt context.
 
+## Context compression
+
+The compressor preserves file content verbatim within the per-file budget
+(default 100_000 chars); files within budget pass through unchanged. Files
+exceeding the budget keep the first 40% and last 60% cut at line boundaries,
+joined by an explicit omission marker, so no mid-file content is dropped
+silently. `.log` files keep the recent tail with a head-omission marker.
+Global context budget defaults to 500_000 chars for every report mode; all
+values are overridable through the scanner profile leaves.
+
 ## Benchmark evidence
 
 Use a synthetic or approved sanitized directory and a fresh v2 database. The

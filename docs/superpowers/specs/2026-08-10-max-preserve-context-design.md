@@ -50,7 +50,7 @@
 | `.log` 读尾部 `log_tail_read_bytes` | 256KB | **2MB** | |
 | 聚合上限 `total_max_chars`（`aggregate_max_chars`） | 50k | **500k** | 实现时验证其执行点（当前仅在 config.rs 赋值，未见强制点） |
 | 候选文件配额 `max_candidate_files` | 96 / 192 / 384 | **不变** | 已足够宽 |
-| `COMPRESSION_POLICY_VERSION` | `markdown_context_v1` | **`markdown_context_v2`** | 缓存 profile 判定不一致 → 强制重建 |
+| `COMPRESSION_POLICY_VERSION` | `markdown_context_v2` | **`markdown_context_v3`** | 缓存 profile 判定不一致 → 强制重建 |
 
 配置文件同步更新：
 
@@ -66,7 +66,10 @@
 1. 先扣除标记预留 `marker_reserve`（≈64 字符，覆盖最坏情况的省略标记行），剩余按比例分配：头预算 = 40% × (limit − marker_reserve)，尾预算 = 60% × (limit − marker_reserve)（比例可配，默认 40/60）；
 2. 头部取前 `head_budget` 字符后**回退到最近的换行边界**（不截断半行）；尾部取最后 `tail_budget` 字符后**前进到最近的换行边界**；
 3. 中缝插入一行标记：`…（已省略中部约 N 字符）…`（N 为实际省略的字符数，`count_chars` 计算）；
-4. **不变量保证规则**：尾部前进到行边界可能使总长超过 `limit`——此时头部预算相应收缩（回退到更早的行边界），使 `count_chars(body) ≤ limit` 恒成立（保证 `rendered ≤ reserved`）；`output_chars = count_chars(body)`（含标记）。
+4. **不变量保证**：边界回退/前进只会缩短头/尾（`head_end ≤ head_budget`、
+   `tail_start ≥ total − tail_budget`），marker 计入 `OMITTED_MARKER_RESERVE=64`
+   预留——`count_chars(body) ≤ limit` 结构性成立，无需补偿逻辑；测试显式断言
+   边界放置与预算不变量。
 
 `.log`（时间序，新信息在尾部）：
 
@@ -85,14 +88,14 @@
 1. **PDF 解析超时**：页数 5 → 100 后，单文件解析耗时可能超过 `file_timeout_by_extension` 中 `.pdf: 45s`；超时文件进 error 列表（有省略摘要行，不丢元信息）。缓解：本地配置 `.pdf` 超时放宽至 **120s**；页数虽为 100，摘录 100k 字符上限使实际读取页数受字符约束。
 2. **每次运行 token 成本**：500k 字符 ≈ 35~40 万输入 token。用户已确认可接受；所有值可覆盖回退（成本敏感时调低全局/单文件预算即可）。
 3. **Office 解析耗时**：docx 段落 / pptx 页数上限放大后单文件耗时上升；不改变超时语义（超时 → error 列表 + 省略摘要），不做隐式 fallback。
-4. **缓存放大**：缓存条目按文件粒度存储解析结果，预算放大不增加缓存条目数，只增单条体积；`markdown_context_v2` 版本 bump 后旧缓存整体失效一次，之后正常。
+4. **缓存放大**：缓存条目按文件粒度存储解析结果，预算放大不增加缓存条目数，只增单条体积；`markdown_context_v3` 版本 bump 后旧缓存整体失效一次，之后正常。
 
 ## 6. 测试策略
 
 Rust 单测（`rust/scanner_core`，`compressor.rs` 新增用例）：
 
 - 双端切割：中文 Unicode 边界、行边界回退（不截半行）、marker 与实际省略字符数一致、`output_chars` 含 marker、body ≤ limit；
-- 不变量规则：尾部前进超限时头部收缩（构造「尾部行特别长」的用例，断言 body ≤ limit 且无半行）；
+- 边界规则：头部结束于换行边界（`'\n'` 之后）、尾部起始于行首；无换行区域退化为字符截断；body ≤ limit 与 marker 字符数断言；
 - `.log` 尾优先 + 头部省略标记；
 - 预算内文件原样透传（verbatim，无标记）；
 - 巨文件（>100k）触发兜底路径；

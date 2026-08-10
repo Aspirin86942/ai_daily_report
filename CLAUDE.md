@@ -110,7 +110,7 @@ rust/                    # Cargo workspace
 ## Key Patterns
 
 - LLM 输出：使用 JSON 模式 + Pydantic 严格校验
-- 扫描策略：`summary_mode` + `total_max_chars` 控制上下文长度
+- 扫描策略：单文件预算内正文逐字保留；超预算文件头+尾行边界兜底（`.log` 尾优先）；默认全局 500k / 单文件 100k 字符，均可用 scanner profile 覆盖
 - Scanner backend：`parser_backend` 表示内容由谁解析，`worker_lane` 表示执行通道，不能混用
 - Office parser：配置默认 `rust_office_oxide_v1`；`.xlsx` 在 Rust CLI 内报告 `rust_xlsx_bounded_v1` 有界预览；Rust 超时默认不 fallback，除非显式开启 `office_fallback_after_timeout`
 - Cache profile：解析缓存身份由 Rust core 归一化 profile 唯一决定——backend、fallback、timeout、`parser_profile_version`、预算字段与 scanner/worker 构建指纹均参与失效；Python 仅传输显式配置的 wire 叶子，详见 `docs/scanner-backends.md`
