@@ -11,7 +11,7 @@
 - `tests/` contains pytest test modules.
 
 ## Build, Test, and Development Commands
-- The only supported runtime is CPython `3.13.13`; `.python-version` is the source of truth for development, CI, release, and deployment.
+- The only supported runtime is CPython `3.13.13`; `.python-version` is the source of truth for development, release, and deployment.
 - `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` installs runtime dependencies.
 - `.\.venv\Scripts\python.exe main.py doctor --strict` validates the production config, templates, dependencies, workers, and Rust core.
 - `.\.venv\Scripts\python.exe main.py daily -i "..."` generates a daily report. Examples: add `--no-save` or `--date 2026-02-05` as needed.

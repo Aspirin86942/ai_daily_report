@@ -118,9 +118,10 @@ checks remain mandatory.
 The Windows production default is now `rust_v2`. Strict doctor probes the
 scanner version and contract, validates its build identity, and requires the
 scan DB parent plus both crash-isolated worker handshakes to succeed before a
-deployment is accepted. The Windows CI job sets a process-level LLM prohibition
-that fails before any SDK call, uses only synthetic Chinese/space-path data for
-end-to-end scanning, and runs cold, warm, and source-version cache checks.
+deployment is accepted. At that time, the Windows CI job set a process-level
+LLM prohibition that failed before any SDK call, used only synthetic
+Chinese/space-path data for end-to-end scanning, and ran cold, warm, and
+source-version cache checks.
 
 The final Task 11 source tree passed 119 focused Python tests and 448 full
 Python tests with the LLM prohibition enabled, Python bytecode compilation,

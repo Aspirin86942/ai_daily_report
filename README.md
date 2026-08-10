@@ -3,7 +3,7 @@
 仅支持 Windows x64 与 CPython 3.13.13 的审计报告工具。生产架构固定为 **Python application shell +
 Rust scanner/context core**：Python 负责 CLI、配置、报告数据库、模板和 LLM；
 Rust 负责文件发现、分类、parser 路由、worker deadline、缓存、审计和确定性
-context 压缩。根目录 `.python-version` 是开发、CI、Release 和部署共同使用的
+context 压缩。根目录 `.python-version` 是开发、Release 和部署共同使用的
 唯一 Python 版本来源。
 
 ## Windows 源码快速开始
@@ -164,4 +164,4 @@ tests/                   # Python/Windows release tests
 
 项目仅承诺 Windows x64、PowerShell、CPython 3.13.13、
 `.venv\Scripts\python.exe` 与 `doctor --strict` 组合下的生产和源码行为；不再提供
-Linux 源码兼容性或 CI 承诺。
+Linux 源码兼容性承诺。

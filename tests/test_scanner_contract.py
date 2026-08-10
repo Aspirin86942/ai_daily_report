@@ -147,7 +147,6 @@ def test_rust_workspace_keeps_discovery_as_a_library_only() -> None:
         "src/core/healthcheck.py",
         "src/services/context_scheduler.py",
         "src/services/rust_context_client.py",
-        ".github/workflows/ci.yml",
         "scripts/deploy_windows.ps1",
         "README.md",
         "docs/scanner-backends.md",

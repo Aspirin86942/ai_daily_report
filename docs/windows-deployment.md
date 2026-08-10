@@ -10,8 +10,8 @@ independently authenticated distribution. Never execute the verifier,
 installer, Python, or PowerShell files from an unverified archive.
 
 The only supported Python runtime is CPython 3.13.13. The root
-`.python-version` file is the shared version source for development, CI,
-release packaging, and deployment.
+`.python-version` file is the shared version source for development, release
+packaging, and deployment.
 
 V1 provides integrity and corruption detection, not publisher authentication.
 `manifest.json`, `SHA256SUMS`, and binary handshakes cannot prove who produced a
@@ -36,8 +36,8 @@ New-Item -ItemType Directory -Path .\dist -Force | Out-Null
   -ReleaseVersion "2026.07.16"
 ```
 
-The Windows CI and release workflows also create a separate production-only
-virtual environment and install it with
+The Windows release workflow also creates a separate production-only virtual
+environment and installs it with
 `python -m pip install --requirement requirements.lock`. From that same clean
 environment they validate the Python worker `version` and `session-version`
 identities, run `doctor --strict`, and execute the full fixed-corpus gate. This
@@ -220,5 +220,5 @@ hashes, and ensures logs plus report/scan databases stay under `shared/`. The
 workflow sets an LLM hard prohibition and never copies developer credentials or
 business files.
 
-Linux is not a supported source or release target and has no compatibility CI,
-installed-mode guarantee, or process-tree timeout claim.
+Linux is not a supported source or release target and has no automated
+compatibility workflow, installed-mode guarantee, or process-tree timeout claim.

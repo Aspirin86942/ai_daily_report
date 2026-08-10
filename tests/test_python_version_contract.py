@@ -9,10 +9,7 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_PYTHON_VERSION = "3.13.13"
-WINDOWS_WORKFLOWS = {
-    ".github/workflows/ci.yml": "windows-production",
-    ".github/workflows/windows-release.yml": "build-verify-package",
-}
+WINDOWS_RELEASE_WORKFLOW = ".github/workflows/windows-release.yml"
 
 
 def test_test_suite_runs_on_the_supported_cpython() -> None:
@@ -35,31 +32,21 @@ def test_project_metadata_uses_the_exact_python_version() -> None:
     )
 
 
-def test_windows_workflows_consume_the_version_file() -> None:
-    for relative_path, job_name in WINDOWS_WORKFLOWS.items():
-        workflow = yaml.safe_load(
-            (PROJECT_ROOT / relative_path).read_text(encoding="utf-8")
-        )
-        job = workflow["jobs"][job_name]
-        setup_python = next(
-            step
-            for step in job["steps"]
-            if step.get("uses") == "actions/setup-python@v5"
-        )
-
-        assert EXPECTED_PYTHON_VERSION in job["name"]
-        assert setup_python["with"]["python-version-file"] == (
-            ".python-version"
-        )
-        assert "python-version" not in setup_python["with"]
-
-    ci = yaml.safe_load(
-        (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
+def test_windows_release_workflow_consumes_the_version_file() -> None:
+    workflow = yaml.safe_load(
+        (PROJECT_ROOT / WINDOWS_RELEASE_WORKFLOW).read_text(encoding="utf-8")
     )
-    assert set(ci["jobs"]) == {"windows-production"}
-    assert "linux-compatibility" not in ci["jobs"]
+    job = workflow["jobs"]["build-verify-package"]
+    setup_python = next(
+        step
+        for step in job["steps"]
+        if step.get("uses") == "actions/setup-python@v5"
+    )
+
+    assert EXPECTED_PYTHON_VERSION in job["name"]
+    assert setup_python["with"]["python-version-file"] == ".python-version"
+    assert "python-version" not in setup_python["with"]
+    assert not (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").exists()
 
 
 def test_deployment_validates_creator_and_venv_before_work() -> None:

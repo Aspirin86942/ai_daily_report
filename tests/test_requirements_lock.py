@@ -19,11 +19,9 @@ DEV_DISTRIBUTIONS = {
     "reportlab",
 }
 WORKFLOW_GATES = {
-    ".github/workflows/ci.yml": 1,
     ".github/workflows/windows-release.yml": 1,
 }
-WINDOWS_PRODUCTION_WORKFLOWS = (
-    ".github/workflows/ci.yml",
+WINDOWS_RELEASE_WORKFLOWS = (
     ".github/workflows/windows-release.yml",
 )
 
@@ -93,7 +91,7 @@ def test_lock_has_hashes_and_excludes_dev_editable_and_project() -> None:
     )
 
 
-def test_ci_pins_uv_syncs_frozen_and_runs_the_projection_gate() -> None:
+def test_release_workflow_pins_uv_and_runs_the_projection_gate() -> None:
     root = Path(__file__).resolve().parents[1]
     for relative_path, expected_gate_count in WORKFLOW_GATES.items():
         workflow = (root / relative_path).read_text(encoding="utf-8")
@@ -107,7 +105,7 @@ def test_ci_pins_uv_syncs_frozen_and_runs_the_projection_gate() -> None:
         )
 
 
-def test_windows_workflows_run_the_explicit_clean_production_chain() -> None:
+def test_windows_release_runs_the_explicit_clean_production_chain() -> None:
     root = Path(__file__).resolve().parents[1]
     ordered_tokens = (
         "python -m venv $prodVenv",
@@ -117,7 +115,7 @@ def test_windows_workflows_run_the_explicit_clean_production_chain() -> None:
         "& $env:AI_DAILY_PROD_PYTHON main.py doctor --strict",
         "& $env:AI_DAILY_PROD_PYTHON scripts/corpus_gate.py",
     )
-    for relative_path in WINDOWS_PRODUCTION_WORKFLOWS:
+    for relative_path in WINDOWS_RELEASE_WORKFLOWS:
         workflow = (root / relative_path).read_text(encoding="utf-8")
         positions = []
         for token in ordered_tokens:

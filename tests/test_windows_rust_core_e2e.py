@@ -8,7 +8,6 @@ import sys
 from types import SimpleNamespace
 
 import pytest
-import yaml
 
 from src.core.healthcheck import collect_healthcheck
 from src.services.context_scheduler import (
@@ -101,39 +100,6 @@ def test_deploy_windows_builds_rust_and_finishes_with_strict_doctor() -> None:
     assert 'Assert-CPythonVersion -Label "Created .venv Python"' in script
     assert "Existing .venv directories are not removed automatically" in script
     assert "api_key" not in script.lower()
-
-
-def test_windows_ci_keeps_all_production_gates_in_one_job() -> None:
-    workflow = yaml.safe_load(
-        (PROJECT_ROOT / ".github" / "workflows" / "ci.yml").read_text(
-            encoding="utf-8"
-        )
-    )
-    jobs = workflow["jobs"]
-
-    assert set(jobs) == {"windows-production"}
-    windows = jobs["windows-production"]
-    assert windows["runs-on"] == "windows-latest"
-    steps = windows["steps"]
-    combined = "\n".join(str(step) for step in steps)
-
-    for required in (
-        "requirements.lock",
-        "cargo fmt",
-        "cargo clippy",
-        "cargo test",
-        "cargo build",
-        "doctor --strict",
-        "pytest tests/",
-        "test_windows_rust_core_e2e.py",
-        "deploy_windows.ps1",
-        "Get-FileHash",
-    ):
-        assert required in combined
-    assert combined.count("deploy_windows.ps1") >= 2
-    assert "AI_DAILY_TEST_FORBID_LLM" in combined
-    assert "task11-preserve.sentinel" in combined
-
 
 
 def test_real_rust_chinese_path_e2e(tmp_path: Path) -> None:
