@@ -453,6 +453,6 @@ def test_frozen_defaults_match_current_python_contract() -> None:
         "max_file_size_mb": 50,
         "discovery_timeout_seconds": 30,
         "file_timeout_seconds": 30,
-        "file_timeout_by_extension": {".pdf": 45, ".xlsx": 60, ".xls": 60},
-        "total_max_chars": 50000,
+        "file_timeout_by_extension": {".pdf": 120, ".xlsx": 60, ".xls": 60},
+        "total_max_chars": 500000,
     }

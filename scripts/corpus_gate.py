@@ -62,12 +62,19 @@ DEFAULT_SEED = "corpus-gate-v1-2026-08-09"
 # 冻结 profile：max_file_size_mb=1 使 2MiB 文件走 file_size_policy；
 # max_candidate_files=4 使按 nominal rank 的第 5 个 candidate 走
 # semantic_file_quota_exhausted；large deadline 保证 safety guard 不触发。
+# summary_pdf_max_pages=2 显式钉住每周档单文件页数上限（新默认 100 会使
+# 3 个 PDF × 100 页预算恰好耗尽 100 页分类预算、只余 1 个分类槽），
+# 保证 3 槽分类 + 1 槽抽取的九态矩阵不变。
+# pdf_classification_timeout_ms=10000 放宽分类 worker 冷启动预算（默认 2s，
+# 本机冷启动 2.6-3.3s 会 PARSER_TIMEOUT），门禁测一致性不测性能。
 PROFILE: dict = {
     "schema_version": "scanner_profile_v2",
     "max_file_size_mb": 1,
     "max_candidate_files": 4,
     "max_total_pdf_classification_pages": 100,
     "max_pdf_text_extractions": 100,
+    "summary_pdf_max_pages": 2,
+    "pdf_classification_timeout_ms": 10000,
     "total_deadline_ms": 60000,
 }
 
