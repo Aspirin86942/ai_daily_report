@@ -7,7 +7,6 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
-from openai import OpenAI
 from pydantic import BaseModel, ValidationError
 
 from ..core.config import config
@@ -32,13 +31,22 @@ class LLMClient:
         self.llm_cfg = config.llm_config
         self.provider = config.llm_provider
 
+        # openai SDK 导入成本高（构建上千个 pydantic 模型），只在真正构造
+        # 客户端时导入，避免拖慢任何仅使用 src.core 的命令启动。
+        from openai import OpenAI
+
+        base_url = str(self.llm_cfg.get("base_url") or "").strip()
+
         if self.provider == "deepseek":
             self.client = OpenAI(
                 api_key=config.deepseek_api_key,
-                base_url="https://api.deepseek.com",
+                base_url=base_url or "https://api.deepseek.com",
             )
         elif self.provider == "openai":
-            self.client = OpenAI(api_key=config.openai_api_key or None)
+            kwargs: dict[str, str | None] = {"api_key": config.openai_api_key or None}
+            if base_url:
+                kwargs["base_url"] = base_url
+            self.client = OpenAI(**kwargs)
         else:
             raise ValueError(
                 f"Unsupported LLM provider: {self.provider}. Expected deepseek/openai."

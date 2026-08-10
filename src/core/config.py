@@ -236,6 +236,10 @@ class Config:
             "temperature": self._settings.llm.temperature,
             "max_tokens": self._settings.llm.max_tokens,
             "max_retries": self._settings.llm.max_retries,
+            # API base URL；旧本机配置缺省为空串，由客户端回退 provider 默认。
+            "base_url": str(
+                getattr(self._settings.llm, "base_url", "") or ""
+            ).strip(),
         }
 
     def scanner_contract_profile(self) -> Dict[str, Any]:

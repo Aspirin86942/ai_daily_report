@@ -142,7 +142,9 @@ rust/                    # Cargo workspace
 
 - `llm.provider = "deepseek"` 时，使用 `DEEPSEEK_API_KEY`（或 `api.deepseek_api_key`），默认模型 `deepseek-chat`
 - `llm.provider = "openai"` 时，使用 `OPENAI_API_KEY`（或 `api.openai_api_key`）
+- `llm.base_url` 可覆盖 API 端点（缺省时 DeepSeek 用 `https://api.deepseek.com`，OpenAI 用 SDK 默认）
 - DeepSeek 和 OpenAI 均使用 Chat Completions API + JSON schema 输出
+- openai SDK 在 `LLMClient` 构造时才导入（懒导入），避免拖慢 `list`/`doctor` 等命令启动
 
 ## CodeGraph
 

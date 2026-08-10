@@ -128,6 +128,55 @@ def test_build_settings_reads_generic_local_yaml(tmp_path):
     assert settings.llm.DEEPSEEK_API_KEY == "local-test-key"
 
 
+def test_llm_config_exposes_base_url_leaf(tmp_path):
+    """llm.base_url 应进入 llm_config，供 LLM 客户端构造 base_url。"""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.windows.yaml").write_text(
+        "\n".join(
+            [
+                "llm:",
+                "  provider: deepseek",
+                "  model_id: deepseek-chat",
+                "  temperature: 0.2",
+                "  max_tokens: 8192",
+                "  max_retries: 3",
+                "  base_url: https://api.deepseek-custom.example",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    settings = Config._build_settings(config_dir, system_name="Windows")
+    cfg = object.__new__(Config)
+    cfg._settings = settings
+
+    assert cfg.llm_config["base_url"] == "https://api.deepseek-custom.example"
+
+
+def test_llm_config_base_url_defaults_to_empty_string(tmp_path):
+    """旧本机配置缺省 base_url 时，llm_config 应回退空串（客户端用默认）。"""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "settings.windows.yaml").write_text(
+        "\n".join(
+            [
+                "llm:",
+                "  provider: deepseek",
+                "  model_id: deepseek-chat",
+                "  temperature: 0.2",
+                "  max_tokens: 8192",
+                "  max_retries: 3",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    settings = Config._build_settings(config_dir, system_name="Windows")
+    cfg = object.__new__(Config)
+    cfg._settings = settings
+
+    assert cfg.llm_config["base_url"] == ""
+
+
 def test_deepseek_api_key_accepts_local_llm_key(monkeypatch):
     """兼容现有 settings.yaml 把密钥放在 llm 节点的本机配置。"""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
