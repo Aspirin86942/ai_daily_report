@@ -413,9 +413,9 @@ class NormalizedScannerProfileV1(ContractModel):
     @model_validator(mode="after")
     def validate_mode_context(self) -> "NormalizedScannerProfileV1":
         expected = {
-            "daily": ("daily_balanced_v1", 50_000, 8_000),
-            "weekly": ("weekly_balanced_v1", 50_000, 5_000),
-            "monthly": ("monthly_balanced_v1", 60_000, 4_000),
+            "daily": ("daily_balanced_v1", 500_000, 100_000),
+            "weekly": ("weekly_balanced_v1", 500_000, 100_000),
+            "monthly": ("monthly_balanced_v1", 500_000, 100_000),
         }[self.report_mode]
         actual = (
             self.context.profile_name,
@@ -439,7 +439,7 @@ class ContextProfileV2(ContractModel):
     medium_file_max_bytes: Literal[1048576]
     large_file_max_bytes: Literal[10485760]
     priority_policy_version: Literal["budget_nominal_v2"]
-    compression_policy_version: Literal["markdown_context_v2"]
+    compression_policy_version: Literal["markdown_context_v3"]
 
     @model_validator(mode="after")
     def validate_budget_order(self) -> "ContextProfileV2":
@@ -478,9 +478,9 @@ class NormalizedScannerProfileV2(ContractModel):
     @model_validator(mode="after")
     def validate_mode_context(self) -> "NormalizedScannerProfileV2":
         expected = {
-            "daily": ("daily_balanced_v1", 50_000, 8_000),
-            "weekly": ("weekly_balanced_v1", 50_000, 5_000),
-            "monthly": ("monthly_balanced_v1", 60_000, 4_000),
+            "daily": ("daily_balanced_v1", 500_000, 100_000),
+            "weekly": ("weekly_balanced_v1", 500_000, 100_000),
+            "monthly": ("monthly_balanced_v1", 500_000, 100_000),
         }[self.report_mode]
         actual = (
             self.context.profile_name,

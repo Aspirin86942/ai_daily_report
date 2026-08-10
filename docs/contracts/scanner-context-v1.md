@@ -95,15 +95,15 @@ These values were checked against `config/settings.example.yaml`,
 | Area | v1 value |
 |---|---|
 | Discovery | extensions `.xlsx,.xls,.pptx,.pdf,.txt,.md,.docx,.csv,.json,.log`; ignores `~$*,*.tmp`; no excluded dirs |
-| Execution | workers `4`; max file `50 MiB`; discovery/file timeout `30/30 s`; `.pdf/.xlsx/.xls` timeout `45/60/60 s`; aggregate chars `50000` |
+| Execution | workers `4`; max file `50 MiB`; discovery/file timeout `30/30 s`; `.pdf/.xlsx/.xls` timeout `45/60/60 s`; aggregate chars `500000` |
 | Routing | profile `v1`; text `light_text_v1`; Office `rust_office_oxide_v1`; PDF `pdf_text_v1` |
 | Fallback | enabled; order `python_office_v1,python_sharepoint_text_v1`; after-timeout `false`; legacy extensions `false`; policy `hybrid_v1` |
-| Shared text | head/tail reads `262144/262144` bytes |
-| Regular parse | text/excerpt `6000`; PDF pages `5`; Excel sheets/rows/cols `5/50/20`; DOCX paragraphs/tables/table rows/table cols `200/20/50/12`; PPTX slides `50`; notes `true`; document excerpt `6000` |
-| Summary parse | text/excerpt `2000`; PDF pages `2`; Excel `2/10/12`; DOCX `80/8/20/8`; PPTX slides `15`; notes `true`; document excerpt `2000` |
-| Daily context | `daily_balanced_v1`; global/per-file chars `50000/8000` |
-| Weekly context | `weekly_balanced_v1`; global/per-file chars `50000/5000` |
-| Monthly context | `monthly_balanced_v1`; global/per-file chars `60000/4000` |
+| Shared text | head/tail reads `2097152/2097152` bytes |
+| Regular parse | text/excerpt `100000`; PDF pages `100`; Excel sheets/rows/cols `100/20000/50`; DOCX paragraphs/tables/table rows/table cols `50000/100/10000/50`; PPTX slides `500`; notes `true`; document excerpt `100000` |
+| Summary parse | text/excerpt `100000`; PDF pages `100`; Excel `100/20000/50`; DOCX `50000/100/10000/50`; PPTX slides `500`; notes `true`; document excerpt `100000` |
+| Daily context | `daily_balanced_v1`; global/per-file chars `500000/100000` |
+| Weekly context | `weekly_balanced_v1`; global/per-file chars `500000/100000` |
+| Monthly context | `monthly_balanced_v1`; global/per-file chars `500000/100000` |
 | Context thresholds | `65536/1048576/10485760` bytes; priority `default_v1`; compression `markdown_context_v1` |
 
 Raw validation bounds are encoded in the profile schema: workers `1..64`, max

@@ -150,9 +150,9 @@ fn normalize_v2_merges_frozen_report_mode_defaults() {
     use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
 
     for (mode, expected) in [
-        (ReportMode::Daily, (96, 80, 8, 10_000)),
-        (ReportMode::Weekly, (192, 100, 12, 15_000)),
-        (ReportMode::Monthly, (384, 370, 16, 25_000)),
+        (ReportMode::Daily, (96, 800, 8, 10_000)),
+        (ReportMode::Weekly, (192, 1200, 12, 15_000)),
+        (ReportMode::Monthly, (384, 1600, 16, 25_000)),
     ] {
         assert_eq!(v2_quota_defaults(mode), expected, "{mode:?}");
         let raw: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
@@ -338,7 +338,7 @@ fn v1_requests_are_normalized_to_v2_with_frozen_defaults() {
         "monthly v1 request fills the frozen monthly deadline"
     );
     assert_eq!(normalized.max_candidate_files, 384);
-    assert_eq!(normalized.max_total_pdf_classification_pages, 370);
+    assert_eq!(normalized.max_total_pdf_classification_pages, 1600);
     assert_eq!(normalized.max_pdf_text_extractions, 16);
     assert_eq!(
         normalized.parse.pdf.max_pages, 100,

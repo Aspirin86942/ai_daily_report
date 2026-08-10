@@ -28,15 +28,17 @@ fn v2_profile(mode: ReportMode) -> ai_daily_scanner_contract::NormalizedScannerP
     normalize_scanner_profile_v2(&ScannerProfile::V2(raw), mode).expect("normalized v2 profile")
 }
 
-/// Daily profile with an explicit small pdf_max_pages so classification plan
-/// arithmetic stays deterministic (80-page budget / 5 pages per pdf = 16
-/// slots). Budget defaults were raised to 500k/100k and pdf pages unified at
-/// 100, which would otherwise leave no PDF classified within the frozen
-/// 80-page daily classification budget.
+/// Daily profile with an explicit small pdf_max_pages and classification page
+/// budget so classification plan arithmetic stays deterministic (80-page
+/// budget / 5 pages per pdf = 16 slots). Defaults were raised to 500k/100k
+/// budgets, pdf pages unified at 100, and the classification page budget
+/// raised to 800 (100 × 8 extraction quota), so plan tests pin their own
+/// arithmetic values.
 fn v2_daily_pdf_profile() -> ai_daily_scanner_contract::NormalizedScannerProfileV2 {
     let raw: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
         "schema_version": "scanner_profile_v2",
-        "pdf_max_pages": 5
+        "pdf_max_pages": 5,
+        "max_total_pdf_classification_pages": 80
     }))
     .expect("minimal v2 raw profile");
     normalize_scanner_profile_v2(&ScannerProfile::V2(raw), ReportMode::Daily)

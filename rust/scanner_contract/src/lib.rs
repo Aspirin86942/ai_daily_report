@@ -722,16 +722,19 @@ pub const SCANNER_PROFILE_V2_ONLY_FIELDS: &[&str] = &[
 ];
 
 /// report-mode 默认（spec Part 8.1 表）：
-/// daily   => (96, 80, 8, 10_000ms)
-/// weekly  => (192, 100, 12, 15_000ms)
-/// monthly => (384, 370, 16, 25_000ms)
+/// daily   => (96, 800, 8, 10_000ms)
+/// weekly  => (192, 1200, 12, 15_000ms)
+/// monthly => (384, 1600, 16, 25_000ms)
 /// tuple order: (max_candidate_files, max_total_pdf_classification_pages,
 /// max_pdf_text_extractions, total_deadline_ms).
+///
+/// 分类页预算 = pdf_max_pages(100) × max_pdf_text_extractions（文件配额），
+/// 保证默认 profile 下每个 PDF 都能先分类后解析。
 pub fn v2_quota_defaults(mode: ReportMode) -> (u64, u64, u64, u64) {
     match mode {
-        ReportMode::Daily => (96, 80, 8, 10_000),
-        ReportMode::Weekly => (192, 100, 12, 15_000),
-        ReportMode::Monthly => (384, 370, 16, 25_000),
+        ReportMode::Daily => (96, 800, 8, 10_000),
+        ReportMode::Weekly => (192, 1200, 12, 15_000),
+        ReportMode::Monthly => (384, 1600, 16, 25_000),
     }
 }
 

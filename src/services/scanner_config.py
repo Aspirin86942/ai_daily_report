@@ -148,10 +148,12 @@ def extract_scanner_profile(scanner_settings: Any) -> dict[str, Any]:
 
 # report-mode 冻结默认表（spec Part 8.1）：(max_candidate_files,
 # max_total_pdf_classification_pages, max_pdf_text_extractions, total_deadline_ms)。
+# 分类页预算 = pdf_max_pages(100) × max_pdf_text_extractions（文件配额），
+# 保证默认 profile 下每个 PDF 都能先分类后解析。
 SCANNER_PROFILE_V2_QUOTA_DEFAULTS = {
-    "daily": (96, 80, 8, 10_000),
-    "weekly": (192, 100, 12, 15_000),
-    "monthly": (384, 370, 16, 25_000),
+    "daily": (96, 800, 8, 10_000),
+    "weekly": (192, 1200, 12, 15_000),
+    "monthly": (384, 1600, 16, 25_000),
 }
 
 
