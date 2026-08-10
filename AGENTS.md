@@ -45,7 +45,7 @@
 ## Testing Guidelines
 - Framework: pytest.
 - Test files are named `tests/test_*.py`.
-- Add tests for new parsing logic, schema changes, and report templates; run `pytest tests/ -v` before submitting.
+- Add tests for new parsing logic, schema changes, and report templates; run `uv run pytest` before submitting.
 
 ## Commit & Pull Request Guidelines
 - Git history is minimal; no strict convention yet. Use short, imperative commit messages (e.g., "Add weekly scan limits").
