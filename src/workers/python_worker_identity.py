@@ -4,7 +4,7 @@ from __future__ import annotations
 
 try:
     from _sha2 import sha256 as _sha256
-except ImportError:  # Python 3.10-3.13 expose the same primitive here.
+except ImportError:  # Keep hashing available without third-party imports.
     try:
         from _sha256 import sha256 as _sha256
     except ImportError:

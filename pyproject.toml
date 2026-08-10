@@ -2,7 +2,7 @@
 name = "ai-daily-report"
 version = "5.0.0"
 description = "审计报告生成器 v5.0"
-requires-python = ">=3.10"
+requires-python = "==3.13.13"
 dependencies = [
     "pydantic>=2.0.0,<3",
     "dynaconf>=3.2.0,<4",

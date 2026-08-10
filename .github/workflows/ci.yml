@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   windows-production:
-    name: Windows production / Python 3.13
+    name: Windows production / CPython 3.13.13
     runs-on: windows-latest
     env:
       DAILY_REPORT_PATHS__WORK_DIR: ${{ github.workspace }}/.ci-work
@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version-file: ".python-version"
           cache: pip
           cache-dependency-path: requirements.lock
       - uses: astral-sh/setup-uv@v6
@@ -200,28 +200,3 @@ jobs:
               Remove-Item -LiteralPath $stage -Recurse -Force
             }
           }
-
-  linux-compatibility:
-    name: Linux compatibility / Python 3.10
-    runs-on: ubuntu-latest
-    env:
-      DAILY_REPORT_PATHS__WORK_DIR: ${{ github.workspace }}/.ci-work
-      DEEPSEEK_API_KEY: ci-doctor-placeholder
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: pip
-          cache-dependency-path: requirements.lock
-      - uses: astral-sh/setup-uv@v6
-        with:
-          version: "0.12.0"
-      - name: Sync locked compatibility dependencies
-        run: uv sync --frozen
-      - name: Verify production requirements projection
-        run: uv run pytest tests/test_requirements_lock.py -v
-      - name: Run Linux compatibility tests
-        run: |
-          mkdir -p .ci-work
-          uv run pytest tests/ -v

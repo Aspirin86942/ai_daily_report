@@ -19,7 +19,7 @@ DEV_DISTRIBUTIONS = {
     "reportlab",
 }
 WORKFLOW_GATES = {
-    ".github/workflows/ci.yml": 2,
+    ".github/workflows/ci.yml": 1,
     ".github/workflows/windows-release.yml": 1,
 }
 WINDOWS_PRODUCTION_WORKFLOWS = (

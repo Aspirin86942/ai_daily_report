@@ -96,6 +96,10 @@ def test_deploy_windows_builds_rust_and_finishes_with_strict_doctor() -> None:
     assert '@("main.py", "doctor", "--strict")' in script
     assert "Copy-Item -LiteralPath $exampleSettings" in script
     assert "Keeping existing config\\settings.windows.yaml" in script
+    assert 'Assert-CPythonVersion -Label "Creator Python"' in script
+    assert 'Assert-CPythonVersion -Label "Existing .venv Python"' in script
+    assert 'Assert-CPythonVersion -Label "Created .venv Python"' in script
+    assert "Existing .venv directories are not removed automatically" in script
     assert "api_key" not in script.lower()
 
 
@@ -107,7 +111,7 @@ def test_windows_ci_keeps_all_production_gates_in_one_job() -> None:
     )
     jobs = workflow["jobs"]
 
-    assert "windows-production" in jobs
+    assert set(jobs) == {"windows-production"}
     windows = jobs["windows-production"]
     assert windows["runs-on"] == "windows-latest"
     steps = windows["steps"]
@@ -130,11 +134,6 @@ def test_windows_ci_keeps_all_production_gates_in_one_job() -> None:
     assert "AI_DAILY_TEST_FORBID_LLM" in combined
     assert "task11-preserve.sentinel" in combined
 
-    compatibility = jobs["linux-compatibility"]
-    assert compatibility["runs-on"] == "ubuntu-latest"
-    compatibility_text = str(compatibility).lower()
-    assert "upload-artifact" not in compatibility_text
-    assert "release" not in compatibility_text
 
 
 def test_real_rust_chinese_path_e2e(tmp_path: Path) -> None:

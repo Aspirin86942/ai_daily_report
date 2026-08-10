@@ -171,6 +171,7 @@ def test_package_manifest_and_archive_entry_set_are_exact(windows_package: Path)
     assert len(payload_paths) == len(set(payload_paths))
     assert "manifest.json" not in payload_paths
     assert "SHA256SUMS" not in payload_paths
+    assert ".python-version" in payload_paths
     assert set(entries) == {
         manifest_name,
         sums_name,
@@ -208,6 +209,7 @@ def test_trusted_verifier_accepts_the_untampered_archive(windows_package: Path):
     "payload_path",
     [
         "main.py",
+        ".python-version",
         "templates/system_prompt.md",
         "requirements.lock",
         "scripts/deploy_windows.ps1",

@@ -1,9 +1,10 @@
 # 审计日报生成器 v5.0
 
-Windows-first 的审计报告工具。生产架构固定为 **Python application shell +
+仅支持 Windows x64 与 CPython 3.13.13 的审计报告工具。生产架构固定为 **Python application shell +
 Rust scanner/context core**：Python 负责 CLI、配置、报告数据库、模板和 LLM；
 Rust 负责文件发现、分类、parser 路由、worker deadline、缓存、审计和确定性
-context 压缩。
+context 压缩。根目录 `.python-version` 是开发、CI、Release 和部署共同使用的
+唯一 Python 版本来源。
 
 ## Windows 源码快速开始
 
@@ -25,10 +26,12 @@ if (
 .\.venv\Scripts\python.exe main.py daily -i "今日完成 XX 审计"
 ```
 
-`deploy_windows.ps1` 保留已有配置和 `.venv`，从 `requirements.lock` 安装
-依赖，构建 locked Rust workspace，并运行 strict doctor。脚本不接受、输出或
-持久化 API Key。`doctor --strict` 验证 scanner 合同/build、v2 数据库父目录和
-两个隔离 worker handshake；它不打开业务文件，也不调用 LLM。
+`deploy_windows.ps1` 保留已有配置和 `.venv`，并先验证 `-Python` 指向的创建者
+解释器及已有 `.venv` 均为 CPython 3.13.13，再从 `requirements.lock` 安装依赖、
+构建 locked Rust workspace 并运行 strict doctor。版本不符时脚本会报告期望值、
+实际值和修复提示，不会自动删除或重建已有 `.venv`。脚本不接受、输出或持久化
+API Key。`doctor --strict` 验证 scanner 合同/build、v2 数据库父目录和两个隔离
+worker handshake；它不打开业务文件，也不调用 LLM。
 
 ## Windows release 安装与回滚
 
@@ -157,8 +160,8 @@ templates/               # prompt 和 Markdown 模板
 tests/                   # Python/Windows release tests
 ```
 
-## Linux compatibility appendix
+## 支持范围
 
-Linux 仅保留源码兼容性测试，不定义生产行为、release artifact、进程树超时语义或
-部署承诺。生产验收和发布门禁以 Windows x64、PowerShell、`.venv\Scripts\python.exe`
-及 `doctor --strict` 为准。
+项目仅承诺 Windows x64、PowerShell、CPython 3.13.13、
+`.venv\Scripts\python.exe` 与 `doctor --strict` 组合下的生产和源码行为；不再提供
+Linux 源码兼容性或 CI 承诺。

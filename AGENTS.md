@@ -4,13 +4,14 @@
 - `main.py` is the CLI entry point.
 - `src/` holds the Python application shell: `core/` (config, health checks, logging, LLM client), `models/` (Pydantic contracts), `services/` (Rust-core orchestration, report storage and generation), `workers/` (crash-isolated Python document worker), and `utils/` (text helpers).
 - `templates/` contains LLM prompts and Jinja2 report templates.
-- `config/` stores YAML settings. Track only `settings.example.yaml`; keep `settings.linux.yaml`, `settings.windows.yaml`, and `.secrets.yaml` local.
+- `config/` stores YAML settings. Track only `settings.example.yaml`; keep `settings.windows.yaml` and `.secrets.yaml` local.
 - `data/` stores the SQLite database and generated Markdown reports; `logs/` holds runtime logs.
 - `rust/` is the Cargo workspace for the production scanner/context core: `scanner_core/`, `scanner_contract/`, `scanner_cli/`, the reusable `discovery/` library, and the crash-isolated `office_parser/` worker.
 - `scripts/benchmark_scanner.py` runs the real scanner path and writes parser/discovery benchmark evidence.
 - `tests/` contains pytest test modules.
 
 ## Build, Test, and Development Commands
+- The only supported runtime is CPython `3.13.13`; `.python-version` is the source of truth for development, CI, release, and deployment.
 - `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` installs runtime dependencies.
 - `.\.venv\Scripts\python.exe main.py doctor --strict` validates the production config, templates, dependencies, workers, and Rust core.
 - `.\.venv\Scripts\python.exe main.py daily -i "..."` generates a daily report. Examples: add `--no-save` or `--date 2026-02-05` as needed.
@@ -52,5 +53,5 @@
 
 ## Configuration & Security
 - Do not commit API keys. Use `config/.secrets.yaml`, `DEEPSEEK_API_KEY`, or `OPENAI_API_KEY`.
-- Update the current OS local settings file (`config/settings.linux.yaml` on Linux, `config/settings.windows.yaml` on Windows) for path, model, and scanner limits changes.
+- Update `config/settings.windows.yaml` for path, model, and scanner limits changes.
  - LLM backend is selectable via `llm.provider` (`deepseek` or `openai`). For DeepSeek, set `DEEPSEEK_API_KEY` (or `api.deepseek_api_key` in `config/.secrets.yaml`). For OpenAI, set `OPENAI_API_KEY` (or `api.openai_api_key` in `config/.secrets.yaml`) and use a model that supports JSON schema output (e.g., `gpt-4o-mini`).

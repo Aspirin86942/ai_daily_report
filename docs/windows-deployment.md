@@ -9,6 +9,10 @@ come from the source checkout, a previously verified installation, or an
 independently authenticated distribution. Never execute the verifier,
 installer, Python, or PowerShell files from an unverified archive.
 
+The only supported Python runtime is CPython 3.13.13. The root
+`.python-version` file is the shared version source for development, CI,
+release packaging, and deployment.
+
 V1 provides integrity and corruption detection, not publisher authentication.
 `manifest.json`, `SHA256SUMS`, and binary handshakes cannot prove who produced a
 remote artifact. Do not auto-download or treat a remote artifact as trusted
@@ -45,7 +49,7 @@ The archive root is `ai-daily-report-windows-x64/` and contains exactly:
 - `ai-daily-scanner.exe` and `ai-daily-office-parser.exe` at their fixed Rust
   release paths;
 - `main.py`, every production Python source file, templates,
-  `requirements.lock`, and `config/settings.example.yaml`;
+  `.python-version`, `requirements.lock`, and `config/settings.example.yaml`;
 - the deploy, verify, install, run, and rollback PowerShell scripts;
 - `manifest.json` and `SHA256SUMS`.
 
@@ -216,5 +220,5 @@ hashes, and ensures logs plus report/scan databases stay under `shared/`. The
 workflow sets an LLM hard prohibition and never copies developer credentials or
 business files.
 
-Linux remains a compatibility-only source target. It has no production release
-artifact, installed-mode guarantee, or Windows process-tree timeout claim.
+Linux is not a supported source or release target and has no compatibility CI,
+installed-mode guarantee, or process-tree timeout claim.

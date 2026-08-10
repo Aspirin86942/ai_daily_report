@@ -125,6 +125,7 @@ if (
 
 $payload = [System.Collections.Generic.List[object]]::new()
 Add-PayloadFile -Payload $payload -LiteralPath (Join-Path $repoRoot 'main.py')
+Add-PayloadFile -Payload $payload -LiteralPath (Join-Path $repoRoot '.python-version')
 Get-ChildItem -LiteralPath (Join-Path $repoRoot 'src') -Recurse -File -Filter '*.py' |
     ForEach-Object { Add-PayloadFile -Payload $payload -LiteralPath $_.FullName }
 Get-ChildItem -LiteralPath (Join-Path $repoRoot 'templates') -Recurse -File |

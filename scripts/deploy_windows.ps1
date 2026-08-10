@@ -27,6 +27,7 @@ $OutputEncoding = $utf8
 
 $scriptDir = Split-Path -Parent $PSCommandPath
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $scriptDir ".."))
+$pythonVersionFile = Join-Path $repoRoot ".python-version"
 $venvDir = Join-Path $repoRoot ".venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $exampleSettings = Join-Path $repoRoot "config\settings.example.yaml"
@@ -38,6 +39,16 @@ $installedMode = -not [string]::IsNullOrWhiteSpace(
     $env:DAILY_REPORT_INSTALL_ROOT
 )
 $env:PYTHONDONTWRITEBYTECODE = "1"
+
+if (-not (Test-Path -LiteralPath $pythonVersionFile -PathType Leaf)) {
+    throw "Missing Python version file: $pythonVersionFile"
+}
+$expectedPythonVersion = (
+    Get-Content -LiteralPath $pythonVersionFile -Raw
+).Trim()
+if ($expectedPythonVersion -notmatch '^\d+\.\d+\.\d+$') {
+    throw "Invalid Python version in $pythonVersionFile"
+}
 
 function Invoke-CheckedCommand {
     param(
@@ -54,6 +65,70 @@ function Invoke-CheckedCommand {
     if ($LASTEXITCODE -ne 0) {
         throw "$Label failed with exit code $LASTEXITCODE"
     }
+}
+
+function Assert-CPythonVersion {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath
+    )
+
+    $repair = (
+        "Install CPython $expectedPythonVersion and pass its executable " +
+        "with -Python. Existing .venv directories are not removed automatically."
+    )
+    try {
+        $probeOutput = @(
+            & $FilePath "-c" (
+                "import platform; " +
+                "print(platform.python_implementation() + ' ' + " +
+                "platform.python_version())"
+            ) 2>&1
+        )
+        $probeExitCode = $LASTEXITCODE
+    }
+    catch {
+        throw (
+            "${Label} could not be inspected. " +
+            "Expected: CPython $expectedPythonVersion. " +
+            "Actual: unavailable. Repair: $repair"
+        )
+    }
+
+    $actualRuntime = ($probeOutput -join "`n").Trim()
+    if ($probeExitCode -ne 0) {
+        throw (
+            "${Label} version probe failed with exit code $probeExitCode. " +
+            "Expected: CPython $expectedPythonVersion. " +
+            "Actual: $actualRuntime. Repair: $repair"
+        )
+    }
+    if ($actualRuntime -cne "CPython $expectedPythonVersion") {
+        throw (
+            "${Label} version mismatch. " +
+            "Expected: CPython $expectedPythonVersion. " +
+            "Actual: $actualRuntime. Repair: $repair"
+        )
+    }
+
+    Write-Host "==> ${Label}: $actualRuntime" -ForegroundColor Cyan
+}
+
+Assert-CPythonVersion -Label "Creator Python" -FilePath $Python
+$venvPathExisted = Test-Path -LiteralPath $venvDir
+$venvExisted = Test-Path -LiteralPath $venvPython -PathType Leaf
+if ($venvPathExisted -and -not $venvExisted) {
+    throw (
+        "Existing .venv is incomplete. " +
+        "Expected: CPython $expectedPythonVersion at $venvPython. " +
+        "Actual: Python executable is missing. " +
+        "Repair: inspect or recreate .venv manually; it was not changed."
+    )
+}
+if ($venvExisted) {
+    Assert-CPythonVersion -Label "Existing .venv Python" -FilePath $venvPython
 }
 
 if ($installedMode) {
@@ -83,7 +158,7 @@ if ($installedMode) {
     Write-Host "Keeping existing config\settings.windows.yaml."
 }
 
-if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+if (-not $venvPathExisted) {
     Invoke-CheckedCommand -Label "Create .venv" -FilePath $Python -Arguments @(
         "-m", "venv", $venvDir
     )
@@ -92,13 +167,9 @@ if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
     throw "Virtual environment Python was not created: $venvPython"
 }
-
-Invoke-CheckedCommand -Label "Validate Python 3.10+" `
-    -FilePath $venvPython `
-    -Arguments @(
-        "-c",
-        "import sys; raise SystemExit(0 if sys.version_info >= (3, 10) else 'Python 3.10+ is required')"
-    )
+if (-not $venvExisted) {
+    Assert-CPythonVersion -Label "Created .venv Python" -FilePath $venvPython
+}
 
 $dependencyFile = $requirementsFile
 if (Test-Path -LiteralPath $lockFile -PathType Leaf) {
