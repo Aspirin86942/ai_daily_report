@@ -9,7 +9,7 @@
 - 报告结构化输出：JSON + Pydantic 校验
 - 历史数据默认存储：SQLite（`data/db/reports.sqlite3`）
 - 支持 `db`（历史聚合）与 `scan`（文件扫描）两种数据来源
-- scan 路径默认使用 Rust discovery，并对 Office 文件优先使用 Rust parser CLI；其中 `.xlsx` 走 `rust_xlsx_bounded_v1` 有界预览，`.docx` / `.pptx` 走 `rust_office_oxide_v1`，Python fallback 保留用于正确性和可审计性
+- scan 路径默认使用 Rust scanner core（Rust discovery + Rust parser CLI）；`.xlsx` 走 `rust_xlsx_bounded_v1` 有界预览，`.docx` / `.pptx` 走 `rust_office_oxide_v1`，PDF 与显式启用的 legacy 格式走 Python document worker。Office parser 超时默认不 fallback（除非显式开启 `office_fallback_after_timeout`），无顶层静默 fallback，详见 `docs/scanner-backends.md` 与 ADR 0002。
 
 ## Commands
 
@@ -79,27 +79,32 @@ cd rust/office_parser && cargo test && cargo build --release
 
 ```text
 src/
+├── cli/                 # CLI 子命令 (daily/weekly/monthly/list/doctor)
 ├── core/
 │   ├── config.py        # 单例配置 (Dynaconf)
 │   ├── healthcheck.py   # CLI 环境检查
 │   ├── llm.py           # DeepSeek/OpenAI 客户端 + JSON 校验重试
 │   └── logger.py
 ├── models/
-│   └── schemas.py       # Pydantic 模型
+│   ├── schemas.py       # 报告 Pydantic 模型 (日/周/月)
+│   └── scanner_contract.py  # scanner/worker 契约 DTO 镜像
 ├── services/
 │   ├── sqlite_store.py  # SQLite 存储实现（日/周/月）
-│   ├── file_scanner.py  # scanner 编排、cache、metrics、parser lane
-│   ├── scan_discovery.py
-│   ├── scan_planner.py
-│   ├── document_parser.py
-│   ├── office_parser.py
-│   └── report_gen.py
+│   ├── context_engine.py / context_scheduler.py   # 上下文构建编排
+│   ├── rust_context_client.py  # Rust scanner CLI 适配 (build-context)
+│   ├── scanner_config.py      # scanner profile 归一化/校验
+│   ├── json_process_client.py # JSON 子进程契约执行
+│   ├── document_parser.py     # Python document 解析 (PDF/legacy lane)
+│   ├── report_gen.py
+│   └── report_runner/    # 报告运行编排 (requests/outcomes/runner)
+├── workers/             # crash-isolated Python worker (document/PDF classifier)
 └── utils/
     └── text_tools.py
 
-rust/
-├── discovery/           # Rust discovery CLI
-└── office_parser/       # Rust Office parser CLI
+rust/                    # Cargo workspace
+├── scanner_core/        # Rust scanner/context core (store/scheduler/session/…)
+├── discovery/           # Rust discovery
+└── office_parser/       # Rust Office parser worker CLI
 ```
 
 ## Key Patterns
@@ -108,7 +113,7 @@ rust/
 - 扫描策略：`summary_mode` + `total_max_chars` 控制上下文长度
 - Scanner backend：`parser_backend` 表示内容由谁解析，`worker_lane` 表示执行通道，不能混用
 - Office parser：配置默认 `rust_office_oxide_v1`；`.xlsx` 在 Rust CLI 内报告 `rust_xlsx_bounded_v1` 有界预览；Rust 超时默认不 fallback，除非显式开启 `office_fallback_after_timeout`
-- Cache profile：backend、fallback、timeout、预算字段变化必须进入 `ScanPlanner` profile，避免复用旧解析缓存
+- Cache profile：解析缓存身份由 Rust core 归一化 profile 唯一决定——backend、fallback、timeout、`parser_profile_version`、预算字段与 scanner/worker 构建指纹均参与失效；Python 仅传输显式配置的 wire 叶子，详见 `docs/scanner-backends.md`
 - 存储策略：SQLite 作为程序事实源，Markdown 作为阅读输出
 - 周边界：ISO 周（Monday-Sunday）
 
