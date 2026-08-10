@@ -54,17 +54,19 @@ scanner:
   # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.
   office_legacy_extensions_enabled: false
   max_workers: 4
-  excel_max_rows: 50
-  pdf_max_pages: 5
-  text_max_chars: 6000
-  summary_excel_max_rows: 10
-  summary_pdf_max_pages: 2
-  summary_text_max_chars: 2000
-  total_max_chars: 50000
+  # 大预算: 全局 500k / 单文件 100k 字符, 预算内正文逐字保留。
+  excel_max_rows: 20000
+  pdf_max_pages: 100
+  text_max_chars: 100000
+  summary_excel_max_rows: 20000
+  summary_pdf_max_pages: 100
+  summary_text_max_chars: 100000
+  total_max_chars: 500000
   max_file_size_mb: 50
   file_timeout_seconds: 30
+  # PDF 页数放宽后单文件解析可能超过默认 45s, 同步放宽超时。
   file_timeout_by_extension:
-    ".pdf": 45
+    ".pdf": 120
     ".xlsx": 60
     ".xls": 60
   parser_profile_version: "v1"
