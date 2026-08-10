@@ -1,7 +1,6 @@
 # scripts/benchmark_harness.py
 """Timer-only scanner/worker harness. pass/fail 只读 benchmark_wall_ms，不读 ContextSummary.total_duration_ms。"""
 from __future__ import annotations
-import json
 import subprocess
 import time
 from dataclasses import dataclass

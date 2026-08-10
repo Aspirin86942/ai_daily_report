@@ -21,7 +21,6 @@ import pytest
 from src.models.scanner_contract import UpgradeDatabaseRequestV1
 from src.services.context_scheduler import (
     ContextScheduleRequest,
-    ContextScheduler,
 )
 from src.services.rust_context_client import RustContextClient
 

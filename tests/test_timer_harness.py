@@ -1,7 +1,6 @@
 # tests/test_timer_harness.py
-import json, subprocess, sys, time
-from pathlib import Path
-from benchmark_harness import wall_clock_ms, BenchmarkResult
+import json, sys, time
+from benchmark_harness import wall_clock_ms
 
 def test_timer_covers_child_spawn_and_response_validation(tmp_path):
     script = tmp_path / "sleeper.py"
