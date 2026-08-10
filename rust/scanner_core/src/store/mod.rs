@@ -250,11 +250,22 @@ impl AttemptRuntime {
 }
 
 fn normalize_runtime_path(value: &str) -> String {
-    if let Ok(canonical) = fs::canonicalize(value) {
+    let path = Path::new(value);
+    if let Ok(canonical) = fs::canonicalize(path) {
         return normalize_contract_path_text(&canonical.to_string_lossy());
     }
+
+    // Runtime targets may not exist when the attempt identity is created. Resolve
+    // their existing parent so Windows case and 8.3 aliases stay stable after creation.
+    if let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) {
+        if let Ok(canonical_parent) = fs::canonicalize(parent) {
+            let canonical = canonical_parent.join(file_name);
+            return normalize_contract_path_text(&canonical.to_string_lossy());
+        }
+    }
+
     let mut normalized = PathBuf::new();
-    for component in Path::new(value).components() {
+    for component in path.components() {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
@@ -6061,6 +6072,24 @@ mod tests {
         ReportMode,
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_path_normalization_is_stable_across_file_creation() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let actual_parent = directory.path().join("MixedCaseParent");
+        std::fs::create_dir(&actual_parent).expect("mixed-case parent");
+        let database_path = directory
+            .path()
+            .join("mixedcaseparent")
+            .join(SCAN_DB_FILENAME);
+
+        let before_creation = normalize_runtime_path(&database_path.to_string_lossy());
+        std::fs::File::create(&database_path).expect("database placeholder");
+        let after_creation = normalize_runtime_path(&database_path.to_string_lossy());
+
+        assert_eq!(before_creation, after_creation);
+    }
     use tempfile::TempDir;
 
     struct ExpiringClock {

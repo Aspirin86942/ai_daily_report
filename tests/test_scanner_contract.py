@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 import pickle
 from pathlib import Path
-import tomllib
 from types import SimpleNamespace
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 compatibility job
+    import tomli as tomllib
 
 from src.core.config import Config, SCANNER_CONTRACT_FIELDS
 from src.services.scanner_config import SCANNER_PROFILE_V2_ONLY_FIELDS
