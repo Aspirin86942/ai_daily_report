@@ -22,8 +22,6 @@ from src.workers.python_worker_identity import (
     PYTHON_SHAREPOINT_TEXT_BACKEND,
     PYTHON_WORKER_BUILD,
     PYTHON_WORKER_BUILD_INPUTS,
-    PYTHON_WORKER_VERSION,
-    WORKER_CONTRACT_VERSION,
     python_worker_version_payload,
 )
 

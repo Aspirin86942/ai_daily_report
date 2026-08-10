@@ -18,7 +18,6 @@ from src.models.scanner_contract import (
     BuildContextRequest,
     ContextEnvelope,
     ContextSummary,
-    Diagnostic,
     DoctorRequest,
     DoctorResponse,
     InspectRunRequest,
