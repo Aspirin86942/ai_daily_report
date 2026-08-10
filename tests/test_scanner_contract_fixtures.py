@@ -364,7 +364,7 @@ def test_contract_fixture_corpus_is_synthetic_and_non_secret() -> None:
     tracked_contract_docs = (
         PROJECT_ROOT
         / "docs"
-        / "superpowers"
+        / "archive"
         / "plans"
         / "2026-07-15-windows-first-rust-scanner-core.md",
         PROJECT_ROOT
