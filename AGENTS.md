@@ -12,15 +12,15 @@
 
 ## Build, Test, and Development Commands
 - The only supported runtime is CPython `3.13.13`; `.python-version` is the source of truth for development, release, and deployment.
-- `.\.venv\Scripts\python.exe -m pip install -r requirements.txt` installs runtime dependencies.
-- `.\.venv\Scripts\python.exe main.py doctor --strict` validates the production config, templates, dependencies, workers, and Rust core.
-- `.\.venv\Scripts\python.exe main.py daily -i "..."` generates a daily report. Examples: add `--no-save` or `--date 2026-02-05` as needed.
-- `.\.venv\Scripts\python.exe main.py weekly --source db` aggregates weekly reports; `--source scan` scans files instead.
-- `.\.venv\Scripts\python.exe main.py monthly --source db` aggregates monthly reports.
-- `.\.venv\Scripts\python.exe -m pytest tests/ -v` runs the Python test suite.
+- `uv sync` installs dependencies from `pyproject.toml` / `uv.lock` into the project `.venv`.
+- `uv run python main.py doctor --strict` validates the production config, templates, dependencies, workers, and Rust core.
+- `uv run python main.py daily -i "..."` generates a daily report. Examples: add `--no-save` or `--date 2026-02-05` as needed.
+- `uv run python main.py weekly --source db` aggregates weekly reports; `--source scan` scans files instead.
+- `uv run python main.py monthly --source db` aggregates monthly reports.
+- `uv run pytest` runs the Python test suite.
 - `cargo test --manifest-path rust/Cargo.toml --workspace --locked` verifies the Rust workspace.
 - `cargo build --manifest-path rust/Cargo.toml --workspace --release --locked` builds both required production executables.
-- `.\.venv\Scripts\python.exe scripts/benchmark_scanner.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --json-out .artifacts\scanner.json --markdown-out .artifacts\scanner.md` captures scanner performance and backend evidence.
+- `uv run python scripts/benchmark_scanner.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --json-out .artifacts\scanner.json --markdown-out .artifacts\scanner.md` captures scanner performance and backend evidence.
 
 ## Coding Style & Naming Conventions
 - Python style: follow PEP 8 with 4-space indentation.
