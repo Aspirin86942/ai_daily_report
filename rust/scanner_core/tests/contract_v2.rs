@@ -167,8 +167,8 @@ fn normalize_v2_merges_frozen_report_mode_defaults() {
         assert_eq!(normalized.max_pdf_text_extractions, expected.2);
         assert_eq!(normalized.total_deadline_ms, expected.3);
         assert_eq!(
-            normalized.pdf_classification_timeout_ms, 2_000,
-            "classifier timeout defaults to 2,000ms for every report mode"
+            normalized.pdf_classification_timeout_ms, 10_000,
+            "classifier timeout defaults to 10,000ms for every report mode"
         );
         assert_eq!(
             normalized.session_concurrency,
@@ -345,8 +345,8 @@ fn v1_requests_are_normalized_to_v2_with_frozen_defaults() {
         "monthly unifies pdf max pages at 100"
     );
     assert_eq!(
-        normalized.pdf_classification_timeout_ms, 2_000,
-        "classifier timeout defaults to 2,000ms"
+        normalized.pdf_classification_timeout_ms, 10_000,
+        "classifier timeout defaults to 10,000ms"
     );
 }
 

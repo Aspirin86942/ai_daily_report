@@ -376,7 +376,7 @@ def test_v1_and_v2_profiles_normalize_to_same_frozen_defaults() -> None:
     assert normalized_v1["max_candidate_files"] == 384
     assert normalized_v1["max_total_pdf_classification_pages"] == 1600
     assert normalized_v1["max_pdf_text_extractions"] == 16
-    assert normalized_v1["pdf_classification_timeout_ms"] == 2_000
+    assert normalized_v1["pdf_classification_timeout_ms"] == 10_000
     assert normalized_v1["session_concurrency"] == min(3, 4)
 
 

@@ -4,7 +4,7 @@
 固定同一台机器、release build、`D:\\01- 工作`、report_mode=monthly、
 RawScannerProfileV2 `summary_pdf_max_pages=5`：
 
-- 30d (2026-07-10..2026-08-08, quota 384/370/16/25000): cold target median<=20s / max<=25s
+- 30d (2026-07-10..2026-08-08, quota 384/1600/16/25000): cold target median<=20s / max<=25s
 - 90d (2026-05-11..2026-08-08, quota 600/800/32/45000): cold target median<=40s / max<=50s
 - 7d snapshot warm re-run: target median<=370ms / max<=420ms（Part 6 用户重定）
 - 30d/90d snapshot warm vs cache-only warm: 改善>=20% 且 semantic 完全一致
@@ -121,12 +121,12 @@ SCENARIOS: dict[str, dict] = {
         "end": date(2026, 8, 8),
         "report_mode": "monthly",
         "profile": _monthly_profile(
-            deadline_ms=25000, candidates=384, classification_pages=370, extractions=16
+            deadline_ms=25000, candidates=384, classification_pages=1600, extractions=16
         ),
         "deadline_ms": 25000,
         "quota_nominal": {
             "max_candidate_files": 384,
-            "max_total_pdf_classification_pages": 370,
+            "max_total_pdf_classification_pages": 1600,
             "max_pdf_text_extractions": 16,
             "total_deadline_ms": 25000,
         },

@@ -417,7 +417,11 @@ def test_contract_fixture_corpus_is_synthetic_and_non_secret() -> None:
 
 
 def test_frozen_defaults_match_current_python_contract() -> None:
-    """示例配置必须继续提供冻结的显式 Rust profile 叶子。"""
+    """示例配置必须继续提供冻结的显式 Rust profile 叶子。
+
+    其中 `.pdf: 120` 是与 Rust 默认 `file_timeout_by_extension` `.pdf: 45s`
+    的有意覆盖分歧（docs/contracts/scanner-context-v1.md 仍记录 45s）。
+    """
     example = yaml.safe_load(
         (PROJECT_ROOT / "config" / "settings.example.yaml").read_text(
             encoding="utf-8"

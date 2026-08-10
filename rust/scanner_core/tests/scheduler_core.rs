@@ -64,7 +64,7 @@ fn context_profile(global_max_chars: u64, per_file_max_chars: u64) -> ContextPro
         medium_file_max_bytes: 1_048_576,
         large_file_max_bytes: 10_485_760,
         priority_policy_version: "budget_nominal_v2".to_string(),
-        compression_policy_version: "markdown_context_v2".to_string(),
+        compression_policy_version: "markdown_context_v3".to_string(),
     }
 }
 

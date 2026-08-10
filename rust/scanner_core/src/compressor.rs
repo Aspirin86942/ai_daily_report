@@ -481,6 +481,9 @@ fn newline_boundary_at_or_after(content: &str, position: usize) -> usize {
 /// 按字符截断），中缝插入省略标记。边界移动只会缩短头/尾，因此
 /// `count_chars(body) <= limit` 结构性成立（marker ≤ 64 预留）。
 fn take_head_and_tail(content: &str, limit: usize) -> String {
+    if limit < OMITTED_MARKER_RESERVE {
+        return content.chars().take(limit).collect();
+    }
     let total = count_chars(content);
     let available = limit.saturating_sub(OMITTED_MARKER_RESERVE).max(1);
     let head_budget = available * HEAD_RATIO_PER_MILLE / 1000;
@@ -495,6 +498,9 @@ fn take_head_and_tail(content: &str, limit: usize) -> String {
 
 /// `.log` 尾部优先：保留最后 `limit - 64` 字符（逐字后缀），前缀头部省略标记。
 fn take_log_tail(content: &str, limit: usize) -> String {
+    if limit < OMITTED_MARKER_RESERVE {
+        return content.chars().take(limit).collect();
+    }
     let total = count_chars(content);
     let available = limit.saturating_sub(OMITTED_MARKER_RESERVE).max(1);
     let tail_start = (total as usize).saturating_sub(available);
@@ -590,7 +596,7 @@ mod tests {
 
     #[test]
     fn head_tail_keeps_partial_first_line_when_no_boundary_in_head_budget() {
-        let content = format!("{}尾行", "字".repeat(300)); // 303 字符，第一行无换行
+        let content = format!("{}尾行", "字".repeat(300)); // 302 字符，第一行无换行
         let limit = 200_usize;
         let body = take_head_and_tail(&content, limit);
         assert!(count_chars(&body) <= limit as u64);
@@ -607,6 +613,20 @@ mod tests {
         assert!(body.ends_with("RECENT_TAIL"));
         assert!(body.contains("省略头部约 574 字符")); // 810 - 236 = 574
         assert!(!body.contains(&"old-".repeat(60))); // 240 字符 > 236 尾部预算
+    }
+
+    #[test]
+    fn tiny_limit_degrades_to_plain_char_truncation() {
+        // limit < OMITTED_MARKER_RESERVE 时省略标记本身就可能超预算：
+        // 退化为纯字符截断，不插入标记，count_chars(body) <= limit 仍成立。
+        let content = "字".repeat(50);
+        for body in [
+            take_head_and_tail(&content, 20),
+            take_log_tail(&content, 20),
+        ] {
+            assert!(count_chars(&body) <= 20);
+            assert!(!body.contains("省略"));
+        }
     }
 
     #[test]

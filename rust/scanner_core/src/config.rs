@@ -420,7 +420,7 @@ fn normalize_scanner_profile_v2_raw(
         max_total_pdf_classification_pages: raw
             .max_total_pdf_classification_pages
             .unwrap_or(default_max_total_pdf_classification_pages),
-        pdf_classification_timeout_ms: raw.pdf_classification_timeout_ms.unwrap_or(2_000),
+        pdf_classification_timeout_ms: raw.pdf_classification_timeout_ms.unwrap_or(10_000),
         total_deadline_ms: raw.total_deadline_ms.unwrap_or(default_total_deadline_ms),
         session_concurrency,
         max_requests_per_session: raw.max_requests_per_session.unwrap_or(128),

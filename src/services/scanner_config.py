@@ -198,7 +198,7 @@ def normalize_scanner_profile_v2(
             raw_profile, "total_deadline_ms", default_total_deadline_ms
         ),
         "pdf_classification_timeout_ms": _leaf_or_default(
-            raw_profile, "pdf_classification_timeout_ms", 2_000
+            raw_profile, "pdf_classification_timeout_ms", 10_000
         ),
         "session_concurrency": _leaf_or_default(
             raw_profile, "session_concurrency", min(max_workers, 4)

@@ -86,7 +86,7 @@ SCENARIOS: dict[str, dict] = {
         "end": date(2026, 8, 8),
         "report_mode": "monthly",
         "profile": _monthly_profile(
-            deadline_ms=25000, candidates=384, classification_pages=370, extractions=16
+            deadline_ms=25000, candidates=384, classification_pages=1600, extractions=16
         ),
         "cold_deadline_ms": 25000,
     },
