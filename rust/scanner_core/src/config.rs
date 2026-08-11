@@ -21,9 +21,9 @@ pub fn normalize_scanner_profile(
     raw.validate()?;
     let summary_mode = !matches!(report_mode, ReportMode::Daily);
     let text_max_chars = if summary_mode {
-        raw.summary_text_max_chars.unwrap_or(100_000)
+        raw.summary_text_max_chars.unwrap_or(400_000)
     } else {
-        raw.text_max_chars.unwrap_or(100_000)
+        raw.text_max_chars.unwrap_or(400_000)
     };
     let default_head_bytes = raw.direct_text_max_bytes.unwrap_or(2 * 1024 * 1024);
     let document_excerpt_max_chars = if summary_mode {
@@ -252,9 +252,9 @@ fn normalize_scanner_profile_v2_raw(
     raw.validate()?;
     let summary_mode = !matches!(report_mode, ReportMode::Daily);
     let text_max_chars = if summary_mode {
-        raw.summary_text_max_chars.unwrap_or(100_000)
+        raw.summary_text_max_chars.unwrap_or(400_000)
     } else {
-        raw.text_max_chars.unwrap_or(100_000)
+        raw.text_max_chars.unwrap_or(400_000)
     };
     let default_head_bytes = raw.direct_text_max_bytes.unwrap_or(2 * 1024 * 1024);
     let document_excerpt_max_chars = if summary_mode {

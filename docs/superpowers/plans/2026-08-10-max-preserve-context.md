@@ -555,3 +555,4 @@ git commit -m "test: align assertions with generous default budgets"
 - **分类页数配额提额**：`v2_quota_defaults` classification 槽位 daily 80→800、weekly 100→1200、monthly 370→1600（元组顺序 `(max_candidate_files, max_total_pdf_classification_pages, max_pdf_text_extractions, total_deadline_ms)`）；extraction 槽位 8/12/16 不变。
 - **Task 1 fixture 算术修正**：`RECENT_TAIL` 实为 11 字符（非 10）；实现时 fixture 调整为 810 字符（头部 799 + RECENT_TAIL 11），保留约定的「省略头部约 574 字符」断言。
 - **settings.windows.yaml 保持未跟踪**：该文件被 `.gitignore` 忽略（敏感本地配置），Task 3 仅提交 example 配置。
+- **e2e 后发现的设计缺口修复（方案 A）**：解析摘录上限 `text_max_chars` / `document_excerpt_max_chars` 100k→400k（per_file 保持 100k；预算模型预留取 `min(per_file, route)` 不变，准入算术不受影响）——否则摘录上限 == 单文件预算，压缩器永远看不到超预算内容，头+尾兜底在默认配置下不可达；`.log` 摘录改为取读窗**最后** 400k 字符（`build_log_content` / `finalize_tail_content` / `limit_tail_chars`，metadata 行保留），兑现「日志尾优先」。>400k 的文件摘录层保前 400k 后压缩器再双端兜底。

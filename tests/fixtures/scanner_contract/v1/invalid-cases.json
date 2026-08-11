@@ -1353,8 +1353,8 @@
             "backend": "light_text_v1",
             "read_head_bytes": 2097152,
             "read_tail_bytes": 2097152,
-            "max_chars": 100000,
-            "excerpt_max_chars": 100000
+            "max_chars": 400000,
+            "excerpt_max_chars": 400000
           },
           "office": {
             "primary_backend": "rust_office_oxide_v1",
@@ -1375,12 +1375,12 @@
             "docx_table_max_cols": 50,
             "pptx_max_slides": 500,
             "pptx_include_notes": true,
-            "document_excerpt_max_chars": 100000
+            "document_excerpt_max_chars": 400000
           },
           "pdf": {
             "backend": "pdf_text_v1",
             "max_pages": 100,
-            "excerpt_max_chars": 100000
+            "excerpt_max_chars": 400000
           }
         },
         "context": {

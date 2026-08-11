@@ -100,6 +100,16 @@ The compressor preserves file content verbatim within the per-file budget
 exceeding the budget keep the first 40% and last 60% cut at line boundaries,
 joined by an explicit omission marker, so no mid-file content is dropped
 silently. `.log` files keep the recent tail with a head-omission marker.
+
+The parse-side excerpt cap (default 400_000 chars) sits above the per-file
+budget so the compressor can see over-budget content and apply the head+tail
+fallback; the budget model reserves `min(per_file_max_chars,
+route.max_excerpt_chars)`, so the larger excerpt does not change admission
+arithmetic. `.log` excerpts take the LAST 400_000 chars of the 2MB tail read
+window (metadata lines preserved), so recent log lines reach the report.
+Files above 400_000 chars keep the first 400_000 excerpt before the
+head+tail fallback.
+
 Global context budget defaults to 500_000 chars for every report mode; all
 values are overridable through the scanner profile leaves.
 

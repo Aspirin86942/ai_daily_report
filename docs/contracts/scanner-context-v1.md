@@ -99,8 +99,8 @@ These values were checked against `config/settings.example.yaml`,
 | Routing | profile `v1`; text `light_text_v1`; Office `rust_office_oxide_v1`; PDF `pdf_text_v1` |
 | Fallback | enabled; order `python_office_v1,python_sharepoint_text_v1`; after-timeout `false`; legacy extensions `false`; policy `hybrid_v1` |
 | Shared text | head/tail reads `2097152/2097152` bytes |
-| Regular parse | text/excerpt `100000`; PDF pages `100`; Excel sheets/rows/cols `100/20000/50`; DOCX paragraphs/tables/table rows/table cols `50000/100/10000/50`; PPTX slides `500`; notes `true`; document excerpt `100000` |
-| Summary parse | text/excerpt `100000`; PDF pages `100`; Excel `100/20000/50`; DOCX `50000/100/10000/50`; PPTX slides `500`; notes `true`; document excerpt `100000` |
+| Regular parse | text/excerpt `400000`; PDF pages `100`; Excel sheets/rows/cols `100/20000/50`; DOCX paragraphs/tables/table rows/table cols `50000/100/10000/50`; PPTX slides `500`; notes `true`; document excerpt `400000` |
+| Summary parse | text/excerpt `400000`; PDF pages `100`; Excel `100/20000/50`; DOCX `50000/100/10000/50`; PPTX slides `500`; notes `true`; document excerpt `400000` |
 | Daily context | `daily_balanced_v1`; global/per-file chars `500000/100000` |
 | Weekly context | `weekly_balanced_v1`; global/per-file chars `500000/100000` |
 | Monthly context | `monthly_balanced_v1`; global/per-file chars `500000/100000` |

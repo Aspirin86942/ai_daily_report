@@ -57,10 +57,10 @@ scanner:
   # 大预算: 全局 500k / 单文件 100k 字符, 预算内正文逐字保留。
   excel_max_rows: 20000
   pdf_max_pages: 100
-  text_max_chars: 100000
+  text_max_chars: 400000
   summary_excel_max_rows: 20000
   summary_pdf_max_pages: 100
-  summary_text_max_chars: 100000
+  summary_text_max_chars: 400000
   total_max_chars: 500000
   max_file_size_mb: 50
   file_timeout_seconds: 30

@@ -214,7 +214,7 @@ fn normalize_defaults_preserve_full_file_content_budget() {
         assert_eq!(normalized.context.global_max_chars, 500_000, "{mode:?}");
         assert_eq!(normalized.context.per_file_max_chars, 100_000, "{mode:?}");
         assert_eq!(normalized.context.compression_policy_version, "markdown_context_v3");
-        assert_eq!(normalized.parse.text.max_chars, 100_000, "{mode:?}");
+        assert_eq!(normalized.parse.text.max_chars, 400_000, "{mode:?}");
         assert_eq!(normalized.parse.text.read_head_bytes, 2 * 1024 * 1024, "{mode:?}");
         assert_eq!(normalized.parse.text.read_tail_bytes, 2 * 1024 * 1024, "{mode:?}");
         assert_eq!(normalized.parse.pdf.max_pages, 100, "{mode:?}");
@@ -222,7 +222,7 @@ fn normalize_defaults_preserve_full_file_content_budget() {
         assert_eq!(normalized.parse.office.excel_max_sheets, 100, "{mode:?}");
         assert_eq!(normalized.parse.office.docx_max_paragraphs, 50_000, "{mode:?}");
         assert_eq!(normalized.parse.office.pptx_max_slides, 500, "{mode:?}");
-        assert_eq!(normalized.parse.office.document_excerpt_max_chars, 100_000, "{mode:?}");
+        assert_eq!(normalized.parse.office.document_excerpt_max_chars, 400_000, "{mode:?}");
         assert_eq!(normalized.parse.aggregate_max_chars, 500_000, "{mode:?}");
 
         let raw_v1: RawScannerProfileV1 = serde_json::from_value(serde_json::json!({
@@ -232,8 +232,8 @@ fn normalize_defaults_preserve_full_file_content_budget() {
         let v1 = normalize_scanner_profile(&raw_v1, mode).expect("minimal v1 profile should normalize");
         assert_eq!(v1.context.global_max_chars, 500_000, "{mode:?}");
         assert_eq!(v1.context.per_file_max_chars, 100_000, "{mode:?}");
-        assert_eq!(v1.parse.text.max_chars, 100_000, "{mode:?}");
-        assert_eq!(v1.parse.office.document_excerpt_max_chars, 100_000, "{mode:?}");
+        assert_eq!(v1.parse.text.max_chars, 400_000, "{mode:?}");
+        assert_eq!(v1.parse.office.document_excerpt_max_chars, 400_000, "{mode:?}");
         assert_eq!(v1.parse.pdf.max_pages, 100, "{mode:?}");
         assert_eq!(v1.parse.aggregate_max_chars, 500_000, "{mode:?}");
     }
