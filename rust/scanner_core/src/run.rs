@@ -58,6 +58,8 @@ use crate::store::{
 pub enum EngineShellError {
     #[error("failed to serialize scanner response: {0}")]
     Serialization(#[from] serde_json::Error),
+    #[error("failed to assemble scanner evidence: {0}")]
+    Evidence(String),
 }
 
 #[derive(Debug)]
@@ -147,7 +149,7 @@ pub fn dispatch_with_response_version(
                     Err(_) => return invalid_request_output(),
                 };
                 let operation = Scanner.build_context(&request)?;
-                CommandOutput::with_exit(&operation.value, operation.exit_code)
+                CommandOutput::with_exit(&operation.value.envelope, operation.exit_code)
             }
             "doctor" => {
                 let request = match decode_request::<DoctorRequest>(input) {
