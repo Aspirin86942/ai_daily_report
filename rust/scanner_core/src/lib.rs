@@ -17,6 +17,7 @@ pub mod parsers;
 pub mod planner;
 pub mod process;
 mod run;
+mod scanner;
 pub mod scheduler;
 pub mod scheduler_adapter;
 pub mod session;
@@ -34,3 +35,4 @@ pub use run::{
     dispatch, dispatch_with_response_version, invalid_request_output, version_response,
     version_response_v2, CommandOutput, EngineShellError,
 };
+pub use scanner::{Scanner, ScannerOperation};

@@ -36,6 +36,7 @@ use crate::parsers::{
     WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
 };
 use crate::process::WorkerRssTracker;
+use crate::scanner::Scanner;
 use crate::scheduler::{
     BudgetedContextScheduler, BudgetedScanOutcome, Clock, RealClock, RealGuardVerifier,
     RunDeadlines, ScheduledRunInput, TerminalIntent, WorkerIdentities,
@@ -145,14 +146,16 @@ pub fn dispatch_with_response_version(
                     Ok(request) => request,
                     Err(_) => return invalid_request_output(),
                 };
-                build_context_command(&request)
+                let operation = Scanner.build_context(&request)?;
+                CommandOutput::with_exit(&operation.value, operation.exit_code)
             }
             "doctor" => {
                 let request = match decode_request::<DoctorRequest>(input) {
                     Ok(request) => request,
                     Err(_) => return invalid_request_output(),
                 };
-                doctor(&request)
+                let operation = Scanner.doctor(&request)?;
+                CommandOutput::with_exit(&operation.value, operation.exit_code)
             }
             "inspect-run" => {
                 let request = match decode_request::<InspectRunRequest>(input) {
@@ -210,7 +213,7 @@ fn upgrade_database_command(
     CommandOutput::with_exit(&response, exit_code)
 }
 
-fn doctor(request: &DoctorRequest) -> Result<CommandOutput, EngineShellError> {
+pub(crate) fn doctor_command(request: &DoctorRequest) -> Result<CommandOutput, EngineShellError> {
     let mut checks = Vec::new();
     let mut first_error = None;
 
@@ -514,7 +517,9 @@ fn inspect_error_output(
     CommandOutput::with_exit(&response, 1)
 }
 
-fn build_context_command(request: &BuildContextRequest) -> Result<CommandOutput, EngineShellError> {
+pub(crate) fn build_context_command(
+    request: &BuildContextRequest,
+) -> Result<CommandOutput, EngineShellError> {
     let started_at = Instant::now();
     let version = version_response();
     let work_dir = match validate_build_work_dir(&request.work_dir) {

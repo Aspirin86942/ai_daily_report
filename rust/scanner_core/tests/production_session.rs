@@ -4,7 +4,8 @@
 mod windows {
     use std::path::{Path, PathBuf};
 
-    use ai_daily_scanner_core::{dispatch, dispatch_with_response_version};
+    use ai_daily_scanner_contract::BuildContextRequest;
+    use ai_daily_scanner_core::{dispatch_with_response_version, Scanner};
     use serde_json::{json, Value};
 
     fn repository_root() -> PathBuf {
@@ -65,14 +66,14 @@ mod windows {
                 "python_document_worker_module": "src.workers.document_parser_worker"
             }
         });
-        let build = dispatch(
-            "build-context",
-            &serde_json::to_vec(&request).expect("serialize build request"),
-        )
-        .expect("dispatch build-context");
-        assert_eq!(build.exit_code, 0, "{}", build.json);
-        let envelope: Value = serde_json::from_str(&build.json).expect("build response JSON");
-        assert_eq!(envelope["status"], "ok", "{}", build.json);
+        let request_typed: BuildContextRequest =
+            serde_json::from_value(request.clone()).expect("typed build request");
+        let build = Scanner
+            .build_context(&request_typed)
+            .expect("in-process build-context");
+        let envelope = serde_json::to_value(&build.value).expect("build response value");
+        assert_eq!(build.exit_code, 0, "{envelope}");
+        assert_eq!(envelope["status"], "ok", "{envelope}");
         let scan_run_id = envelope["scan_run_id"].as_u64().expect("successful run id");
 
         let inspect_request = json!({
@@ -116,15 +117,15 @@ mod windows {
 
         let mut snapshot_request = request.clone();
         snapshot_request["request_id"] = json!("72333333-7233-4233-8233-723333333333");
-        let snapshot = dispatch(
-            "build-context",
-            &serde_json::to_vec(&snapshot_request).expect("serialize snapshot request"),
-        )
-        .expect("dispatch snapshot build-context");
-        assert_eq!(snapshot.exit_code, 0, "{}", snapshot.json);
-        let snapshot_envelope: Value =
-            serde_json::from_str(&snapshot.json).expect("snapshot response JSON");
-        assert_eq!(snapshot_envelope["status"], "ok", "{}", snapshot.json);
+        let snapshot_request_typed: BuildContextRequest =
+            serde_json::from_value(snapshot_request).expect("typed snapshot request");
+        let snapshot = Scanner
+            .build_context(&snapshot_request_typed)
+            .expect("in-process snapshot build-context");
+        let snapshot_envelope =
+            serde_json::to_value(&snapshot.value).expect("snapshot response value");
+        assert_eq!(snapshot.exit_code, 0, "{snapshot_envelope}");
+        assert_eq!(snapshot_envelope["status"], "ok", "{snapshot_envelope}");
         let snapshot_run_id = snapshot_envelope["scan_run_id"]
             .as_u64()
             .expect("snapshot run id");
