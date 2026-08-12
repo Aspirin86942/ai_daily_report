@@ -1,7 +1,9 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use ai_daily_scanner_contract::{AdapterPaths, CompressionProfile, ReportMode, ScannerSettings};
-use ai_daily_scanner_core::{ScanRequest, Scanner, ScannerConfig, ScannerError};
+use ai_daily_scanner_core::{
+    ScanRequest, Scanner, ScannerConfig, ScannerError, ENGINE_BUILD_IDENTITY,
+};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -133,5 +135,6 @@ fn ai_daily_scanner_native(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyRe
     module.add_class::<PyScanner>()?;
     module.add("NativeScannerError", py.get_type::<NativeScannerError>())?;
     module.add("__version__", env!("CARGO_PKG_VERSION"))?;
+    module.add("__build_identity__", ENGINE_BUILD_IDENTITY)?;
     Ok(())
 }

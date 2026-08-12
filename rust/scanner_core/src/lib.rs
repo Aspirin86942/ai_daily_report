@@ -38,3 +38,5 @@ pub use run::{
 pub use scanner::{
     ContextResult, ScanRequest, Scanner, ScannerConfig, ScannerError, ScannerOperation,
 };
+
+pub const ENGINE_BUILD_IDENTITY: &str = env!("AI_DAILY_ENGINE_BUILD");
