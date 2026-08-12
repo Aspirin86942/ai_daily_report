@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+import importlib.machinery
+import importlib.util
 import sys
 from dataclasses import dataclass
 from datetime import date
@@ -88,33 +90,34 @@ class NativeScanner:
         runtime_config: Any,
         *,
         project_root: Path | None = None,
+        index_db_path: str | Path | None = None,
         native: _NativeScannerObject | None = None,
     ) -> None:
         root = (project_root or Path(__file__).resolve().parents[2]).resolve()
-        self._native = native or self._load_native(
-            {
-                "work_dir": str(Path(runtime_config.work_dir).resolve()),
-                "scan_db_path": str(
-                    _resolve_path(root, runtime_config.rust_index_db_path)
-                ),
-                "scanner_profile": runtime_config.scanner_contract_profile(),
-                "office_worker_path": str(
-                    _resolve_executable(
-                        root,
-                        runtime_config.rust_office_parser_bin,
-                    )
-                ),
-                "python_executable": str(Path(sys.executable).resolve()),
-                "python_module_root": str(root),
-                "python_document_worker_module": (
-                    "src.workers.document_parser_worker"
-                ),
-            }
-        )
+        self._native = native
+        self._native_config = {
+            "work_dir": str(_resolve_path(root, runtime_config.work_dir)),
+            "scan_db_path": str(
+                _resolve_path(
+                    root,
+                    index_db_path or runtime_config.rust_index_db_path,
+                )
+            ),
+            "scanner_profile": runtime_config.scanner_contract_profile(),
+            "office_worker_path": str(
+                _resolve_executable(
+                    root,
+                    runtime_config.rust_office_parser_bin,
+                )
+            ),
+            "python_executable": str(Path(sys.executable).resolve()),
+            "python_module_root": str(root),
+            "python_document_worker_module": "src.workers.document_parser_worker",
+        }
 
     def build_context(self, request: ScanRequest) -> ScanResult:
         try:
-            value = self._native.build_context(request.to_native())
+            value = self._native_object().build_context(request.to_native())
             return ScanResult.from_native(value)
         except NativeScannerError:
             raise
@@ -125,7 +128,7 @@ class NativeScanner:
 
     def doctor(self) -> DoctorResponse:
         try:
-            return DoctorResponse.model_validate(self._native.doctor())
+            return DoctorResponse.model_validate(self._native_object().doctor())
         except NativeScannerError:
             raise
         except Exception as exc:
@@ -133,8 +136,49 @@ class NativeScanner:
 
     @staticmethod
     def _load_native(config: dict[str, object]) -> _NativeScannerObject:
-        module = importlib.import_module("ai_daily_scanner_native")
+        try:
+            module = importlib.import_module("ai_daily_scanner_native")
+        except ModuleNotFoundError as exc:
+            if exc.name != "ai_daily_scanner_native":
+                raise
+            module = _load_source_checkout_extension()
         return module.Scanner(config)
+
+    def _native_object(self) -> _NativeScannerObject:
+        if self._native is None:
+            self._native = self._load_native(self._native_config)
+        return self._native
+
+
+def _load_source_checkout_extension() -> Any:
+    """从 release build 加载开发态扩展；已安装 release 始终使用 wheel。"""
+    extension_path = (
+        Path(__file__).resolve().parents[2]
+        / "rust"
+        / "target"
+        / "release"
+        / "ai_daily_scanner_native.dll"
+    )
+    if sys.platform != "win32" or not extension_path.is_file():
+        raise ModuleNotFoundError(
+            "ai_daily_scanner_native is not installed and no source-checkout "
+            "release extension is available"
+        )
+    loader = importlib.machinery.ExtensionFileLoader(
+        "ai_daily_scanner_native",
+        str(extension_path),
+    )
+    spec = importlib.util.spec_from_file_location(
+        "ai_daily_scanner_native",
+        extension_path,
+        loader=loader,
+    )
+    if spec is None:
+        raise ImportError("cannot create ai_daily_scanner_native module spec")
+    module = importlib.util.module_from_spec(spec)
+    loader.exec_module(module)
+    sys.modules["ai_daily_scanner_native"] = module
+    return module
 
 
 def _resolve_path(root: Path, value: str | Path) -> Path:

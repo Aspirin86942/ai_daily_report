@@ -137,7 +137,6 @@ def test_rust_workspace_keeps_discovery_as_a_library_only() -> None:
         "discovery",
         "office_parser",
         "scanner_native",
-        "scanner_cli",
         "scanner_contract",
         "scanner_core",
     }
@@ -146,9 +145,7 @@ def test_rust_workspace_keeps_discovery_as_a_library_only() -> None:
         "config/settings.example.yaml",
         "src/core/config.py",
         "src/core/healthcheck.py",
-        "src/services/context_scheduler.py",
-        "src/services/rust_context_client.py",
-        "scripts/deploy_windows.ps1",
+        "src/services/native_scanner.py",
         "README.md",
         "docs/scanner-backends.md",
     )
@@ -160,7 +157,7 @@ def test_rust_workspace_keeps_discovery_as_a_library_only() -> None:
     assert "rust/office_parser/target" not in combined
     assert "rust\\discovery\\target" not in combined
     assert "rust\\office_parser\\target" not in combined
-    assert "rust/target/release/ai-daily-scanner" in combined
+    assert "ai_daily_scanner_native" in combined
     assert "rust/target/release/ai-daily-office-parser" in combined
 
 

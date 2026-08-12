@@ -30,14 +30,15 @@ RunnerFactory = Callable[[], ReportRunner]
 def build_default_report_runner(console: ConsolePort) -> ReportRunner:
     """按需装配 production ReportRunner 依赖。"""
     from src.core.llm import LLMClient
-    from src.services.context_scheduler import ContextScheduler
+    from src.core.config import config
+    from src.services.native_scanner import NativeScanner
     from src.services.report_gen import ReportGenerator
     from src.services.report_runner.input_adapter import ConsoleDailyInputAdapter
     from src.services.report_runner.model_port import LLMModelPort
     from src.services.sqlite_store import SQLiteStore
 
     return ReportRunner(
-        scheduler=ContextScheduler(),
+        scanner=NativeScanner(config),
         store=SQLiteStore(),
         renderer=ReportGenerator(),
         model_port=LLMModelPort(client_factory=LLMClient),

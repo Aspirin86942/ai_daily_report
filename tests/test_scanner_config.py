@@ -6,19 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.services.context_engine import ContextEngine
 from src.services.scanner_config import (
     UnknownScannerContractFieldsError,
     extract_scanner_profile,
 )
-
-
-def test_context_engine_protocol_is_public_name() -> None:
-    """跨模块引用的 Protocol 必须是公开名。"""
-    from src.services.context_scheduler import ContextScheduler
-
-    assert ContextEngine is not None
-    assert hasattr(ContextScheduler, "_engine_from_config")
 
 
 def test_extract_profile_passes_explicit_contract_leaves() -> None:

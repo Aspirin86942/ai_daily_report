@@ -1,4 +1,4 @@
-"""运行 Rust v2 scanner/context，并通过 inspect-run DTO 输出性能证据。"""
+"""运行 native scanner，并从本次结果输出完整性能证据。"""
 
 from __future__ import annotations
 
@@ -16,11 +16,10 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.core.config import config  # noqa: E402
 from src.models.scanner_contract import (  # noqa: E402
     ContextEnvelope,
-    FileAudit,
-    InspectRunResponse,
+    FileAuditV2,
+    InspectRunResponseV2,
 )
-from src.services.context_scheduler import ContextScheduleRequest  # noqa: E402
-from src.services.rust_context_client import RustContextClient  # noqa: E402
+from src.services.native_scanner import NativeScanner, ScanRequest  # noqa: E402
 
 
 def calculate_files_per_second(*, file_count: int, duration_ms: int) -> float:
@@ -30,7 +29,7 @@ def calculate_files_per_second(*, file_count: int, duration_ms: int) -> float:
     return round(file_count * 1000 / duration_ms, 3)
 
 
-def build_parser_backend_summary(files: list[FileAudit]) -> dict[str, Any]:
+def build_parser_backend_summary(files: list[FileAuditV2]) -> dict[str, Any]:
     """分别汇总真实 parser backend 和 worker lane，禁止混成一个维度。"""
     backend_counts: dict[str, int] = {}
     lane_counts: dict[str, int] = {}
@@ -72,7 +71,7 @@ def build_parser_backend_summary(files: list[FileAudit]) -> dict[str, Any]:
 def build_benchmark_payload(
     *,
     envelope: ContextEnvelope,
-    inspection: InspectRunResponse | None,
+    inspection: InspectRunResponseV2 | None,
     start_date: date,
     end_date: date,
     summary_mode: bool,
@@ -102,14 +101,16 @@ def build_benchmark_payload(
         extension_metrics = []
         file_audits = []
     summary = envelope.summary
-    reused_count = sum(item.cache_status == "fresh" for item in files)
-    reparsed_count = sum(item.cache_status == "miss" for item in files)
+    reused_count = sum(
+        item.parse_cache_status in {"fresh", "snapshot"} for item in files
+    )
+    reparsed_count = sum(item.parse_cache_status == "miss" for item in files)
     return {
         "parameters": {
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
             "summary_mode": summary_mode,
-            "engine": "rust_v2",
+            "engine": "native",
         },
         "status": envelope.status,
         "scan_result": {
@@ -237,7 +238,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--end-date", type=_parse_date, default=default_end_date)
     parser.add_argument("--summary-mode", action="store_true")
-    parser.add_argument("--scanner-bin", type=Path, default=None)
     parser.add_argument("--scan-db-path", type=Path, default=None)
     parser.add_argument("--json-out", type=Path, default=None)
     parser.add_argument("--markdown-out", type=Path, default=None)
@@ -245,29 +245,20 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    client = RustContextClient(
-        config=config,
-        scanner_binary=args.scanner_bin or config.rust_scanner_bin,
-        office_worker_path=config.rust_office_parser_bin,
-        scan_db_path=args.scan_db_path or config.rust_index_db_path,
-        timeout_seconds=config.rust_process_timeout_seconds,
+    scanner = NativeScanner(
+        config,
+        index_db_path=args.scan_db_path,
     )
-    envelope = client.build_context(
-        ContextScheduleRequest(
+    result = scanner.build_context(
+        ScanRequest(
             report_mode="weekly" if args.summary_mode else "daily",
-            source="scan",
             start_date=args.start_date,
             end_date=args.end_date,
         )
     )
-    inspection = (
-        None
-        if envelope.scan_run_id is None
-        else client.inspect_run(envelope.scan_run_id, include_content=False)
-    )
     return build_benchmark_payload(
-        envelope=envelope,
-        inspection=inspection,
+        envelope=result.envelope,
+        inspection=result.evidence,
         start_date=args.start_date,
         end_date=args.end_date,
         summary_mode=args.summary_mode,

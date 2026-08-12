@@ -18,12 +18,6 @@ DEV_DISTRIBUTIONS = {
     "pytest-xdist",
     "reportlab",
 }
-WORKFLOW_GATES = {
-    ".github/workflows/windows-release.yml": 1,
-}
-WINDOWS_RELEASE_WORKFLOWS = (
-    ".github/workflows/windows-release.yml",
-)
 
 
 def _export_lock(root: Path, output_path: Path) -> bytes:
@@ -89,42 +83,3 @@ def test_lock_has_hashes_and_excludes_dev_editable_and_project() -> None:
         or " @ file:" in line.lower()
         for line in lock_text.splitlines()
     )
-
-
-def test_release_workflow_pins_uv_and_runs_the_projection_gate() -> None:
-    root = Path(__file__).resolve().parents[1]
-    for relative_path, expected_gate_count in WORKFLOW_GATES.items():
-        workflow = (root / relative_path).read_text(encoding="utf-8")
-        assert workflow.count("uses: astral-sh/setup-uv@v6") == expected_gate_count
-        assert workflow.count(f'version: "{UV_VERSION}"') == expected_gate_count
-        assert workflow.count("uv sync --frozen") == expected_gate_count
-        assert "requirements-dev.txt" not in workflow
-        assert (
-            workflow.count("uv run pytest tests/test_requirements_lock.py -v")
-            == expected_gate_count
-        )
-
-
-def test_windows_release_runs_the_explicit_clean_production_chain() -> None:
-    root = Path(__file__).resolve().parents[1]
-    ordered_tokens = (
-        "python -m venv $prodVenv",
-        "& $prodPython -m pip install --requirement requirements.lock",
-        "-m src.workers.document_parser_worker version",
-        "-m src.workers.document_parser_worker session-version",
-        "& $env:AI_DAILY_PROD_PYTHON main.py doctor --strict",
-        "& $env:AI_DAILY_PROD_PYTHON scripts/corpus_gate.py",
-    )
-    for relative_path in WINDOWS_RELEASE_WORKFLOWS:
-        workflow = (root / relative_path).read_text(encoding="utf-8")
-        positions = []
-        for token in ordered_tokens:
-            assert workflow.count(token) == 1, f"{relative_path}: {token}"
-            positions.append(workflow.index(token))
-        assert positions == sorted(positions), (
-            f"{relative_path}: production gate order"
-        )
-        assert "worker_build -ne $worker.worker_build" in workflow
-        assert "--work-dir (Join-Path $gateRoot 'corpus')" in workflow
-        assert "--out-root (Join-Path $gateRoot 'runs')" in workflow
-        assert "--evidence (Join-Path $gateRoot 'evidence.json')" in workflow

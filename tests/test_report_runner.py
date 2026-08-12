@@ -7,7 +7,8 @@ from pathlib import Path
 
 from src.models.scanner_contract import ContextSummary, Diagnostic
 from src.models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
-from src.services.context_engine import ContextBuildResult
+from src.models.scanner_contract import ContextEnvelope
+from src.services.native_scanner import ScanResult
 from src.services.report_runner.outcomes import (
     ErrorCode,
     ReportRunFailure,
@@ -21,12 +22,12 @@ from src.services.report_runner.requests import (
 )
 
 
-class FakeScheduler:
-    def __init__(self, result: ContextBuildResult) -> None:
+class FakeScanner:
+    def __init__(self, result: ScanResult) -> None:
         self._result = result
         self.calls: list[object] = []
 
-    def build_context(self, request: object) -> ContextBuildResult:
+    def build_context(self, request: object) -> ScanResult:
         self.calls.append(request)
         return self._result
 
@@ -114,7 +115,7 @@ class FixedInputAdapter:
         return self.value
 
 
-def _context(status: str = "ok") -> ContextBuildResult:
+def _context(status: str = "ok") -> ScanResult:
     diagnostic = Diagnostic(
         error_code="RUST_CORE_CRASHED" if status == "error" else "PARSER_FAILED",
         message="synthetic scanner diagnostic",
@@ -123,7 +124,12 @@ def _context(status: str = "ok") -> ContextBuildResult:
         file_path=None,
         backend=None,
     )
-    return ContextBuildResult(
+    envelope = ContextEnvelope(
+        contract="ai_daily_context",
+        protocol_version=1,
+        request_id="11111111-1111-4111-8111-111111111111",
+        engine_version="0.1.0",
+        engine_build="test-build",
         file_context="ctx" if status != "error" else "",
         status=status,
         summary=ContextSummary(
@@ -145,13 +151,14 @@ def _context(status: str = "ok") -> ContextBuildResult:
         warnings=[diagnostic] if status == "partial" else [],
         error=diagnostic if status == "error" else None,
     )
+    return ScanResult(envelope=envelope, evidence=None)
 
 
 def _make_runner(**overrides):
     from src.services.report_runner.runner import ReportRunner
 
     defaults = {
-        "scheduler": FakeScheduler(_context()),
+        "scanner": FakeScanner(_context()),
         "store": FakeStore(),
         "renderer": FakeRenderer(),
         "model_port": RecordingModelPort(),
@@ -215,7 +222,7 @@ def test_daily_scanner_error_fails_before_input_and_llm():
     model_port = RecordingModelPort()
     daily_input = FixedInputAdapter()
     runner = _make_runner(
-        scheduler=FakeScheduler(_context(status="error")),
+        scanner=FakeScanner(_context(status="error")),
         model_port=model_port,
         daily_input=daily_input,
     )
@@ -328,9 +335,9 @@ def test_daily_date_override_keeps_scan_window(tmp_path):
                 next_plan="n",
             )
 
-    scheduler = FakeScheduler(_context())
+    scanner = FakeScanner(_context())
     runner = _make_runner(
-        scheduler=scheduler,
+        scanner=scanner,
         store=store,
         renderer=renderer,
         model_port=LLMModelPort(client_factory=RecordingClient),
@@ -346,7 +353,7 @@ def test_daily_date_override_keeps_scan_window(tmp_path):
     )
 
     assert isinstance(outcome, ReportRunSuccess)
-    schedule = scheduler.calls[0]
+    schedule = scanner.calls[0]
     assert schedule.start_date == date(2026, 5, 24)
     assert schedule.end_date == date(2026, 5, 25)
     assert outcome.report.date == "2026-05-20"
@@ -363,7 +370,7 @@ def test_daily_scanner_error_does_not_construct_llm_client():
         raise AssertionError("scanner error 后不得构造 LLM client")
 
     runner = _make_runner(
-        scheduler=FakeScheduler(_context(status="error")),
+        scanner=FakeScanner(_context(status="error")),
         model_port=LLMModelPort(client_factory=client_factory),
     )
 
@@ -427,9 +434,9 @@ def test_weekly_db_zero_scanner_calls_and_publishes(tmp_path):
                 other_notes="",
             )
 
-    scheduler = FakeScheduler(_context())
+    scanner = FakeScanner(_context())
     runner = _make_runner(
-        scheduler=scheduler,
+        scanner=scanner,
         store=store,
         renderer=renderer,
         model_port=LLMModelPort(client_factory=RecordingClient),
@@ -444,7 +451,7 @@ def test_weekly_db_zero_scanner_calls_and_publishes(tmp_path):
         )
     )
 
-    assert scheduler.calls == []
+    assert scanner.calls == []
     assert isinstance(outcome, ReportRunSuccess)
     assert outcome.source_evidence.report_count == 1
     assert outcome.publication.markdown_state == "written"
@@ -455,7 +462,7 @@ def test_weekly_scan_calls_scanner_once_and_appends_supplement(tmp_path):
     from src.services.report_gen import ReportGenerator
 
     renderer = ReportGenerator(reports_dir=tmp_path / "reports")
-    scheduler = FakeScheduler(_context())
+    scanner = FakeScanner(_context())
 
     class RecordingClient:
         def generate_weekly_report(
@@ -485,7 +492,7 @@ def test_weekly_scan_calls_scanner_once_and_appends_supplement(tmp_path):
             )
 
     runner = _make_runner(
-        scheduler=scheduler,
+        scanner=scanner,
         renderer=renderer,
         model_port=LLMModelPort(client_factory=RecordingClient),
     )
@@ -501,8 +508,8 @@ def test_weekly_scan_calls_scanner_once_and_appends_supplement(tmp_path):
     )
 
     assert isinstance(outcome, ReportRunSuccess)
-    assert len(scheduler.calls) == 1
-    schedule = scheduler.calls[0]
+    assert len(scanner.calls) == 1
+    schedule = scanner.calls[0]
     assert schedule.start_date == date(2026, 5, 11)
     assert schedule.end_date == date(2026, 5, 17)
 
@@ -550,7 +557,7 @@ def test_monthly_db_zero_scanner_calls(tmp_path):
             next_plan="n",
         )
     )
-    scheduler = FakeScheduler(_context())
+    scanner = FakeScanner(_context())
 
     class RecordingClient:
         def generate_monthly_report(
@@ -578,7 +585,7 @@ def test_monthly_db_zero_scanner_calls(tmp_path):
             )
 
     runner = _make_runner(
-        scheduler=scheduler,
+        scanner=scanner,
         store=store,
         model_port=LLMModelPort(client_factory=RecordingClient),
     )
@@ -592,7 +599,7 @@ def test_monthly_db_zero_scanner_calls(tmp_path):
         )
     )
 
-    assert scheduler.calls == []
+    assert scanner.calls == []
     assert isinstance(outcome, ReportRunSuccess)
     assert outcome.period.start_date == date(2026, 5, 1)
     assert outcome.period.end_date == date(2026, 5, 31)
@@ -602,7 +609,7 @@ def test_monthly_scan_calls_scanner_once(tmp_path):
     from src.services.report_gen import ReportGenerator
 
     renderer = ReportGenerator(reports_dir=tmp_path / "reports")
-    scheduler = FakeScheduler(_context())
+    scanner = FakeScanner(_context())
 
     class RecordingClient:
         def generate_monthly_report(
@@ -627,7 +634,7 @@ def test_monthly_scan_calls_scanner_once(tmp_path):
             )
 
     runner = _make_runner(
-        scheduler=scheduler,
+        scanner=scanner,
         renderer=renderer,
         model_port=LLMModelPort(client_factory=RecordingClient),
     )
@@ -643,7 +650,7 @@ def test_monthly_scan_calls_scanner_once(tmp_path):
     )
 
     assert isinstance(outcome, ReportRunSuccess)
-    assert len(scheduler.calls) == 1
-    schedule = scheduler.calls[0]
+    assert len(scanner.calls) == 1
+    schedule = scanner.calls[0]
     assert schedule.start_date == date(2026, 5, 1)
     assert schedule.end_date == date(2026, 5, 31)

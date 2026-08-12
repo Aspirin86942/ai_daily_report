@@ -16,8 +16,7 @@ from ...models.schemas import (
     MonthlyReportData,
     WeeklyReportData,
 )
-from ..context_engine import ContextBuildResult
-from ..context_scheduler import ContextScheduleRequest
+from ..native_scanner import ScanRequest, ScanResult
 from .input_adapter import DailyInputAdapter
 from .model_port import (
     DailyGenerationRequest,
@@ -55,8 +54,8 @@ from .requests import (
 PeriodMode = Literal["weekly", "monthly"]
 
 
-class _ContextSchedulerPort(Protocol):
-    def build_context(self, request: ContextScheduleRequest) -> ContextBuildResult:
+class _ScannerPort(Protocol):
+    def build_context(self, request: ScanRequest) -> ScanResult:
         ...
 
 
@@ -132,7 +131,7 @@ def _not_attempted(requested: bool) -> PublicationReceipt:
 
 @dataclass(slots=True)
 class ReportRunner:
-    scheduler: _ContextSchedulerPort
+    scanner: _ScannerPort
     store: _ReportStore
     renderer: _ReportRenderer
     model_port: ReportModelPort
@@ -425,14 +424,13 @@ class ReportRunner:
     def _build_scan_context(
         self, period: ResolvedPeriod, *, requested: bool
     ) -> _AcceptedScan | ReportRunFailure:
-        schedule = ContextScheduleRequest(
+        scan_request = ScanRequest(
             report_mode=period.mode,
-            source="scan",
             start_date=period.start_date,
             end_date=period.end_date,
         )
         try:
-            result = self.scheduler.build_context(schedule)
+            scan_result = self.scanner.build_context(scan_request)
         except Exception as exc:
             return self._failure(
                 mode=period.mode,
@@ -441,11 +439,12 @@ class ReportRunner:
                 phase="source",
                 error_code=ErrorCode.SCANNER_FAILED,
                 message=str(exc),
-                retryable=False,
+                retryable=bool(getattr(exc, "retryable", False)),
                 requested=requested,
                 cause=type(exc).__name__,
             )
 
+        result = scan_result.envelope
         evidence = ScanEvidence(
             status=result.status,
             source_file_count=result.summary.source_file_count,

@@ -7,7 +7,7 @@ import pytest
 
 from src.core import healthcheck
 from src.core.config import UnknownScannerContractFieldsError
-from src.services.rust_context_client import RustContextProbeError
+from src.services.native_scanner import NativeScannerError
 
 
 def _write_templates(root: Path) -> None:
@@ -59,18 +59,10 @@ def _make_strict_rust_config(
     return cfg
 
 
-def _strict_version() -> SimpleNamespace:
+def _strict_doctor(*checks: tuple[str, str]) -> SimpleNamespace:
     return SimpleNamespace(
         contract="ai_daily_context",
         protocol_version=1,
-        engine_version="0.1.0",
-        engine_build="sha256-source-v1:synthetic",
-        target_triple="x86_64-pc-windows-msvc",
-    )
-
-
-def _strict_doctor(*checks: tuple[str, str]) -> SimpleNamespace:
-    return SimpleNamespace(
         engine_version="0.1.0",
         engine_build="sha256-source-v1:synthetic",
         checks=[
@@ -104,12 +96,10 @@ def test_collect_healthcheck_strict_uses_effective_config_without_local_yaml(
     _prepare_strict_root(tmp_path)
     captured: dict[str, object] = {}
 
-    class StubRustContextClient:
-        def __init__(self, **kwargs):
+    class StubNativeScanner:
+        def __init__(self, runtime_config, **kwargs):
+            captured["runtime_config"] = runtime_config
             captured.update(kwargs)
-
-        def version(self):
-            return _strict_version()
 
         def doctor(self):
             return _strict_doctor(
@@ -121,8 +111,8 @@ def test_collect_healthcheck_strict_uses_effective_config_without_local_yaml(
     monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
     monkeypatch.setattr(
         healthcheck,
-        "RustContextClient",
-        StubRustContextClient,
+        "NativeScanner",
+        StubNativeScanner,
         raising=False,
     )
 
@@ -134,14 +124,10 @@ def test_collect_healthcheck_strict_uses_effective_config_without_local_yaml(
 
     assert result.errors == []
     assert not any("缺少配置文件" in message for message in result.errors)
-    assert result.info["Scanner Engine"] == "rust_v2"
-    assert result.info["Rust Scanner Contract"] == "ai_daily_context/v1"
-    assert result.info["Rust Scanner Engine"] == (
-        "0.1.0 (x86_64-pc-windows-msvc)"
-    )
-    assert captured["scanner_binary"] == "bin/ai-daily-scanner"
-    assert captured["scan_db_path"] == "data/db/scan_index_v2.sqlite3"
-    assert captured["office_worker_path"] == "bin/ai-daily-office-parser"
+    assert result.info["Scanner Interface"] == "native"
+    assert result.info["Native Scanner Contract"] == "ai_daily_context/v1"
+    assert result.info["Native Scanner Engine"] == "0.1.0"
+    assert captured["project_root"] == tmp_path
 
 
 def test_collect_healthcheck_strict_always_requires_office_worker_package(
@@ -150,12 +136,9 @@ def test_collect_healthcheck_strict_always_requires_office_worker_package(
 ):
     _prepare_strict_root(tmp_path)
 
-    class StubRustContextClient:
-        def __init__(self, **kwargs):
+    class StubNativeScanner:
+        def __init__(self, runtime_config, **kwargs):
             pass
-
-        def version(self):
-            return _strict_version()
 
         def doctor(self):
             return _strict_doctor(
@@ -167,8 +150,8 @@ def test_collect_healthcheck_strict_always_requires_office_worker_package(
     monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
     monkeypatch.setattr(
         healthcheck,
-        "RustContextClient",
-        StubRustContextClient,
+        "NativeScanner",
+        StubNativeScanner,
     )
 
     result = healthcheck.collect_healthcheck(
@@ -180,25 +163,7 @@ def test_collect_healthcheck_strict_always_requires_office_worker_package(
         strict=True,
     )
 
-    assert "Rust strict check failed: office_worker_handshake" in result.errors
-
-
-def test_collect_healthcheck_strict_rejects_non_rust_effective_engine(
-    tmp_path,
-    monkeypatch,
-):
-    _prepare_strict_root(tmp_path)
-    cfg = _make_strict_rust_config(tmp_path)
-    cfg.scanner_engine = "retired"
-    monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
-
-    result = healthcheck.collect_healthcheck(
-        project_root=tmp_path,
-        config_obj=cfg,
-        strict=True,
-    )
-
-    assert "严格模式要求 scanner.engine=rust_v2" in result.errors
+    assert "Native strict check failed: office_worker_handshake" in result.errors
 
 
 def test_collect_healthcheck_strict_reports_safe_scanner_contract_failure(
@@ -207,18 +172,18 @@ def test_collect_healthcheck_strict_reports_safe_scanner_contract_failure(
 ):
     _prepare_strict_root(tmp_path)
 
-    class FailingRustContextClient:
-        def __init__(self, **kwargs):
+    class FailingNativeScanner:
+        def __init__(self, runtime_config, **kwargs):
             pass
 
-        def version(self):
-            raise RustContextProbeError("version", "invalid_response")
+        def doctor(self):
+            raise NativeScannerError("NATIVE_RESULT_INVALID", "private", False)
 
     monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
     monkeypatch.setattr(
         healthcheck,
-        "RustContextClient",
-        FailingRustContextClient,
+        "NativeScanner",
+        FailingNativeScanner,
         raising=False,
     )
 
@@ -229,7 +194,7 @@ def test_collect_healthcheck_strict_reports_safe_scanner_contract_failure(
     )
 
     assert result.errors == [
-        "Rust scanner version/contract check failed (invalid_response)"
+        "Native scanner doctor failed (NATIVE_RESULT_INVALID)"
     ]
 
 
@@ -239,12 +204,9 @@ def test_collect_healthcheck_strict_requires_configured_worker_routes(
 ):
     _prepare_strict_root(tmp_path)
 
-    class StubRustContextClient:
-        def __init__(self, **kwargs):
+    class StubNativeScanner:
+        def __init__(self, runtime_config, **kwargs):
             pass
-
-        def version(self):
-            return _strict_version()
 
         def doctor(self):
             return _strict_doctor(
@@ -256,8 +218,8 @@ def test_collect_healthcheck_strict_requires_configured_worker_routes(
     monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
     monkeypatch.setattr(
         healthcheck,
-        "RustContextClient",
-        StubRustContextClient,
+        "NativeScanner",
+        StubNativeScanner,
         raising=False,
     )
     cfg = _make_strict_rust_config(
@@ -271,8 +233,8 @@ def test_collect_healthcheck_strict_requires_configured_worker_routes(
         strict=True,
     )
 
-    assert "Rust strict check failed: office_worker_handshake" in result.errors
-    assert "Rust strict check failed: python_worker_handshake" in result.errors
+    assert "Native strict check failed: office_worker_handshake" in result.errors
+    assert "Native strict check failed: python_worker_handshake" in result.errors
 
 
 def test_collect_healthcheck_accepts_env_only_provider_key(tmp_path, monkeypatch):
@@ -614,12 +576,9 @@ def test_strict_installed_healthcheck_reports_all_shared_runtime_paths(
     cfg.db_dir = db_dir
     cfg.log_dir = log_dir
 
-    class StubRustContextClient:
-        def __init__(self, **kwargs):
+    class StubNativeScanner:
+        def __init__(self, runtime_config, **kwargs):
             pass
-
-        def version(self):
-            return _strict_version()
 
         def doctor(self):
             return _strict_doctor(
@@ -629,7 +588,7 @@ def test_strict_installed_healthcheck_reports_all_shared_runtime_paths(
             )
 
     monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
-    monkeypatch.setattr(healthcheck, "RustContextClient", StubRustContextClient)
+    monkeypatch.setattr(healthcheck, "NativeScanner", StubNativeScanner)
 
     result = healthcheck.collect_healthcheck(
         project_root=release,
@@ -670,12 +629,9 @@ def test_strict_installed_healthcheck_rejects_version_local_log_path(
     ):
         directory.mkdir(parents=True, exist_ok=True)
 
-    class StubRustContextClient:
-        def __init__(self, **kwargs):
+    class StubNativeScanner:
+        def __init__(self, runtime_config, **kwargs):
             pass
-
-        def version(self):
-            return _strict_version()
 
         def doctor(self):
             return _strict_doctor(
@@ -685,7 +641,7 @@ def test_strict_installed_healthcheck_rejects_version_local_log_path(
             )
 
     monkeypatch.setattr(healthcheck, "REQUIRED_DEPENDENCIES", [])
-    monkeypatch.setattr(healthcheck, "RustContextClient", StubRustContextClient)
+    monkeypatch.setattr(healthcheck, "NativeScanner", StubNativeScanner)
 
     result = healthcheck.collect_healthcheck(
         project_root=release,

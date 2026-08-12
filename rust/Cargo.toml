@@ -3,7 +3,6 @@ members = [
     "discovery",
     "office_parser",
     "scanner_native",
-    "scanner_cli",
     "scanner_contract",
     "scanner_core",
 ]

@@ -20,11 +20,13 @@ from src.models.scanner_contract import (
     ContextEnvelope,
     ContextSummary,
     Diagnostic,
+    ExecutionMetricsV2,
     ExtensionMetric,
-    FileAudit,
-    InspectRunResponse,
+    FileAuditV2,
+    InspectRunResponseV2,
     StageMetric,
 )
+from src.services.native_scanner import ScanResult
 
 
 def _diagnostic() -> Diagnostic:
@@ -55,16 +57,18 @@ def _summary() -> ContextSummary:
     )
 
 
-def _files() -> list[FileAudit]:
+def _files() -> list[FileAuditV2]:
     return [
-        FileAudit(
+        FileAuditV2(
             relative_path="notes\\a.md",
             file_identity="fixture:a",
             source_version="mtime_ns=1:size=10",
+            source_guard_kind="content_sha256_v1",
+            source_guard_sha256="c" * 64,
             parse_status="success",
             parser_backend="light_text_v1",
             worker_lane="rust_core",
-            cache_status="fresh",
+            parse_cache_status="fresh",
             cache_miss_reason="",
             truncated=False,
             content_sha256="a" * 64,
@@ -72,15 +76,21 @@ def _files() -> list[FileAudit]:
             failure_class="",
             fallback_backend="",
             fallback_reason_code="",
+            parse_transport="not_applicable",
+            parse_attempt_count=0,
+            final_diagnostic=None,
+            pdf_classification=None,
         ),
-        FileAudit(
+        FileAuditV2(
             relative_path="docs\\broken.pdf",
             file_identity="fixture:b",
             source_version="mtime_ns=2:size=20",
+            source_guard_kind="content_sha256_v1",
+            source_guard_sha256="d" * 64,
             parse_status="error",
             parser_backend="pdf_text_v1",
             worker_lane="python_document_process",
-            cache_status="miss",
+            parse_cache_status="miss",
             cache_miss_reason="new_file",
             truncated=True,
             content_sha256="b" * 64,
@@ -88,6 +98,10 @@ def _files() -> list[FileAudit]:
             failure_class="recoverable_parser_failure",
             fallback_backend="",
             fallback_reason_code="",
+            parse_transport="session",
+            parse_attempt_count=1,
+            final_diagnostic=_diagnostic(),
+            pdf_classification=None,
         ),
     ]
 
@@ -109,10 +123,11 @@ def _envelope() -> ContextEnvelope:
     )
 
 
-def _inspection() -> InspectRunResponse:
-    return InspectRunResponse(
+def _inspection() -> InspectRunResponseV2:
+    return InspectRunResponseV2(
         contract="ai_daily_context",
         protocol_version=1,
+        response_version=2,
         request_id="21111111-2111-4111-8111-211111111111",
         scan_run_id=7,
         context_run_id=7,
@@ -168,6 +183,44 @@ def _inspection() -> InspectRunResponse:
         ],
         warnings=[_diagnostic()],
         error=None,
+        artifact_id=1,
+        reused_from_context_run_id=None,
+        reuse_kind="none",
+        execution_metrics=ExecutionMetricsV2(
+            discovery_observed_file_count=2,
+            source_guard_content_hash_file_count=2,
+            source_guard_unavailable_count=0,
+            source_guard_bytes_read=30,
+            candidate_file_count=2,
+            admitted_file_count=2,
+            classification_slot_count=0,
+            confirmed_run_inspected_pages_total=0,
+            unobserved_classification_attempt_count=0,
+            nominal_charged_pages_total=0,
+            extraction_slot_count=0,
+            pdfplumber_invocations=1,
+            snapshot_hit=False,
+            parse_cache_lookup_count=2,
+            classification_cache_lookup_count=0,
+            parse_cache_all_hit=False,
+            classification_cache_all_hit=None,
+            stage_deadline_exhausted_count=0,
+            session_restart_count=0,
+            session_fallback_count=0,
+            classify_attempt_count=0,
+            parse_attempt_count=1,
+            reserved_chars=100,
+            rendered_chars=100,
+            worker_handshake_ms=1,
+            discovery_ms=2,
+            snapshot_lookup_ms=1,
+            current_run_audit_write_ms=1,
+            terminal_precommit_ms=1,
+            deadline_precommit_elapsed_ms=24,
+            envelope_rebuild_ms=1,
+            terminal_rows_written=8,
+            peak_worker_rss_bytes=1024,
+        ),
     )
 
 
@@ -251,42 +304,33 @@ def test_render_and_write_report_preserve_metadata_only(tmp_path: Path):
     )
 
 
-def test_run_benchmark_calls_build_then_inspect_without_file_scanner(monkeypatch):
+def test_run_benchmark_uses_single_native_result(monkeypatch):
     calls: list[tuple[str, object]] = []
 
-    class StubClient:
-        def __init__(self, **kwargs) -> None:
+    class StubScanner:
+        def __init__(self, runtime_config, **kwargs) -> None:
             calls.append(("init", kwargs))
 
-        def build_context(self, request) -> ContextEnvelope:
+        def build_context(self, request) -> ScanResult:
             calls.append(("build", request.report_mode))
-            return _envelope()
+            return ScanResult(envelope=_envelope(), evidence=_inspection())
 
-        def inspect_run(self, scan_run_id: int, *, include_content: bool):
-            calls.append(("inspect", (scan_run_id, include_content)))
-            return _inspection()
-
-    monkeypatch.setattr(benchmark_module, "RustContextClient", StubClient)
+    monkeypatch.setattr(benchmark_module, "NativeScanner", StubScanner)
     monkeypatch.setattr(
         benchmark_module,
         "config",
         SimpleNamespace(
-            rust_scanner_bin="scanner.exe",
-            rust_office_parser_bin="office-worker.exe",
             rust_index_db_path="state/scan_index_v2.sqlite3",
-            rust_process_timeout_seconds=90,
         ),
     )
     args = SimpleNamespace(
         start_date=date(2026, 7, 15),
         end_date=date(2026, 7, 16),
         summary_mode=False,
-        scanner_bin=None,
         scan_db_path=None,
     )
 
     payload = run_benchmark(args)
 
     assert payload["status"] == "partial"
-    assert calls[0][1]["office_worker_path"] == "office-worker.exe"
-    assert calls[1:] == [("build", "daily"), ("inspect", (7, False))]
+    assert calls == [("init", {"index_db_path": None}), ("build", "daily")]

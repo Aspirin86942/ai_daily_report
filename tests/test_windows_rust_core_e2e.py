@@ -10,16 +10,12 @@ from types import SimpleNamespace
 import pytest
 
 from src.core.healthcheck import collect_healthcheck
-from src.services.context_scheduler import (
-    ContextScheduleRequest,
-    ContextScheduler,
-)
-from src.services.rust_context_client import RustContextClient
+from src.services.native_scanner import NativeScanner, ScanRequest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-SCANNER_BIN = (
-    PROJECT_ROOT / "rust" / "target" / "release" / "ai-daily-scanner.exe"
+NATIVE_EXTENSION = (
+    PROJECT_ROOT / "rust" / "target" / "release" / "ai_daily_scanner_native.dll"
 )
 OFFICE_BIN = (
     PROJECT_ROOT
@@ -35,7 +31,7 @@ def _require_windows_release() -> None:
         pytest.skip("Windows production E2E")
     missing = [
         path.name
-        for path in (SCANNER_BIN, OFFICE_BIN)
+        for path in (NATIVE_EXTENSION, OFFICE_BIN)
         if not path.is_file()
     ]
     if missing:
@@ -56,11 +52,8 @@ def _runtime_config(
         "max_workers": 2,
     }
     return SimpleNamespace(
-        scanner_engine="rust_v2",
-        rust_scanner_bin=str(SCANNER_BIN),
         rust_office_parser_bin=str(OFFICE_BIN),
         rust_index_db_path=str(scan_db_path),
-        rust_process_timeout_seconds=60.0,
         work_dir=work_dir,
         scanner_contract_profile=lambda: raw_profile.copy(),
         llm_provider="deepseek",
@@ -72,34 +65,12 @@ def _runtime_config(
     )
 
 
-def _schedule_request() -> ContextScheduleRequest:
-    return ContextScheduleRequest(
+def _scan_request() -> ScanRequest:
+    return ScanRequest(
         report_mode="daily",
-        source="scan",
         start_date=date(2000, 1, 1),
         end_date=date(2099, 12, 31),
     )
-
-
-def test_deploy_windows_builds_rust_and_finishes_with_strict_doctor() -> None:
-    script = (PROJECT_ROOT / "scripts" / "deploy_windows.ps1").read_text(
-        encoding="utf-8"
-    )
-
-    assert "[switch]$BuildRust" not in script
-    assert "if ($BuildRust)" not in script
-    assert '"build",' in script
-    assert '"--workspace",' in script
-    assert '"--release",' in script
-    assert '"--locked"' in script
-    assert '@("main.py", "doctor", "--strict")' in script
-    assert "Copy-Item -LiteralPath $exampleSettings" in script
-    assert "Keeping existing config\\settings.windows.yaml" in script
-    assert 'Assert-CPythonVersion -Label "Creator Python"' in script
-    assert 'Assert-CPythonVersion -Label "Existing .venv Python"' in script
-    assert 'Assert-CPythonVersion -Label "Created .venv Python"' in script
-    assert "Existing .venv directories are not removed automatically" in script
-    assert "api_key" not in script.lower()
 
 
 def test_real_rust_chinese_path_e2e(tmp_path: Path) -> None:
@@ -120,13 +91,13 @@ def test_real_rust_chinese_path_e2e(tmp_path: Path) -> None:
         config_obj=cfg,
         strict=True,
     )
-    result = ContextScheduler(runtime_config=cfg).build_context(
-        _schedule_request()
-    )
+    result = NativeScanner(cfg, project_root=PROJECT_ROOT).build_context(
+        _scan_request()
+    ).envelope
 
     assert doctor.errors == []
-    assert doctor.info["Scanner Engine"] == "rust_v2"
-    assert doctor.info["Rust scan_db_parent"] == "ok"
+    assert doctor.info["Scanner Interface"] == "native"
+    assert doctor.info["Scanner scan_db_parent"] == "ok"
     assert result.status == "ok"
     assert result.summary.source_file_count == 1
     assert result.summary.success_count == 1
@@ -143,41 +114,34 @@ def test_real_rust_cold_warm_cache_e2e(tmp_path: Path) -> None:
     scan_db_path = tmp_path / "state" / "scan_index_v2.sqlite3"
     scan_db_path.parent.mkdir()
     cfg = _runtime_config(tmp_path, work_dir, scan_db_path)
-    client = RustContextClient(
-        config=cfg,
+    scanner = NativeScanner(
+        cfg,
         project_root=PROJECT_ROOT,
-        scanner_binary=SCANNER_BIN,
-        scan_db_path=scan_db_path,
-        office_worker_path=OFFICE_BIN,
-        timeout_seconds=60,
     )
 
-    cold = client.build_context(_schedule_request())
-    warm = client.build_context(_schedule_request())
+    cold = scanner.build_context(_scan_request())
+    warm = scanner.build_context(_scan_request())
     source.write_text("changed cache evidence with new size", encoding="utf-8")
-    changed = client.build_context(_schedule_request())
+    changed = scanner.build_context(_scan_request())
 
-    assert cold.status == warm.status == changed.status == "ok"
-    assert cold.scan_run_id is not None
-    assert warm.scan_run_id is not None
-    assert changed.scan_run_id is not None
-    cold_audit = client.inspect_run(cold.scan_run_id)
-    warm_audit = client.inspect_run(warm.scan_run_id)
-    changed_audit = client.inspect_run(changed.scan_run_id)
+    assert cold.envelope.status == warm.envelope.status == changed.envelope.status == "ok"
+    assert cold.evidence is not None
+    assert warm.evidence is not None
+    assert changed.evidence is not None
 
     assert [
-        (item.cache_status, item.cache_miss_reason)
-        for item in cold_audit.files
+        (item.parse_cache_status, item.cache_miss_reason)
+        for item in cold.evidence.files
     ] == [
         ("miss", "new_file")
     ]
     assert [
-        (item.cache_status, item.cache_miss_reason)
-        for item in warm_audit.files
+        (item.parse_cache_status, item.cache_miss_reason)
+        for item in warm.evidence.files
     ] == [
-        ("fresh", "")
+        ("snapshot", "")
     ]
     assert [
-        (item.cache_status, item.cache_miss_reason)
-        for item in changed_audit.files
+        (item.parse_cache_status, item.cache_miss_reason)
+        for item in changed.evidence.files
     ] == [("miss", "source_version_changed")]

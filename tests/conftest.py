@@ -12,6 +12,6 @@ def rust_release_binaries() -> dict[str, Path]:
     """Rust release 二进制路径（Windows-first）。缺失时由依赖方决定跳过。"""
     release = Path(__file__).resolve().parents[1] / "rust" / "target" / "release"
     return {
-        "scanner": release / "ai-daily-scanner.exe",
+        "scanner_native": release / "ai_daily_scanner_native.dll",
         "office_parser": release / "ai-daily-office-parser.exe",
     }

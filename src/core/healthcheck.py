@@ -9,10 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import Config, UnknownScannerContractFieldsError, config
-from ..services.rust_context_client import (
-    RustContextClient,
-    RustContextProbeError,
-)
+from ..services.native_scanner import NativeScanner, NativeScannerError
 
 TEMPLATE_FILES: tuple[str, ...] = (
     "system_prompt.md",
@@ -225,65 +222,30 @@ def _append_strict_rust_core_checks(
     cfg: Any,
     project_root: Path,
 ) -> None:
-    """Validate the effective Rust production path without exposing stderr."""
+    """验证原生 scanner 与两个隔离 worker，不暴露底层错误内容。"""
 
-    engine = str(getattr(cfg, "scanner_engine", "")).strip().lower()
-    result.info["Scanner Engine"] = engine
-    if engine != "rust_v2":
-        result.errors.append("严格模式要求 scanner.engine=rust_v2")
-        return
+    result.info["Scanner Interface"] = "native"
 
     try:
-        configured_timeout = float(
-            getattr(cfg, "rust_process_timeout_seconds", 30.0)
-        )
-        client = RustContextClient(
-            config=cfg,
+        doctor = NativeScanner(
+            cfg,
             project_root=project_root,
-            scanner_binary=getattr(cfg, "rust_scanner_bin"),
-            scan_db_path=getattr(cfg, "rust_index_db_path"),
-            office_worker_path=getattr(cfg, "rust_office_parser_bin"),
-            timeout_seconds=min(configured_timeout, 30.0),
         )
-        version = client.version()
-    except RustContextProbeError as exc:
-        result.errors.append(
-            "Rust scanner version/contract check failed "
-            f"({exc.kind})"
-        )
+        doctor = doctor.doctor()
+    except NativeScannerError as exc:
+        result.errors.append(f"Native scanner doctor failed ({exc.error_code})")
         return
     except Exception as exc:
         result.errors.append(
-            "Rust scanner version/contract check failed "
-            f"({type(exc).__name__})"
+            f"Native scanner doctor failed ({type(exc).__name__})"
         )
         return
 
-    result.info["Rust Scanner Contract"] = (
-        f"{version.contract}/v{version.protocol_version}"
+    result.info["Native Scanner Contract"] = (
+        f"{doctor.contract}/v{doctor.protocol_version}"
     )
-    result.info["Rust Scanner Engine"] = (
-        f"{version.engine_version} ({version.target_triple})"
-    )
-    result.info["Rust Scanner Build"] = version.engine_build
-
-    try:
-        doctor = client.doctor()
-    except RustContextProbeError as exc:
-        result.errors.append(f"Rust scanner doctor failed ({exc.kind})")
-        return
-    except Exception as exc:
-        result.errors.append(
-            f"Rust scanner doctor failed ({type(exc).__name__})"
-        )
-        return
-
-    if (
-        doctor.engine_version != version.engine_version
-        or doctor.engine_build != version.engine_build
-    ):
-        result.errors.append("Rust scanner doctor identity mismatch")
-        return
+    result.info["Native Scanner Engine"] = doctor.engine_version
+    result.info["Native Scanner Build"] = doctor.engine_build
 
     checks = {check.name: check for check in doctor.checks}
     # 严格部署验证完整生产包；即使当前 profile 暂不使用某个 worker，
@@ -291,11 +253,11 @@ def _append_strict_rust_core_checks(
     for check_name in STRICT_RUST_PACKAGE_CHECKS:
         check = checks.get(check_name)
         if check is None:
-            result.errors.append(f"Rust strict check missing: {check_name}")
+            result.errors.append(f"Native strict check missing: {check_name}")
             continue
-        result.info[f"Rust {check_name}"] = str(check.status)
+        result.info[f"Scanner {check_name}"] = str(check.status)
         if check.status != "ok":
-            result.errors.append(f"Rust strict check failed: {check_name}")
+            result.errors.append(f"Native strict check failed: {check_name}")
 
 
 def _append_installed_containment_checks(

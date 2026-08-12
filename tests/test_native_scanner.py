@@ -92,7 +92,9 @@ def test_native_module_is_lazy(monkeypatch) -> None:
     monkeypatch.setattr(importlib, "import_module", fake_import)
     assert calls == []
 
-    NativeScanner(_runtime_config())
+    scanner = NativeScanner(_runtime_config())
+    assert calls == []
+    scanner.doctor()
 
     assert calls == ["ai_daily_scanner_native"]
 
