@@ -136,6 +136,7 @@ def test_rust_workspace_keeps_discovery_as_a_library_only() -> None:
     assert set(workspace["workspace"]["members"]) == {
         "discovery",
         "office_parser",
+        "scanner_native",
         "scanner_cli",
         "scanner_contract",
         "scanner_core",

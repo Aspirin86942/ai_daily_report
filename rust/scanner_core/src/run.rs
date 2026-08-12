@@ -36,7 +36,7 @@ use crate::parsers::{
     WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
 };
 use crate::process::WorkerRssTracker;
-use crate::scanner::Scanner;
+use crate::scanner::{ScanRequest, Scanner, ScannerConfig};
 use crate::scheduler::{
     BudgetedContextScheduler, BudgetedScanOutcome, Clock, RealClock, RealGuardVerifier,
     RunDeadlines, ScheduledRunInput, TerminalIntent, WorkerIdentities,
@@ -148,7 +148,14 @@ pub fn dispatch_with_response_version(
                     Ok(request) => request,
                     Err(_) => return invalid_request_output(),
                 };
-                let operation = Scanner.build_context(&request)?;
+                let scanner = Scanner::open(ScannerConfig::from_build_request(&request))
+                    .map_err(|error| EngineShellError::Evidence(error.to_string()))?;
+                let operation = scanner
+                    .build_context_with_request_id(
+                        &ScanRequest::from_build_request(&request),
+                        request.request_id.clone(),
+                    )
+                    .map_err(|error| EngineShellError::Evidence(error.to_string()))?;
                 CommandOutput::with_exit(&operation.value.envelope, operation.exit_code)
             }
             "doctor" => {
@@ -156,7 +163,24 @@ pub fn dispatch_with_response_version(
                     Ok(request) => request,
                     Err(_) => return invalid_request_output(),
                 };
-                let operation = Scanner.doctor(&request)?;
+                let config = ScannerConfig {
+                    work_dir: request.scan_db_path.rsplit_once(['/', '\\']).map_or_else(
+                        || request.scan_db_path.clone(),
+                        |(parent, _)| parent.to_string(),
+                    ),
+                    scan_db_path: request.scan_db_path.clone(),
+                    scanner_profile: ai_daily_scanner_contract::ScannerProfile::V2(
+                        serde_json::from_value(
+                            serde_json::json!({"schema_version": "scanner_profile_v2"}),
+                        )?,
+                    ),
+                    adapters: request.adapters.clone(),
+                };
+                let scanner = Scanner::open(config)
+                    .map_err(|error| EngineShellError::Evidence(error.to_string()))?;
+                let operation = scanner
+                    .doctor_with_request_id(request.request_id.clone())
+                    .map_err(|error| EngineShellError::Evidence(error.to_string()))?;
                 CommandOutput::with_exit(&operation.value, operation.exit_code)
             }
             "inspect-run" => {

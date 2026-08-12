@@ -1,0 +1,15 @@
+[package]
+name = "ai-daily-scanner-native"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "ai_daily_scanner_native"
+crate-type = ["cdylib"]
+
+[dependencies]
+ai-daily-scanner-contract = { path = "../scanner_contract" }
+ai-daily-scanner-core = { path = "../scanner_core" }
+pyo3 = { version = "0.29.2", features = ["extension-module"] }
+pythonize = "0.29.0"
+serde.workspace = true

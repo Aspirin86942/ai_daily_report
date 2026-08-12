@@ -5,7 +5,7 @@ mod windows {
     use std::path::{Path, PathBuf};
 
     use ai_daily_scanner_contract::BuildContextRequest;
-    use ai_daily_scanner_core::Scanner;
+    use ai_daily_scanner_core::{ScanRequest, Scanner, ScannerConfig};
     use serde_json::json;
 
     fn repository_root() -> PathBuf {
@@ -68,8 +68,13 @@ mod windows {
         });
         let request_typed: BuildContextRequest =
             serde_json::from_value(request.clone()).expect("typed build request");
-        let build = Scanner
-            .build_context(&request_typed)
+        let scanner =
+            Scanner::open(ScannerConfig::from_build_request(&request_typed)).expect("open scanner");
+        let build = scanner
+            .build_context_with_request_id(
+                &ScanRequest::from_build_request(&request_typed),
+                request_typed.request_id.clone(),
+            )
             .expect("in-process build-context");
         let envelope = serde_json::to_value(&build.value.envelope).expect("build response value");
         assert_eq!(build.exit_code, 0, "{envelope}");
@@ -109,8 +114,11 @@ mod windows {
         snapshot_request["request_id"] = json!("72333333-7233-4233-8233-723333333333");
         let snapshot_request_typed: BuildContextRequest =
             serde_json::from_value(snapshot_request).expect("typed snapshot request");
-        let snapshot = Scanner
-            .build_context(&snapshot_request_typed)
+        let snapshot = scanner
+            .build_context_with_request_id(
+                &ScanRequest::from_build_request(&snapshot_request_typed),
+                snapshot_request_typed.request_id.clone(),
+            )
             .expect("in-process snapshot build-context");
         let snapshot_envelope =
             serde_json::to_value(&snapshot.value.envelope).expect("snapshot response value");
