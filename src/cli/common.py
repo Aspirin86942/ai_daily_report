@@ -54,14 +54,9 @@ def present_report_outcome(
 ) -> bool:
     """把 typed outcome 映射为既有提示、预览与 bool 退出语义。"""
     period = outcome.period
-    if period is not None and label == "周报":
+    if period is not None and label in {"周报", "月报"}:
         console.print(
-            f"\n[bold green]===== 生成周报 {period.display_label} "
-            f"({period.start_date} ~ {period.end_date}) =====[/bold green]\n"
-        )
-    elif period is not None and label == "月报":
-        console.print(
-            f"\n[bold green]===== 生成月报 {period.display_label} "
+            f"\n[bold green]===== 生成{label} {period.display_label} "
             f"({period.start_date} ~ {period.end_date}) =====[/bold green]\n"
         )
 

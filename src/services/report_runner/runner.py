@@ -112,6 +112,16 @@ class _AcceptedScan:
     evidence: ScanEvidence
 
 
+@dataclass(frozen=True, slots=True)
+class _PeriodSourceData:
+    reports: list[DailyReportData]
+    missing_days: list[str]
+    file_context: str
+    status: Literal["ok", "partial"]
+    warnings: list[Diagnostic]
+    evidence: ScanEvidence | DatabaseEvidence
+
+
 def _not_attempted(requested: bool) -> PublicationReceipt:
     return PublicationReceipt(
         requested=requested,
@@ -275,79 +285,31 @@ class ReportRunner:
         save: bool,
         supplemental: str | None,
     ) -> ReportRunOutcome:
-        reports: list[DailyReportData]
-        missing_days: list[str]
-        warnings: list[Diagnostic]
-        evidence: ScanEvidence | DatabaseEvidence
-        status: Literal["ok", "partial"]
+        source_data = self._load_period_source(mode, period, requested=save)
+        if isinstance(source_data, ReportRunFailure):
+            return source_data
 
-        if period.source == "scan":
-            accepted = self._build_scan_context(period, requested=save)
-            if isinstance(accepted, ReportRunFailure):
-                return accepted
-            reports = []
-            missing_days = []
-            file_context = accepted.file_context
-            warnings = accepted.warnings
-            evidence = accepted.evidence
-            status = accepted.status
-        else:
-            try:
-                reports, missing_days = self._read_period_reports(mode, period)
-            except Exception as exc:
-                return self._failure(
-                    mode=mode,
-                    source="db",
-                    period=period,
-                    phase="source",
-                    error_code=ErrorCode.SOURCE_READ_FAILED,
-                    message=str(exc),
-                    retryable=False,
-                    requested=save,
-                    cause=type(exc).__name__,
-                )
-            if not reports:
-                return self._failure(
-                    mode=mode,
-                    source="db",
-                    period=period,
-                    phase="source",
-                    error_code=ErrorCode.NO_SOURCE_REPORTS,
-                    message=f"未找到 {period.display_label} 的日报数据",
-                    retryable=False,
-                    requested=save,
-                )
-            reports = sorted(reports, key=lambda report: report.date)
-            missing_days = sorted(missing_days)
-            file_context = "无文件证据"
-            warnings = []
-            evidence = DatabaseEvidence(
-                report_count=len(reports),
-                missing_days=list(missing_days),
-            )
-            status = "ok"
-
+        file_context = source_data.file_context
         if supplemental is not None and supplemental.strip():
             file_context = f"{file_context}\n\n---\n\n用户补充: {supplemental}"
 
-        generation_request: GenerationRequest
         if mode == "weekly":
             year, week, _ = period.start_date.isocalendar()
-            generation_request = WeeklyGenerationRequest(
-                reports=reports,
+            generation_request: GenerationRequest = WeeklyGenerationRequest(
+                reports=source_data.reports,
                 file_context=file_context,
                 year=year,
                 week=week,
-                missing_days=missing_days,
+                missing_days=source_data.missing_days,
                 data_source=period.source,
             )
             expected_type = WeeklyReportData
         else:
             generation_request = MonthlyGenerationRequest(
-                reports=reports,
+                reports=source_data.reports,
                 file_context=file_context,
                 year_month=period.display_label,
-                missing_days=missing_days,
+                missing_days=source_data.missing_days,
                 data_source=period.source,
             )
             expected_type = MonthlyReportData
@@ -359,20 +321,19 @@ class ReportRunner:
             source=period.source,
             period=period,
             requested=save,
-            warnings=warnings,
-            evidence=evidence,
+            warnings=source_data.warnings,
+            evidence=source_data.evidence,
         )
         if isinstance(generated, ReportRunFailure):
             return generated
 
         if mode == "weekly":
             report = cast(WeeklyReportData, generated)
-            year, week, _ = period.start_date.isocalendar()
             return self._render_and_publish(
                 mode=mode,
                 source=period.source,
                 period=period,
-                status=status,
+                status=source_data.status,
                 report=report,
                 save=save,
                 render=self.renderer.render_weekly_markdown,
@@ -380,8 +341,8 @@ class ReportRunner:
                 save_markdown=lambda markdown: self.renderer.save_weekly_markdown(
                     markdown, year, week
                 ),
-                warnings=warnings,
-                evidence=evidence,
+                warnings=source_data.warnings,
+                evidence=source_data.evidence,
             )
 
         report = cast(MonthlyReportData, generated)
@@ -389,7 +350,7 @@ class ReportRunner:
             mode=mode,
             source=period.source,
             period=period,
-            status=status,
+            status=source_data.status,
             report=report,
             save=save,
             render=self.renderer.render_monthly_markdown,
@@ -397,8 +358,68 @@ class ReportRunner:
             save_markdown=lambda markdown: self.renderer.save_monthly_markdown(
                 markdown, period.display_label
             ),
-            warnings=warnings,
-            evidence=evidence,
+            warnings=source_data.warnings,
+            evidence=source_data.evidence,
+        )
+
+    def _load_period_source(
+        self,
+        mode: PeriodMode,
+        period: ResolvedPeriod,
+        *,
+        requested: bool,
+    ) -> _PeriodSourceData | ReportRunFailure:
+        if period.source == "scan":
+            accepted = self._build_scan_context(period, requested=requested)
+            if isinstance(accepted, ReportRunFailure):
+                return accepted
+            return _PeriodSourceData(
+                reports=[],
+                missing_days=[],
+                file_context=accepted.file_context,
+                status=accepted.status,
+                warnings=accepted.warnings,
+                evidence=accepted.evidence,
+            )
+
+        try:
+            reports, missing_days = self._read_period_reports(mode, period)
+        except Exception as exc:
+            return self._failure(
+                mode=mode,
+                source="db",
+                period=period,
+                phase="source",
+                error_code=ErrorCode.SOURCE_READ_FAILED,
+                message=str(exc),
+                retryable=False,
+                requested=requested,
+                cause=type(exc).__name__,
+            )
+        if not reports:
+            return self._failure(
+                mode=mode,
+                source="db",
+                period=period,
+                phase="source",
+                error_code=ErrorCode.NO_SOURCE_REPORTS,
+                message=f"未找到 {period.display_label} 的日报数据",
+                retryable=False,
+                requested=requested,
+            )
+
+        reports = sorted(reports, key=lambda report: report.date)
+        missing_days = sorted(missing_days)
+        return _PeriodSourceData(
+            reports=reports,
+            missing_days=missing_days,
+            file_context="无文件证据",
+            status="ok",
+            warnings=[],
+            evidence=DatabaseEvidence(
+                report_count=len(reports),
+                missing_days=list(missing_days),
+            ),
         )
 
     def _build_scan_context(

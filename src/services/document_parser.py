@@ -125,16 +125,13 @@ def _parse_docx(
         DEFAULT_DOCX_MAX_PARAGRAPHS,
     )
     if paragraphs:
-        if not builder.add("# DOCX preview"):
-            truncated = True
-        if not builder.add("## Paragraphs"):
-            truncated = True
+        builder.add("# DOCX preview")
+        builder.add("## Paragraphs")
         for index, paragraph in enumerate(paragraphs):
             if index >= max_paragraphs:
                 truncated = True
                 break
             if not builder.add(paragraph):
-                truncated = True
                 break
         if len(paragraphs) > max_paragraphs:
             truncated = True
@@ -156,14 +153,10 @@ def _parse_docx(
             break
         markdown, table_truncated = _docx_table_to_markdown(table, max_rows, max_cols)
         truncated = truncated or table_truncated
-        if markdown:
-            if not builder.add(f"## Table {table_index + 1}\n\n{markdown}"):
-                truncated = True
-                break
+        if markdown and not builder.add(f"## Table {table_index + 1}\n\n{markdown}"):
+            break
 
-    content = builder.build()
-    if not content:
-        content = "No paragraph/table text extracted"
+    content = builder.build() or "No paragraph/table text extracted"
     return WorkerParsePayload(
         file_path=str(file_path),
         file_type=file_type,
@@ -190,8 +183,7 @@ def _parse_xlsx(
     max_cols = _positive_limit(limits, "excel_max_columns", DEFAULT_EXCEL_MAX_COLUMNS)
 
     try:
-        if not builder.add("# XLSX preview"):
-            truncated = True
+        builder.add("# XLSX preview")
         for sheet_index, sheet_name in enumerate(workbook.sheetnames):
             if sheet_index >= max_sheets:
                 truncated = True
@@ -214,10 +206,8 @@ def _parse_xlsx(
                     break
                 rows.append([_format_cell(cell) for cell in raw_row[:max_cols]])
             markdown = _rows_to_markdown(rows)
-            if markdown:
-                if not builder.add(f"## Sheet: {sheet_name}\n\n{markdown}"):
-                    truncated = True
-                    break
+            if markdown and not builder.add(f"## Sheet: {sheet_name}\n\n{markdown}"):
+                break
     finally:
         workbook.close()
 
@@ -245,8 +235,7 @@ def _parse_pptx(
     truncated = False
     max_slides = _positive_limit(limits, "pptx_max_slides", DEFAULT_PPTX_MAX_SLIDES)
 
-    if not builder.add("# PPTX preview"):
-        truncated = True
+    builder.add("# PPTX preview")
     for slide_index, slide in enumerate(presentation.slides):
         if slide_index >= max_slides:
             truncated = True
@@ -268,7 +257,6 @@ def _parse_pptx(
             if not builder.add(
                 f"## Slide {slide_index + 1}\n\n" + "\n\n".join(slide_parts)
             ):
-                truncated = True
                 break
 
     content = builder.build() or "No slide text extracted"
@@ -295,8 +283,7 @@ def _parse_pdf(
     extracted_any_text = False
     max_pages = _positive_limit(limits, "pdf_max_pages", 5)
 
-    if not builder.add("# PDF text preview"):
-        truncated = True
+    builder.add("# PDF text preview")
     with pdfplumber.open(file_path) as pdf:
         for page_index, page in enumerate(pdf.pages):
             if page_index >= max_pages:
@@ -306,7 +293,6 @@ def _parse_pdf(
             if text.strip():
                 extracted_any_text = True
                 if not builder.add(f"## Page {page_index + 1}\n\n{text.strip()}"):
-                    truncated = True
                     _close_pdf_page(page)
                     break
             _close_pdf_page(page)
