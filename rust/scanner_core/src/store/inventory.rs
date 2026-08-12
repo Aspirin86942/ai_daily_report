@@ -353,7 +353,7 @@ pub(crate) fn insert_file_results(
         )",
     )?;
     let mut execution_statement = transaction.prepare_cached(
-        "INSERT INTO scan_file_execution_v2(
+        "INSERT INTO scan_file_execution(
             scan_run_id, file_identity, parse_transport, parse_attempt_count,
             classification_status, classification_page_count,
             classification_cache_status, classification_cache_miss_reason,

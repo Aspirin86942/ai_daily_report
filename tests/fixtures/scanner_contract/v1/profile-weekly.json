@@ -1,6 +1,4 @@
 {
-  "schema_version": "normalized_scanner_profile_v1",
-  "parser_profile_version": "v1",
   "report_mode": "weekly",
   "discovery": {
     "allowed_extensions": [
@@ -49,7 +47,7 @@
         "python_sharepoint_text_v2"
       ],
       "fallback_after_timeout": false,
-      "fallback_policy_version": "hybrid_v1",
+      "fallback_policy_version": "worker_v2_fixed_routing",
       "legacy_extensions_enabled": false,
       "excel_max_sheets": 2,
       "excel_max_rows": 10,
@@ -75,7 +73,17 @@
     "small_file_max_bytes": 65536,
     "medium_file_max_bytes": 1048576,
     "large_file_max_bytes": 10485760,
-    "priority_policy_version": "default_v1",
-    "compression_policy_version": "markdown_context_v1"
-  }
+    "priority_policy_version": "budget_nominal_v2",
+    "compression_policy_version": "markdown_context_v2"
+  },
+  "admission_policy_version": "budget_admission_v2",
+  "classifier_policy_version": "pdf_text_presence_v1",
+  "max_candidate_files": 192,
+  "max_pdf_text_extractions": 12,
+  "max_total_pdf_classification_pages": 100,
+  "pdf_classification_timeout_ms": 2000,
+  "total_deadline_ms": 15000,
+  "worker_max_requests": 128,
+  "worker_idle_ttl_ms": 30000,
+  "worker_rss_limit_bytes": 536870912
 }

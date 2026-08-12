@@ -100,14 +100,14 @@ class NativeScanner:
             "scan_db_path": str(
                 _resolve_path(
                     root,
-                    index_db_path or runtime_config.rust_index_db_path,
+                    index_db_path or runtime_config.index_db_path,
                 )
             ),
-            "scanner_profile": runtime_config.scanner_contract_profile(),
+            "scanner_settings": runtime_config.scanner_settings(),
             "office_worker_path": str(
                 _resolve_executable(
                     root,
-                    runtime_config.rust_office_parser_bin,
+                    runtime_config.office_worker_path,
                 )
             ),
             "python_executable": str(Path(sys.executable).resolve()),

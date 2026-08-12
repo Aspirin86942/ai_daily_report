@@ -6,10 +6,9 @@ use ai_daily_scanner_contract::{
     AuditWorkerLane, BuildContextRequest, CacheMissReason, CacheStatus, ContextAction,
     ContextDecision, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
     DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest,
-    InspectRunResponse, InspectStatus, MaintenanceRequestV1, MaintenanceStatus, Nullable,
-    ParseStatus, RunStatus, StageMetric, StageName, TransportErrorResponse,
-    UpgradeDatabaseRequestV1, UpgradeStatus, Validate, VersionResponse, VersionResponseV2,
-    WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
+    InspectRunResponse, InspectStatus, Nullable, ParseStatus, RunStatus, StageMetric, StageName,
+    TransportErrorResponse, Validate, VersionResponse, WorkerDiagnosticV1,
+    WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
 };
 use chrono::NaiveDate;
 use serde::de::DeserializeOwned;
@@ -26,7 +25,7 @@ use crate::artifact::{
     snapshot_key_parts, ArtifactDecisionRow, ArtifactDraft, ArtifactFileRow, ClassifierIdentity,
     PdfClassificationProvenanceV1, SemanticSummary, CLASSIFIER_CONTRACT_VERSION,
 };
-use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
+use crate::config::normalize_scanner_settings;
 use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
 use crate::parsers::classifier::ClassifierPort;
 use crate::parsers::{
@@ -118,9 +117,7 @@ pub fn dispatch(command: &str, input: &[u8]) -> Result<CommandOutput, EngineShel
     dispatch_with_response_version(command, input, 1)
 }
 
-/// CLI entry that honors `--response-version N` (spec Part 5.3): response
-/// version 2 serves the strict `InspectRunResponseV2` / `VersionResponseV2`
-/// surfaces; version 1 (default) keeps the frozen v1 projection unchanged.
+/// Legacy CLI adapter for the remaining build/doctor/inspect compatibility tests.
 pub fn dispatch_with_response_version(
     command: &str,
     input: &[u8],
@@ -128,7 +125,7 @@ pub fn dispatch_with_response_version(
 ) -> Result<CommandOutput, EngineShellError> {
     if response_version == 2 {
         match command {
-            "version" => CommandOutput::success(&version_response_v2()),
+            "version" => CommandOutput::success(&version_response()),
             "inspect-run" => {
                 let request = match decode_request::<InspectRunRequest>(input) {
                     Ok(request) => request,
@@ -167,11 +164,7 @@ pub fn dispatch_with_response_version(
                         |(parent, _)| parent.to_string(),
                     ),
                     scan_db_path: request.scan_db_path.clone(),
-                    scanner_profile: ai_daily_scanner_contract::ScannerProfile::V2(
-                        serde_json::from_value(
-                            serde_json::json!({"schema_version": "scanner_profile_v2"}),
-                        )?,
-                    ),
+                    scanner_settings: serde_json::from_value(serde_json::json!({}))?,
                     adapters: request.adapters.clone(),
                 };
                 let scanner = Scanner::open(config)
@@ -188,53 +181,9 @@ pub fn dispatch_with_response_version(
                 };
                 inspect_run_command(&request)
             }
-            "upgrade-db" => {
-                let request = match decode_request::<UpgradeDatabaseRequestV1>(input) {
-                    Ok(request) => request,
-                    Err(_) => return invalid_request_output(),
-                };
-                upgrade_database_command(&request)
-            }
-            "maintenance" => {
-                let request = match decode_request::<MaintenanceRequestV1>(input) {
-                    Ok(request) => request,
-                    Err(_) => return invalid_request_output(),
-                };
-                maintenance_command(&request)
-            }
             _ => invalid_request_output(),
         }
     }
-}
-
-fn maintenance_command(request: &MaintenanceRequestV1) -> Result<CommandOutput, EngineShellError> {
-    let response = ScannerStore::maintenance(request);
-    debug_assert!(
-        response.validate().is_ok(),
-        "maintenance response violates the wire contract"
-    );
-    let exit_code = if response.status == MaintenanceStatus::Error {
-        1
-    } else {
-        0
-    };
-    CommandOutput::with_exit(&response, exit_code)
-}
-
-fn upgrade_database_command(
-    request: &UpgradeDatabaseRequestV1,
-) -> Result<CommandOutput, EngineShellError> {
-    let response = ScannerStore::upgrade_database(request);
-    debug_assert!(
-        response.validate().is_ok(),
-        "upgrade-db response violates the wire contract"
-    );
-    let exit_code = if response.status == UpgradeStatus::Error {
-        1
-    } else {
-        0
-    };
-    CommandOutput::with_exit(&response, exit_code)
 }
 
 pub(crate) fn doctor_command(request: &DoctorRequest) -> Result<CommandOutput, EngineShellError> {
@@ -381,8 +330,8 @@ fn inspect_run_command(request: &InspectRunRequest) -> Result<CommandOutput, Eng
     };
     match store.inspect_run(request.scan_run_id, request.include_content) {
         Ok(snapshot) => {
-            // spec Part 5.3: full_v2 rows are projected lossily into v1 and the
-            // projection warnings are appended (output-only, bounded to 257).
+            // Current evidence is projected lossily into v1 and the projection
+            // warnings are appended (output-only, bounded to 257).
             let warnings =
                 crate::inspect::v1_lossy_projection_warnings(&snapshot, &snapshot.warnings);
             let response = InspectRunResponse {
@@ -422,8 +371,6 @@ fn inspect_run_command(request: &InspectRunRequest) -> Result<CommandOutput, Eng
 }
 
 /// `inspect-run --response-version 2`: returns the strict `InspectRunResponseV2`.
-/// Migrated v1 runs fail closed with `INSPECT_V2_PROVENANCE_UNAVAILABLE` and the
-/// sentinel execution metrics (spec Part 5.3) — never fake 0/null evidence.
 fn inspect_run_command_v2(request: &InspectRunRequest) -> Result<CommandOutput, EngineShellError> {
     let mut store = match ScannerStore::open_existing(Path::new(&request.scan_db_path)) {
         Ok(store) => store,
@@ -442,48 +389,29 @@ fn inspect_run_command_v2(request: &InspectRunRequest) -> Result<CommandOutput, 
     };
     match store.inspect_run(request.scan_run_id, request.include_content) {
         Ok(snapshot) => {
-            let response = match snapshot.audit_provenance_version {
-                Some(crate::context_audit::AuditProvenanceVersion::MigratedV1) => {
-                    crate::inspect::inspect_v2_error(
-                        request,
-                        ErrorCode::InspectV2ProvenanceUnavailable,
-                        "migrated v1 run lacks v2 provenance".to_string(),
-                        false,
-                        Some(snapshot.run_status),
-                    )
-                }
-                Some(crate::context_audit::AuditProvenanceVersion::FullV2) => {
-                    if snapshot.files_v2.iter().any(|row| {
-                        row.parse_transport.is_none() || row.parse_attempt_count.is_none()
-                    }) {
-                        crate::inspect::inspect_v2_error(
-                            request,
-                            ErrorCode::InspectV2ProvenanceUnavailable,
-                            "historical full-v2 run lacks per-file execution provenance"
-                                .to_string(),
-                            false,
-                            Some(snapshot.run_status),
-                        )
-                    } else {
-                        match crate::inspect::assemble_inspect_v2(request, &snapshot) {
-                            Ok(response) => return CommandOutput::success(&response),
-                            Err(message) => crate::inspect::inspect_v2_error(
-                                request,
-                                ErrorCode::RunCorrupt,
-                                message,
-                                false,
-                                Some(snapshot.run_status),
-                            ),
-                        }
-                    }
-                }
-                None => crate::inspect::inspect_v2_error(
+            let response = if snapshot
+                .files_v2
+                .iter()
+                .any(|row| row.parse_transport.is_none() || row.parse_attempt_count.is_none())
+            {
+                crate::inspect::inspect_v2_error(
                     request,
-                    ErrorCode::RunCorrupt,
-                    "nonterminal run has no v2 provenance".to_string(),
+                    ErrorCode::InspectV2ProvenanceUnavailable,
+                    "run lacks per-file execution provenance".to_string(),
                     false,
                     Some(snapshot.run_status),
-                ),
+                )
+            } else {
+                match crate::inspect::assemble_inspect_v2(request, &snapshot) {
+                    Ok(response) => return CommandOutput::success(&response),
+                    Err(message) => crate::inspect::inspect_v2_error(
+                        request,
+                        ErrorCode::RunCorrupt,
+                        message,
+                        false,
+                        Some(snapshot.run_status),
+                    ),
+                }
             };
             CommandOutput::with_exit(&response, 1)
         }
@@ -553,10 +481,7 @@ pub(crate) fn build_context_command(
             return build_error_output(request, &version, error, Vec::new(), empty_summary(), None);
         }
     };
-    let profile = match normalize_scanner_profile_for_request(
-        &request.scanner_profile,
-        request.report_mode,
-    ) {
+    let profile = match normalize_scanner_settings(&request.scanner_settings, request.report_mode) {
         Ok(profile) => profile,
         Err(message) => {
             return build_error_output(
@@ -574,8 +499,8 @@ pub(crate) fn build_context_command(
             );
         }
     };
-    let v2_profile =
-        match normalize_scanner_profile_v2(&request.scanner_profile, request.report_mode) {
+    let normalized_settings =
+        match normalize_scanner_settings(&request.scanner_settings, request.report_mode) {
             Ok(profile) => profile,
             Err(message) => {
                 return build_error_output(
@@ -655,7 +580,7 @@ pub(crate) fn build_context_command(
     };
     // The only monotonic origin for this run is created immediately after the
     // begin_run COMMIT. Handshake/discovery time must consume this same budget.
-    let timing = match ActiveRunTiming::start(v2_profile.total_deadline_ms) {
+    let timing = match ActiveRunTiming::start(normalized_settings.total_deadline_ms) {
         Ok(timing) => timing,
         Err(message) => {
             let abandon_error = current_time_millis()
@@ -684,7 +609,7 @@ pub(crate) fn build_context_command(
         request,
         &version,
         &profile,
-        &v2_profile,
+        &normalized_settings,
         &work_dir,
         store,
         worker_pools,
@@ -699,8 +624,8 @@ pub(crate) fn build_context_command(
 fn execute_active_build(
     request: &BuildContextRequest,
     version: &VersionResponse,
-    profile: &ai_daily_scanner_contract::NormalizedScannerProfileV1,
-    v2_profile: &ai_daily_scanner_contract::NormalizedScannerProfileV2,
+    profile: &ai_daily_scanner_contract::NormalizedScannerSettings,
+    normalized_settings: &ai_daily_scanner_contract::NormalizedScannerSettings,
     work_dir: &Path,
     store: &mut ScannerStore,
     worker_pools: &mut ScannerWorkerPools,
@@ -895,7 +820,7 @@ fn execute_active_build(
     let discovery_duration_ms = elapsed_ms(discovery_started);
 
     // ---- assemble + execute the deep-module scheduler ----
-    let params = crate::session::SessionParams::from_profile_v2(v2_profile);
+    let params = crate::session::SessionParams::from_settings(normalized_settings);
     let (office_pool, python_pool) = worker_pools.resolve(
         office_command,
         office_worker.clone(),
@@ -1098,7 +1023,7 @@ fn execute_active_build(
             .classifier_build
             .clone()
             .unwrap_or_else(|| "0".repeat(64)),
-        profile_hash: match crate::store::classifier_profile_hash(v2_profile) {
+        profile_hash: match crate::store::classifier_profile_hash(normalized_settings) {
             Ok(hash) => hash,
             Err(message) => {
                 return finish_active_error(
@@ -1126,7 +1051,7 @@ fn execute_active_build(
         request,
         &discovery.files,
         &discovery.issues,
-        v2_profile,
+        normalized_settings,
         &version.engine_build,
         &worker_identities,
         &classifier_identity,
@@ -1232,7 +1157,7 @@ fn execute_active_build(
         work_dir.to_string_lossy().into_owned(),
         discovery.files,
         discovery.issues,
-        v2_profile.clone(),
+        normalized_settings.clone(),
         worker_identities.clone(),
         version.engine_version.clone(),
         version.engine_build.clone(),
@@ -1346,7 +1271,7 @@ fn execute_active_build(
     // artifact with no rows). Built before the outcome is consumed by the batch.
     let artifact_draft = match build_batch_artifact(
         &outcome,
-        v2_profile,
+        normalized_settings,
         &worker_identities,
         &classifier_identity.profile_hash,
     ) {
@@ -2062,7 +1987,7 @@ fn finalize_snapshot_hit(
 #[allow(clippy::too_many_arguments)]
 fn build_batch_artifact(
     outcome: &BudgetedScanOutcome,
-    v2_profile: &ai_daily_scanner_contract::NormalizedScannerProfileV2,
+    normalized_settings: &ai_daily_scanner_contract::NormalizedScannerSettings,
     worker_identities: &WorkerIdentities,
     classifier_profile_hash: &str,
 ) -> Result<Option<ArtifactDraft>, String> {
@@ -2095,7 +2020,7 @@ fn build_batch_artifact(
     if eligible {
         let file_rows = artifact_file_rows(
             outcome,
-            v2_profile,
+            normalized_settings,
             worker_identities,
             classifier_profile_hash,
         );
@@ -2123,7 +2048,7 @@ fn build_batch_artifact(
 #[allow(clippy::too_many_arguments)]
 fn artifact_file_rows(
     outcome: &BudgetedScanOutcome,
-    v2_profile: &ai_daily_scanner_contract::NormalizedScannerProfileV2,
+    normalized_settings: &ai_daily_scanner_contract::NormalizedScannerSettings,
     worker_identities: &WorkerIdentities,
     classifier_profile_hash: &str,
 ) -> Vec<ArtifactFileRow> {
@@ -2160,7 +2085,7 @@ fn artifact_file_rows(
                     {
                         0
                     } else {
-                        v2_profile.parse.pdf.max_pages
+                        normalized_settings.parse.pdf.max_pages
                     },
                     classifier_build: classifier_build.clone(),
                     classifier_profile_hash: classifier_profile_hash.to_string(),
@@ -2392,7 +2317,7 @@ fn worker_fingerprint(worker: &RegisteredWorker) -> WorkerFingerprint {
 
 fn route_stack_fingerprints(
     version: &VersionResponse,
-    profile: &ai_daily_scanner_contract::NormalizedScannerProfileV1,
+    profile: &ai_daily_scanner_contract::NormalizedScannerSettings,
     office_worker: &RegisteredWorker,
     python_worker: &RegisteredWorker,
 ) -> Result<RouteStackFingerprints, String> {
@@ -2512,7 +2437,7 @@ fn attach_source_guards(files: &mut [DiscoveredFileOut], observer: &SourceGuardO
 fn discover_with_timeout(
     work_dir: &Path,
     request: &BuildContextRequest,
-    profile: &ai_daily_scanner_contract::NormalizedScannerProfileV1,
+    profile: &ai_daily_scanner_contract::NormalizedScannerSettings,
     timeout: Duration,
 ) -> Result<DiscoveryReport, Diagnostic> {
     let start_date = NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d").map_err(|_| {
@@ -3057,43 +2982,6 @@ pub fn version_response() -> VersionResponse {
     }
 }
 
-/// `version --response-version 2` (spec Part 5.3): deny-unknown strict
-/// `VersionResponseV2` with the canonical capability arrays and the
-/// engine-owned `cache_retention_v1` constants echoed from Plan 2.
-pub fn version_response_v2() -> VersionResponseV2 {
-    VersionResponseV2 {
-        contract: "ai_daily_context".to_string(),
-        protocol_version: 1,
-        response_version: 2,
-        binary_name: "ai-daily-scanner".to_string(),
-        engine_version: env!("CARGO_PKG_VERSION").to_string(),
-        engine_build: env!("AI_DAILY_ENGINE_BUILD").to_string(),
-        target_triple: target_triple(),
-        supported_commands: vec![
-            "version".to_string(),
-            "doctor".to_string(),
-            "build-context".to_string(),
-            "inspect-run".to_string(),
-            "maintenance".to_string(),
-            "upgrade-db".to_string(),
-        ],
-        office_worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
-        python_worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
-        accepted_scanner_profile_versions: vec![
-            "scanner_profile_v1".to_string(),
-            "scanner_profile_v2".to_string(),
-        ],
-        inspect_response_versions: vec![1, 2],
-        classifier_contract_versions: vec![CLASSIFIER_CONTRACT_VERSION.to_string()],
-        session_contract_versions: vec![WORKER_CONTRACT_VERSION.to_string()],
-        maintenance_contract_versions: vec!["ai_daily_scanner_maintenance_v1".to_string()],
-        upgrade_contract_versions: vec!["ai_daily_scanner_upgrade_v1".to_string()],
-        source_guard_policy: "source_guard_v2".to_string(),
-        max_source_files_per_run: ai_daily_scanner_contract::MAX_SOURCE_FILES_PER_RUN,
-        cache_retention_policy: crate::store::cache::cache_retention_policy(),
-    }
-}
-
 fn target_triple() -> String {
     let arch = std::env::consts::ARCH;
     if cfg!(all(target_os = "windows", target_env = "msvc")) {
@@ -3224,9 +3112,8 @@ mod tests {
             .into_owned();
         request.adapters.python_module_root = directory.path().to_string_lossy().into_owned();
 
-        let profile =
-            normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode)
-                .expect("normalized scanner profile");
+        let profile = normalize_scanner_settings(&request.scanner_settings, request.report_mode)
+            .expect("normalized scanner profile");
         let canonical =
             ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
         let runtime =

@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ai_daily_scanner_contract::{
     AdapterPaths, BuildContextRequest, CompressionProfile, ContextEnvelope, DoctorRequest,
-    DoctorResponse, InspectRunRequest, InspectRunResponseV2, Nullable, ReportMode, ScannerProfile,
+    DoctorResponse, InspectRunRequest, InspectRunResponseV2, Nullable, ReportMode, ScannerSettings,
     Validate,
 };
 use serde::Serialize;
@@ -38,7 +38,7 @@ pub struct ContextResult {
 pub struct ScannerConfig {
     pub work_dir: String,
     pub scan_db_path: String,
-    pub scanner_profile: ScannerProfile,
+    pub scanner_settings: ScannerSettings,
     pub adapters: AdapterPaths,
 }
 
@@ -241,7 +241,7 @@ impl Scanner {
             report_mode: request.report_mode,
             compression_profile: Nullable(request.compression_profile),
             scan_db_path: self.config.scan_db_path.clone(),
-            scanner_profile: self.config.scanner_profile.clone(),
+            scanner_settings: self.config.scanner_settings.clone(),
             adapters: self.config.adapters.clone(),
         };
         wire_request
@@ -256,7 +256,7 @@ impl ScannerConfig {
         Self {
             work_dir: request.work_dir.clone(),
             scan_db_path: request.scan_db_path.clone(),
-            scanner_profile: request.scanner_profile.clone(),
+            scanner_settings: request.scanner_settings.clone(),
             adapters: request.adapters.clone(),
         }
     }
@@ -275,7 +275,7 @@ impl ScanRequest {
 
 fn validate_config(config: &ScannerConfig) -> Result<(), ScannerError> {
     config
-        .scanner_profile
+        .scanner_settings
         .validate()
         .map_err(ScannerError::InvalidConfiguration)?;
     config

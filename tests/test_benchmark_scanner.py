@@ -319,9 +319,7 @@ def test_run_benchmark_uses_single_native_result(monkeypatch):
     monkeypatch.setattr(
         benchmark_module,
         "config",
-        SimpleNamespace(
-            rust_index_db_path="state/scan_index_v2.sqlite3",
-        ),
+        SimpleNamespace(),
     )
     args = SimpleNamespace(
         start_date=date(2026, 7, 15),

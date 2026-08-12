@@ -2,8 +2,7 @@
 //! the success-only PDF classification cache (spec Part 3/4).
 
 use ai_daily_scanner_contract::{
-    CacheMissReason, CacheRetentionPolicy, NormalizedScannerProfileV1, NormalizedScannerProfileV2,
-    Validate,
+    CacheMissReason, CacheRetentionPolicy, NormalizedScannerSettings, Validate,
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Serialize;
@@ -29,7 +28,7 @@ pub(crate) struct CacheLookupKey<'a> {
 
 // ---------------------------------------------------------------------------
 // cache_retention_v1 固定硬上限（spec Part 4 表）。这些常量由
-// VersionResponseV2 与 maintenance response 回显；调参必须另升 policy version。
+// These limits are compiled policy; changing one requires a new policy version.
 // ---------------------------------------------------------------------------
 
 pub const PARSE_CACHE_MAX_BYTES: i64 = 1_073_741_824; // 1 GiB
@@ -272,7 +271,7 @@ pub struct CacheAwarePlanEntry {
 struct ParseProfileFingerprint<'a> {
     protocol_version: u64,
     route_stack: &'a RouteStackFingerprint,
-    parser_profile_version: &'a str,
+    core_build_identity: &'a str,
     max_file_size_bytes: u64,
     default_timeout_ms: u64,
     timeout_by_extension_ms: &'a std::collections::BTreeMap<String, u64>,
@@ -282,23 +281,31 @@ struct ParseProfileFingerprint<'a> {
 pub fn parse_profile_hash(
     protocol_version: u64,
     route_stack: &RouteStackFingerprint,
-    profile: &NormalizedScannerProfileV1,
+    profile: &NormalizedScannerSettings,
 ) -> Result<String, String> {
     if protocol_version != 1 {
         return Err("parse profile hash protocol must be v1".to_string());
     }
     profile.validate()?;
+    let canonical_json = parse_profile_fingerprint_json(protocol_version, route_stack, profile)?;
+    Ok(domain_hash(b"parse-profile-v1\0", &canonical_json))
+}
+
+fn parse_profile_fingerprint_json(
+    protocol_version: u64,
+    route_stack: &RouteStackFingerprint,
+    profile: &NormalizedScannerSettings,
+) -> Result<Vec<u8>, String> {
     let input = ParseProfileFingerprint {
         protocol_version,
         route_stack,
-        parser_profile_version: &profile.parser_profile_version,
+        core_build_identity: env!("AI_DAILY_ENGINE_BUILD"),
         max_file_size_bytes: profile.execution.max_file_size_bytes,
         default_timeout_ms: profile.execution.file_timeout_ms,
         timeout_by_extension_ms: &profile.execution.file_timeout_by_extension_ms,
         parse: &profile.parse,
     };
-    let canonical_json = serde_json::to_vec(&input).map_err(|error| error.to_string())?;
-    Ok(domain_hash(b"parse-profile-v1\0", &canonical_json))
+    serde_json::to_vec(&input).map_err(|error| error.to_string())
 }
 
 pub fn sha256_hex(bytes: &[u8]) -> String {
@@ -719,7 +726,8 @@ pub(crate) fn write_success_cache_with_check(
 /// 按 spec Part 4 eviction tuple 升序删除 parse cache 行，直到
 /// `sum(entry_size_bytes) <= cap`。`recompute_rank` 由 `parser_backend` 推导；
 /// 未知 backend 排最后（防御：正常写入已 fail closed，因此只能来自历史数据）。
-pub(crate) fn evict_parse_cache(transaction: &Transaction<'_>, cap: i64) -> rusqlite::Result<()> {
+#[cfg(test)]
+fn evict_parse_cache(transaction: &Transaction<'_>, cap: i64) -> rusqlite::Result<()> {
     evict_parse_cache_with_check(transaction, cap, &|| true)
         .map_err(CacheMutationError::into_sqlite)
 }
@@ -908,7 +916,7 @@ struct ClassifierProfileFingerprint<'a> {
     pdf_classification_timeout_ms: u64,
 }
 
-pub fn classifier_profile_hash(profile: &NormalizedScannerProfileV2) -> Result<String, String> {
+pub fn classifier_profile_hash(profile: &NormalizedScannerSettings) -> Result<String, String> {
     profile.validate()?;
     let input = ClassifierProfileFingerprint {
         policy_version: &profile.classifier_policy_version,
@@ -1089,10 +1097,8 @@ pub(crate) fn write_success_classification_cache_with_check(
 /// `sum(entry_size_bytes) <= cap`。tuple 前缀为
 /// `(generation_rank, result_examined_pages, last_accessed_bucket, cached_at_ms,
 /// primary_key_bytes)`。
-pub(crate) fn evict_classification_cache(
-    transaction: &Transaction<'_>,
-    cap: i64,
-) -> rusqlite::Result<()> {
+#[cfg(test)]
+fn evict_classification_cache(transaction: &Transaction<'_>, cap: i64) -> rusqlite::Result<()> {
     evict_classification_cache_with_check(transaction, cap, &|| true)
         .map_err(CacheMutationError::into_sqlite)
 }
@@ -1243,28 +1249,23 @@ pub(crate) fn touch_classification_cache_access_with_check(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{normalize_scanner_profile, normalize_scanner_profile_v2};
-    use crate::store::schema::V2_DDL;
-    use ai_daily_scanner_contract::{
-        RawScannerProfileV1, RawScannerProfileV2, ReportMode, ScannerProfile,
-    };
+    use crate::config::normalize_scanner_settings;
+    use crate::store::schema::V3_DDL;
+    use ai_daily_scanner_contract::{ReportMode, ScannerSettings};
 
-    fn raw_profile() -> RawScannerProfileV1 {
-        serde_json::from_value(serde_json::json!({"schema_version": "scanner_profile_v1"}))
-            .expect("minimal raw profile")
+    fn raw_profile() -> ScannerSettings {
+        serde_json::from_value(serde_json::json!({})).expect("minimal settings")
     }
 
-    fn v2_profile(mode: ReportMode) -> NormalizedScannerProfileV2 {
-        let raw: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
-            "schema_version": "scanner_profile_v2"
-        }))
-        .expect("minimal v2 raw profile");
-        normalize_scanner_profile_v2(&ScannerProfile::V2(raw), mode).expect("normalized v2 profile")
+    fn normalized_settings(mode: ReportMode) -> NormalizedScannerSettings {
+        let raw: ScannerSettings =
+            serde_json::from_value(serde_json::json!({})).expect("minimal settings");
+        normalize_scanner_settings(&raw, mode).expect("normalized settings")
     }
 
     #[test]
     fn parse_profile_hash_changes_for_every_content_semantic_input() {
-        let profile = normalize_scanner_profile(&raw_profile(), ReportMode::Daily)
+        let profile = normalize_scanner_settings(&raw_profile(), ReportMode::Daily)
             .expect("normalized profile");
         let route = RouteStackFingerprint::text("build-a").unwrap();
         let base = parse_profile_hash(1, &route, &profile).expect("hash");
@@ -1280,8 +1281,6 @@ mod tests {
         guard.execution.max_file_size_bytes += 1;
         let mut parse = profile.clone();
         parse.parse.text.max_chars += 1;
-        let mut parser_profile_version = profile.clone();
-        parser_profile_version.parser_profile_version = "v2".to_string();
         let mut backend = profile.clone();
         backend.parse.office.primary_backend = "different_office_backend_v1".to_string();
         let mut fallback = profile.clone();
@@ -1304,10 +1303,6 @@ mod tests {
         );
         assert_ne!(base, parse_profile_hash(1, &route, &guard).unwrap());
         assert_ne!(base, parse_profile_hash(1, &route, &parse).unwrap());
-        assert_ne!(
-            base,
-            parse_profile_hash(1, &route, &parser_profile_version).unwrap()
-        );
         assert_ne!(base, parse_profile_hash(1, &route, &backend).unwrap());
         assert_ne!(base, parse_profile_hash(1, &route, &fallback).unwrap());
         assert_ne!(
@@ -1326,8 +1321,24 @@ mod tests {
     }
 
     #[test]
+    fn parse_profile_fingerprint_includes_compiled_engine_build_identity() {
+        let profile = normalize_scanner_settings(&raw_profile(), ReportMode::Daily)
+            .expect("normalized profile");
+        let route = RouteStackFingerprint::text("worker-build").unwrap();
+        let fingerprint: serde_json::Value = serde_json::from_slice(
+            &parse_profile_fingerprint_json(1, &route, &profile).expect("fingerprint JSON"),
+        )
+        .expect("fingerprint value");
+
+        assert_eq!(
+            fingerprint["core_build_identity"],
+            env!("AI_DAILY_ENGINE_BUILD")
+        );
+    }
+
+    #[test]
     fn route_stack_hash_includes_each_applicable_worker_contract_and_build() {
-        let profile = normalize_scanner_profile(&raw_profile(), ReportMode::Daily)
+        let profile = normalize_scanner_settings(&raw_profile(), ReportMode::Daily)
             .expect("normalized profile");
         let without_fallback = RouteStackFingerprint::modern_office(
             "engine-build",
@@ -1379,7 +1390,7 @@ mod tests {
 
     fn fresh_v2_db() -> rusqlite::Connection {
         let connection = rusqlite::Connection::open_in_memory().expect("in-memory db");
-        connection.execute_batch(V2_DDL).expect("v2 schema builds");
+        connection.execute_batch(V3_DDL).expect("v3 schema builds");
         connection
     }
 
@@ -1421,14 +1432,14 @@ mod tests {
 
     #[test]
     fn classifier_profile_hash_changes_for_every_classification_semantic_input() {
-        let profile = v2_profile(ReportMode::Daily);
+        let profile = normalized_settings(ReportMode::Daily);
         let base = classifier_profile_hash(&profile).expect("hash");
 
         let mut timeout = profile.clone();
         timeout.pdf_classification_timeout_ms += 1_000;
         let mut pages = profile.clone();
         pages.parse.pdf.max_pages += 1;
-        let report_mode = v2_profile(ReportMode::Monthly);
+        let report_mode = normalized_settings(ReportMode::Monthly);
 
         assert_ne!(base, classifier_profile_hash(&timeout).unwrap());
         assert_ne!(base, classifier_profile_hash(&pages).unwrap());
@@ -1439,7 +1450,7 @@ mod tests {
         let mut quota = profile.clone();
         quota.max_total_pdf_classification_pages += 1;
         let mut session = profile.clone();
-        session.session_concurrency += 1;
+        session.worker_max_requests += 1;
         let mut deadline = profile.clone();
         deadline.total_deadline_ms += 1_000;
         assert_eq!(base, classifier_profile_hash(&quota).unwrap());

@@ -10,8 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.core.config import Config, SCANNER_CONTRACT_FIELDS
-from src.services.scanner_config import SCANNER_PROFILE_V2_ONLY_FIELDS
+from src.core.config import Config, SCANNER_SETTINGS_FIELDS
 from src.models.scanner_contract import (
     WorkerParseRequest,
     build_rust_core_crashed_envelope,
@@ -64,7 +63,7 @@ def test_worker_contract_rejects_embedded_nul_in_absolute_path() -> None:
         WorkerParseRequest.model_validate(payload)
 
 
-def test_scanner_contract_profile_copies_only_present_raw_leaves() -> None:
+def test_scanner_settings_copies_only_present_raw_leaves() -> None:
     """Python 只透传显式 scanner 叶子，不扩默认值或基础设施字段。"""
     cfg = object.__new__(Config)
     cfg._settings = SimpleNamespace(
@@ -72,41 +71,31 @@ def test_scanner_contract_profile_copies_only_present_raw_leaves() -> None:
             allowed_extensions=[".xlsx"],
             ignored_patterns=["*归档*.xlsx"],
             max_workers=3,
-            office_fallback_after_timeout=False,
-            engine="rust_v2",
-            rust_scanner_bin="bin/scanner",
-            rust_office_parser_bin="bin/office-worker",
-            rust_index_db_path="state/scan_index_v2.sqlite3",
-            rust_process_timeout_seconds=45,
+            fallback_after_timeout=False,
+            office_worker_path="bin/office-worker",
+            index_db_path="state/scan_index_v3.sqlite3",
         )
     )
 
-    profile = cfg.scanner_contract_profile()
+    settings = cfg.scanner_settings()
 
-    assert profile == {
-        "schema_version": "scanner_profile_v1",
+    assert settings == {
         "allowed_extensions": [".xlsx"],
         "ignored_patterns": ["*归档*.xlsx"],
         "max_workers": 3,
-        "office_fallback_after_timeout": False,
+        "fallback_after_timeout": False,
     }
-    pickle.dumps(profile)
+    pickle.dumps(settings)
 
 
-def test_scanner_contract_profile_allowlist_matches_wire_schema() -> None:
-    """配置提取 allowlist 必须与版本化 raw profile schema 同步。
-
-    The v1|v2 raw profile schema accepts both `scanner_profile_v1` and
-    `scanner_profile_v2`; the extraction allowlist must cover every v1 leaf
-    plus every v2-only leaf (spec Part 8.1).
-    """
+def test_scanner_settings_allowlist_matches_wire_schema() -> None:
+    """配置提取 allowlist 必须与单一 raw settings schema 同步。"""
     schema = _load_json(CONTRACT_DIR / "scanner-profile-request-v1.schema.json")
     assert isinstance(schema, dict)
-    expected = set(schema["properties"]) - {"schema_version"}
-    assert expected == set(SCANNER_CONTRACT_FIELDS) | SCANNER_PROFILE_V2_ONLY_FIELDS
+    assert set(schema["properties"]) == set(SCANNER_SETTINGS_FIELDS)
 
 
-def test_scanner_contract_profile_rejects_unknown_candidate_leaf() -> None:
+def test_scanner_settings_rejects_unknown_candidate_leaf() -> None:
     """拼错或未版本化的新 scanner 叶子不得被静默丢弃。"""
     cfg = object.__new__(Config)
     cfg._settings = SimpleNamespace(
@@ -117,7 +106,7 @@ def test_scanner_contract_profile_rejects_unknown_candidate_leaf() -> None:
     )
 
     with pytest.raises(ValueError, match="unexpected_contract_leaf"):
-        cfg.scanner_contract_profile()
+        cfg.scanner_settings()
 
 
 def test_rust_workspace_keeps_discovery_as_a_library_only() -> None:

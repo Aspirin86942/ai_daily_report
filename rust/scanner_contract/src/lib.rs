@@ -277,425 +277,9 @@ impl Validate for AdapterPaths {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct RawScannerProfileV1 {
-    pub schema_version: String,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub allowed_extensions: Option<Vec<String>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub ignored_patterns: Option<Vec<String>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub excluded_dirs: Option<Vec<String>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub max_workers: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub max_file_size_mb: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub discovery_timeout_seconds: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub file_timeout_seconds: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub file_timeout_by_extension: Option<BTreeMap<String, u64>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub total_max_chars: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub parser_profile_version: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_parser_backend: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub pdf_parser_backend: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_fallback_policy_version: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_parser_fallback_enabled: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_fallback_after_timeout: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_legacy_extensions_enabled: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub pptx_include_notes: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_parser_fallback_order: Option<Vec<FallbackBackend>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub direct_text_max_bytes: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub direct_text_read_bytes: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub log_tail_read_bytes: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub text_excerpt_max_chars: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub excel_max_rows: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub pdf_max_pages: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub text_max_chars: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub excel_max_sheets: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub excel_max_columns: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub docx_max_paragraphs: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub docx_max_tables: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub docx_table_max_rows: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub docx_table_max_cols: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub pptx_max_slides: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub document_excerpt_max_chars: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_excel_max_rows: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_pdf_max_pages: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_text_max_chars: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_excel_max_sheets: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_excel_max_columns: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_docx_max_paragraphs: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_docx_max_tables: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_docx_table_max_rows: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_docx_table_max_cols: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_pptx_max_slides: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub summary_document_excerpt_max_chars: Option<u64>,
-}
-
-impl Validate for RawScannerProfileV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.schema_version, "scanner_profile_v1", "schema_version")?;
-        if let Some(values) = &self.allowed_extensions {
-            validate_extensions(values, "allowed_extensions", false)?;
-        }
-        if let Some(values) = &self.ignored_patterns {
-            validate_strings(values, "ignored_patterns", false)?;
-        }
-        if let Some(values) = &self.excluded_dirs {
-            validate_strings(values, "excluded_dirs", false)?;
-        }
-        macro_rules! range {
-            ($field:ident, $min:expr, $max:expr) => {
-                if let Some(value) = self.$field {
-                    require_range(value, $min, $max, stringify!($field))?;
-                }
-            };
-        }
-        range!(max_workers, 1, 64);
-        range!(max_file_size_mb, 1, 4096);
-        range!(discovery_timeout_seconds, 1, 3600);
-        range!(file_timeout_seconds, 1, 3600);
-        if let Some(timeouts) = &self.file_timeout_by_extension {
-            if timeouts.len() > 256 {
-                return Err("file_timeout_by_extension has too many entries".to_string());
-            }
-            for (extension, timeout) in timeouts {
-                require_extension(extension, "file_timeout_by_extension key")?;
-                require_range(*timeout, 1, 3600, "file_timeout_by_extension value")?;
-            }
-        }
-        range!(total_max_chars, 1, 10_000_000);
-        for (field, value) in [
-            ("parser_profile_version", &self.parser_profile_version),
-            ("office_parser_backend", &self.office_parser_backend),
-            ("pdf_parser_backend", &self.pdf_parser_backend),
-            (
-                "office_fallback_policy_version",
-                &self.office_fallback_policy_version,
-            ),
-        ] {
-            if let Some(value) = value {
-                require_non_empty(value, 1024, field)?;
-            }
-        }
-        if let Some(order) = &self.office_parser_fallback_order {
-            if order.len() > 2 || order.iter().collect::<HashSet<_>>().len() != order.len() {
-                return Err("office_parser_fallback_order must be a unique pair".to_string());
-            }
-        }
-        for (field, value) in [
-            ("direct_text_max_bytes", self.direct_text_max_bytes),
-            ("direct_text_read_bytes", self.direct_text_read_bytes),
-            ("log_tail_read_bytes", self.log_tail_read_bytes),
-        ] {
-            if let Some(value) = value {
-                require_range(value, 1, 67_108_864, field)?;
-            }
-        }
-        for (field, value) in [
-            ("text_excerpt_max_chars", self.text_excerpt_max_chars),
-            ("text_max_chars", self.text_max_chars),
-            (
-                "document_excerpt_max_chars",
-                self.document_excerpt_max_chars,
-            ),
-            ("summary_text_max_chars", self.summary_text_max_chars),
-            (
-                "summary_document_excerpt_max_chars",
-                self.summary_document_excerpt_max_chars,
-            ),
-        ] {
-            if let Some(value) = value {
-                require_range(value, 1, 10_000_000, field)?;
-            }
-        }
-        for (field, value) in [
-            ("pdf_max_pages", self.pdf_max_pages),
-            ("summary_pdf_max_pages", self.summary_pdf_max_pages),
-        ] {
-            if let Some(value) = value {
-                require_range(value, 1, 10_000, field)?;
-            }
-        }
-        for (field, value) in [
-            ("excel_max_sheets", self.excel_max_sheets),
-            ("summary_excel_max_sheets", self.summary_excel_max_sheets),
-        ] {
-            if let Some(value) = value {
-                require_range(value, 1, 1024, field)?;
-            }
-        }
-        for (field, value) in [
-            ("excel_max_rows", self.excel_max_rows),
-            ("docx_table_max_rows", self.docx_table_max_rows),
-            ("summary_excel_max_rows", self.summary_excel_max_rows),
-            (
-                "summary_docx_table_max_rows",
-                self.summary_docx_table_max_rows,
-            ),
-        ] {
-            if let Some(value) = value {
-                require_range(value, 1, 1_048_576, field)?;
-            }
-        }
-        for (field, value) in [
-            ("excel_max_columns", self.excel_max_columns),
-            ("docx_table_max_cols", self.docx_table_max_cols),
-            ("summary_excel_max_columns", self.summary_excel_max_columns),
-            (
-                "summary_docx_table_max_cols",
-                self.summary_docx_table_max_cols,
-            ),
-        ] {
-            if let Some(value) = value {
-                require_range(value, 1, 16_384, field)?;
-            }
-        }
-        for (field, value) in [
-            ("docx_max_paragraphs", self.docx_max_paragraphs),
-            (
-                "summary_docx_max_paragraphs",
-                self.summary_docx_max_paragraphs,
-            ),
-        ] {
-            if let Some(value) = value {
-                require_range(value, 1, 1_000_000, field)?;
-            }
-        }
-        for (field, value) in [
-            ("docx_max_tables", self.docx_max_tables),
-            ("pptx_max_slides", self.pptx_max_slides),
-            ("summary_docx_max_tables", self.summary_docx_max_tables),
-            ("summary_pptx_max_slides", self.summary_pptx_max_slides),
-        ] {
-            if let Some(value) = value {
-                require_range(value, 1, 100_000, field)?;
-            }
-        }
-        Ok(())
-    }
-}
-
 // ---------------------------------------------------------------------------
-// scanner profile v2: constants, default table, and the strict raw wire type.
-// RawScannerProfileV2 is a strict superset of RawScannerProfileV1: every v1
-// leaf parses under v2, plus the v2-only leaves below. All leaves stay
-// optional in the raw wire; Rust normalization owns every default.
+// Scanner settings constants and the strict raw settings type. All leaves stay
+// optional; Rust normalization owns every default and routing policy.
 // ---------------------------------------------------------------------------
 
 pub const ADMISSION_POLICY_VERSION: &str = "budget_admission_v2";
@@ -704,30 +288,13 @@ pub const PRIORITY_POLICY_VERSION: &str = "budget_nominal_v2";
 pub const COMPRESSION_POLICY_VERSION: &str = "markdown_context_v2";
 pub const MAX_SOURCE_FILES_PER_RUN: u64 = 1_000_000;
 
-/// v2-only leaves（spec Part 8.1 表）。v1 请求归一化为 v2 时这些叶子缺省，
-/// 由 report-mode 冻结默认表填充；v2→v1 投影（Plan 2 T4 接线前的生产路径）
-/// 删除它们，保证 v1 归一化不受 v2-only 叶子影响。
-pub const SCANNER_PROFILE_V2_ONLY_FIELDS: &[&str] = &[
-    "max_candidate_files",
-    "max_pdf_text_extractions",
-    "max_total_pdf_classification_pages",
-    "admission_policy_version",
-    "classifier_policy_version",
-    "pdf_classification_timeout_ms",
-    "total_deadline_ms",
-    "session_concurrency",
-    "max_requests_per_session",
-    "session_idle_ttl_ms",
-    "session_rss_limit_bytes",
-];
-
 /// report-mode 默认（spec Part 8.1 表）：
 /// daily   => (96, 80, 8, 10_000ms)
 /// weekly  => (192, 100, 12, 15_000ms)
 /// monthly => (384, 370, 16, 25_000ms)
 /// tuple order: (max_candidate_files, max_total_pdf_classification_pages,
 /// max_pdf_text_extractions, total_deadline_ms).
-pub fn v2_quota_defaults(mode: ReportMode) -> (u64, u64, u64, u64) {
+pub fn quota_defaults(mode: ReportMode) -> (u64, u64, u64, u64) {
     match mode {
         ReportMode::Daily => (96, 80, 8, 10_000),
         ReportMode::Weekly => (192, 100, 12, 15_000),
@@ -737,8 +304,7 @@ pub fn v2_quota_defaults(mode: ReportMode) -> (u64, u64, u64, u64) {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct RawScannerProfileV2 {
-    pub schema_version: String,
+pub struct ScannerSettings {
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -798,55 +364,19 @@ pub struct RawScannerProfileV2 {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
-    pub parser_profile_version: Option<String>,
+    pub fallback_after_timeout: Option<bool>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
-    pub office_parser_backend: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub pdf_parser_backend: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_fallback_policy_version: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_parser_fallback_enabled: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_fallback_after_timeout: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_legacy_extensions_enabled: Option<bool>,
+    pub legacy_office_enabled: Option<bool>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
     pub pptx_include_notes: Option<bool>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub office_parser_fallback_order: Option<Vec<FallbackBackend>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1003,7 +533,6 @@ pub struct RawScannerProfileV2 {
         deserialize_with = "deserialize_optional_non_null"
     )]
     pub summary_document_excerpt_max_chars: Option<u64>,
-    // v2-only leaves（spec Part 8.1 表）
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -1027,18 +556,6 @@ pub struct RawScannerProfileV2 {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
-    pub admission_policy_version: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub classifier_policy_version: Option<String>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
     pub pdf_classification_timeout_ms: Option<u64>,
     #[serde(
         default,
@@ -1051,30 +568,23 @@ pub struct RawScannerProfileV2 {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
-    pub session_concurrency: Option<u64>,
+    pub worker_max_requests: Option<u64>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
-    pub max_requests_per_session: Option<u64>,
+    pub worker_idle_ttl_ms: Option<u64>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
-    pub session_idle_ttl_ms: Option<u64>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub session_rss_limit_bytes: Option<u64>,
+    pub worker_rss_limit_bytes: Option<u64>,
 }
 
-impl Validate for RawScannerProfileV2 {
+impl Validate for ScannerSettings {
     fn validate(&self) -> Result<(), String> {
-        require_const(&self.schema_version, "scanner_profile_v2", "schema_version")?;
         if let Some(values) = &self.allowed_extensions {
             validate_extensions(values, "allowed_extensions", false)?;
         }
@@ -1105,24 +615,6 @@ impl Validate for RawScannerProfileV2 {
             }
         }
         range!(total_max_chars, 1, 10_000_000);
-        for (field, value) in [
-            ("parser_profile_version", &self.parser_profile_version),
-            ("office_parser_backend", &self.office_parser_backend),
-            ("pdf_parser_backend", &self.pdf_parser_backend),
-            (
-                "office_fallback_policy_version",
-                &self.office_fallback_policy_version,
-            ),
-        ] {
-            if let Some(value) = value {
-                require_non_empty(value, 1024, field)?;
-            }
-        }
-        if let Some(order) = &self.office_parser_fallback_order {
-            if order.len() > 2 || order.iter().collect::<HashSet<_>>().len() != order.len() {
-                return Err("office_parser_fallback_order must be a unique pair".to_string());
-            }
-        }
         for (field, value) in [
             ("direct_text_max_bytes", self.direct_text_max_bytes),
             ("direct_text_read_bytes", self.direct_text_read_bytes),
@@ -1212,26 +704,14 @@ impl Validate for RawScannerProfileV2 {
                 require_range(value, 1, 100_000, field)?;
             }
         }
-        // v2-only leaves
         range!(max_candidate_files, 1, 1_000_000);
         range!(max_pdf_text_extractions, 0, 100_000);
         range!(max_total_pdf_classification_pages, 0, 10_000_000);
-        if let Some(value) = &self.admission_policy_version {
-            require_const(value, ADMISSION_POLICY_VERSION, "admission_policy_version")?;
-        }
-        if let Some(value) = &self.classifier_policy_version {
-            require_const(
-                value,
-                CLASSIFIER_POLICY_VERSION,
-                "classifier_policy_version",
-            )?;
-        }
         range!(pdf_classification_timeout_ms, 100, 60_000);
         range!(total_deadline_ms, 5_000, 3_600_000);
-        range!(session_concurrency, 1, 8);
-        range!(max_requests_per_session, 1, 10_000);
-        range!(session_idle_ttl_ms, 1_000, 600_000);
-        range!(session_rss_limit_bytes, 67_108_864, 8_589_934_592);
+        range!(worker_max_requests, 1, 10_000);
+        range!(worker_idle_ttl_ms, 1_000, 600_000);
+        range!(worker_rss_limit_bytes, 67_108_864, 8_589_934_592);
         Ok(())
     }
 }
@@ -1446,85 +926,6 @@ impl Validate for ContextProfile {
             || self.large_file_max_bytes != 10_485_760
             || self.global_max_chars < self.per_file_max_chars
         {
-            return Err("context thresholds or budgets violate v1".to_string());
-        }
-        require_const(
-            &self.priority_policy_version,
-            "default_v1",
-            "priority_policy_version",
-        )?;
-        require_const(
-            &self.compression_policy_version,
-            "markdown_context_v1",
-            "compression_policy_version",
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NormalizedScannerProfileV1 {
-    pub schema_version: String,
-    pub parser_profile_version: String,
-    pub report_mode: ReportMode,
-    pub discovery: DiscoveryProfile,
-    pub execution: ExecutionProfile,
-    pub parse: ParseProfile,
-    pub context: ContextProfile,
-}
-
-impl Validate for NormalizedScannerProfileV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(
-            &self.schema_version,
-            "normalized_scanner_profile_v1",
-            "schema_version",
-        )?;
-        require_non_empty(&self.parser_profile_version, 1024, "parser_profile_version")?;
-        self.discovery.validate()?;
-        self.execution.validate()?;
-        self.parse.validate()?;
-        self.context.validate()?;
-        let expected = match self.report_mode {
-            ReportMode::Daily => ("daily_balanced_v1", 50_000, 8_000),
-            ReportMode::Weekly => ("weekly_balanced_v1", 50_000, 5_000),
-            ReportMode::Monthly => ("monthly_balanced_v1", 60_000, 4_000),
-        };
-        let actual = (
-            self.context.profile_name.as_str(),
-            self.context.global_max_chars,
-            self.context.per_file_max_chars,
-        );
-        if actual == expected {
-            Ok(())
-        } else {
-            Err("report mode and normalized context profile do not match".to_string())
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ContextProfileV2 {
-    pub profile_name: String,
-    pub global_max_chars: u64,
-    pub per_file_max_chars: u64,
-    pub small_file_max_bytes: u64,
-    pub medium_file_max_bytes: u64,
-    pub large_file_max_bytes: u64,
-    pub priority_policy_version: String,
-    pub compression_policy_version: String,
-}
-
-impl Validate for ContextProfileV2 {
-    fn validate(&self) -> Result<(), String> {
-        require_range(self.global_max_chars, 1, 10_000_000, "global_max_chars")?;
-        require_range(self.per_file_max_chars, 1, 10_000_000, "per_file_max_chars")?;
-        if self.small_file_max_bytes != 65_536
-            || self.medium_file_max_bytes != 1_048_576
-            || self.large_file_max_bytes != 10_485_760
-            || self.global_max_chars < self.per_file_max_chars
-        {
             return Err("context thresholds or budgets violate v2".to_string());
         }
         require_const(
@@ -1542,14 +943,12 @@ impl Validate for ContextProfileV2 {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct NormalizedScannerProfileV2 {
-    pub schema_version: String,
-    pub parser_profile_version: String,
+pub struct NormalizedScannerSettings {
     pub report_mode: ReportMode,
     pub discovery: DiscoveryProfile,
     pub execution: ExecutionProfile,
     pub parse: ParseProfile,
-    pub context: ContextProfileV2,
+    pub context: ContextProfile,
     // v2-only leaves（spec Part 8.1 表），归一化后全部必填
     pub admission_policy_version: String,
     pub classifier_policy_version: String,
@@ -1558,20 +957,13 @@ pub struct NormalizedScannerProfileV2 {
     pub max_total_pdf_classification_pages: u64,
     pub pdf_classification_timeout_ms: u64,
     pub total_deadline_ms: u64,
-    pub session_concurrency: u64,
-    pub max_requests_per_session: u64,
-    pub session_idle_ttl_ms: u64,
-    pub session_rss_limit_bytes: u64,
+    pub worker_max_requests: u64,
+    pub worker_idle_ttl_ms: u64,
+    pub worker_rss_limit_bytes: u64,
 }
 
-impl Validate for NormalizedScannerProfileV2 {
+impl Validate for NormalizedScannerSettings {
     fn validate(&self) -> Result<(), String> {
-        require_const(
-            &self.schema_version,
-            "normalized_scanner_profile_v2",
-            "schema_version",
-        )?;
-        require_non_empty(&self.parser_profile_version, 1024, "parser_profile_version")?;
         self.discovery.validate()?;
         self.execution.validate()?;
         self.parse.validate()?;
@@ -1609,64 +1001,10 @@ impl Validate for NormalizedScannerProfileV2 {
         range!(max_total_pdf_classification_pages, 0, 10_000_000);
         range!(pdf_classification_timeout_ms, 100, 60_000);
         range!(total_deadline_ms, 5_000, 3_600_000);
-        range!(session_concurrency, 1, 8);
-        range!(max_requests_per_session, 1, 10_000);
-        range!(session_idle_ttl_ms, 1_000, 600_000);
-        range!(session_rss_limit_bytes, 67_108_864, 8_589_934_592);
+        range!(worker_max_requests, 1, 10_000);
+        range!(worker_idle_ttl_ms, 1_000, 600_000);
+        range!(worker_rss_limit_bytes, 67_108_864, 8_589_934_592);
         Ok(())
-    }
-}
-
-/// `scanner_profile` tagged union（spec Part 8.1）：按 `schema_version` 判别
-/// v1/v2 raw profile。未知 `schema_version` 在反序列化时拒绝；两个变体继续
-/// 走各自严格字段门禁。序列化保持内部对象原样（含 `schema_version`），因此
-/// `BuildContextRequest` 的 JSON 形状不变。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(untagged)]
-pub enum ScannerProfile {
-    V1(RawScannerProfileV1),
-    V2(RawScannerProfileV2),
-}
-
-impl<'de> Deserialize<'de> for ScannerProfile {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = Value::deserialize(deserializer)?;
-        let schema_version = value
-            .get("schema_version")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        match schema_version {
-            "scanner_profile_v1" => serde_json::from_value(value)
-                .map(Self::V1)
-                .map_err(de::Error::custom),
-            "scanner_profile_v2" => serde_json::from_value(value)
-                .map(Self::V2)
-                .map_err(de::Error::custom),
-            _ => Err(de::Error::custom(
-                "scanner_profile schema_version must be scanner_profile_v1 or scanner_profile_v2",
-            )),
-        }
-    }
-}
-
-impl ScannerProfile {
-    pub fn schema_version(&self) -> &'static str {
-        match self {
-            Self::V1(_) => "scanner_profile_v1",
-            Self::V2(_) => "scanner_profile_v2",
-        }
-    }
-}
-
-impl Validate for ScannerProfile {
-    fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::V1(raw) => raw.validate(),
-            Self::V2(raw) => raw.validate(),
-        }
     }
 }
 
@@ -1683,7 +1021,7 @@ pub struct BuildContextRequest {
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub compression_profile: Nullable<CompressionProfile>,
     pub scan_db_path: String,
-    pub scanner_profile: ScannerProfile,
+    pub scanner_settings: ScannerSettings,
     pub adapters: AdapterPaths,
 }
 
@@ -1715,7 +1053,7 @@ impl Validate for BuildContextRequest {
             return Err("compression profile does not match report mode".to_string());
         }
         require_absolute_path(&self.scan_db_path, "scan_db_path")?;
-        self.scanner_profile.validate()?;
+        self.scanner_settings.validate()?;
         self.adapters.validate()
     }
 }
@@ -1756,9 +1094,7 @@ pub enum ErrorCode {
     ProfileRouteInvariant,
     SourceFileLimitExceeded,
     SourceGuardUnavailable,
-    MaintenanceModeUnavailable,
-    SchemaUpgradeRequired,
-    SchemaMigrationFailed,
+    ScannerDbSchemaMismatch,
     DiagnosticsAggregated,
     SnapshotReuseProjectedAsFresh,
     ParseCacheNotApplicableProjectedAsMiss,
@@ -1780,7 +1116,6 @@ pub enum DiagnosticStage {
     Process,
     Doctor,
     Inspect,
-    Maintenance,
     Internal,
 }
 
@@ -2742,8 +2077,7 @@ impl Validate for InspectRunResponse {
 }
 
 // ---------------------------------------------------------------------------
-// v2 observation / maintenance / upgrade wire surface (types + fixtures only;
-// behavior lands in later tasks).
+// Complete scanner evidence and worker contracts.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2804,75 +2138,6 @@ impl Validate for CacheRetentionPolicy {
             u64::MAX,
             "opportunistic_gc_budget_ms",
         )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VersionResponseV2 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub response_version: u64,
-    pub binary_name: String,
-    pub engine_version: String,
-    pub engine_build: String,
-    pub target_triple: String,
-    pub supported_commands: Vec<String>,
-    pub office_worker_contract_version: String,
-    pub python_worker_contract_version: String,
-    pub accepted_scanner_profile_versions: Vec<String>,
-    pub inspect_response_versions: Vec<u64>,
-    pub classifier_contract_versions: Vec<String>,
-    pub session_contract_versions: Vec<String>,
-    pub maintenance_contract_versions: Vec<String>,
-    pub upgrade_contract_versions: Vec<String>,
-    pub source_guard_policy: String,
-    pub max_source_files_per_run: u64,
-    pub cache_retention_policy: CacheRetentionPolicy,
-}
-
-impl Validate for VersionResponseV2 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_context", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_range(self.response_version, 2, 2, "response_version")?;
-        require_const(&self.binary_name, "ai-daily-scanner", "binary_name")?;
-        for (field, value) in [
-            ("engine_version", self.engine_version.as_str()),
-            ("engine_build", self.engine_build.as_str()),
-            ("target_triple", self.target_triple.as_str()),
-        ] {
-            require_non_empty(value, 1024, field)?;
-        }
-        let expected_commands = [
-            "version",
-            "doctor",
-            "build-context",
-            "inspect-run",
-            "maintenance",
-            "upgrade-db",
-        ];
-        if self
-            .supported_commands
-            .iter()
-            .map(String::as_str)
-            .eq(expected_commands)
-            && self.office_worker_contract_version == "ai_daily_worker_v1"
-            && self.python_worker_contract_version == "ai_daily_worker_v1"
-            && self.accepted_scanner_profile_versions
-                == ["scanner_profile_v1", "scanner_profile_v2"]
-            && self.inspect_response_versions == [1_u64, 2_u64]
-            && self.classifier_contract_versions == ["ai_daily_pdf_classifier_v1"]
-            && self.session_contract_versions == ["ai_daily_worker_v2"]
-            && self.maintenance_contract_versions == ["ai_daily_scanner_maintenance_v1"]
-            && self.upgrade_contract_versions == ["ai_daily_scanner_upgrade_v1"]
-            && self.source_guard_policy == "source_guard_v2"
-            && self.max_source_files_per_run == MAX_SOURCE_FILES_PER_RUN
-        {
-            self.cache_retention_policy.validate()
-        } else {
-            Err("version v2 capabilities must use the frozen canonical sets".to_string())
-        }
     }
 }
 
@@ -3899,279 +3164,6 @@ impl Validate for InspectRunResponseV2 {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenanceMode {
-    Gc,
-    IncrementalVacuum,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenanceStatus {
-    Ok,
-    Error,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AutoVacuumMode {
-    None,
-    Full,
-    Incremental,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenancePreIntegrityCheck {
-    Ok,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenancePostIntegrityCheck {
-    NotRun,
-    Ok,
-    Failed,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MaintenanceVacuumStatus {
-    NotRequested,
-    SkippedDryRun,
-    Ok,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaintenanceSizeV1 {
-    pub parse_cache_logical_bytes: u64,
-    pub classification_cache_logical_bytes: u64,
-    pub context_artifacts_logical_bytes: u64,
-    pub terminal_audit_logical_bytes: u64,
-    pub database_file_bytes: u64,
-    pub wal_file_bytes: u64,
-    pub shm_file_bytes: u64,
-    pub total_physical_bytes: u64,
-    pub freelist_bytes: u64,
-    pub auto_vacuum_mode: AutoVacuumMode,
-}
-
-impl Validate for MaintenanceSizeV1 {
-    fn validate(&self) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaintenanceDeletedV1 {
-    pub parse_cache_rows: u64,
-    pub classification_cache_rows: u64,
-    pub context_artifacts_rows: u64,
-    pub context_artifact_files_rows: u64,
-    pub context_artifact_decisions_rows: u64,
-    pub scan_runs_rows: u64,
-    pub scan_run_attempts_rows: u64,
-    pub run_diagnostics_rows: u64,
-    pub scan_file_results_rows: u64,
-    pub scan_stage_metrics_rows: u64,
-    pub scan_extension_metrics_rows: u64,
-    pub context_runs_rows: u64,
-    pub context_decisions_rows: u64,
-    pub file_inventory_rows: u64,
-}
-
-impl Validate for MaintenanceDeletedV1 {
-    fn validate(&self) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaintenanceVacuumV1 {
-    pub mode: MaintenanceMode,
-    pub status: MaintenanceVacuumStatus,
-    pub pages_changed: u64,
-}
-
-impl Validate for MaintenanceVacuumV1 {
-    fn validate(&self) -> Result<(), String> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaintenanceRequestV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub scan_db_path: String,
-    pub mode: MaintenanceMode,
-    pub dry_run: bool,
-}
-
-impl Validate for MaintenanceRequestV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_scanner_maintenance", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        require_absolute_path(&self.scan_db_path, "scan_db_path")
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaintenanceResponseV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub status: MaintenanceStatus,
-    pub cache_retention_policy: CacheRetentionPolicy,
-    pub before: MaintenanceSizeV1,
-    pub after: MaintenanceSizeV1,
-    pub after_complete: bool,
-    pub deleted: MaintenanceDeletedV1,
-    pub pre_integrity_check: MaintenancePreIntegrityCheck,
-    pub post_integrity_check: MaintenancePostIntegrityCheck,
-    pub vacuum: MaintenanceVacuumV1,
-    pub warnings: Vec<Diagnostic>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub error: Nullable<Diagnostic>,
-}
-
-impl Validate for MaintenanceResponseV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_scanner_maintenance", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        self.cache_retention_policy.validate()?;
-        for warning in &self.warnings {
-            warning.validate()?;
-        }
-        if let Some(error) = &self.error.0 {
-            error.validate()?;
-        }
-        match self.status {
-            MaintenanceStatus::Ok => {
-                if self.error.0.is_some()
-                    || self.pre_integrity_check != MaintenancePreIntegrityCheck::Ok
-                    || self.post_integrity_check == MaintenancePostIntegrityCheck::Failed
-                    || self.vacuum.status == MaintenanceVacuumStatus::Error
-                    || !self.after_complete
-                {
-                    return Err("ok maintenance response violates status invariants".to_string());
-                }
-            }
-            MaintenanceStatus::Error => {
-                if self.error.0.is_none() {
-                    return Err("error maintenance response requires a diagnostic".to_string());
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UpgradeDatabaseRequestV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub scan_db_path: String,
-    pub apply: bool,
-}
-
-impl Validate for UpgradeDatabaseRequestV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_scanner_upgrade", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        require_absolute_path(&self.scan_db_path, "scan_db_path")
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpgradeIntegrityCheck {
-    NotRun,
-    Ok,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct UpgradeDatabaseResponseV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub status: UpgradeStatus,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub source_user_version: Nullable<u64>,
-    pub target_user_version: u64,
-    pub apply: bool,
-    pub schema_migrated: bool,
-    pub auto_vacuum_converted: bool,
-    pub legacy_parse_cache_rows_detected: u64,
-    pub invalidated_parse_cache_rows: u64,
-    pub pre_integrity_check: UpgradeIntegrityCheck,
-    pub post_integrity_check: UpgradeIntegrityCheck,
-    pub warnings: Vec<Diagnostic>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub error: Nullable<Diagnostic>,
-}
-
-impl Validate for UpgradeDatabaseResponseV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_scanner_upgrade", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        require_range(self.target_user_version, 2, 2, "target_user_version")?;
-        if let Some(source_user_version) = self.source_user_version.0 {
-            require_range(source_user_version, 1, u64::MAX, "source_user_version")?;
-        }
-        if self.invalidated_parse_cache_rows > self.legacy_parse_cache_rows_detected {
-            return Err("invalidated_parse_cache_rows exceeds detected rows".to_string());
-        }
-        for warning in &self.warnings {
-            warning.validate()?;
-        }
-        if let Some(error) = &self.error.0 {
-            error.validate()?;
-        }
-        match self.status {
-            UpgradeStatus::Ok | UpgradeStatus::Partial => {
-                if self.error.0.is_some() {
-                    return Err("successful upgrade response cannot contain an error".to_string());
-                }
-            }
-            UpgradeStatus::Error => {
-                if self.error.0.is_none() {
-                    return Err("error upgrade response requires a diagnostic".to_string());
-                }
-            }
-        }
-        if self.status == UpgradeStatus::Partial && self.warnings.is_empty() {
-            return Err("partial upgrade response requires a warning".to_string());
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UpgradeStatus {
-    Ok,
-    Partial,
-    Error,
-}
-
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RelatedPayload {
@@ -4190,8 +3182,8 @@ enum ContractPayload {
     DoctorResponse(DoctorResponse),
     InspectRunRequest(InspectRunRequest),
     InspectRunResponse(InspectRunResponse),
-    NormalizedScannerProfile(NormalizedScannerProfileV1),
-    RawScannerProfile(Box<RawScannerProfileV1>),
+    NormalizedScannerSettings(Box<NormalizedScannerSettings>),
+    RawScannerSettings(Box<ScannerSettings>),
     TransportError(TransportErrorResponse),
     VersionResponse(VersionResponse),
     WorkerParseRequest(WorkerParseRequest),
@@ -4231,9 +3223,9 @@ fn parse_contract_payload(schema: &str, value: &Value) -> Result<ContractPayload
             Ok(ContractPayload::InspectRunResponse(parse_typed(value)?))
         }
         "scanner-profile-normalized-v1.schema.json" => Ok(
-            ContractPayload::NormalizedScannerProfile(parse_typed(value)?),
+            ContractPayload::NormalizedScannerSettings(Box::new(parse_typed(value)?)),
         ),
-        "scanner-profile-request-v1.schema.json" => Ok(ContractPayload::RawScannerProfile(
+        "scanner-profile-request-v1.schema.json" => Ok(ContractPayload::RawScannerSettings(
             Box::new(parse_typed(value)?),
         )),
         "transport-error-v1.schema.json" => {
@@ -4271,8 +3263,8 @@ impl ContractPayload {
             Self::DoctorResponse(payload) => serialize!(payload),
             Self::InspectRunRequest(payload) => serialize!(payload),
             Self::InspectRunResponse(payload) => serialize!(payload),
-            Self::NormalizedScannerProfile(payload) => serialize!(payload),
-            Self::RawScannerProfile(payload) => serialize!(payload),
+            Self::NormalizedScannerSettings(payload) => serialize!(payload),
+            Self::RawScannerSettings(payload) => serialize!(payload),
             Self::TransportError(payload) => serialize!(payload),
             Self::VersionResponse(payload) => serialize!(payload),
             Self::WorkerParseRequest(payload) => serialize!(payload),

@@ -4,10 +4,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
 use ai_daily_scanner_contract::{
-    ErrorCode, RawScannerProfileV1, ReportMode, WorkerKind, WorkerVersionResponse,
+    ErrorCode, ReportMode, ScannerSettings, WorkerKind, WorkerVersionResponse,
 };
 use ai_daily_scanner_core::classifier::ParserRoute;
-use ai_daily_scanner_core::config::normalize_scanner_profile;
+use ai_daily_scanner_core::config::normalize_scanner_settings;
 use ai_daily_scanner_core::fallback::FailureClass;
 use ai_daily_scanner_core::parsers::{register_worker, register_worker_pair, WorkerCommand};
 use ai_daily_scanner_core::planner::{plan_candidates, PlanAction};
@@ -160,18 +160,16 @@ fn identity(kind: WorkerKind) -> WorkerVersionResponse {
     }
 }
 
-fn legacy_office_profile() -> ai_daily_scanner_contract::NormalizedScannerProfileV1 {
-    let raw: RawScannerProfileV1 = serde_json::from_value(serde_json::json!({
-        "schema_version": "scanner_profile_v1",
+fn legacy_office_profile() -> ai_daily_scanner_contract::NormalizedScannerSettings {
+    let raw: ScannerSettings = serde_json::from_value(serde_json::json!({
+
         "allowed_extensions": [".xls", ".doc", ".ppt"],
-        "office_legacy_extensions_enabled": true,
-        "office_parser_fallback_enabled": false,
-        "office_parser_fallback_order": [],
+        "legacy_office_enabled": true,
         "max_workers": 3,
         "file_timeout_seconds": 30
     }))
     .expect("legacy profile should decode");
-    normalize_scanner_profile(&raw, ReportMode::Daily).expect("legacy profile should normalize")
+    normalize_scanner_settings(&raw, ReportMode::Daily).expect("legacy profile should normalize")
 }
 
 fn discovered_file_with_extension(

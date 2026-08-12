@@ -1,6 +1,6 @@
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use ai_daily_scanner_contract::{AdapterPaths, CompressionProfile, ReportMode, ScannerProfile};
+use ai_daily_scanner_contract::{AdapterPaths, CompressionProfile, ReportMode, ScannerSettings};
 use ai_daily_scanner_core::{ScanRequest, Scanner, ScannerConfig, ScannerError};
 use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
@@ -16,7 +16,7 @@ create_exception!(ai_daily_scanner_native, NativeScannerError, PyException);
 struct NativeConfig {
     work_dir: String,
     scan_db_path: String,
-    scanner_profile: ScannerProfile,
+    scanner_settings: ScannerSettings,
     office_worker_path: String,
     python_executable: String,
     python_module_root: String,
@@ -49,7 +49,7 @@ impl PyScanner {
             let inner = Scanner::open(ScannerConfig {
                 work_dir: config.work_dir,
                 scan_db_path: config.scan_db_path,
-                scanner_profile: config.scanner_profile,
+                scanner_settings: config.scanner_settings,
                 adapters: AdapterPaths {
                     office_worker_path: config.office_worker_path,
                     python_executable: config.python_executable,

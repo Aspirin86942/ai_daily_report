@@ -9,7 +9,6 @@
         "nullability"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "max_workers": null
       }
     },
@@ -21,7 +20,6 @@
         "unknown_field"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "deprecated_helper_path": "C:\\scanner-fixtures\\bin\\helper.exe"
       }
     },
@@ -33,7 +31,6 @@
         "type"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "max_workers": true
       }
     },
@@ -45,7 +42,6 @@
         "bound"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "max_workers": 0
       }
     },
@@ -57,7 +53,6 @@
         "bound"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "max_file_size_mb": 4097
       }
     },
@@ -69,7 +64,6 @@
         "bound"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "file_timeout_seconds": 3601
       }
     },
@@ -81,7 +75,6 @@
         "bound"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "direct_text_read_bytes": 67108865
       }
     },
@@ -93,7 +86,6 @@
         "bound"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "text_max_chars": 10000001
       }
     },
@@ -105,7 +97,6 @@
         "bound"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "pdf_max_pages": 10001
       }
     },
@@ -117,7 +108,6 @@
         "bound"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "excel_max_rows": 1048577
       }
     },
@@ -129,7 +119,6 @@
         "bound"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "ignored_patterns": [
           "pattern-0",
           "pattern-1",
@@ -399,8 +388,9 @@
         "bound"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
-        "parser_profile_version": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        "ignored_patterns": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ]
       }
     },
     {
@@ -411,7 +401,6 @@
         "enum"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "allowed_extensions": [
           ".XLSX"
         ]
@@ -425,7 +414,6 @@
         "enum"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "office_parser_fallback_order": [
           "unknown_backend_v1"
         ]
@@ -448,15 +436,13 @@
         "report_mode": "daily",
         "compression_profile": null,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v1"
-        },
         "adapters": {
           "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src.workers.document_parser_worker"
-        }
+        },
+        "scanner_settings": {}
       }
     },
     {
@@ -476,15 +462,13 @@
         "report_mode": "daily",
         "compression_profile": null,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v1"
-        },
         "adapters": {
           "office_worker_path": "relative\\office.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src.workers.document_parser_worker"
-        }
+        },
+        "scanner_settings": {}
       }
     },
     {
@@ -504,15 +488,13 @@
         "report_mode": "daily",
         "compression_profile": null,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v1"
-        },
         "adapters": {
           "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src.workers.document_parser_worker"
-        }
+        },
+        "scanner_settings": {}
       }
     },
     {
@@ -532,15 +514,13 @@
         "report_mode": "weekly",
         "compression_profile": "daily_balanced_v1",
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v1"
-        },
         "adapters": {
           "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src.workers.document_parser_worker"
-        }
+        },
+        "scanner_settings": {}
       }
     },
     {
@@ -560,16 +540,14 @@
         "report_mode": "daily",
         "compression_profile": null,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v1"
-        },
         "adapters": {
           "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src.workers.document_parser_worker"
         },
-        "unexpected": true
+        "unexpected": true,
+        "scanner_settings": {}
       }
     },
     {
@@ -589,15 +567,13 @@
         "report_mode": "daily",
         "compression_profile": null,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v1"
-        },
         "adapters": {
           "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src.workers.document_parser_worker"
-        }
+        },
+        "scanner_settings": {}
       }
     },
     {
@@ -617,15 +593,13 @@
         "end_date": "2026-07-15",
         "report_mode": "daily",
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v1"
-        },
         "adapters": {
           "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src.workers.document_parser_worker"
-        }
+        },
+        "scanner_settings": {}
       }
     },
     {
@@ -646,15 +620,13 @@
         "report_mode": "daily",
         "compression_profile": null,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v1"
-        },
         "adapters": {
           "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src.workers.document_parser_worker"
-        }
+        },
+        "scanner_settings": {}
       }
     },
     {
@@ -674,15 +646,13 @@
         "report_mode": "daily",
         "compression_profile": null,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v1"
-        },
         "adapters": {
           "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src..workers.document_parser_worker"
-        }
+        },
+        "scanner_settings": {}
       }
     },
     {
@@ -702,14 +672,14 @@
         "report_mode": "daily",
         "compression_profile": null,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": {
-          "schema_version": "scanner_profile_v3"
-        },
         "adapters": {
           "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
           "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
           "python_module_root": "C:\\scanner-fixtures\\repo",
           "python_document_worker_module": "src.workers.document_parser_worker"
+        },
+        "scanner_settings": {
+          "schema_version": "scanner_profile_v3"
         }
       }
     },
@@ -1053,8 +1023,6 @@
         "status_invariant"
       ],
       "payload": {
-        "schema_version": "normalized_scanner_profile_v1",
-        "parser_profile_version": "v1",
         "report_mode": "daily",
         "discovery": {
           "allowed_extensions": [
@@ -1103,7 +1071,7 @@
               "python_sharepoint_text_v2"
             ],
             "fallback_after_timeout": false,
-            "fallback_policy_version": "hybrid_v1",
+            "fallback_policy_version": "worker_v2_fixed_routing",
             "legacy_extensions_enabled": false,
             "excel_max_sheets": 5,
             "excel_max_rows": 50,
@@ -1129,9 +1097,19 @@
           "small_file_max_bytes": 1048576,
           "medium_file_max_bytes": 1048576,
           "large_file_max_bytes": 10485760,
-          "priority_policy_version": "default_v1",
-          "compression_policy_version": "markdown_context_v1"
-        }
+          "priority_policy_version": "budget_nominal_v2",
+          "compression_policy_version": "markdown_context_v2"
+        },
+        "admission_policy_version": "budget_admission_v2",
+        "classifier_policy_version": "pdf_text_presence_v1",
+        "max_candidate_files": 96,
+        "max_pdf_text_extractions": 8,
+        "max_total_pdf_classification_pages": 80,
+        "pdf_classification_timeout_ms": 2000,
+        "total_deadline_ms": 10000,
+        "worker_max_requests": 128,
+        "worker_idle_ttl_ms": 30000,
+        "worker_rss_limit_bytes": 536870912
       }
     },
     {
@@ -1143,8 +1121,6 @@
         "status_invariant"
       ],
       "payload": {
-        "schema_version": "normalized_scanner_profile_v1",
-        "parser_profile_version": "v1",
         "report_mode": "daily",
         "discovery": {
           "allowed_extensions": [
@@ -1193,7 +1169,7 @@
               "python_sharepoint_text_v2"
             ],
             "fallback_after_timeout": false,
-            "fallback_policy_version": "hybrid_v1",
+            "fallback_policy_version": "worker_v2_fixed_routing",
             "legacy_extensions_enabled": false,
             "excel_max_sheets": 5,
             "excel_max_rows": 50,
@@ -1219,9 +1195,19 @@
           "small_file_max_bytes": 65536,
           "medium_file_max_bytes": 1048576,
           "large_file_max_bytes": 10485760,
-          "priority_policy_version": "default_v1",
-          "compression_policy_version": "markdown_context_v1"
-        }
+          "priority_policy_version": "budget_nominal_v2",
+          "compression_policy_version": "markdown_context_v2"
+        },
+        "admission_policy_version": "budget_admission_v2",
+        "classifier_policy_version": "pdf_text_presence_v1",
+        "max_candidate_files": 96,
+        "max_pdf_text_extractions": 8,
+        "max_total_pdf_classification_pages": 80,
+        "pdf_classification_timeout_ms": 2000,
+        "total_deadline_ms": 10000,
+        "worker_max_requests": 128,
+        "worker_idle_ttl_ms": 30000,
+        "worker_rss_limit_bytes": 536870912
       }
     },
     {
@@ -1232,8 +1218,6 @@
         "unknown_field"
       ],
       "payload": {
-        "schema_version": "normalized_scanner_profile_v1",
-        "parser_profile_version": "v1",
         "report_mode": "daily",
         "discovery": {
           "allowed_extensions": [
@@ -1283,7 +1267,7 @@
               "python_sharepoint_text_v2"
             ],
             "fallback_after_timeout": false,
-            "fallback_policy_version": "hybrid_v1",
+            "fallback_policy_version": "worker_v2_fixed_routing",
             "legacy_extensions_enabled": false,
             "excel_max_sheets": 5,
             "excel_max_rows": 50,
@@ -1309,9 +1293,19 @@
           "small_file_max_bytes": 65536,
           "medium_file_max_bytes": 1048576,
           "large_file_max_bytes": 10485760,
-          "priority_policy_version": "default_v1",
-          "compression_policy_version": "markdown_context_v1"
-        }
+          "priority_policy_version": "budget_nominal_v2",
+          "compression_policy_version": "markdown_context_v2"
+        },
+        "admission_policy_version": "budget_admission_v2",
+        "classifier_policy_version": "pdf_text_presence_v1",
+        "max_candidate_files": 96,
+        "max_pdf_text_extractions": 8,
+        "max_total_pdf_classification_pages": 80,
+        "pdf_classification_timeout_ms": 2000,
+        "total_deadline_ms": 10000,
+        "worker_max_requests": 128,
+        "worker_idle_ttl_ms": 30000,
+        "worker_rss_limit_bytes": 536870912
       }
     },
     {
@@ -1322,8 +1316,6 @@
         "canonicalization"
       ],
       "payload": {
-        "schema_version": "normalized_scanner_profile_v1",
-        "parser_profile_version": "v1",
         "report_mode": "daily",
         "discovery": {
           "allowed_extensions": [
@@ -1364,7 +1356,7 @@
               "python_sharepoint_text_v2"
             ],
             "fallback_after_timeout": false,
-            "fallback_policy_version": "hybrid_v1",
+            "fallback_policy_version": "worker_v2_fixed_routing",
             "legacy_extensions_enabled": false,
             "excel_max_sheets": 5,
             "excel_max_rows": 50,
@@ -1390,9 +1382,19 @@
           "small_file_max_bytes": 65536,
           "medium_file_max_bytes": 1048576,
           "large_file_max_bytes": 10485760,
-          "priority_policy_version": "default_v1",
-          "compression_policy_version": "markdown_context_v1"
-        }
+          "priority_policy_version": "budget_nominal_v2",
+          "compression_policy_version": "markdown_context_v2"
+        },
+        "admission_policy_version": "budget_admission_v2",
+        "classifier_policy_version": "pdf_text_presence_v1",
+        "max_candidate_files": 96,
+        "max_pdf_text_extractions": 8,
+        "max_total_pdf_classification_pages": 80,
+        "pdf_classification_timeout_ms": 2000,
+        "total_deadline_ms": 10000,
+        "worker_max_requests": 128,
+        "worker_idle_ttl_ms": 30000,
+        "worker_rss_limit_bytes": 536870912
       }
     },
     {
@@ -1572,7 +1574,6 @@
         "type"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "max_workers": 4.0
       }
     },
@@ -1584,7 +1585,6 @@
         "type"
       ],
       "payload": {
-        "schema_version": "scanner_profile_v1",
         "max_workers": "4"
       }
     },
@@ -1830,15 +1830,13 @@
             "report_mode": "daily",
             "compression_profile": null,
             "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-            "scanner_profile": {
-              "schema_version": "scanner_profile_v1"
-            },
             "adapters": {
               "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
               "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
               "python_module_root": "C:\\scanner-fixtures\\repo",
               "python_document_worker_module": "src.workers.document_parser_worker"
-            }
+            },
+            "scanner_settings": {}
           }
         }
       ]

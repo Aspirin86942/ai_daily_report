@@ -45,17 +45,16 @@ def _runtime_config(
     work_dir: Path,
     scan_db_path: Path,
 ) -> SimpleNamespace:
-    raw_profile = {
-        "schema_version": "scanner_profile_v1",
+    scanner_settings = {
         "allowed_extensions": [".txt"],
         "ignored_patterns": ["~$*", "*.tmp"],
         "max_workers": 2,
     }
     return SimpleNamespace(
-        rust_office_parser_bin=str(OFFICE_BIN),
-        rust_index_db_path=str(scan_db_path),
+        office_worker_path=str(OFFICE_BIN),
+        index_db_path=str(scan_db_path),
         work_dir=work_dir,
-        scanner_contract_profile=lambda: raw_profile.copy(),
+        scanner_settings=lambda: scanner_settings.copy(),
         llm_provider="deepseek",
         llm_config={"model_id": "synthetic-no-network"},
         deepseek_api_key="synthetic-doctor-placeholder",
@@ -82,7 +81,7 @@ def test_real_rust_chinese_path_e2e(tmp_path: Path) -> None:
         "synthetic Windows Rust context evidence",
         encoding="utf-8",
     )
-    scan_db_path = root / "shared" / "db" / "scan_index_v2.sqlite3"
+    scan_db_path = root / "shared" / "db" / "scan_index_v3.sqlite3"
     scan_db_path.parent.mkdir(parents=True)
     cfg = _runtime_config(root, work_dir, scan_db_path)
 
@@ -111,7 +110,7 @@ def test_real_rust_cold_warm_cache_e2e(tmp_path: Path) -> None:
     work_dir.mkdir()
     source = work_dir / "唯一 文件.txt"
     source.write_text("cold cache evidence", encoding="utf-8")
-    scan_db_path = tmp_path / "state" / "scan_index_v2.sqlite3"
+    scan_db_path = tmp_path / "state" / "scan_index_v3.sqlite3"
     scan_db_path.parent.mkdir()
     cfg = _runtime_config(tmp_path, work_dir, scan_db_path)
     scanner = NativeScanner(

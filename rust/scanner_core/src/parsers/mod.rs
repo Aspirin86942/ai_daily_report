@@ -13,7 +13,7 @@ use crate::classifier::ParserRoute;
 use crate::fallback::{FailureClass, ParseFailure};
 use crate::process::{run_process, ProcessError, ProcessSpec, WorkerRssTracker};
 use ai_daily_scanner_contract::{
-    AdapterPaths, Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerProfileV1, Nullable,
+    AdapterPaths, Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerSettings, Nullable,
     Validate, WorkerBackend, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
     WorkerDiagnosticV1Stage, WorkerKind, WorkerParseRequest, WorkerParseResponse,
     WorkerParserLimits, WorkerStatus, WorkerVersionResponse,
@@ -123,7 +123,7 @@ pub struct WorkerRegistry {
 }
 
 pub fn preflight_workers(
-    profile: &NormalizedScannerProfileV1,
+    profile: &NormalizedScannerSettings,
     adapters: &AdapterPaths,
     timeout: Duration,
 ) -> Result<WorkerRegistry, ParseFailure> {
@@ -138,7 +138,7 @@ pub fn preflight_workers(
 /// Runs the continuation only after all route-relevant worker identities have
 /// been frozen. Task 7 uses this boundary before its first cache lookup.
 pub fn preflight_then<T>(
-    profile: &NormalizedScannerProfileV1,
+    profile: &NormalizedScannerSettings,
     adapters: &AdapterPaths,
     timeout: Duration,
     continuation: impl FnOnce(&WorkerRegistry) -> T,
@@ -756,7 +756,7 @@ pub(crate) fn worker_request(
     file: &ai_daily_discovery::DiscoveredFileOut,
     route: ParserRoute,
     timeout_ms: u64,
-    profile: &NormalizedScannerProfileV1,
+    profile: &NormalizedScannerSettings,
 ) -> WorkerParseRequest {
     let backend = match route {
         ParserRoute::RustOffice => WorkerBackend::RustOfficeOxideV2,
@@ -837,7 +837,7 @@ struct RequiredWorkerSet {
     python_document: bool,
 }
 
-fn required_worker_set(profile: &NormalizedScannerProfileV1) -> RequiredWorkerSet {
+fn required_worker_set(profile: &NormalizedScannerSettings) -> RequiredWorkerSet {
     let allows = |extension: &str| {
         profile
             .discovery
@@ -867,15 +867,14 @@ fn required_worker_set(profile: &NormalizedScannerProfileV1) -> RequiredWorkerSe
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::normalize_scanner_profile;
-    use ai_daily_scanner_contract::{RawScannerProfileV1, ReportMode};
+    use crate::config::normalize_scanner_settings;
+    use ai_daily_scanner_contract::{ReportMode, ScannerSettings};
 
     #[test]
     fn frozen_default_requires_both_worker_fingerprints() {
-        let raw: RawScannerProfileV1 =
-            serde_json::from_str(r#"{"schema_version":"scanner_profile_v1"}"#)
-                .expect("minimal profile should parse");
-        let profile = normalize_scanner_profile(&raw, ReportMode::Daily)
+        let raw: ScannerSettings =
+            serde_json::from_str(r#"{}"#).expect("minimal profile should parse");
+        let profile = normalize_scanner_settings(&raw, ReportMode::Daily)
             .expect("default profile should normalize");
 
         assert_eq!(

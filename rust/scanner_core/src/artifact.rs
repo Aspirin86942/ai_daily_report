@@ -14,7 +14,7 @@
 use ai_daily_discovery::{DiscoveredFileOut, DiscoveryIssue};
 use ai_daily_scanner_contract::{
     BuildContextRequest, ContextAction, ContextEnvelope, ContextSummary, Diagnostic, EngineStatus,
-    NormalizedScannerProfileV2, Nullable, ParseStatus, PdfClassificationStatus, ReportMode,
+    NormalizedScannerSettings, Nullable, ParseStatus, PdfClassificationStatus, ReportMode,
     Validate,
 };
 use serde::{Deserialize, Serialize};
@@ -204,7 +204,7 @@ struct SnapshotKeyPayload<'a> {
     logical_request: serde_json::Value,
     discovery: &'a [DiscoveredFileOut],
     discovery_issues: &'a [DiscoveryIssue],
-    profile: &'a NormalizedScannerProfileV2,
+    profile: &'a NormalizedScannerSettings,
     report_mode: ReportMode,
     engine_build: &'a str,
     workers: WorkerCanonical<'a>,
@@ -235,7 +235,7 @@ pub fn snapshot_key_parts(
     logical_request: &BuildContextRequest,
     discovery: &[DiscoveredFileOut],
     issues: &[DiscoveryIssue],
-    profile: &NormalizedScannerProfileV2,
+    profile: &NormalizedScannerSettings,
     engine_build: &str,
     worker_ids: &WorkerIdentities,
     classifier_ids: &ClassifierIdentity,
@@ -285,7 +285,7 @@ pub fn snapshot_key(
     logical_request: &BuildContextRequest,
     discovery: &[DiscoveredFileOut],
     issues: &[DiscoveryIssue],
-    profile: &NormalizedScannerProfileV2,
+    profile: &NormalizedScannerSettings,
     engine_build: &str,
     worker_ids: &WorkerIdentities,
     classifier_ids: &ClassifierIdentity,
@@ -416,8 +416,8 @@ fn hex_bytes(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::normalize_scanner_profile_v2;
-    use ai_daily_scanner_contract::{RawScannerProfileV2, ScannerProfile};
+    use crate::config::normalize_scanner_settings;
+    use ai_daily_scanner_contract::ScannerSettings;
 
     #[test]
     fn rebuild_envelope_error_run_requires_no_artifact() {
@@ -461,13 +461,8 @@ mod tests {
 
     #[test]
     fn snapshot_key_version_is_part_of_the_payload() {
-        let profile = normalize_scanner_profile_v2(
-            &ScannerProfile::V2(
-                serde_json::from_value::<RawScannerProfileV2>(serde_json::json!({
-                    "schema_version": "scanner_profile_v2"
-                }))
-                .unwrap(),
-            ),
+        let profile = normalize_scanner_settings(
+            &serde_json::from_value::<ScannerSettings>(serde_json::json!({})).unwrap(),
             ReportMode::Daily,
         )
         .unwrap();
@@ -481,7 +476,7 @@ mod tests {
             "report_mode": "daily",
             "compression_profile": null,
             "scan_db_path": "C:\\state\\index.sqlite3",
-            "scanner_profile": {"schema_version": "scanner_profile_v2"},
+            "scanner_settings": {},
             "adapters": {
                 "office_worker_path": "C:\\bin\\office.exe",
                 "python_executable": "C:\\venv\\python.exe",

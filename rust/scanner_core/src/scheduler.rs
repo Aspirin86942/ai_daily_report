@@ -22,7 +22,7 @@ use ai_daily_discovery::{DiscoveredFileOut, DiscoveryIssue};
 use ai_daily_scanner_contract::{
     AuditWorkerLane, CacheMissReason, CacheStatus, ClassificationCacheStatus,
     ClassificationTransport, ContextSummary, Diagnostic, DiagnosticStage, ErrorCode,
-    ExtensionMetric, NormalizedScannerProfileV2, Nullable, ParseStatus, ParseTransport,
+    ExtensionMetric, NormalizedScannerSettings, Nullable, ParseStatus, ParseTransport,
     PdfClassificationAuditV1, PdfClassificationStatus, RunStatus, StageMetric, StageName,
 };
 use rayon::prelude::*;
@@ -304,7 +304,7 @@ pub struct ScheduledRunInput {
     pub work_dir: String,
     pub discovery: Vec<DiscoveredFileOut>,
     pub discovery_issues: Vec<DiscoveryIssue>,
-    pub profile: NormalizedScannerProfileV2,
+    pub profile: NormalizedScannerSettings,
     pub workers: WorkerIdentities,
     /// Engine identity used for the local (light-text) parser provenance and
     /// the terminal `context_runs.context_profile_hash`.
@@ -340,7 +340,7 @@ impl ScheduledRunInput {
         work_dir: String,
         discovery: Vec<DiscoveredFileOut>,
         discovery_issues: Vec<DiscoveryIssue>,
-        profile: NormalizedScannerProfileV2,
+        profile: NormalizedScannerSettings,
         workers: WorkerIdentities,
         engine_version: String,
         engine_build: String,
@@ -375,7 +375,7 @@ impl ScheduledRunInput {
         work_dir: String,
         discovery: Vec<DiscoveredFileOut>,
         discovery_issues: Vec<DiscoveryIssue>,
-        profile: NormalizedScannerProfileV2,
+        profile: NormalizedScannerSettings,
         workers: WorkerIdentities,
         engine_version: String,
         engine_build: String,
@@ -673,9 +673,9 @@ impl BudgetedContextScheduler {
         let mut metrics = source_guard_metrics(&input.discovery);
         apply_observed_source_guard_metrics(&mut metrics, self.guard.as_ref());
         // Bounded parallel executor for classification/parse waves (spec
-        // Solution / Part 7.3): `session_concurrency` threads at most; each
+        // Solution / Part 7.3): max_workers threads at most; each
         // wave is dispatched only while `remaining_to_work_deadline > 0`.
-        let executor = WaveExecutor::new(profile.session_concurrency.max(1) as usize)?;
+        let executor = WaveExecutor::new(profile.execution.max_workers.max(1) as usize)?;
 
         // ---- Stage A: freeze ClassificationPlan before any classification I/O ----
         let candidates: Vec<PlanCandidate> = input.discovery.iter().map(plan_candidate).collect();
@@ -1240,7 +1240,7 @@ fn classification_cache_record(
     })
 }
 
-fn route_timeout_ms(route: RouteKind, profile: &NormalizedScannerProfileV2) -> u64 {
+fn route_timeout_ms(route: RouteKind, profile: &NormalizedScannerSettings) -> u64 {
     let extension = match route {
         RouteKind::Pdf => ".pdf",
         RouteKind::PythonOffice => ".xls",
@@ -1300,7 +1300,7 @@ impl BudgetedContextScheduler {
         &self,
         classified: &[ClassifiedPlan],
         snapshot: &HashMap<String, &DiscoveredFileOut>,
-        profile: &NormalizedScannerProfileV2,
+        profile: &NormalizedScannerSettings,
         classifier_profile_hash: &str,
         classifier_build: &str,
         existed_before: &HashSet<String>,
@@ -1455,7 +1455,7 @@ impl BudgetedContextScheduler {
 
         // ---- Phase B (bounded waves, spec P4-T0): dispatch a batch only while
         // `remaining_to_work_deadline > 0`. A batch is at most
-        // `session_concurrency` invocations; everything not yet dispatched when
+        // `max_workers` invocations; everything not yet dispatched when
         // the deadline is reached is queued -> runtime NotParsed. Results are
         // merged back by nominal rank, so completion order cannot change the
         // plan/outcome. ----
@@ -1735,7 +1735,7 @@ impl BudgetedContextScheduler {
         admission: &[AdmissionDecision],
         snapshot: &HashMap<String, &DiscoveredFileOut>,
         classifications: &BTreeMap<String, PdfClassificationResult>,
-        profile: &NormalizedScannerProfileV2,
+        profile: &NormalizedScannerSettings,
         existed_before: &HashSet<String>,
         runtime_classification: &HashSet<String>,
         metrics: &mut ExecutionMetrics,
@@ -1863,7 +1863,7 @@ impl BudgetedContextScheduler {
 
         // ---- Phase B (bounded waves, spec P4-T0): dispatch a batch only while
         // `remaining_to_work_deadline > 0`. A batch is at most
-        // `session_concurrency` parses; files not yet dispatched when the
+        // `max_workers` parses; files not yet dispatched when the
         // deadline is reached are queued -> runtime NotParsed. Results are merged
         // back by nominal rank, so completion order cannot change the outcome.
         // In-flight parses preserve their effective per-file timeout

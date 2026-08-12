@@ -6,14 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.services.scanner_config import (
-    UnknownScannerContractFieldsError,
-    extract_scanner_profile,
-)
+from src.services.scanner_config import UnknownScannerSettingsError, extract_scanner_settings
 
 
-def test_extract_profile_passes_explicit_contract_leaves() -> None:
-    profile = extract_scanner_profile(
+def test_extract_settings_passes_explicit_leaves() -> None:
+    settings = extract_scanner_settings(
         SimpleNamespace(
             allowed_extensions=[".txt", ".md"],
             max_workers=4,
@@ -21,30 +18,29 @@ def test_extract_profile_passes_explicit_contract_leaves() -> None:
         )
     )
 
-    assert profile == {
-        "schema_version": "scanner_profile_v1",
+    assert settings == {
         "allowed_extensions": [".txt", ".md"],
         "max_workers": 4,
         "total_max_chars": 50_000,
     }
 
 
-def test_extract_profile_rejects_unknown_leaves() -> None:
-    with pytest.raises(UnknownScannerContractFieldsError) as exc_info:
-        extract_scanner_profile(SimpleNamespace(unknown_leaf=1))
+def test_extract_settings_rejects_unknown_leaves() -> None:
+    with pytest.raises(UnknownScannerSettingsError) as exc_info:
+        extract_scanner_settings(SimpleNamespace(unknown_leaf=1))
 
     assert exc_info.value.fields == ("unknown_leaf",)
 
 
-def test_extract_profile_keeps_infrastructure_out_of_wire() -> None:
-    profile = extract_scanner_profile(
-        SimpleNamespace(rust_scanner_bin="bin/x", engine="rust_v2")
+def test_extract_settings_keeps_paths_out_of_native_settings() -> None:
+    settings = extract_scanner_settings(
+        SimpleNamespace(index_db_path="state/scan_index_v3.sqlite3", office_worker_path="bin/x")
     )
 
-    assert profile == {"schema_version": "scanner_profile_v1"}
+    assert settings == {}
 
 
-def test_config_delegates_profile_to_scanner_config(monkeypatch) -> None:
+def test_config_delegates_settings_to_scanner_config(monkeypatch) -> None:
     from src.core.config import Config
     from src.services import scanner_config
 
@@ -57,7 +53,7 @@ def test_config_delegates_profile_to_scanner_config(monkeypatch) -> None:
         seen.append(scanner_settings)
         return {"delegated": True}
 
-    monkeypatch.setattr(scanner_config, "extract_scanner_profile", extract_spy)
+    monkeypatch.setattr(scanner_config, "extract_scanner_settings", extract_spy)
 
-    assert cfg.scanner_contract_profile() == {"delegated": True}
+    assert cfg.scanner_settings() == {"delegated": True}
     assert seen == [scanner]

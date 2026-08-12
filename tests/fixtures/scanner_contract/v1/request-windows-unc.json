@@ -7,10 +7,8 @@
   "end_date": "2026-07-15",
   "report_mode": "daily",
   "compression_profile": "daily_balanced_v1",
-  "scan_db_path": "\\\\fixture-server\\scanner-state\\scan-index-v2.sqlite3",
-  "scanner_profile": {
-    "schema_version": "scanner_profile_v1"
-  },
+  "scan_db_path": "\\\\fixture-server\\scanner-state\\scan_index_v3.sqlite3",
+  "scanner_settings": {},
   "adapters": {
     "office_worker_path": "\\\\fixture-server\\scanner-bin\\ai-daily-office-parser.exe",
     "python_executable": "\\\\fixture-server\\scanner-runtime\\python.exe",

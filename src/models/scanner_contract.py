@@ -127,10 +127,9 @@ class AdapterPaths(ContractModel):
     ]
 
 
-class RawScannerProfileV1(ContractModel):
-    """只包含调用方显式提供的 scanner 叶子。"""
+class ScannerSettings(ContractModel):
+    """调用方可调的 scanner 叶子；默认值和路由策略由 Rust 唯一拥有。"""
 
-    schema_version: Literal["scanner_profile_v1"]
     allowed_extensions: Annotated[list[Extension], Field(max_length=256)] | None = None
     ignored_patterns: Annotated[list[NonEmpty1024], Field(max_length=256)] | None = None
     excluded_dirs: Annotated[list[NonEmpty1024], Field(max_length=256)] | None = None
@@ -143,18 +142,9 @@ class RawScannerProfileV1(ContractModel):
         Field(max_length=256),
     ] | None = None
     total_max_chars: CharBudget | None = None
-    parser_profile_version: NonEmpty1024 | None = None
-    office_parser_backend: NonEmpty1024 | None = None
-    pdf_parser_backend: NonEmpty1024 | None = None
-    office_fallback_policy_version: NonEmpty1024 | None = None
-    office_parser_fallback_enabled: bool | None = None
-    office_fallback_after_timeout: bool | None = None
-    office_legacy_extensions_enabled: bool | None = None
+    fallback_after_timeout: bool | None = None
+    legacy_office_enabled: bool | None = None
     pptx_include_notes: bool | None = None
-    office_parser_fallback_order: Annotated[
-        list[Literal["python_office_v2", "python_sharepoint_text_v2"]],
-        Field(max_length=2),
-    ] | None = None
     direct_text_max_bytes: ReadBudget | None = None
     direct_text_read_bytes: ReadBudget | None = None
     log_tail_read_bytes: ReadBudget | None = None
@@ -181,97 +171,14 @@ class RawScannerProfileV1(ContractModel):
     summary_docx_table_max_cols: ColumnBudget | None = None
     summary_pptx_max_slides: CollectionBudget | None = None
     summary_document_excerpt_max_chars: CharBudget | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def reject_explicit_nulls(cls, value: Any) -> Any:
-        if isinstance(value, dict):
-            null_fields = [key for key, item in value.items() if item is None]
-            if null_fields:
-                raise ValueError(
-                    "raw scanner profile fields cannot be null: "
-                    + ", ".join(sorted(null_fields))
-                )
-        return value
-
-    @model_validator(mode="after")
-    def reject_duplicate_fallbacks(self) -> "RawScannerProfileV1":
-        order = self.office_parser_fallback_order
-        if order is not None and len(order) != len(set(order)):
-            raise ValueError("fallback order must not contain duplicates")
-        return self
-
-
-class RawScannerProfileV2(ContractModel):
-    """只包含调用方显式提供的 scanner 叶子；v1 叶子的严格超集。
-
-    v1 的每个叶子在 v2 里都继续可解析，另加 v2-only 叶子。全部叶子仍为
-    可选，默认值的唯一所有者是 Rust 归一化。
-    """
-
-    schema_version: Literal["scanner_profile_v2"]
-    allowed_extensions: Annotated[list[Extension], Field(max_length=256)] | None = None
-    ignored_patterns: Annotated[list[NonEmpty1024], Field(max_length=256)] | None = None
-    excluded_dirs: Annotated[list[NonEmpty1024], Field(max_length=256)] | None = None
-    max_workers: Annotated[int, Field(ge=1, le=64)] | None = None
-    max_file_size_mb: Annotated[int, Field(ge=1, le=4096)] | None = None
-    discovery_timeout_seconds: TimeoutSeconds | None = None
-    file_timeout_seconds: TimeoutSeconds | None = None
-    file_timeout_by_extension: Annotated[
-        dict[Extension, TimeoutSeconds],
-        Field(max_length=256),
-    ] | None = None
-    total_max_chars: CharBudget | None = None
-    parser_profile_version: NonEmpty1024 | None = None
-    office_parser_backend: NonEmpty1024 | None = None
-    pdf_parser_backend: NonEmpty1024 | None = None
-    office_fallback_policy_version: NonEmpty1024 | None = None
-    office_parser_fallback_enabled: bool | None = None
-    office_fallback_after_timeout: bool | None = None
-    office_legacy_extensions_enabled: bool | None = None
-    pptx_include_notes: bool | None = None
-    office_parser_fallback_order: Annotated[
-        list[Literal["python_office_v2", "python_sharepoint_text_v2"]],
-        Field(max_length=2),
-    ] | None = None
-    direct_text_max_bytes: ReadBudget | None = None
-    direct_text_read_bytes: ReadBudget | None = None
-    log_tail_read_bytes: ReadBudget | None = None
-    text_excerpt_max_chars: CharBudget | None = None
-    excel_max_rows: RowBudget | None = None
-    pdf_max_pages: PdfPageBudget | None = None
-    text_max_chars: CharBudget | None = None
-    excel_max_sheets: ExcelSheetBudget | None = None
-    excel_max_columns: ColumnBudget | None = None
-    docx_max_paragraphs: ParagraphBudget | None = None
-    docx_max_tables: CollectionBudget | None = None
-    docx_table_max_rows: RowBudget | None = None
-    docx_table_max_cols: ColumnBudget | None = None
-    pptx_max_slides: CollectionBudget | None = None
-    document_excerpt_max_chars: CharBudget | None = None
-    summary_excel_max_rows: RowBudget | None = None
-    summary_pdf_max_pages: PdfPageBudget | None = None
-    summary_text_max_chars: CharBudget | None = None
-    summary_excel_max_sheets: ExcelSheetBudget | None = None
-    summary_excel_max_columns: ColumnBudget | None = None
-    summary_docx_max_paragraphs: ParagraphBudget | None = None
-    summary_docx_max_tables: CollectionBudget | None = None
-    summary_docx_table_max_rows: RowBudget | None = None
-    summary_docx_table_max_cols: ColumnBudget | None = None
-    summary_pptx_max_slides: CollectionBudget | None = None
-    summary_document_excerpt_max_chars: CharBudget | None = None
-    # v2-only leaves（spec Part 8.1 表）
     max_candidate_files: Annotated[int, Field(ge=1, le=1_000_000)] | None = None
     max_pdf_text_extractions: Annotated[int, Field(ge=0, le=100_000)] | None = None
     max_total_pdf_classification_pages: Annotated[int, Field(ge=0, le=10_000_000)] | None = None
-    admission_policy_version: Literal["budget_admission_v2"] | None = None
-    classifier_policy_version: Literal["pdf_text_presence_v1"] | None = None
     pdf_classification_timeout_ms: Annotated[int, Field(ge=100, le=60_000)] | None = None
     total_deadline_ms: Annotated[int, Field(ge=5_000, le=3_600_000)] | None = None
-    session_concurrency: Annotated[int, Field(ge=1, le=8)] | None = None
-    max_requests_per_session: Annotated[int, Field(ge=1, le=10_000)] | None = None
-    session_idle_ttl_ms: Annotated[int, Field(ge=1_000, le=600_000)] | None = None
-    session_rss_limit_bytes: Annotated[int, Field(ge=67_108_864, le=8_589_934_592)] | None = None
+    worker_max_requests: Annotated[int, Field(ge=1, le=10_000)] | None = None
+    worker_idle_ttl_ms: Annotated[int, Field(ge=1_000, le=600_000)] | None = None
+    worker_rss_limit_bytes: Annotated[int, Field(ge=67_108_864, le=8_589_934_592)] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -280,17 +187,10 @@ class RawScannerProfileV2(ContractModel):
             null_fields = [key for key, item in value.items() if item is None]
             if null_fields:
                 raise ValueError(
-                    "raw scanner profile fields cannot be null: "
+                    "scanner settings fields cannot be null: "
                     + ", ".join(sorted(null_fields))
                 )
         return value
-
-    @model_validator(mode="after")
-    def reject_duplicate_fallbacks(self) -> "RawScannerProfileV2":
-        order = self.office_parser_fallback_order
-        if order is not None and len(order) != len(set(order)):
-            raise ValueError("fallback order must not contain duplicates")
-        return self
 
 
 class DiscoveryProfile(ContractModel):
@@ -385,8 +285,8 @@ class ContextProfile(ContractModel):
     small_file_max_bytes: Literal[65536]
     medium_file_max_bytes: Literal[1048576]
     large_file_max_bytes: Literal[10485760]
-    priority_policy_version: Literal["default_v1"]
-    compression_policy_version: Literal["markdown_context_v1"]
+    priority_policy_version: Literal["budget_nominal_v2"]
+    compression_policy_version: Literal["markdown_context_v2"]
 
     @model_validator(mode="after")
     def validate_budget_order(self) -> "ContextProfile":
@@ -401,68 +301,14 @@ class ContextProfile(ContractModel):
         return self
 
 
-class NormalizedScannerProfileV1(ContractModel):
-    schema_version: Literal["normalized_scanner_profile_v1"]
-    parser_profile_version: NonEmpty1024
+class NormalizedScannerSettings(ContractModel):
+    """Rust 归一化后的完整设置和编译期策略结果。"""
+
     report_mode: ReportMode
     discovery: DiscoveryProfile
     execution: ExecutionProfile
     parse: ParseProfile
     context: ContextProfile
-
-    @model_validator(mode="after")
-    def validate_mode_context(self) -> "NormalizedScannerProfileV1":
-        expected = {
-            "daily": ("daily_balanced_v1", 50_000, 8_000),
-            "weekly": ("weekly_balanced_v1", 50_000, 5_000),
-            "monthly": ("monthly_balanced_v1", 60_000, 4_000),
-        }[self.report_mode]
-        actual = (
-            self.context.profile_name,
-            self.context.global_max_chars,
-            self.context.per_file_max_chars,
-        )
-        if actual != expected:
-            raise ValueError("report mode and context profile do not match")
-        return self
-
-
-class ContextProfileV2(ContractModel):
-    profile_name: Literal[
-        "daily_balanced_v1",
-        "weekly_balanced_v1",
-        "monthly_balanced_v1",
-    ]
-    global_max_chars: CharBudget
-    per_file_max_chars: CharBudget
-    small_file_max_bytes: Literal[65536]
-    medium_file_max_bytes: Literal[1048576]
-    large_file_max_bytes: Literal[10485760]
-    priority_policy_version: Literal["budget_nominal_v2"]
-    compression_policy_version: Literal["markdown_context_v2"]
-
-    @model_validator(mode="after")
-    def validate_budget_order(self) -> "ContextProfileV2":
-        if not (
-            self.small_file_max_bytes
-            < self.medium_file_max_bytes
-            < self.large_file_max_bytes
-        ):
-            raise ValueError("context size thresholds must be increasing")
-        if self.global_max_chars < self.per_file_max_chars:
-            raise ValueError("global context budget must cover a file budget")
-        return self
-
-
-class NormalizedScannerProfileV2(ContractModel):
-    schema_version: Literal["normalized_scanner_profile_v2"]
-    parser_profile_version: NonEmpty1024
-    report_mode: ReportMode
-    discovery: DiscoveryProfile
-    execution: ExecutionProfile
-    parse: ParseProfile
-    context: ContextProfileV2
-    # v2-only leaves（spec Part 8.1 表），归一化后全部必填
     admission_policy_version: Literal["budget_admission_v2"]
     classifier_policy_version: Literal["pdf_text_presence_v1"]
     max_candidate_files: Annotated[int, Field(ge=1, le=1_000_000)]
@@ -470,13 +316,12 @@ class NormalizedScannerProfileV2(ContractModel):
     max_total_pdf_classification_pages: Annotated[int, Field(ge=0, le=10_000_000)]
     pdf_classification_timeout_ms: Annotated[int, Field(ge=100, le=60_000)]
     total_deadline_ms: Annotated[int, Field(ge=5_000, le=3_600_000)]
-    session_concurrency: Annotated[int, Field(ge=1, le=8)]
-    max_requests_per_session: Annotated[int, Field(ge=1, le=10_000)]
-    session_idle_ttl_ms: Annotated[int, Field(ge=1_000, le=600_000)]
-    session_rss_limit_bytes: Annotated[int, Field(ge=67_108_864, le=8_589_934_592)]
+    worker_max_requests: Annotated[int, Field(ge=1, le=10_000)]
+    worker_idle_ttl_ms: Annotated[int, Field(ge=1_000, le=600_000)]
+    worker_rss_limit_bytes: Annotated[int, Field(ge=67_108_864, le=8_589_934_592)]
 
     @model_validator(mode="after")
-    def validate_mode_context(self) -> "NormalizedScannerProfileV2":
+    def validate_mode_context(self) -> "NormalizedScannerSettings":
         expected = {
             "daily": ("daily_balanced_v1", 50_000, 8_000),
             "weekly": ("weekly_balanced_v1", 50_000, 5_000),
@@ -490,12 +335,6 @@ class NormalizedScannerProfileV2(ContractModel):
         if actual != expected:
             raise ValueError("report mode and context profile do not match")
         return self
-
-
-ScannerProfile = Annotated[
-    RawScannerProfileV1 | RawScannerProfileV2,
-    Field(discriminator="schema_version"),
-]
 
 
 class BuildContextRequest(ContractModel):
@@ -512,7 +351,7 @@ class BuildContextRequest(ContractModel):
         "monthly_balanced_v1",
     ] | None
     scan_db_path: AbsolutePath
-    scanner_profile: ScannerProfile
+    scanner_settings: ScannerSettings
     adapters: AdapterPaths
 
     @model_validator(mode="after")
@@ -559,8 +398,7 @@ class Diagnostic(ContractModel):
         "SOURCE_FILE_LIMIT_EXCEEDED",
         "SOURCE_GUARD_UNAVAILABLE",
         "MAINTENANCE_MODE_UNAVAILABLE",
-        "SCHEMA_UPGRADE_REQUIRED",
-        "SCHEMA_MIGRATION_FAILED",
+        "SCANNER_DB_SCHEMA_MISMATCH",
         "DIAGNOSTICS_AGGREGATED",
         "SNAPSHOT_REUSE_PROJECTED_AS_FRESH",
         "PARSE_CACHE_NOT_APPLICABLE_PROJECTED_AS_MISS",
@@ -801,27 +639,6 @@ class TransportErrorResponse(ContractModel):
             or self.error.backend is not None
         ):
             raise ValueError("transport error must describe an invalid request")
-        return self
-
-
-class VersionResponse(ContractModel):
-    contract: Literal["ai_daily_context"]
-    protocol_version: Literal[1]
-    binary_name: Literal["ai-daily-scanner"]
-    engine_version: NonEmpty1024
-    engine_build: NonEmpty1024
-    target_triple: NonEmpty1024
-    supported_commands: list[
-        Literal["version", "doctor", "build-context", "inspect-run"]
-    ]
-    office_worker_contract_version: NonEmpty1024
-    python_worker_contract_version: NonEmpty1024
-
-    @model_validator(mode="after")
-    def validate_commands(self) -> "VersionResponse":
-        expected = ["version", "doctor", "build-context", "inspect-run"]
-        if self.supported_commands != expected:
-            raise ValueError("supported_commands must use the frozen order")
         return self
 
 
@@ -1092,8 +909,7 @@ class InspectRunResponse(ContractModel):
 
 
 # ---------------------------------------------------------------------------
-# v2 observation / maintenance / upgrade wire surface (types + fixtures only;
-# behavior lands in later tasks).
+# Complete scanner evidence and worker contracts.
 # ---------------------------------------------------------------------------
 
 SourceGuardKind = Literal[
@@ -1146,71 +962,6 @@ _BODY_PARSER_LANES = {
     "python_office_v2": "python_document_process_v2",
     "python_sharepoint_text_v2": "python_document_process_v2",
 }
-
-
-class CacheRetentionPolicy(ContractModel):
-    policy_version: Literal["cache_retention_v1"]
-    parse_cache_max_bytes: NonNegativeInt
-    classification_cache_max_bytes: NonNegativeInt
-    context_artifacts_max_bytes: NonNegativeInt
-    terminal_audit_max_bytes: NonNegativeInt
-    terminal_run_max_count: NonNegativeInt
-    terminal_run_max_age_days: NonNegativeInt
-    opportunistic_gc_budget_ms: NonNegativeInt
-
-
-class VersionResponseV2(ContractModel):
-    contract: Literal["ai_daily_context"]
-    protocol_version: Literal[1]
-    response_version: Literal[2]
-    binary_name: Literal["ai-daily-scanner"]
-    engine_version: NonEmpty1024
-    engine_build: NonEmpty1024
-    target_triple: NonEmpty1024
-    supported_commands: list[
-        Literal[
-            "version",
-            "doctor",
-            "build-context",
-            "inspect-run",
-            "maintenance",
-            "upgrade-db",
-        ]
-    ]
-    office_worker_contract_version: Literal["ai_daily_worker_v1"]
-    python_worker_contract_version: Literal["ai_daily_worker_v1"]
-    accepted_scanner_profile_versions: list[
-        Literal["scanner_profile_v1", "scanner_profile_v2"]
-    ]
-    inspect_response_versions: list[Literal[1, 2]]
-    classifier_contract_versions: list[Literal["ai_daily_pdf_classifier_v1"]]
-    session_contract_versions: list[Literal["ai_daily_worker_v2"]]
-    maintenance_contract_versions: list[Literal["ai_daily_scanner_maintenance_v1"]]
-    upgrade_contract_versions: list[Literal["ai_daily_scanner_upgrade_v1"]]
-    source_guard_policy: Literal["source_guard_v2"]
-    max_source_files_per_run: Literal[1000000]
-    cache_retention_policy: CacheRetentionPolicy
-
-    @model_validator(mode="after")
-    def validate_canonical_arrays(self) -> "VersionResponseV2":
-        expected_commands = [
-            "version",
-            "doctor",
-            "build-context",
-            "inspect-run",
-            "maintenance",
-            "upgrade-db",
-        ]
-        if self.supported_commands != expected_commands:
-            raise ValueError("supported_commands must use the frozen order")
-        if self.accepted_scanner_profile_versions != [
-            "scanner_profile_v1",
-            "scanner_profile_v2",
-        ]:
-            raise ValueError("accepted_scanner_profile_versions must be canonical")
-        if self.inspect_response_versions != [1, 2]:
-            raise ValueError("inspect_response_versions must be canonical")
-        return self
 
 
 class PdfClassificationAuditV1(ContractModel):
@@ -1737,121 +1488,6 @@ class InspectRunResponseV2(ContractModel):
         return self
 
 
-class MaintenanceRequestV1(ContractModel):
-    contract: Literal["ai_daily_scanner_maintenance"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    scan_db_path: AbsolutePath
-    mode: Literal["gc", "incremental_vacuum"]
-    dry_run: bool
-
-
-class MaintenanceSizeV1(ContractModel):
-    parse_cache_logical_bytes: NonNegativeInt
-    classification_cache_logical_bytes: NonNegativeInt
-    context_artifacts_logical_bytes: NonNegativeInt
-    terminal_audit_logical_bytes: NonNegativeInt
-    database_file_bytes: NonNegativeInt
-    wal_file_bytes: NonNegativeInt
-    shm_file_bytes: NonNegativeInt
-    total_physical_bytes: NonNegativeInt
-    freelist_bytes: NonNegativeInt
-    auto_vacuum_mode: Literal["none", "full", "incremental"]
-
-
-class MaintenanceDeletedV1(ContractModel):
-    parse_cache_rows: NonNegativeInt
-    classification_cache_rows: NonNegativeInt
-    context_artifacts_rows: NonNegativeInt
-    context_artifact_files_rows: NonNegativeInt
-    context_artifact_decisions_rows: NonNegativeInt
-    scan_runs_rows: NonNegativeInt
-    scan_run_attempts_rows: NonNegativeInt
-    run_diagnostics_rows: NonNegativeInt
-    scan_file_results_rows: NonNegativeInt
-    scan_stage_metrics_rows: NonNegativeInt
-    scan_extension_metrics_rows: NonNegativeInt
-    context_runs_rows: NonNegativeInt
-    context_decisions_rows: NonNegativeInt
-    file_inventory_rows: NonNegativeInt
-
-
-class MaintenanceVacuumV1(ContractModel):
-    mode: Literal["gc", "incremental_vacuum"]
-    status: Literal["not_requested", "skipped_dry_run", "ok", "error"]
-    pages_changed: NonNegativeInt
-
-
-class MaintenanceResponseV1(ContractModel):
-    contract: Literal["ai_daily_scanner_maintenance"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    status: Literal["ok", "error"]
-    cache_retention_policy: CacheRetentionPolicy
-    before: MaintenanceSizeV1
-    after: MaintenanceSizeV1
-    after_complete: bool
-    deleted: MaintenanceDeletedV1
-    pre_integrity_check: Literal["ok", "failed"]
-    post_integrity_check: Literal["not_run", "ok", "failed"]
-    vacuum: MaintenanceVacuumV1
-    warnings: Annotated[list[Diagnostic], Field(max_length=257)]
-    error: Diagnostic | None
-
-    @model_validator(mode="after")
-    def validate_status(self) -> "MaintenanceResponseV1":
-        if self.status == "ok":
-            if (
-                self.error
-                or self.pre_integrity_check != "ok"
-                or self.post_integrity_check == "failed"
-                or self.vacuum.status == "error"
-                or not self.after_complete
-            ):
-                raise ValueError("ok maintenance response violates status invariants")
-        if self.status == "error" and self.error is None:
-            raise ValueError("error maintenance response requires a diagnostic")
-        return self
-
-
-class UpgradeDatabaseRequestV1(ContractModel):
-    contract: Literal["ai_daily_scanner_upgrade"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    scan_db_path: AbsolutePath
-    apply: bool
-
-
-class UpgradeDatabaseResponseV1(ContractModel):
-    contract: Literal["ai_daily_scanner_upgrade"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    status: Literal["ok", "partial", "error"]
-    source_user_version: PositiveInt | None
-    target_user_version: Literal[2]
-    apply: bool
-    schema_migrated: bool
-    auto_vacuum_converted: bool
-    legacy_parse_cache_rows_detected: NonNegativeInt
-    invalidated_parse_cache_rows: NonNegativeInt
-    pre_integrity_check: Literal["not_run", "ok", "failed"]
-    post_integrity_check: Literal["not_run", "ok", "failed"]
-    warnings: Annotated[list[Diagnostic], Field(max_length=257)]
-    error: Diagnostic | None
-
-    @model_validator(mode="after")
-    def validate_status(self) -> "UpgradeDatabaseResponseV1":
-        if self.invalidated_parse_cache_rows > self.legacy_parse_cache_rows_detected:
-            raise ValueError("invalidated_parse_cache_rows exceeds detected rows")
-        if self.status in {"ok", "partial"} and self.error:
-            raise ValueError("successful upgrade response cannot contain an error")
-        if self.status == "partial" and not self.warnings:
-            raise ValueError("partial upgrade response requires a warning")
-        if self.status == "error" and self.error is None:
-            raise ValueError("error upgrade response requires a diagnostic")
-        return self
-
-
 SCHEMA_MODELS: dict[str, type[ContractModel]] = {
     "build-context-request-v1.schema.json": BuildContextRequest,
     "context-envelope-v1.schema.json": ContextEnvelope,
@@ -1860,10 +1496,9 @@ SCHEMA_MODELS: dict[str, type[ContractModel]] = {
     "doctor-response-v1.schema.json": DoctorResponse,
     "inspect-run-request-v1.schema.json": InspectRunRequest,
     "inspect-run-response-v1.schema.json": InspectRunResponse,
-    "scanner-profile-normalized-v1.schema.json": NormalizedScannerProfileV1,
-    "scanner-profile-request-v1.schema.json": RawScannerProfileV1,
+    "scanner-profile-normalized-v1.schema.json": NormalizedScannerSettings,
+    "scanner-profile-request-v1.schema.json": ScannerSettings,
     "transport-error-v1.schema.json": TransportErrorResponse,
-    "version-response-v1.schema.json": VersionResponse,
     "worker-diagnostic-v1.schema.json": WorkerDiagnosticV1,
     "worker-parse-request-v1.schema.json": WorkerParseRequest,
     "worker-parse-response-v1.schema.json": WorkerParseResponse,
@@ -1945,9 +1580,8 @@ def validate_contract_payload(
 __all__ = [
     "AdapterPaths",
     "BuildContextRequest",
-    "CacheRetentionPolicy",
     "ContextEnvelope",
-    "ContextProfileV2",
+    "ContextProfile",
     "ContextSummary",
     "ClassifierVersionResponseV1",
     "Diagnostic",
@@ -1960,26 +1594,14 @@ __all__ = [
     "InspectRunRequest",
     "InspectRunResponse",
     "InspectRunResponseV2",
-    "MaintenanceDeletedV1",
-    "MaintenanceRequestV1",
-    "MaintenanceResponseV1",
-    "MaintenanceSizeV1",
-    "MaintenanceVacuumV1",
-    "NormalizedScannerProfileV1",
-    "NormalizedScannerProfileV2",
+    "NormalizedScannerSettings",
     "PdfClassificationAuditV1",
     "PdfClassifierRequestV1",
     "PdfClassifierResponseV1",
     "PdfClassifierResultV1",
     "PythonOperationDiagnosticV1",
-    "RawScannerProfileV1",
-    "RawScannerProfileV2",
-    "ScannerProfile",
+    "ScannerSettings",
     "TransportErrorResponse",
-    "UpgradeDatabaseRequestV1",
-    "UpgradeDatabaseResponseV1",
-    "VersionResponse",
-    "VersionResponseV2",
     "WORKER_DIAGNOSTIC_V1_ERROR_CODES",
     "WORKER_DIAGNOSTIC_V1_STAGES",
     "WorkerDiagnosticV1",

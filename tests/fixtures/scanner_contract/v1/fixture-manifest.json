@@ -78,10 +78,6 @@
       "schema": "context-envelope-v1.schema.json"
     },
     {
-      "file": "scanner-version-response.json",
-      "schema": "version-response-v1.schema.json"
-    },
-    {
       "file": "transport-error.json",
       "schema": "transport-error-v1.schema.json"
     },

@@ -8,15 +8,13 @@
 //! position, so the decision output is cache-independent.
 
 use ai_daily_scanner_contract::{
-    AuditWorkerLane, CacheStatus, ContextAction, ContextDecision, ContextProfile, ContextProfileV2,
-    Diagnostic, ParseStatus, Validate,
+    AuditWorkerLane, CacheStatus, ContextAction, ContextDecision, ContextProfile, Diagnostic,
+    ParseStatus, Validate,
 };
 
 use crate::nominal::NominalKey;
 
-/// The minimal budget profile the decision layer and renderer need. Both the
-/// frozen v1 `ContextProfile` and the v2 `ContextProfileV2` implement it, so
-/// the decision/scheduler path never converts or duplicates the profile.
+/// The minimal budget profile the decision layer and renderer need.
 pub trait BudgetProfile {
     fn global_max_chars(&self) -> u64;
     fn per_file_max_chars(&self) -> u64;
@@ -26,24 +24,6 @@ pub trait BudgetProfile {
 }
 
 impl BudgetProfile for ContextProfile {
-    fn global_max_chars(&self) -> u64 {
-        self.global_max_chars
-    }
-    fn per_file_max_chars(&self) -> u64 {
-        self.per_file_max_chars
-    }
-    fn large_file_max_bytes(&self) -> u64 {
-        self.large_file_max_bytes
-    }
-    fn profile_name(&self) -> &str {
-        &self.profile_name
-    }
-    fn compression_policy_version(&self) -> &str {
-        &self.compression_policy_version
-    }
-}
-
-impl BudgetProfile for ContextProfileV2 {
     fn global_max_chars(&self) -> u64 {
         self.global_max_chars
     }

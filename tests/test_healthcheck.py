@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.core import healthcheck
-from src.core.config import UnknownScannerContractFieldsError
+from src.core.config import UnknownScannerSettingsError
 from src.services.native_scanner import NativeScannerError
 
 
@@ -29,10 +29,7 @@ def _make_config(provider: str, api_key: str | None, root: Path) -> SimpleNamesp
         llm_provider=provider,
         work_dir=root / "workspace",
         llm_config={"model_id": "deepseek-chat", "max_tokens": 8192},
-        scanner_contract_profile=lambda: {
-            "schema_version": "scanner_profile_v1",
-            "max_workers": 4,
-        },
+        scanner_settings=lambda: {"max_workers": 4},
         reports_dir=root / "data" / "reports",
         db_dir=root / "data" / "db",
         deepseek_api_key=api_key if provider == "deepseek" else "",
@@ -46,13 +43,9 @@ def _make_strict_rust_config(
     allowed_extensions: list[str] | None = None,
 ) -> SimpleNamespace:
     cfg = _make_config("deepseek", "synthetic-key", root)
-    cfg.scanner_engine = "rust_v2"
-    cfg.rust_scanner_bin = "bin/ai-daily-scanner"
-    cfg.rust_office_parser_bin = "bin/ai-daily-office-parser"
-    cfg.rust_index_db_path = "data/db/scan_index_v2.sqlite3"
-    cfg.rust_process_timeout_seconds = 30.0
-    cfg.scanner_contract_profile = lambda: {
-        "schema_version": "scanner_profile_v1",
+    cfg.office_worker_path = "bin/ai-daily-office-parser"
+    cfg.index_db_path = "data/db/scan_index_v3.sqlite3"
+    cfg.scanner_settings = lambda: {
         "max_workers": 4,
         "allowed_extensions": allowed_extensions or [".txt"],
     }
@@ -341,7 +334,7 @@ def test_collect_healthcheck_redacts_runtime_config_exception(tmp_path, monkeypa
     assert fake_secret not in repr(result)
 
 
-def test_collect_healthcheck_reports_unknown_scanner_contract_fields(
+def test_collect_healthcheck_reports_unknown_scanner_settings(
     tmp_path,
     monkeypatch,
 ):
@@ -349,8 +342,8 @@ def test_collect_healthcheck_reports_unknown_scanner_contract_fields(
     _prepare_platform_config_root(tmp_path)
 
     cfg = _make_config("deepseek", "synthetic-key", tmp_path)
-    cfg.scanner_contract_profile = lambda: (_ for _ in ()).throw(
-        UnknownScannerContractFieldsError(
+    cfg.scanner_settings = lambda: (_ for _ in ()).throw(
+        UnknownScannerSettingsError(
             ("worker_lane_mode", "discovery_backend")
         )
     )
@@ -362,7 +355,7 @@ def test_collect_healthcheck_reports_unknown_scanner_contract_fields(
     )
 
     assert result.errors == [
-        "配置校验失败: unknown scanner contract fields: "
+        "配置校验失败: unknown scanner settings: "
         "discovery_backend, worker_lane_mode"
     ]
 

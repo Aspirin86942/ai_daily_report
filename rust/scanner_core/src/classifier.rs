@@ -1,5 +1,5 @@
 use ai_daily_discovery::DiscoveredFileOut;
-use ai_daily_scanner_contract::NormalizedScannerProfileV1;
+use ai_daily_scanner_contract::NormalizedScannerSettings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParserRoute {
@@ -44,7 +44,7 @@ pub enum ClassificationError {
 
 pub fn classify_candidate(
     file: &DiscoveredFileOut,
-    profile: &NormalizedScannerProfileV1,
+    profile: &NormalizedScannerSettings,
 ) -> Result<ParserRoute, ClassificationError> {
     if file.size_bytes > profile.execution.max_file_size_bytes {
         return Err(ClassificationError::FileTooLarge);

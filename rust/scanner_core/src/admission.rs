@@ -15,7 +15,7 @@
 
 use crate::budget_model::{ContextBudgetModel, RouteHint, RouteKind};
 use ai_daily_scanner_contract::{
-    NormalizedScannerProfileV2, PdfClassificationStatus, SourceGuardKind,
+    NormalizedScannerSettings, PdfClassificationStatus, SourceGuardKind,
 };
 use std::collections::BTreeMap;
 
@@ -137,7 +137,7 @@ pub struct ClassificationPlan;
 impl ClassificationPlan {
     pub fn build(
         files: Vec<PlanCandidate>,
-        profile: &NormalizedScannerProfileV2,
+        profile: &NormalizedScannerSettings,
         page_budget: u64,
     ) -> Vec<ClassifiedPlan> {
         let mut classified = Vec::with_capacity(files.len());
@@ -281,7 +281,7 @@ impl ContentAdmissionPlan {
     /// PDF that carries `PdfClassificationPlan::Classify`.
     pub fn build(
         classified: &[ClassifiedPlan],
-        profile: &NormalizedScannerProfileV2,
+        profile: &NormalizedScannerSettings,
         model: &ContextBudgetModel,
         classifications: &BTreeMap<String, PdfClassificationResult>,
     ) -> Vec<AdmissionDecision> {
@@ -411,7 +411,7 @@ fn admit_pdf(
 fn route_hint(
     plan: &ClassifiedPlan,
     route: RouteKind,
-    profile: &NormalizedScannerProfileV2,
+    profile: &NormalizedScannerSettings,
 ) -> RouteHint {
     RouteHint {
         relative_path: plan.relative_path.clone(),
@@ -432,7 +432,7 @@ enum RouteDecision {
 
 fn classify_candidate_v2(
     file: &PlanCandidate,
-    profile: &NormalizedScannerProfileV2,
+    profile: &NormalizedScannerSettings,
 ) -> RouteDecision {
     if file.size_bytes > profile.execution.max_file_size_bytes {
         return RouteDecision::PolicyNotParsed(NotParsedReason::FileSizePolicy);

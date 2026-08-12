@@ -38,7 +38,7 @@ mod windows {
         let work_dir = temp.path().join("work");
         std::fs::create_dir(&work_dir).expect("work directory");
         std::fs::copy(fixture, work_dir.join("text.pdf")).expect("copy PDF fixture");
-        let db_path = temp.path().join("scan_index_v2.sqlite3");
+        let db_path = temp.path().join("scan_index_v3.sqlite3");
 
         let request = json!({
             "contract": "ai_daily_context",
@@ -50,14 +50,14 @@ mod windows {
             "report_mode": "weekly",
             "compression_profile": null,
             "scan_db_path": db_path,
-            "scanner_profile": {
-                "schema_version": "scanner_profile_v2",
+            "scanner_settings": {
+
                 "max_candidate_files": 8,
                 "max_total_pdf_classification_pages": 20,
                 "max_pdf_text_extractions": 4,
                 "total_deadline_ms": 60000,
-                "session_concurrency": 1,
-                "max_requests_per_session": 1
+                "max_workers": 1,
+                "worker_max_requests": 1
             },
             "adapters": {
                 "office_worker_path": office,
@@ -97,7 +97,7 @@ mod windows {
         assert_eq!(metrics["session_fallback_count"], 0);
         assert!(
             metrics["session_restart_count"].as_u64().unwrap_or(0) >= 1,
-            "max_requests_per_session=1 must recycle the session between classify and parse: {response}"
+            "worker_max_requests=1 must recycle the session between classify and parse: {response}"
         );
         assert!(
             metrics["peak_worker_rss_bytes"].as_u64().unwrap_or(0) > 0,

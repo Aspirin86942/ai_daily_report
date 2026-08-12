@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .config import Config, UnknownScannerContractFieldsError, config
+from .config import Config, UnknownScannerSettingsError, config
 from ..services.native_scanner import NativeScanner, NativeScannerError
 
 TEMPLATE_FILES: tuple[str, ...] = (
@@ -166,7 +166,7 @@ def _append_runtime_config_checks(
     log_dir = Path(getattr(cfg, "log_dir", project_root / "logs"))
     config_dir = Path(getattr(cfg, "config_dir", project_root / "config"))
     installed_mode = bool(getattr(cfg, "installed_mode", False))
-    scanner_profile = cfg.scanner_contract_profile()
+    scanner_settings = cfg.scanner_settings()
     result.info["运行模式"] = "installed" if installed_mode else "source"
     if installed_mode:
         result.info["安装根目录"] = str(getattr(cfg, "install_root"))
@@ -181,7 +181,7 @@ def _append_runtime_config_checks(
     result.info["LLM Provider"] = provider
     result.info["工作目录"] = str(work_dir)
     result.info["LLM 模型"] = model_id
-    max_workers = scanner_profile.get("max_workers")
+    max_workers = scanner_settings.get("max_workers")
     result.info["最大并发"] = (
         str(max_workers) if max_workers is not None else "Rust 默认"
     )
@@ -340,7 +340,7 @@ def collect_healthcheck(
 
     try:
         _append_runtime_config_checks(result, cfg, root, strict=strict)
-    except UnknownScannerContractFieldsError as exc:
+    except UnknownScannerSettingsError as exc:
         # 该异常只包含配置字段名，可安全展示，帮助定位过期或拼错的配置。
         result.errors.append(f"配置校验失败: {exc}")
     except Exception as exc:

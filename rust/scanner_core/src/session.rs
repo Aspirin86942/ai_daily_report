@@ -17,7 +17,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ai_daily_scanner_contract::{
-    NormalizedScannerProfileV2, PdfClassifierRequestV1, PdfClassifierResultV1, Validate,
+    NormalizedScannerSettings, PdfClassifierRequestV1, PdfClassifierResultV1, Validate,
     WorkerBackend, WorkerParseRequest, WorkerParseResponse,
 };
 use ai_daily_worker_contract::{
@@ -68,7 +68,7 @@ impl Default for SessionParams {
 }
 
 impl SessionParams {
-    /// spec Part 7.3 / Part 8.1：默认 `session_concurrency = min(max_workers, 4)`。
+    /// Worker pool concurrency is derived from the single max_workers setting.
     pub fn with_default_concurrency(max_workers: u64) -> Self {
         Self {
             concurrency: usize::try_from(max_workers.min(4)).unwrap_or(4).max(1),
@@ -76,14 +76,14 @@ impl SessionParams {
         }
     }
 
-    pub fn from_profile_v2(profile: &NormalizedScannerProfileV2) -> Self {
+    pub fn from_settings(profile: &NormalizedScannerSettings) -> Self {
         Self {
-            concurrency: usize::try_from(profile.session_concurrency)
+            concurrency: usize::try_from(profile.execution.max_workers.min(4))
                 .unwrap_or(Self::default().concurrency)
                 .clamp(1, 8),
-            max_requests_per_session: profile.max_requests_per_session,
-            idle_ttl: Duration::from_millis(profile.session_idle_ttl_ms),
-            rss_limit_bytes: profile.session_rss_limit_bytes,
+            max_requests_per_session: profile.worker_max_requests,
+            idle_ttl: Duration::from_millis(profile.worker_idle_ttl_ms),
+            rss_limit_bytes: profile.worker_rss_limit_bytes,
         }
     }
 }

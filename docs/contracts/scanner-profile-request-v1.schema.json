@@ -1,20 +1,10 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "scanner-profile-request-v1.schema.json",
-  "title": "RawScannerProfileV1",
+  "title": "ScannerSettings",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version"
-  ],
   "properties": {
-    "schema_version": {
-      "type": "string",
-      "enum": [
-        "scanner_profile_v1",
-        "scanner_profile_v2"
-      ]
-    },
     "allowed_extensions": {
       "$ref": "#/$defs/extensionArray"
     },
@@ -53,41 +43,14 @@
     "total_max_chars": {
       "$ref": "#/$defs/charBudget"
     },
-    "parser_profile_version": {
-      "$ref": "#/$defs/nonEmptyString"
-    },
-    "office_parser_backend": {
-      "$ref": "#/$defs/nonEmptyString"
-    },
-    "pdf_parser_backend": {
-      "$ref": "#/$defs/nonEmptyString"
-    },
-    "office_fallback_policy_version": {
-      "$ref": "#/$defs/nonEmptyString"
-    },
-    "office_parser_fallback_enabled": {
+    "fallback_after_timeout": {
       "type": "boolean"
     },
-    "office_fallback_after_timeout": {
-      "type": "boolean"
-    },
-    "office_legacy_extensions_enabled": {
+    "legacy_office_enabled": {
       "type": "boolean"
     },
     "pptx_include_notes": {
       "type": "boolean"
-    },
-    "office_parser_fallback_order": {
-      "type": "array",
-      "maxItems": 2,
-      "uniqueItems": true,
-      "items": {
-        "type": "string",
-        "enum": [
-          "python_office_v2",
-          "python_sharepoint_text_v2"
-        ]
-      }
     },
     "direct_text_max_bytes": {
       "$ref": "#/$defs/readBudget"
@@ -182,12 +145,6 @@
       "minimum": 0,
       "maximum": 10000000
     },
-    "admission_policy_version": {
-      "const": "budget_admission_v2"
-    },
-    "classifier_policy_version": {
-      "const": "pdf_text_presence_v1"
-    },
     "pdf_classification_timeout_ms": {
       "type": "integer",
       "minimum": 100,
@@ -198,22 +155,17 @@
       "minimum": 5000,
       "maximum": 3600000
     },
-    "session_concurrency": {
-      "type": "integer",
-      "minimum": 1,
-      "maximum": 8
-    },
-    "max_requests_per_session": {
+    "worker_max_requests": {
       "type": "integer",
       "minimum": 1,
       "maximum": 10000
     },
-    "session_idle_ttl_ms": {
+    "worker_idle_ttl_ms": {
       "type": "integer",
       "minimum": 1000,
       "maximum": 600000
     },
-    "session_rss_limit_bytes": {
+    "worker_rss_limit_bytes": {
       "type": "integer",
       "minimum": 67108864,
       "maximum": 8589934592

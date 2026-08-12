@@ -1,25 +1,27 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "scanner-profile-normalized-v1.schema.json",
-  "title": "NormalizedScannerProfileV1",
+  "title": "NormalizedScannerSettings",
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema_version",
-    "parser_profile_version",
     "report_mode",
     "discovery",
     "execution",
     "parse",
-    "context"
+    "context",
+    "admission_policy_version",
+    "classifier_policy_version",
+    "max_candidate_files",
+    "max_pdf_text_extractions",
+    "max_total_pdf_classification_pages",
+    "pdf_classification_timeout_ms",
+    "total_deadline_ms",
+    "worker_max_requests",
+    "worker_idle_ttl_ms",
+    "worker_rss_limit_bytes"
   ],
   "properties": {
-    "schema_version": {
-      "const": "normalized_scanner_profile_v1"
-    },
-    "parser_profile_version": {
-      "$ref": "#/$defs/nonEmptyString"
-    },
     "report_mode": {
       "type": "string",
       "enum": [
@@ -39,6 +41,52 @@
     },
     "context": {
       "$ref": "#/$defs/context"
+    },
+    "admission_policy_version": {
+      "const": "budget_admission_v2"
+    },
+    "classifier_policy_version": {
+      "const": "pdf_text_presence_v1"
+    },
+    "max_candidate_files": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 1000000
+    },
+    "max_pdf_text_extractions": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000
+    },
+    "max_total_pdf_classification_pages": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 10000000
+    },
+    "pdf_classification_timeout_ms": {
+      "type": "integer",
+      "minimum": 100,
+      "maximum": 60000
+    },
+    "total_deadline_ms": {
+      "type": "integer",
+      "minimum": 5000,
+      "maximum": 3600000
+    },
+    "worker_max_requests": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 10000
+    },
+    "worker_idle_ttl_ms": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 600000
+    },
+    "worker_rss_limit_bytes": {
+      "type": "integer",
+      "minimum": 67108864,
+      "maximum": 8589934592
     }
   },
   "allOf": [
@@ -399,10 +447,10 @@
           "const": 10485760
         },
         "priority_policy_version": {
-          "const": "default_v1"
+          "const": "budget_nominal_v2"
         },
         "compression_policy_version": {
-          "const": "markdown_context_v1"
+          "const": "markdown_context_v2"
         }
       }
     },

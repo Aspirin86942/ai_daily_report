@@ -21,9 +21,8 @@ llm:
   max_retries: 3
 
 scanner:
-  engine: "rust_v2"
-  rust_scanner_bin: "rust/target/release/ai-daily-scanner"
-  rust_index_db_path: "data/db/scan_index_v2.sqlite3"
+  index_db_path: "data/db/scan_index_v3.sqlite3"
+  office_worker_path: "rust/target/release/ai-daily-office-parser"
   allowed_extensions:
     - ".xlsx"
     - ".xls"
@@ -40,17 +39,10 @@ scanner:
     - "*.tmp"
   excluded_dirs: []
   discovery_timeout_seconds: 30
-  # Rust core owns parser routing; these values participate in cache identity.
-  office_parser_backend: "rust_office_oxide_v2"
-  rust_office_parser_bin: "rust/target/release/ai-daily-office-parser"
-  office_parser_fallback_enabled: true
-  office_parser_fallback_order:
-    - "python_office_v2"
-    - "python_sharepoint_text_v2"
-  office_fallback_after_timeout: false
-  office_fallback_policy_version: "hybrid_v1"
+  # Backend/routing/fallback order are compiled Rust policy.
+  fallback_after_timeout: false
   # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.
-  office_legacy_extensions_enabled: false
+  legacy_office_enabled: false
   max_workers: 4
   excel_max_rows: 50
   pdf_max_pages: 5
@@ -65,4 +57,6 @@ scanner:
     ".pdf": 45
     ".xlsx": 60
     ".xls": 60
-  parser_profile_version: "v1"
+  worker_max_requests: 128
+  worker_idle_ttl_ms: 30000
+  worker_rss_limit_bytes: 536870912

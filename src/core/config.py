@@ -8,13 +8,8 @@ from typing import Any, Dict
 
 from dynaconf import Dynaconf
 
-DEFAULT_RUST_OFFICE_PARSER_BIN = (
-    "rust/target/release/ai-daily-office-parser"
-)
-DEFAULT_SCANNER_ENGINE = "rust_v2"
-DEFAULT_RUST_SCANNER_BIN = "rust/target/release/ai-daily-scanner"
-DEFAULT_RUST_INDEX_DB_PATH = "data/db/scan_index_v2.sqlite3"
-DEFAULT_RUST_PROCESS_TIMEOUT_SECONDS = 900.0
+DEFAULT_OFFICE_WORKER_PATH = "rust/target/release/ai-daily-office-parser"
+DEFAULT_INDEX_DB_PATH = "data/db/scan_index_v3.sqlite3"
 
 INSTALLED_PATH_ENV_VARS = {
     "install_root": "DAILY_REPORT_INSTALL_ROOT",
@@ -25,14 +20,14 @@ INSTALLED_PATH_ENV_VARS = {
     "log_dir": "DAILY_REPORT_LOG_DIR",
 }
 
-_SCANNER_CONFIG_COMPAT_EXPORTS = frozenset(
-    {"SCANNER_CONTRACT_FIELDS", "UnknownScannerContractFieldsError"}
+_SCANNER_CONFIG_EXPORTS = frozenset(
+    {"SCANNER_SETTINGS_FIELDS", "UnknownScannerSettingsError"}
 )
 
 
 def __getattr__(name: str) -> Any:
-    """按需兼容历史 scanner 配置导入，避免 core/services 循环加载。"""
-    if name not in _SCANNER_CONFIG_COMPAT_EXPORTS:
+    """按需导出 scanner 配置门禁，避免 core/services 循环加载。"""
+    if name not in _SCANNER_CONFIG_EXPORTS:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
     from ..services import scanner_config
@@ -238,83 +233,41 @@ class Config:
             "max_retries": self._settings.llm.max_retries,
         }
 
-    def scanner_contract_profile(self) -> Dict[str, Any]:
-        """提取调用方显式配置的 scanner v1 wire 叶子。"""
-        from ..services.scanner_config import extract_scanner_profile
+    def scanner_settings(self) -> Dict[str, Any]:
+        """提取调用方显式配置的 scanner settings。"""
+        from ..services.scanner_config import extract_scanner_settings
 
-        return extract_scanner_profile(self._settings.scanner)
-
-    @property
-    def scanner_engine(self) -> str:
-        """选择一次完整 scanner/context engine；Windows 默认 Rust v2。"""
-        value = str(
-            getattr(self._settings.scanner, "engine", DEFAULT_SCANNER_ENGINE)
-        ).strip().lower()
-        if value != "rust_v2":
-            raise ValueError(f"unsupported scanner engine: {value!r}")
-        return value
+        return extract_scanner_settings(self._settings.scanner)
 
     @property
-    def rust_scanner_bin(self) -> str:
-        """Rust v2 context binary 路径，不注入 scanner wire profile。"""
-        if self.installed_mode:
-            return str((self.project_root / DEFAULT_RUST_SCANNER_BIN).resolve())
-        return self._non_blank_string(
-            getattr(
-                self._settings.scanner,
-                "rust_scanner_bin",
-                DEFAULT_RUST_SCANNER_BIN,
-            ),
-            DEFAULT_RUST_SCANNER_BIN,
-        )
-
-    @property
-    def rust_office_parser_bin(self) -> str:
-        """Rust Office worker 路径；worker 始终由 Rust core 隔离启动。"""
+    def office_worker_path(self) -> str:
+        """隔离 Office worker 路径。"""
         if self.installed_mode:
             return str(
-                (self.project_root / DEFAULT_RUST_OFFICE_PARSER_BIN).resolve()
+                (self.project_root / DEFAULT_OFFICE_WORKER_PATH).resolve()
             )
         return self._non_blank_string(
             getattr(
                 self._settings.scanner,
-                "rust_office_parser_bin",
-                DEFAULT_RUST_OFFICE_PARSER_BIN,
+                "office_worker_path",
+                DEFAULT_OFFICE_WORKER_PATH,
             ),
-            DEFAULT_RUST_OFFICE_PARSER_BIN,
+            DEFAULT_OFFICE_WORKER_PATH,
         )
 
     @property
-    def rust_index_db_path(self) -> str:
-        """Rust v2 独占数据库路径；已退役的 v1 数据库保持不变。"""
+    def index_db_path(self) -> str:
+        """Fresh-only v3 scanner 数据库路径。"""
         if self.installed_mode:
-            return str((self.db_dir / "scan_index_v2.sqlite3").resolve())
+            return str((self.db_dir / "scan_index_v3.sqlite3").resolve())
         return self._non_blank_string(
             getattr(
                 self._settings.scanner,
-                "rust_index_db_path",
-                DEFAULT_RUST_INDEX_DB_PATH,
+                "index_db_path",
+                DEFAULT_INDEX_DB_PATH,
             ),
-            DEFAULT_RUST_INDEX_DB_PATH,
+            DEFAULT_INDEX_DB_PATH,
         )
-
-    @property
-    def rust_process_timeout_seconds(self) -> float:
-        """Python 外层 watchdog 总预算，不替代 Rust 的逐文件 deadline。"""
-        raw = getattr(
-            self._settings.scanner,
-            "rust_process_timeout_seconds",
-            DEFAULT_RUST_PROCESS_TIMEOUT_SECONDS,
-        )
-        try:
-            value = float(raw)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("rust_process_timeout_seconds must be numeric") from exc
-        if not 1.0 <= value <= 86_400.0:
-            raise ValueError(
-                "rust_process_timeout_seconds must be between 1 and 86400"
-            )
-        return value
 
     @property
     def llm_provider(self) -> str:

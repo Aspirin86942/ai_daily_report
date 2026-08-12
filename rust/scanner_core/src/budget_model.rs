@@ -9,7 +9,7 @@
 //! internal Error (never a panic, never a silent Omit, never a truncation of
 //! other files).
 
-use ai_daily_scanner_contract::{ContextProfileV2, NormalizedScannerProfileV2};
+use ai_daily_scanner_contract::{ContextProfile, NormalizedScannerSettings};
 
 pub const BUDGET_MODEL_MISMATCH_CODE: &str = "BUDGET_MODEL_MISMATCH";
 pub const CONTEXT_FIXED_SECTIONS_OVER_BUDGET_CODE: &str = "CONTEXT_FIXED_SECTIONS_OVER_BUDGET";
@@ -136,7 +136,7 @@ impl RouteKind {
     }
 
     /// Maximum content a route can produce under the normalized parser limits.
-    pub fn max_excerpt_chars(self, profile: &NormalizedScannerProfileV2) -> u64 {
+    pub fn max_excerpt_chars(self, profile: &NormalizedScannerSettings) -> u64 {
         match self {
             Self::LightText => profile
                 .parse
@@ -270,7 +270,7 @@ impl ContextBudgetModel {
     /// `fixed_sections` are the pre-rendered sections that exist before any
     /// admitted file (header, run summary, notices, `## 文件证据`, and any
     /// preexisting bounded error sections frozen before `ContentAdmissionPlan`).
-    pub fn new(profile: &ContextProfileV2, fixed_sections: &[String]) -> Result<Self, BudgetError> {
+    pub fn new(profile: &ContextProfile, fixed_sections: &[String]) -> Result<Self, BudgetError> {
         let exact = fixed_sections
             .iter()
             .map(|section| count_chars(section))

@@ -33,7 +33,7 @@ pub mod discovery {
 
 pub use run::{
     dispatch, dispatch_with_response_version, invalid_request_output, version_response,
-    version_response_v2, CommandOutput, EngineShellError,
+    CommandOutput, EngineShellError,
 };
 pub use scanner::{
     ContextResult, ScanRequest, Scanner, ScannerConfig, ScannerError, ScannerOperation,

@@ -3,9 +3,8 @@
 
 use ai_daily_scanner_contract::{
     AuditWorkerLane, CacheStatus, ClassificationCacheStatus, ClassificationTransport,
-    ContextAction, ContextProfile, ContextProfileV2, Diagnostic, DiagnosticStage, ErrorCode,
-    Nullable, ParseStatus, ParseTransport, PdfClassificationStatus, RawScannerProfileV2,
-    ReportMode, ScannerProfile, SourceGuardKind,
+    ContextAction, ContextProfile, Diagnostic, DiagnosticStage, ErrorCode, Nullable, ParseStatus,
+    ParseTransport, PdfClassificationStatus, ReportMode, ScannerSettings, SourceGuardKind,
 };
 use ai_daily_scanner_core::admission::{
     ClassificationPlan, ContentAdmissionPlan, NotParsedReason, PdfClassificationPlan,
@@ -17,15 +16,13 @@ use ai_daily_scanner_core::budget_model::{
     SECTION_SEPARATOR_CHARS,
 };
 use ai_daily_scanner_core::compressor::build_context;
-use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
+use ai_daily_scanner_core::config::normalize_scanner_settings;
 use ai_daily_scanner_core::nominal::nominal_rank;
 
-fn v2_profile(mode: ReportMode) -> ai_daily_scanner_contract::NormalizedScannerProfileV2 {
-    let raw: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
-        "schema_version": "scanner_profile_v2"
-    }))
-    .expect("minimal v2 raw profile");
-    normalize_scanner_profile_v2(&ScannerProfile::V2(raw), mode).expect("normalized v2 profile")
+fn normalized_settings(mode: ReportMode) -> ai_daily_scanner_contract::NormalizedScannerSettings {
+    let raw: ScannerSettings =
+        serde_json::from_value(serde_json::json!({})).expect("minimal v2 raw profile");
+    normalize_scanner_settings(&raw, mode).expect("normalized v2 profile")
 }
 
 fn candidate(path: &str, extension: &str, size_bytes: u64) -> PlanCandidate {
@@ -38,8 +35,8 @@ fn candidate(path: &str, extension: &str, size_bytes: u64) -> PlanCandidate {
     }
 }
 
-fn context_profile(global_max_chars: u64, per_file_max_chars: u64) -> ContextProfileV2 {
-    ContextProfileV2 {
+fn context_profile(global_max_chars: u64, per_file_max_chars: u64) -> ContextProfile {
+    ContextProfile {
         profile_name: "daily_balanced_v1".to_string(),
         global_max_chars,
         per_file_max_chars,
@@ -260,7 +257,7 @@ fn every_route_reserved_covers_rendered() {
         long_path,
     ];
     for mode in [ReportMode::Daily, ReportMode::Weekly, ReportMode::Monthly] {
-        let profile = v2_profile(mode);
+        let profile = normalized_settings(mode);
         let model = ContextBudgetModel::new(&profile.context, &[]).expect("valid model");
         for path in &paths {
             for route in routes {
@@ -310,7 +307,7 @@ fn every_route_reserved_covers_rendered() {
 
 #[test]
 fn classification_plan_handles_no_io_dispositions_before_candidate_slots() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let files = vec![
         candidate(r"\big.log", ".log", 1024 * 1024 * 1024), // file too large -> policy
         candidate(r"\a.docx", ".docx", 100),                // office candidate
@@ -354,7 +351,7 @@ fn classification_plan_handles_no_io_dispositions_before_candidate_slots() {
 
 #[test]
 fn classification_plan_marks_source_guard_unavailable_as_error_reject() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let mut unavailable = candidate(r"\a.pdf", ".pdf", 100);
     unavailable.source_guard_kind = SourceGuardKind::Unavailable;
     let plan = ClassificationPlan::build(
@@ -372,7 +369,7 @@ fn classification_plan_marks_source_guard_unavailable_as_error_reject() {
 
 #[test]
 fn classification_plan_reserves_full_pdf_max_pages_per_pdf_in_nominal_order() {
-    let profile = v2_profile(ReportMode::Daily); // page budget 80, pdf_max_pages 5
+    let profile = normalized_settings(ReportMode::Daily); // page budget 80, pdf_max_pages 5
     let files: Vec<PlanCandidate> = (0..17)
         .map(|index| candidate(&format!(r"\p{index:02}.pdf"), ".pdf", 100))
         .collect();
@@ -408,7 +405,7 @@ fn classification_plan_reserves_full_pdf_max_pages_per_pdf_in_nominal_order() {
 
 #[test]
 fn classification_plan_assigns_candidate_slots_by_nominal_rank() {
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = normalized_settings(ReportMode::Daily);
     profile.max_candidate_files = 2;
     let files = vec![
         candidate(r"\z.pdf", ".pdf", 100),
@@ -476,7 +473,7 @@ fn content_admission_continues_to_smaller_files_after_a_budget_omit() {
     // small.md (priority 30, text excerpt 100). The single pass omits the big
     // file on the global budget, then CONTINUES to the smaller file and admits
     // it; there is no backfill into the big file's slot.
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = normalized_settings(ReportMode::Daily);
     profile.parse.office.document_excerpt_max_chars = 8_000;
     profile.parse.text.excerpt_max_chars = 100;
     let model = admission_context(2_000, 2_000);
@@ -522,7 +519,7 @@ fn content_admission_continues_to_smaller_files_after_a_budget_omit() {
 
 #[test]
 fn content_admission_text_pdf_requires_budget_and_extraction_slot() {
-    let profile = v2_profile(ReportMode::Daily); // max_pdf_text_extractions 8
+    let profile = normalized_settings(ReportMode::Daily); // max_pdf_text_extractions 8
     let mut profile = profile;
     profile.max_pdf_text_extractions = 1;
     let model = admission_context(50_000, 8_000);
@@ -582,7 +579,7 @@ fn content_admission_text_pdf_requires_budget_and_extraction_slot() {
 
 #[test]
 fn content_admission_no_text_pdf_is_metadata_only_without_extraction_slot() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let model = admission_context(50_000, 8_000);
     let files = vec![
         candidate(r"\image.pdf", ".pdf", 100),
@@ -633,7 +630,7 @@ fn content_admission_no_text_pdf_is_metadata_only_without_extraction_slot() {
 
 #[test]
 fn content_admission_classifier_failure_is_not_admitted() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let model = admission_context(50_000, 8_000);
     let files = vec![candidate(r"\broken.pdf", ".pdf", 100)];
     let classified =
@@ -658,7 +655,7 @@ fn content_admission_classifier_failure_is_not_admitted() {
 // omits a successful file when the global budget is exhausted (spec Part 2.2).
 // ---------------------------------------------------------------------------
 
-fn v1_profile(global_max_chars: u64, per_file_max_chars: u64) -> ContextProfile {
+fn settings(global_max_chars: u64, per_file_max_chars: u64) -> ContextProfile {
     ContextProfile {
         profile_name: "daily_balanced_v1".to_string(),
         global_max_chars,
@@ -715,7 +712,7 @@ fn compressor_success_omit_branch_is_budget_model_mismatch() {
             evidence("b.md", ".md", &"B".repeat(260)),
             evidence("c.md", ".md", &"C".repeat(260)),
         ],
-        &v1_profile(1_250, 300),
+        &settings(1_250, 300),
         ReportMode::Daily,
     );
     let error = result.expect_err("budget overflow must be an internal error, not an Omit");
@@ -741,7 +738,7 @@ fn compressor_still_renders_golden_keep_compress_metadata_error() {
             metadata,
             parse_error("broken.md"),
         ],
-        &v1_profile(4_000, 80),
+        &settings(4_000, 80),
         ReportMode::Daily,
     )
     .expect("golden context");
@@ -1204,7 +1201,7 @@ fn run_scheduler<
     parser: P,
     classifier: C,
     discovery: Vec<DiscoveredFileOut>,
-    profile: ai_daily_scanner_contract::NormalizedScannerProfileV2,
+    profile: ai_daily_scanner_contract::NormalizedScannerSettings,
 ) -> Result<
     ai_daily_scanner_core::scheduler::BudgetedScanOutcome,
     ai_daily_scanner_core::scheduler::SchedulerFailure,
@@ -1225,7 +1222,7 @@ fn run_scheduler_with_guard<
     parser: P,
     classifier: C,
     discovery: Vec<DiscoveredFileOut>,
-    profile: ai_daily_scanner_contract::NormalizedScannerProfileV2,
+    profile: ai_daily_scanner_contract::NormalizedScannerSettings,
     guard: G,
 ) -> Result<
     ai_daily_scanner_core::scheduler::BudgetedScanOutcome,
@@ -1292,7 +1289,7 @@ impl GuardVerifier for TaintedObservedGuard {
 #[test]
 fn pre_snapshot_taint_overrides_a_policy_omission_and_refreshes_metrics() {
     let clock = FakeClock::new();
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let oversized = profile.execution.max_file_size_bytes + 1;
     let outcome = run_scheduler_with_guard(
         &clock,
@@ -1356,7 +1353,7 @@ fn pre_snapshot_taint_overrides_a_policy_omission_and_refreshes_metrics() {
 fn scheduled_input_keeps_the_begin_run_deadline_origin() {
     let clock = FakeClock::new();
     clock.advance(100);
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let deadlines =
         RunDeadlines::derive(profile.total_deadline_ms, &clock).expect("begin-run deadline pair");
 
@@ -1403,7 +1400,7 @@ fn cache_state_does_not_change_semantic_output() {
         discovered("notes/b.txt", ".txt", 128),
         discovered("report.pdf", ".pdf", 256),
     ];
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let parser = TestParser {
         results: HashMap::from([
             (
@@ -1568,7 +1565,7 @@ fn cache_state_does_not_change_semantic_output() {
 fn not_parsed_counts_are_derived_not_error() {
     // NotParsed (semantic/policy) -> omit + no Diagnostic + derived
     // not_parsed_count; it never enters the error metric.
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     // Override the candidate quota so files 2 and 3 are semantically rejected.
     let mut profile = profile;
     profile.max_candidate_files = 1;
@@ -1716,14 +1713,14 @@ impl ParserPort for DeadlineParser {
 #[test]
 fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
     // 3 text files; each parse advances the clock 2000ms. With the bounded
-    // parallel executor (session_concurrency=2) the first wave (a.md, b.md)
+    // parallel executor (max_workers=2) the first wave (a.md, b.md)
     // completes before the WorkDeadline (3000ms); when the scheduler tries to
     // start the NEXT batch the deadline has passed -> c.md is queued -> runtime
     // NotParsed and the run-level trigger is recorded once. Run is Partial,
     // NEVER snapshot. (P4-T0: the deadline check is per-batch, not per-file.)
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = normalized_settings(ReportMode::Daily);
     profile.total_deadline_ms = 5_000; // work deadline = 3_000
-    profile.session_concurrency = 2;
+    profile.execution.max_workers = 2;
     let discovery = vec![
         discovered("notes/a.md", ".md", 64),
         discovered("notes/b.md", ".md", 64),
@@ -1805,14 +1802,14 @@ fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
 #[test]
 fn work_deadline_before_any_parse_forms_error_run_without_snapshot() {
     // Every in-flight parse consumes its full effective timeout. With the
-    // bounded parallel executor (session_concurrency=2) the first batch
+    // bounded parallel executor (max_workers=2) the first batch
     // (a.md, b.md) is in-flight and both run into the WorkDeadline -> Timeout;
     // the next batch never starts -> c.md is queued -> runtime NotParsed. With
     // no included files the run is Error and the context is empty.
     // (P4-T0: per-batch deadline check; in-flight -> Timeout, queued -> NotParsed.)
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = normalized_settings(ReportMode::Daily);
     profile.total_deadline_ms = 5_000; // work deadline = 3_000
-    profile.session_concurrency = 2;
+    profile.execution.max_workers = 2;
     let discovery = vec![
         discovered("notes/a.md", ".md", 64),
         discovered("notes/b.md", ".md", 64),
@@ -1890,10 +1887,10 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
     // runtime NotParsed with NO classification result, NO per-file Diagnostic and
     // NO snapshot. The run has no included files -> Error with the run-level
     // deadline diagnostic as the envelope error.
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = normalized_settings(ReportMode::Daily);
     profile.total_deadline_ms = 5_000; // work deadline = 3_000
     profile.parse.pdf.max_pages = 2;
-    profile.session_concurrency = 2;
+    profile.execution.max_workers = 2;
     let discovery = vec![
         discovered("one.pdf", ".pdf", 128),
         discovered("two.pdf", ".pdf", 128),
@@ -1964,7 +1961,7 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
 
 #[test]
 fn not_classified_by_budget_has_a_zero_execution_audit() {
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = normalized_settings(ReportMode::Daily);
     profile.parse.pdf.max_pages = 2;
     profile.max_total_pdf_classification_pages = 0;
     let clock = FakeClock::new();
@@ -2006,7 +2003,7 @@ fn not_classified_by_budget_has_a_zero_execution_audit() {
 
 #[test]
 fn retry_metrics_count_only_actual_classifier_and_pdf_parse_attempts() {
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = normalized_settings(ReportMode::Daily);
     profile.parse.pdf.max_pages = 2;
     let mut parsed = success_parse("fixture:retry.pdf", "", "pdf evidence");
     parsed.parser_backend = "python_pdf_text_v2".to_string();
@@ -2046,7 +2043,7 @@ fn retry_metrics_count_only_actual_classifier_and_pdf_parse_attempts() {
 
 #[test]
 fn post_parse_source_change_discards_content_but_keeps_execution_provenance() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let file = discovered("changed.md", ".md", 128);
     let mut parsed = success_parse(&file.file_identity, &file.path, "discard me");
     parsed.parser_backend = "light_text_v2".to_string();
@@ -2113,7 +2110,7 @@ fn post_parse_source_change_discards_content_but_keeps_execution_provenance() {
 #[test]
 fn classifier_pre_and_post_source_changes_keep_source_changed_semantics() {
     for (fail_on_pdf_call, expected_attempts) in [(0, 0), (1, 1)] {
-        let profile = v2_profile(ReportMode::Daily);
+        let profile = normalized_settings(ReportMode::Daily);
         let pdf = discovered("changed.pdf", ".pdf", 128);
         let text = discovered("notes.md", ".md", 64);
         let clock = FakeClock::new();
@@ -2215,7 +2212,7 @@ fn cache_commit_skipped_after_work_deadline() {
     // result keeps its state and the receipt list only carries pre-deadline
     // writes. Here every parse completes before the deadline, so the receipt
     // list is non-empty and the run is Success.
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let discovery = vec![discovered("notes/a.md", ".md", 64)];
     let parser = TestParser {
         results: HashMap::from([(
@@ -2242,7 +2239,7 @@ fn cache_commit_skipped_after_work_deadline() {
 
 #[test]
 fn cache_access_touch_failure_is_audited_instead_of_silently_ignored() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let discovery = vec![discovered("notes/a.md", ".md", 64)];
     let touches = Arc::new(Mutex::new(0));
     let cache = TestCache {
@@ -2284,7 +2281,7 @@ fn cache_access_touch_failure_is_audited_instead_of_silently_ignored() {
 
 #[test]
 fn cache_access_touch_deadline_uses_the_run_level_deadline_terminal_state() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let discovery = vec![discovered("notes/a.md", ".md", 64)];
     let cache = TestCache {
         parse: HashMap::from([(
@@ -2323,7 +2320,7 @@ fn cache_access_touch_deadline_uses_the_run_level_deadline_terminal_state() {
 fn discovery_issues_mark_the_run_partial_with_warnings() {
     // An unreadable discovery entry must surface as a run-level warning and mark
     // the run Partial, never silently vanish (spec Part 5.3).
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let discovery = vec![discovered("notes/a.md", ".md", 64)];
     let issues = vec![ai_daily_discovery::DiscoveryIssue {
         kind: ai_daily_discovery::DiscoveryIssueKind::Metadata,
@@ -2377,7 +2374,7 @@ fn discovery_issues_mark_the_run_partial_with_warnings() {
 fn classification_cache_persists_real_page_counts() {
     // spec Part 3.2: the classification cache stores the classifier's REAL
     // page counts (page_count / result_examined_pages), never a hardcoded 1.
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let discovery = vec![discovered("report.pdf", ".pdf", 256)];
     let classifier = TestClassifier {
         results: HashMap::from([(
@@ -2409,7 +2406,7 @@ fn source_file_limit_exceeds_fail_closed() {
     // spec Part 2.1: the 1,000,001st source file fails closed as a non-retryable
     // run-level Error BEFORE prepare_inventory, with zero file rows and
     // discovery_observed_file_count = ceiling + 1.
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let discovery: Vec<DiscoveredFileOut> = (0..1_000_001)
         .map(|index| discovered(&format!("notes/f{index:06}.md"), ".md", 64))
         .collect();
@@ -2445,7 +2442,7 @@ fn source_file_limit_exceeds_fail_closed() {
 fn classification_lookup_failure_propagates_as_run_level() {
     // spec Part 4: a classification cache lookup failure is a run-level
     // adapter/store error, NEVER a per-file miss disposition.
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let discovery = vec![discovered("report.pdf", ".pdf", 256)];
     let cache = TestCache {
         classification_lookup_error: Some(CachePortError::Store {
@@ -2476,7 +2473,7 @@ fn classification_lookup_failure_propagates_as_run_level() {
 fn classifier_unknown_maps_timeout_vs_crash() {
     // spec Part 3.2: classifier per-file timeout -> unknown -> Timeout; crash /
     // transient I/O / protocol failure -> unknown -> Error retryable=true.
-    let mut profile = v2_profile(ReportMode::Daily);
+    let mut profile = normalized_settings(ReportMode::Daily);
     profile.parse.pdf.max_pages = 5;
     let diag = |code: ai_daily_scanner_contract::PythonOperationErrorCode| {
         ai_daily_scanner_contract::PythonOperationDiagnosticV1 {
@@ -2545,15 +2542,15 @@ fn classifier_unknown_maps_timeout_vs_crash() {
 // ---------------------------------------------------------------------------
 // P4-T0: classification and parse execute in bounded parallel waves
 // (spec Solution + Part 7.3; performance blocker fix). The wave executor must
-// dispatch up to `session_concurrency` classifier/parser invocations at once;
+// dispatch up to `max_workers` classifier/parser invocations at once;
 // results are merged back by nominal rank so completion order never changes the
 // outcome. These tests FAIL on the sequential scheduler and pass after the fix.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn classification_executes_in_parallel_waves() {
-    let mut profile = v2_profile(ReportMode::Daily);
-    profile.session_concurrency = 2;
+    let mut profile = normalized_settings(ReportMode::Daily);
+    profile.execution.max_workers = 2;
     let discovery = vec![
         discovered("one.pdf", ".pdf", 128),
         discovered("two.pdf", ".pdf", 128),
@@ -2577,15 +2574,15 @@ fn classification_executes_in_parallel_waves() {
     assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
     assert!(
         max_seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-        "classification must run in parallel waves (session_concurrency=2), saw max {}",
+        "classification must run in parallel waves (max_workers=2), saw max {}",
         max_seen.load(std::sync::atomic::Ordering::SeqCst)
     );
 }
 
 #[test]
 fn parse_executes_in_parallel_waves() {
-    let mut profile = v2_profile(ReportMode::Daily);
-    profile.session_concurrency = 2;
+    let mut profile = normalized_settings(ReportMode::Daily);
+    profile.execution.max_workers = 2;
     let discovery = vec![
         discovered("notes/a.md", ".md", 64),
         discovered("notes/b.md", ".md", 64),
@@ -2609,7 +2606,7 @@ fn parse_executes_in_parallel_waves() {
     assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
     assert!(
         max_seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-        "parse must run in parallel waves (session_concurrency=2), saw max {}",
+        "parse must run in parallel waves (max_workers=2), saw max {}",
         max_seen.load(std::sync::atomic::Ordering::SeqCst)
     );
 }

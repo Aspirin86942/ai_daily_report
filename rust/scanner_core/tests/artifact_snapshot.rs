@@ -5,15 +5,14 @@
 
 use ai_daily_discovery::{DiscoveredFileOut, DiscoveryIssue, DiscoveryIssueKind};
 use ai_daily_scanner_contract::{
-    BuildContextRequest, ContextAction, ContextSummary, EngineStatus, NormalizedScannerProfileV2,
-    Nullable, ParseStatus, ParseTransport, ReportMode, ScannerProfile, Validate,
+    BuildContextRequest, ContextAction, ContextSummary, EngineStatus, NormalizedScannerSettings,
+    Nullable, ParseStatus, ParseTransport, ReportMode, Validate,
 };
 use ai_daily_scanner_core::artifact::{
     rebuild_envelope, snapshot_key, snapshot_key_parts, ArtifactDecisionRow, ArtifactDraft,
     ArtifactFileRow, ClassifierIdentity, PdfClassificationProvenanceV1, SemanticSummary,
     SnapshotKeyParts,
 };
-use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
 use ai_daily_scanner_core::scheduler::{RealClock, RunDeadlines, WorkerIdentities};
 use sha2::Digest;
 
@@ -23,13 +22,13 @@ const ENGINE_BUILD_A: &str = "engine-build-a";
 const ENGINE_BUILD_B: &str = "engine-build-b";
 
 fn raw_profile() -> serde_json::Value {
-    serde_json::json!({ "schema_version": "scanner_profile_v2" })
+    serde_json::json!({})
 }
 
-fn v2_profile(mode: ReportMode) -> NormalizedScannerProfileV2 {
-    let raw: ai_daily_scanner_contract::RawScannerProfileV2 =
+fn normalized_settings(mode: ReportMode) -> NormalizedScannerSettings {
+    let raw: ai_daily_scanner_contract::ScannerSettings =
         serde_json::from_value(raw_profile()).expect("minimal v2 raw profile");
-    normalize_scanner_profile_v2(&ScannerProfile::V2(raw), mode).expect("normalized v2 profile")
+    normalize_scanner_settings(&raw, mode).expect("normalized v2 profile")
 }
 
 fn request(mode: ReportMode, request_id: &str) -> BuildContextRequest {
@@ -50,7 +49,7 @@ fn request(mode: ReportMode, request_id: &str) -> BuildContextRequest {
         ),
         "compression_profile": null,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan-index-v2.sqlite3",
-        "scanner_profile": profile,
+        "scanner_settings": profile,
         "adapters": {
             "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
             "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
@@ -108,8 +107,8 @@ fn issue(path: &str) -> DiscoveryIssue {
 
 #[test]
 fn snapshot_key_changes_when_report_mode_changes() {
-    let daily = v2_profile(ReportMode::Daily);
-    let weekly = v2_profile(ReportMode::Weekly);
+    let daily = normalized_settings(ReportMode::Daily);
+    let weekly = normalized_settings(ReportMode::Weekly);
     let k1 = snapshot_key(
         &request(ReportMode::Daily, REQUEST_ID_A),
         &[],
@@ -135,7 +134,7 @@ fn snapshot_key_changes_when_report_mode_changes() {
 
 #[test]
 fn snapshot_key_changes_when_engine_build_changes() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
     let base = snapshot_key(
         &request,
@@ -162,7 +161,7 @@ fn snapshot_key_changes_when_engine_build_changes() {
 
 #[test]
 fn snapshot_key_changes_when_discovery_rows_change() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
     let base = snapshot_key(
         &request,
@@ -189,7 +188,7 @@ fn snapshot_key_changes_when_discovery_rows_change() {
 
 #[test]
 fn snapshot_key_changes_when_discovery_issues_change() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
     let base = snapshot_key(
         &request,
@@ -219,7 +218,7 @@ fn snapshot_key_changes_when_discovery_issues_change() {
 
 #[test]
 fn snapshot_key_changes_when_worker_identity_changes() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
     let base = snapshot_key(
         &request,
@@ -249,7 +248,7 @@ fn snapshot_key_changes_when_worker_identity_changes() {
 
 #[test]
 fn snapshot_key_changes_when_classifier_identity_changes() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
     let base = snapshot_key(
         &request,
@@ -279,7 +278,7 @@ fn snapshot_key_changes_when_classifier_identity_changes() {
 
 #[test]
 fn snapshot_key_omits_request_id() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let request_a = request(ReportMode::Daily, REQUEST_ID_A);
     let request_b = request(ReportMode::Daily, REQUEST_ID_B);
     let k1 = snapshot_key(
@@ -307,7 +306,7 @@ fn snapshot_key_omits_request_id() {
 
 #[test]
 fn snapshot_key_includes_source_guard_identity() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
     let mut file = discovery_file("a.txt");
     let base = snapshot_key(
@@ -336,7 +335,7 @@ fn snapshot_key_includes_source_guard_identity() {
 
 #[test]
 fn snapshot_key_parts_hash_is_domain_separated_sha256_of_canonical_json() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let request = request(ReportMode::Daily, REQUEST_ID_A);
     let parts = snapshot_key_parts(
         &request,
@@ -678,14 +677,14 @@ fn seed_scan_runs(connection: &rusqlite::Connection, count: i64) {
 }
 
 #[test]
-fn fresh_v2_schema_enforces_snapshot_hit_reused_check() {
-    use ai_daily_scanner_core::store::schema::{configure_connection, migrate};
+fn fresh_v3_schema_enforces_snapshot_hit_reused_check() {
+    use ai_daily_scanner_core::store::schema::{configure_connection, create_v3};
 
     let dir = tempfile::tempdir().expect("temporary directory");
     let path = dir.path().join("snapshot-check.sqlite3");
     let mut connection = rusqlite::Connection::open(path).expect("database opens");
     configure_connection(&connection).expect("pragmas");
-    migrate(&mut connection).expect("migration");
+    create_v3(&mut connection).expect("v3 schema");
     seed_scan_runs(&connection, 3);
     // Every success context_runs row must reference an artifact (spec Part 5.1
     // status⇔artifact_id CHECK); seed one ineligible payload artifact.
@@ -742,7 +741,7 @@ use ai_daily_scanner_contract::{
     AdapterPaths, AuditWorkerLane, CacheMissReason, CacheStatus, ContextDecision, ExtensionMetric,
     RunStatus, StageMetric, StageName,
 };
-use ai_daily_scanner_core::config::normalize_scanner_profile_for_request;
+use ai_daily_scanner_core::config::normalize_scanner_settings;
 use ai_daily_scanner_core::store::{
     canonical_envelope_json, ActiveRun, AttemptRuntime, BeginRunOutcome, CanonicalRequest,
     ContextDecisionRecord, ContextRunRecord, FileResultRecord, FinalizationBatch, InventoryRecord,
@@ -759,7 +758,7 @@ fn snapshot_store_harness() -> (
     BuildContextRequest,
     CanonicalRequest,
     AttemptRuntime,
-    ai_daily_scanner_contract::NormalizedScannerProfileV1,
+    ai_daily_scanner_contract::NormalizedScannerSettings,
 ) {
     let directory = tempfile::tempdir().expect("temporary directory");
     let file_path = directory.path().join("a.txt");
@@ -786,9 +785,8 @@ fn snapshot_store_harness() -> (
         python_module_root: directory.path().to_string_lossy().to_string(),
         python_document_worker_module: "src.workers.document_parser_worker".to_string(),
     };
-    let profile =
-        normalize_scanner_profile_for_request(&request.scanner_profile, request.report_mode)
-            .expect("normalized v1 profile");
+    let profile = normalize_scanner_settings(&request.scanner_settings, request.report_mode)
+        .expect("normalized v1 profile");
     let canonical =
         ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
     let runtime =
@@ -1118,12 +1116,12 @@ fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
     let discovery = vec![snapshot_discovery()];
     let worker_ids = workers("office-a", "python-a");
     let classifier = classifier("classifier-a");
-    let v2_profile = v2_profile(ReportMode::Daily);
+    let normalized_settings = normalized_settings(ReportMode::Daily);
     let key = snapshot_key_parts(
         &request,
         &discovery,
         &[],
-        &v2_profile,
+        &normalized_settings,
         ENGINE_BUILD_A,
         &worker_ids,
         &classifier,

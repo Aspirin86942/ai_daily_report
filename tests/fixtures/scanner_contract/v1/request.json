@@ -7,9 +7,8 @@
   "end_date": "2026-07-15",
   "report_mode": "daily",
   "compression_profile": null,
-  "scan_db_path": "C:\\scanner-fixtures\\state\\scan-index-v2.sqlite3",
-  "scanner_profile": {
-    "schema_version": "scanner_profile_v1",
+  "scan_db_path": "C:\\scanner-fixtures\\state\\scan_index_v3.sqlite3",
+  "scanner_settings": {
     "allowed_extensions": [
       ".xlsx",
       ".xls",
@@ -38,18 +37,9 @@
       ".xls": 60
     },
     "total_max_chars": 50000,
-    "parser_profile_version": "v1",
-    "office_parser_backend": "rust_office_oxide_v2",
-    "pdf_parser_backend": "python_pdf_text_v2",
-    "office_fallback_policy_version": "hybrid_v1",
-    "office_parser_fallback_enabled": true,
-    "office_fallback_after_timeout": false,
-    "office_legacy_extensions_enabled": false,
+    "fallback_after_timeout": false,
+    "legacy_office_enabled": false,
     "pptx_include_notes": true,
-    "office_parser_fallback_order": [
-      "python_office_v2",
-      "python_sharepoint_text_v2"
-    ],
     "direct_text_max_bytes": 262144,
     "direct_text_read_bytes": 262144,
     "log_tail_read_bytes": 262144,
@@ -75,7 +65,15 @@
     "summary_docx_table_max_rows": 20,
     "summary_docx_table_max_cols": 8,
     "summary_pptx_max_slides": 15,
-    "summary_document_excerpt_max_chars": 2000
+    "summary_document_excerpt_max_chars": 2000,
+    "max_candidate_files": 96,
+    "max_pdf_text_extractions": 8,
+    "max_total_pdf_classification_pages": 80,
+    "pdf_classification_timeout_ms": 2000,
+    "total_deadline_ms": 10000,
+    "worker_max_requests": 128,
+    "worker_idle_ttl_ms": 30000,
+    "worker_rss_limit_bytes": 536870912
   },
   "adapters": {
     "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",

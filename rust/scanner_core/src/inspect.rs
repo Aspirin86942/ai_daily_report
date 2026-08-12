@@ -1,10 +1,4 @@
-//! Inspect v2 assembly + v1 lossy projection (spec Part 5.3).
-//!
-//! `InspectRunResponseV2` is a separate strict observability interface: it is
-//! never added to `ContextEnvelope v1`. Full_v2 runs produce the strict v2
-//! object; migrated v1 runs fail closed with `INSPECT_V2_PROVENANCE_UNAVAILABLE`.
-//! The default v1 inspect stays lossy for full_v2 rows and appends the four
-//! projection warnings (output-only, never written back to full diagnostics).
+//! Inspect v2 assembly + v1 lossy projection.
 
 use ai_daily_scanner_contract::{
     ClassificationCacheStatus, ClassificationTransport, Diagnostic, DiagnosticStage, ErrorCode,
@@ -14,9 +8,7 @@ use ai_daily_scanner_contract::{
 };
 
 use crate::artifact::PdfClassificationProvenanceV1;
-use crate::context_audit::{
-    assemble_execution_metrics_v2, AuditProvenanceVersion, FileAuditV2Source, InspectSnapshot,
-};
+use crate::context_audit::{assemble_execution_metrics_v2, FileAuditV2Source, InspectSnapshot};
 
 /// Error sentinel execution object is validated by `InspectRunResponseV2`
 /// `status=error`; it never represents the inspected run.
@@ -58,22 +50,17 @@ fn error_sentinel() -> ai_daily_scanner_contract::ExecutionMetricsV2 {
     }
 }
 
-/// Assembles the strict v2 response for a full_v2 run. The caller has already
-/// validated `audit_provenance_version == FullV2` (migrated runs fail closed in
-/// `inspect_v2_error`).
+/// Assembles the strict response from the current schema's complete evidence.
 pub fn assemble_inspect_v2(
     request: &InspectRunRequest,
     snapshot: &InspectSnapshot,
 ) -> Result<InspectRunResponseV2, String> {
-    if snapshot.audit_provenance_version != Some(AuditProvenanceVersion::FullV2) {
-        return Err("full_v2 provenance is required for inspect v2".to_string());
-    }
     if snapshot
         .files_v2
         .iter()
         .any(|row| row.parse_transport.is_none() || row.parse_attempt_count.is_none())
     {
-        return Err("full_v2 file execution provenance is unavailable".to_string());
+        return Err("file execution provenance is unavailable".to_string());
     }
     let files = snapshot
         .files_v2
@@ -146,7 +133,7 @@ fn determine_reuse_kind(
 }
 
 /// Strict error-arm v2 response (sentinel execution metrics; never the
-/// inspected run's evidence). `migrated_v1` uses `INSPECT_V2_PROVENANCE_UNAVAILABLE`.
+/// inspected run's evidence).
 pub fn inspect_v2_error(
     request: &InspectRunRequest,
     error_code: ErrorCode,
@@ -206,8 +193,7 @@ fn empty_summary() -> ai_daily_scanner_contract::ContextSummary {
     }
 }
 
-/// Assembles one strict `FileAuditV2` from the persisted full_v2 row
-/// (spec Part 5.3 field/order + nullability).
+/// Assembles one strict `FileAuditV2` from a persisted current-schema row.
 fn assemble_file_audit_v2(row: &FileAuditV2Source) -> Result<FileAuditV2, String> {
     let source_guard_kind = match row.source_guard_kind.as_deref() {
         Some(kind) => parse_source_guard_kind(kind)?,
@@ -219,14 +205,14 @@ fn assemble_file_audit_v2(row: &FileAuditV2Source) -> Result<FileAuditV2, String
         Some("snapshot") => ParseCacheStatus::Snapshot,
         Some("not_applicable") => ParseCacheStatus::NotApplicable,
         Some(value) => return Err(format!("unknown parse_cache_status: {value}")),
-        None => return Err("full_v2 file row has no parse_cache_status".to_string()),
+        None => return Err("file row has no parse_cache_status".to_string()),
     };
     let parse_transport = row
         .parse_transport
-        .ok_or_else(|| "full_v2 file execution provenance is unavailable".to_string())?;
+        .ok_or_else(|| "file execution provenance is unavailable".to_string())?;
     let parse_attempt_count = row
         .parse_attempt_count
-        .ok_or_else(|| "full_v2 file execution provenance is unavailable".to_string())?;
+        .ok_or_else(|| "file execution provenance is unavailable".to_string())?;
     // spec Part 5.3/Part 3: the immutable artifact provenance only maps to a
     // snapshot audit when THIS current row is actually a snapshot row. A cold
     // run's own inspect must never stamp snapshot identity onto real execution
@@ -340,8 +326,8 @@ fn projection_warning(error_code: ErrorCode, message: &str) -> Diagnostic {
     }
 }
 
-/// Adds the v1 lossy projection warnings for full_v2 rows to the existing
-/// warnings (spec Part 5.3). Output-only: never written back to full
+/// Adds the v1 lossy projection warnings to the existing warnings.
+/// Output-only: never written back to full
 /// diagnostics, envelope metadata or snapshot eligibility. Merged warnings stay
 /// within the 257 projection bound (256 detail + 1 `DIAGNOSTICS_AGGREGATED`).
 pub fn v1_lossy_projection_warnings(

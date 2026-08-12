@@ -13,20 +13,18 @@ use ai_daily_scanner_contract::{
     PdfClassifierResponseV1, PdfClassifierResultStatus, PdfClassifierResultV1,
     PythonOperationDiagnosticV1, PythonOperationErrorCode, PythonOperationStage, Validate,
 };
-use ai_daily_scanner_contract::{RawScannerProfileV2, ReportMode, ScannerProfile, WorkerKind};
-use ai_daily_scanner_core::config::normalize_scanner_profile_v2;
+use ai_daily_scanner_contract::{ReportMode, ScannerSettings, WorkerKind};
+use ai_daily_scanner_core::config::normalize_scanner_settings;
 use ai_daily_scanner_core::parsers::classifier::{PdfClassifierExecution, PdfClassifierPort};
 use ai_daily_scanner_core::parsers::{
     register_worker, worker_hello_from_registered, WorkerCommand,
 };
 use ai_daily_scanner_core::store::classifier_profile_hash;
 
-fn v2_profile(mode: ReportMode) -> ai_daily_scanner_contract::NormalizedScannerProfileV2 {
-    let raw: RawScannerProfileV2 = serde_json::from_value(serde_json::json!({
-        "schema_version": "scanner_profile_v2"
-    }))
-    .expect("minimal v2 raw profile");
-    normalize_scanner_profile_v2(&ScannerProfile::V2(raw), mode).expect("normalized v2 profile")
+fn normalized_settings(mode: ReportMode) -> ai_daily_scanner_contract::NormalizedScannerSettings {
+    let raw: ScannerSettings =
+        serde_json::from_value(serde_json::json!({})).expect("minimal v2 raw profile");
+    normalize_scanner_settings(&raw, mode).expect("normalized v2 profile")
 }
 
 fn request_id() -> String {
@@ -236,7 +234,7 @@ fn stub_classifier_port_returns_in_memory_results() {
 
 #[test]
 fn classifier_profile_hash_is_canonical_and_input_sensitive() {
-    let profile = v2_profile(ReportMode::Daily);
+    let profile = normalized_settings(ReportMode::Daily);
     let base = classifier_profile_hash(&profile).expect("profile hash");
 
     let mut changed_timeout = profile.clone();

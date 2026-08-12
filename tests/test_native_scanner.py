@@ -39,9 +39,9 @@ class StubNative:
 def _runtime_config() -> SimpleNamespace:
     return SimpleNamespace(
         work_dir="D:/audit/work",
-        rust_index_db_path="data/db/scan_index_v2.sqlite3",
-        rust_office_parser_bin="rust/target/release/ai-daily-office-parser",
-        scanner_contract_profile=lambda: {"schema_version": "scanner_profile_v2"},
+        index_db_path="data/db/scan_index_v3.sqlite3",
+        office_worker_path="rust/target/release/ai-daily-office-parser",
+        scanner_settings=lambda: {"max_workers": 4},
     )
 
 

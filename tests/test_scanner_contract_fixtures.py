@@ -28,7 +28,6 @@ SCHEMA_FILES = {
     "scanner-profile-normalized-v1.schema.json",
     "scanner-profile-request-v1.schema.json",
     "transport-error-v1.schema.json",
-    "version-response-v1.schema.json",
     "worker-diagnostic-v1.schema.json",
     "worker-parse-request-v1.schema.json",
     "worker-parse-response-v1.schema.json",
@@ -55,7 +54,6 @@ REQUIRED_VALID_FIXTURES = {
     "response-error.json",
     "response-ok.json",
     "response-partial.json",
-    "scanner-version-response.json",
     "transport-error.json",
     "worker-parse-long-path-request.json",
     "worker-parse-long-path-response-ok.json",
@@ -249,9 +247,7 @@ def test_invalid_fixture_corpus_covers_every_contract_rule_class() -> None:
 
     by_name = {case["name"]: case["payload"] for case in cases}
     assert len(by_name["profile_array_over_limit"]["ignored_patterns"]) == 257
-    assert len(
-        by_name["profile_string_over_limit"]["parser_profile_version"]
-    ) == 1025
+    assert len(by_name["profile_string_over_limit"]["ignored_patterns"][0]) == 1025
     assert type(by_name["profile_integer_float"]["max_workers"]) is float
     assert by_name["profile_integer_numeric_string"]["max_workers"] == "4"
 

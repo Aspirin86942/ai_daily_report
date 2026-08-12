@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ai_daily_discovery::DiscoveredFileOut;
 use ai_daily_scanner_contract::{
-    Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerProfileV1, Nullable, ParseStatus,
+    Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerSettings, Nullable, ParseStatus,
     ParseTransport,
 };
 
@@ -31,7 +31,7 @@ use crate::store::{
 pub struct StoreCachePort {
     db_path: PathBuf,
     route_stacks: RouteStackFingerprints,
-    v1_profile: NormalizedScannerProfileV1,
+    settings: NormalizedScannerSettings,
     deadlines: RunDeadlines,
     clock: RealClock,
 }
@@ -40,14 +40,14 @@ impl StoreCachePort {
     pub fn new(
         db_path: PathBuf,
         route_stacks: RouteStackFingerprints,
-        v1_profile: NormalizedScannerProfileV1,
+        settings: NormalizedScannerSettings,
         deadlines: RunDeadlines,
         clock: RealClock,
     ) -> Self {
         Self {
             db_path,
             route_stacks,
-            v1_profile,
+            settings,
             deadlines,
             clock,
         }
@@ -95,7 +95,7 @@ impl CachePort for StoreCachePort {
         let profile_hash = crate::store::cache::parse_profile_hash(
             1,
             self.route_stacks.for_route(parser_route),
-            &self.v1_profile,
+            &self.settings,
         )
         .map_err(|message| CachePortError::InvalidKey { detail: message })?;
         let store = self.open()?;
@@ -212,14 +212,14 @@ impl CachePort for StoreCachePort {
 /// Production parser adapter. Light text stays in-process; every Office/PDF
 /// route crosses one of the two long-lived worker-v2 pools.
 pub struct ProductionParser {
-    profile: NormalizedScannerProfileV1,
+    profile: NormalizedScannerSettings,
     python_pool: Arc<crate::session::WorkerPool>,
     office_pool: Arc<crate::session::WorkerPool>,
 }
 
 impl ProductionParser {
     pub fn new(
-        profile: &NormalizedScannerProfileV1,
+        profile: &NormalizedScannerSettings,
         python_pool: Arc<crate::session::WorkerPool>,
         office_pool: Arc<crate::session::WorkerPool>,
     ) -> Self {

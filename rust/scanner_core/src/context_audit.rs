@@ -2,7 +2,7 @@
 
 use ai_daily_scanner_contract::{
     AuditWorkerLane, ContextAction, ContextDecision, ContextProfile, ContextSummary, Diagnostic,
-    EngineStatus, ExecutionMetricsV2, ExtensionMetric, FileAudit, NormalizedScannerProfileV1,
+    EngineStatus, ExecutionMetricsV2, ExtensionMetric, FileAudit, NormalizedScannerSettings,
     Nullable, ParseStatus, ParseTransport, PdfClassificationAuditV1, PdfClassificationStatus,
     RunStatus, StageMetric, StageName, Validate,
 };
@@ -85,13 +85,13 @@ struct ContextProfileFingerprint<'a> {
 struct RejectedProfileFingerprint<'a> {
     protocol_version: u64,
     engine_build: &'a str,
-    profile: &'a NormalizedScannerProfileV1,
+    profile: &'a NormalizedScannerSettings,
 }
 
 pub fn context_profile_hash(
     protocol_version: u64,
     engine_build: &str,
-    profile: &NormalizedScannerProfileV1,
+    profile: &NormalizedScannerSettings,
 ) -> Result<String, String> {
     if protocol_version != 1 || engine_build.is_empty() {
         return Err("context profile fingerprint identity is invalid".to_string());
@@ -112,7 +112,7 @@ pub fn context_profile_hash(
 pub fn rejected_profile_hash(
     protocol_version: u64,
     engine_build: &str,
-    profile: &NormalizedScannerProfileV1,
+    profile: &NormalizedScannerSettings,
 ) -> Result<String, String> {
     if protocol_version != 1 || engine_build.is_empty() {
         return Err("rejected profile fingerprint identity is invalid".to_string());
@@ -177,10 +177,6 @@ pub struct InspectSnapshot {
     pub files: Vec<FileAudit>,
     pub decisions: Vec<ContextDecision>,
     pub warnings: Vec<Diagnostic>,
-    // ---- Inspect v2 provenance (spec Part 5.3). `audit_provenance_version`
-    // is None only for nonterminal (running/abandoned) rows; `migrated_v1`
-    // rows fail closed with `INSPECT_V2_PROVENANCE_UNAVAILABLE`.
-    pub audit_provenance_version: Option<AuditProvenanceVersion>,
     pub artifact_id: Option<u64>,
     pub reused_from_context_run_id: Option<u64>,
     pub snapshot_hit: bool,
@@ -190,20 +186,13 @@ pub struct InspectSnapshot {
     pub rendered_chars: u64,
     /// WorkDeadline run-level trigger fired during this run (0 or 1).
     pub stage_deadline_exhausted: bool,
-    /// Full_v2 per-file rows (v1 FileAudit + SourceGuardV2 + classifier
-    /// provenance). Empty for migrated_v1/nonterminal rows.
+    /// Per-file rows with source-guard and classifier provenance.
+    /// Empty for nonterminal rows.
     pub files_v2: Vec<FileAuditV2Source>,
     /// Authoritative `execution_metrics` persisted at finalize (spec Part 5.3).
-    /// `None` for migrated_v1/nonterminal rows and engine-error runs that had no
-    /// scheduler outcome.
+    /// `None` for nonterminal rows and engine-error runs that had no scheduler
+    /// outcome.
     pub execution_metrics: Option<ExecutionMetricsV2>,
-}
-
-/// `scan_runs.audit_provenance_version` (spec Part 8.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuditProvenanceVersion {
-    MigratedV1,
-    FullV2,
 }
 
 /// Per-file SourceGuardV2 + classifier provenance used to assemble
@@ -439,18 +428,11 @@ pub(crate) fn load_inspect_snapshot(
     scan_run_id: i64,
     include_content: bool,
 ) -> Result<InspectSnapshot, InspectLoadError> {
-    type InspectRunRow = (
-        String,
-        String,
-        String,
-        String,
-        Option<String>,
-        Option<String>,
-    );
+    type InspectRunRow = (String, String, String, String, Option<String>);
     let run_row: Option<InspectRunRow> = transaction
         .query_row(
             "SELECT request_id, canonical_request_json, request_hash, status,
-                    final_envelope_metadata_json, audit_provenance_version
+                    final_envelope_metadata_json
              FROM scan_runs WHERE scan_run_id=?1",
             [scan_run_id],
             |row| {
@@ -460,7 +442,6 @@ pub(crate) fn load_inspect_snapshot(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
-                    row.get(5)?,
                 ))
             },
         )
@@ -472,7 +453,6 @@ pub(crate) fn load_inspect_snapshot(
         request_hash,
         run_status_text,
         envelope_metadata_json,
-        provenance_version,
     ) = run_row.ok_or_else(|| InspectLoadError::before_status(InspectAuditError::RunNotFound))?;
     if crate::store::cache::domain_hash(b"request-v1\0", canonical_request_json.as_bytes())
         != request_hash
@@ -645,37 +625,6 @@ pub(crate) fn load_inspect_snapshot(
         .map(|record| record.decision)
         .collect();
 
-    // ---- Inspect v2 provenance (spec Part 5.3): only terminal full_v2 rows
-    // carry it; migrated_v1 fails closed and nonterminal rows expose none.
-    let audit_provenance_version = match (run_status, provenance_version.as_deref()) {
-        (RunStatus::Running | RunStatus::Abandoned, None) => None,
-        (RunStatus::Running | RunStatus::Abandoned, Some(_)) => {
-            return Err(InspectLoadError::after_status(
-                InspectAuditError::RunCorrupt(
-                    "nonterminal run has an audit provenance version".to_string(),
-                ),
-                run_status,
-            ));
-        }
-        (_, Some("full_v2")) => Some(AuditProvenanceVersion::FullV2),
-        (_, Some("migrated_v1")) => Some(AuditProvenanceVersion::MigratedV1),
-        (_, Some(_)) => {
-            return Err(InspectLoadError::after_status(
-                InspectAuditError::RunCorrupt(
-                    "run has an unknown audit provenance version".to_string(),
-                ),
-                run_status,
-            ));
-        }
-        (_, None) => {
-            return Err(InspectLoadError::after_status(
-                InspectAuditError::RunCorrupt(
-                    "terminal run has no audit provenance version".to_string(),
-                ),
-                run_status,
-            ));
-        }
-    };
     let (artifact_id, reused_from_context_run_id, snapshot_hit) = match context.as_ref() {
         Some(_) => {
             let (artifact_id, reused_from, snapshot_hit) =
@@ -738,7 +687,6 @@ pub(crate) fn load_inspect_snapshot(
         files,
         decisions,
         warnings,
-        audit_provenance_version,
         artifact_id,
         reused_from_context_run_id,
         snapshot_hit,
@@ -750,8 +698,8 @@ pub(crate) fn load_inspect_snapshot(
     })
 }
 
-/// Loads the authoritative `execution_metrics` row persisted at finalize
-/// (spec Part 5.3). Migrated v1 / nonterminal / engine-error runs have none.
+/// Loads the authoritative `execution_metrics` row persisted at finalize.
+/// Nonterminal and engine-error runs may have none.
 fn load_execution_metrics(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
@@ -1006,9 +954,8 @@ fn load_artifact_semantic_chars(
     Ok((reserved, rendered))
 }
 
-/// Loads full_v2 per-file rows (SourceGuardV2 + classifier provenance) for
-/// `FileAuditV2` assembly (spec Part 5.3). `artifact_id` selects the current
-/// run's `context_artifact_files` rows (none for ineligible/migrated runs).
+/// Loads per-file source-guard and classifier provenance for `FileAuditV2`
+/// assembly. `artifact_id` selects the current run's artifact rows.
 fn load_file_audits_v2(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
@@ -1039,7 +986,7 @@ fn load_file_audits_v2(
          LEFT JOIN file_inventory fi ON fi.file_identity = fr.file_identity
          LEFT JOIN context_artifact_files af
              ON af.file_identity = fr.file_identity AND af.artifact_id = ?2
-         LEFT JOIN scan_file_execution_v2 fx
+         LEFT JOIN scan_file_execution fx
              ON fx.scan_run_id = fr.scan_run_id AND fx.file_identity = fr.file_identity
          WHERE fr.scan_run_id = ?1
          ORDER BY lower(fr.relative_path), fr.relative_path, fr.file_identity",

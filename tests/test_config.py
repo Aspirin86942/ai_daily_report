@@ -24,7 +24,7 @@ def _installed_env(root: Path) -> dict[str, str]:
     return {name: str(path) for name, path in paths.items()}
 
 
-def test_example_settings_selects_the_windows_rust_core_defaults():
+def test_example_settings_selects_native_scanner_paths():
     project_root = Path(__file__).resolve().parents[1]
     settings = yaml.safe_load(
         (project_root / "config" / "settings.example.yaml").read_text(
@@ -32,12 +32,11 @@ def test_example_settings_selects_the_windows_rust_core_defaults():
         )
     )
 
-    assert settings["scanner"]["engine"] == "rust_v2"
-    assert settings["scanner"]["rust_scanner_bin"] == (
-        "rust/target/release/ai-daily-scanner"
+    assert settings["scanner"]["office_worker_path"] == (
+        "rust/target/release/ai-daily-office-parser"
     )
-    assert settings["scanner"]["rust_index_db_path"] == (
-        "data/db/scan_index_v2.sqlite3"
+    assert settings["scanner"]["index_db_path"] == (
+        "data/db/scan_index_v3.sqlite3"
     )
 
 
@@ -139,45 +138,36 @@ def test_deepseek_api_key_accepts_local_llm_key(monkeypatch):
     assert cfg.deepseek_api_key == "local-test-key"
 
 
-def test_scanner_engine_defaults_to_rust_v2_after_cutover():
+def test_scanner_paths_default_to_native_layout():
     cfg = object.__new__(Config)
     cfg._settings = SimpleNamespace(scanner=SimpleNamespace())
 
-    assert cfg.scanner_engine == "rust_v2"
-    assert cfg.rust_scanner_bin == "rust/target/release/ai-daily-scanner"
-    assert cfg.rust_office_parser_bin == (
+    assert cfg.office_worker_path == (
         "rust/target/release/ai-daily-office-parser"
     )
-    assert cfg.rust_index_db_path == "data/db/scan_index_v2.sqlite3"
-    assert cfg.rust_process_timeout_seconds == 900.0
+    assert cfg.index_db_path == "data/db/scan_index_v3.sqlite3"
 
 
-def test_scanner_engine_reads_explicit_rust_v2_infrastructure_only():
+def test_scanner_paths_read_explicit_values():
     cfg = object.__new__(Config)
     cfg._settings = SimpleNamespace(
         scanner=SimpleNamespace(
-            engine="RUST_V2",
-            rust_scanner_bin="bin/scanner",
-            rust_office_parser_bin="bin/office-worker",
-            rust_index_db_path="state/scan_index_v2.sqlite3",
-            rust_process_timeout_seconds="45.5",
+            office_worker_path="bin/office-worker",
+            index_db_path="state/scan_index_v3.sqlite3",
         )
     )
 
-    assert cfg.scanner_engine == "rust_v2"
-    assert cfg.rust_scanner_bin == "bin/scanner"
-    assert cfg.rust_office_parser_bin == "bin/office-worker"
-    assert cfg.rust_index_db_path == "state/scan_index_v2.sqlite3"
-    assert cfg.rust_process_timeout_seconds == 45.5
+    assert cfg.office_worker_path == "bin/office-worker"
+    assert cfg.index_db_path == "state/scan_index_v3.sqlite3"
 
 
-@pytest.mark.parametrize("value", ["automatic", "", "python"])
-def test_scanner_engine_rejects_implicit_or_unknown_selection(value: str):
+@pytest.mark.parametrize("key", ["engine", "rust_scanner_bin", "rust_index_db_path"])
+def test_scanner_settings_reject_removed_infrastructure_keys(key: str):
     cfg = object.__new__(Config)
-    cfg._settings = SimpleNamespace(scanner=SimpleNamespace(engine=value))
+    cfg._settings = SimpleNamespace(scanner=SimpleNamespace(**{key: "removed"}))
 
-    with pytest.raises(ValueError, match="unsupported scanner engine"):
-        _ = cfg.scanner_engine
+    with pytest.raises(ValueError, match=key):
+        cfg.scanner_settings()
 
 
 def test_installed_paths_accept_absolute_drive_space_and_non_ascii(tmp_path):
@@ -255,10 +245,8 @@ def test_installed_mode_derives_release_binaries_and_shared_scan_db(tmp_path):
         scanner=SimpleNamespace(),
     )
 
-    assert Path(cfg.rust_scanner_bin).is_absolute()
-    assert Path(cfg.rust_scanner_bin).is_relative_to(release_root)
-    assert Path(cfg.rust_office_parser_bin).is_relative_to(release_root)
-    assert Path(cfg.rust_index_db_path) == paths["db_dir"] / "scan_index_v2.sqlite3"
+    assert Path(cfg.office_worker_path).is_relative_to(release_root)
+    assert Path(cfg.index_db_path) == paths["db_dir"] / "scan_index_v3.sqlite3"
     assert cfg.log_dir == paths["log_dir"]
 
 

@@ -1,6 +1,6 @@
-use ai_daily_scanner_contract::{NormalizedScannerProfileV1, RawScannerProfileV1, ReportMode};
+use ai_daily_scanner_contract::{NormalizedScannerSettings, ReportMode, ScannerSettings};
 use ai_daily_scanner_core::classifier::{classify_candidate, ClassificationError, ParserRoute};
-use ai_daily_scanner_core::config::normalize_scanner_profile;
+use ai_daily_scanner_core::config::normalize_scanner_settings;
 use ai_daily_scanner_core::discovery::{
     bootstrap_file_identity, discover_files_with_diagnostics, normalize_contract_path_text,
     DiscoveredFileOut, DiscoveryIssueKind, DiscoveryRequest,
@@ -13,9 +13,8 @@ use tempfile::tempdir;
 
 #[test]
 fn rust_defaults_match_all_frozen_normalized_profiles() {
-    let raw: RawScannerProfileV1 =
-        serde_json::from_str(r#"{"schema_version":"scanner_profile_v1"}"#)
-            .expect("minimal raw profile should parse");
+    let raw: ScannerSettings =
+        serde_json::from_str(r#"{}"#).expect("minimal raw profile should parse");
     let cases = [
         (
             ReportMode::Daily,
@@ -32,18 +31,18 @@ fn rust_defaults_match_all_frozen_normalized_profiles() {
     ];
 
     for (mode, fixture) in cases {
-        let expected: NormalizedScannerProfileV1 =
+        let expected: NormalizedScannerSettings =
             serde_json::from_str(fixture).expect("fixture should parse");
         let actual =
-            normalize_scanner_profile(&raw, mode).expect("frozen defaults should normalize");
+            normalize_scanner_settings(&raw, mode).expect("frozen defaults should normalize");
         assert_eq!(actual, expected);
     }
 }
 
 #[test]
 fn raw_profile_sets_and_timeout_keys_become_canonical() {
-    let raw: RawScannerProfileV1 = serde_json::from_value(serde_json::json!({
-        "schema_version": "scanner_profile_v1",
+    let raw: ScannerSettings = serde_json::from_value(serde_json::json!({
+
         "allowed_extensions": [".txt", ".md", ".txt"],
         "ignored_patterns": [" ~$* ", "*.tmp", "*.tmp"],
         "excluded_dirs": [" C:\\Synthetic Excluded ", "C:\\Synthetic Excluded"],
@@ -54,7 +53,7 @@ fn raw_profile_sets_and_timeout_keys_become_canonical() {
     .expect("raw profile should parse");
 
     let normalized =
-        normalize_scanner_profile(&raw, ReportMode::Daily).expect("profile should normalize");
+        normalize_scanner_settings(&raw, ReportMode::Daily).expect("profile should normalize");
 
     assert_eq!(normalized.discovery.allowed_extensions, [".md", ".txt"]);
     assert_eq!(normalized.discovery.ignored_patterns, ["*.tmp", "~$*"]);
@@ -193,11 +192,10 @@ fn discovery_deduplicates_resolved_aliases() {
 
 #[test]
 fn planner_is_deterministic_and_rejects_large_files_before_parsing() {
-    let raw: RawScannerProfileV1 =
-        serde_json::from_str(r#"{"schema_version":"scanner_profile_v1"}"#)
-            .expect("minimal raw profile should parse");
+    let raw: ScannerSettings =
+        serde_json::from_str(r#"{}"#).expect("minimal raw profile should parse");
     let profile =
-        normalize_scanner_profile(&raw, ReportMode::Daily).expect("defaults should normalize");
+        normalize_scanner_settings(&raw, ReportMode::Daily).expect("defaults should normalize");
     let files = vec![
         synthetic_file("C:\\scan\\z.xlsx", ".xlsx", 100),
         synthetic_file("C:\\scan\\a.txt", ".txt", 100),
@@ -231,17 +229,14 @@ fn planner_is_deterministic_and_rejects_large_files_before_parsing() {
 
 #[test]
 fn legacy_doc_and_ppt_routes_require_the_explicit_profile_switch() {
-    let disabled_raw: RawScannerProfileV1 = serde_json::from_str(
-        r#"{"schema_version":"scanner_profile_v1","allowed_extensions":[".doc"]}"#,
-    )
-    .expect("disabled profile should parse");
-    let enabled_raw: RawScannerProfileV1 = serde_json::from_str(
-        r#"{"schema_version":"scanner_profile_v1","allowed_extensions":[".doc"],"office_legacy_extensions_enabled":true}"#,
-    )
-    .expect("enabled profile should parse");
-    let disabled = normalize_scanner_profile(&disabled_raw, ReportMode::Daily)
+    let disabled_raw: ScannerSettings = serde_json::from_str(r#"{"allowed_extensions":[".doc"]}"#)
+        .expect("disabled profile should parse");
+    let enabled_raw: ScannerSettings =
+        serde_json::from_str(r#"{"allowed_extensions":[".doc"],"legacy_office_enabled":true}"#)
+            .expect("enabled profile should parse");
+    let disabled = normalize_scanner_settings(&disabled_raw, ReportMode::Daily)
         .expect("disabled profile should normalize");
-    let enabled = normalize_scanner_profile(&enabled_raw, ReportMode::Daily)
+    let enabled = normalize_scanner_settings(&enabled_raw, ReportMode::Daily)
         .expect("enabled profile should normalize");
     let file = synthetic_file("C:\\scan\\legacy.doc", ".doc", 100);
 

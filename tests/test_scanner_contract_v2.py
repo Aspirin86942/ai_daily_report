@@ -1,10 +1,6 @@
-"""Scanner profile v2 与 v2 wire 类型的跨语言 fixture 测试。"""
+"""Scanner evidence、settings 与 worker 合同测试。"""
 
 from __future__ import annotations
-
-import re
-from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -13,114 +9,14 @@ from src.models.scanner_contract import (
     Diagnostic,
     FileAuditV2,
     InspectRunResponseV2,
-    MaintenanceRequestV1,
-    MaintenanceResponseV1,
-    RawScannerProfileV2,
     PdfClassificationAuditV1,
+    ScannerSettings,
     TransportErrorResponse,
-    UpgradeDatabaseRequestV1,
-    UpgradeDatabaseResponseV1,
-    VersionResponseV2,
     WORKER_DIAGNOSTIC_V1_ERROR_CODES,
     WORKER_DIAGNOSTIC_V1_STAGES,
     WorkerDiagnosticV1,
     WorkerParseResponse,
 )
-from src.services.scanner_config import (
-    SCANNER_PROFILE_V2_ONLY_FIELDS,
-    SCANNER_PROFILE_V2_QUOTA_DEFAULTS,
-    extract_scanner_profile,
-    normalize_scanner_profile_v2,
-)
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-def test_python_quota_defaults_match_rust_v2_quota_defaults() -> None:
-    """Python 默认表必须与 Rust `v2_quota_defaults` 逐字一致（spec Part 8.1）。
-
-    生产默认值的唯一所有者是 Rust core；Python 的镜像表若漂移，本测试从 Rust
-    源码直接抽取 tuple 断言相等，而不是让两边各自复制同样的字面量。
-    """
-    rust_source = (
-        PROJECT_ROOT
-        / "rust"
-        / "scanner_contract"
-        / "src"
-        / "lib.rs"
-    ).read_text(encoding="utf-8")
-    marker = "pub fn v2_quota_defaults"
-    start = rust_source.index(marker)
-    end = rust_source.index("\n}", start)
-    body = rust_source[start:end]
-
-    rust_table: dict[str, tuple[int, int, int, int]] = {}
-    for mode, label in (("Daily", "daily"), ("Weekly", "weekly"), ("Monthly", "monthly")):
-        pattern = re.compile(
-            rf"ReportMode::{mode}\s*=>\s*\((\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+_\d+|\d+)\s*\)"
-        )
-        match = pattern.search(body)
-        assert match is not None, f"missing v2_quota_defaults arm for {mode}"
-        rust_table[label] = tuple(
-            int(part.replace("_", "")) for part in match.groups()
-        )
-
-    assert rust_table == SCANNER_PROFILE_V2_QUOTA_DEFAULTS
-
-
-def test_raw_profile_v2_is_strict_superset() -> None:
-    # v1 默认叶子的 JSON 在 v2 中必须可解析
-    v1_json = {"schema_version": "scanner_profile_v1", "max_file_size_mb": 50}
-    v2 = RawScannerProfileV2.model_validate(
-        {**v1_json, "schema_version": "scanner_profile_v2"}
-    )
-    assert v2.max_file_size_mb == 50
-
-
-def test_version_v2_exposes_new_capabilities() -> None:
-    r = VersionResponseV2.model_validate(
-        {
-            "contract": "ai_daily_context",
-            "protocol_version": 1,
-            "response_version": 2,
-            "binary_name": "ai-daily-scanner",
-            "engine_version": "0.1.0",
-            "engine_build": "sha256-source-v1:" + "a" * 64,
-            "target_triple": "x86_64-pc-windows-msvc",
-            "supported_commands": [
-                "version",
-                "doctor",
-                "build-context",
-                "inspect-run",
-                "maintenance",
-                "upgrade-db",
-            ],
-            "office_worker_contract_version": "ai_daily_worker_v1",
-            "python_worker_contract_version": "ai_daily_worker_v1",
-            "accepted_scanner_profile_versions": [
-                "scanner_profile_v1",
-                "scanner_profile_v2",
-            ],
-            "inspect_response_versions": [1, 2],
-            "classifier_contract_versions": ["ai_daily_pdf_classifier_v1"],
-            "session_contract_versions": ["ai_daily_worker_v2"],
-            "maintenance_contract_versions": ["ai_daily_scanner_maintenance_v1"],
-            "upgrade_contract_versions": ["ai_daily_scanner_upgrade_v1"],
-            "source_guard_policy": "source_guard_v2",
-            "max_source_files_per_run": 1_000_000,
-            "cache_retention_policy": {
-                "policy_version": "cache_retention_v1",
-                "parse_cache_max_bytes": 1073741824,
-                "classification_cache_max_bytes": 134217728,
-                "context_artifacts_max_bytes": 536870912,
-                "terminal_audit_max_bytes": 2147483648,
-                "terminal_run_max_count": 500,
-                "terminal_run_max_age_days": 90,
-                "opportunistic_gc_budget_ms": 10,
-            },
-        }
-    )
-    assert r.max_source_files_per_run == 1_000_000
 
 
 def test_worker_diagnostic_v1_error_code_set_is_frozen() -> None:
@@ -271,51 +167,7 @@ def test_scanner_diagnostic_accepts_the_new_codes_and_stage() -> None:
     )
 
 
-def test_v2_only_leaf_outputs_scanner_profile_v2() -> None:
-    cfg = SimpleNamespace(
-        scanner=SimpleNamespace(
-            allowed_extensions=[".xlsx"],
-            max_workers=3,
-            total_deadline_ms=25_000,
-        )
-    )
-    profile = extract_scanner_profile(cfg.scanner)
-    assert profile["schema_version"] == "scanner_profile_v2"
-    assert profile["total_deadline_ms"] == 25_000
-    assert profile["allowed_extensions"] == [".xlsx"]
-
-
-def test_without_v2_only_leaf_keeps_outputting_v1() -> None:
-    cfg = SimpleNamespace(
-        scanner=SimpleNamespace(
-            allowed_extensions=[".xlsx"],
-            max_workers=3,
-        )
-    )
-    profile = extract_scanner_profile(cfg.scanner)
-    assert profile["schema_version"] == "scanner_profile_v1"
-    assert profile["max_workers"] == 3
-
-
-def test_v2_only_allowlist_is_exact() -> None:
-    assert SCANNER_PROFILE_V2_ONLY_FIELDS == frozenset(
-        {
-            "max_candidate_files",
-            "max_pdf_text_extractions",
-            "max_total_pdf_classification_pages",
-            "admission_policy_version",
-            "classifier_policy_version",
-            "pdf_classification_timeout_ms",
-            "total_deadline_ms",
-            "session_concurrency",
-            "max_requests_per_session",
-            "session_idle_ttl_ms",
-            "session_rss_limit_bytes",
-        }
-    )
-
-
-def _build_context_request_payload(scanner_profile: dict) -> dict:
+def _build_context_request_payload(scanner_settings: dict) -> dict:
     return {
         "contract": "ai_daily_context",
         "protocol_version": 1,
@@ -326,7 +178,7 @@ def _build_context_request_payload(scanner_profile: dict) -> dict:
         "report_mode": "monthly",
         "compression_profile": None,
         "scan_db_path": "C:\\scanner-fixtures\\state\\scan.sqlite3",
-        "scanner_profile": scanner_profile,
+        "scanner_settings": scanner_settings,
         "adapters": {
             "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
             "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
@@ -336,182 +188,38 @@ def _build_context_request_payload(scanner_profile: dict) -> dict:
     }
 
 
-def test_build_context_request_accepts_v1_profile() -> None:
-    request = BuildContextRequest.model_validate(
-        _build_context_request_payload(
-            {"schema_version": "scanner_profile_v1", "max_workers": 3}
-        )
-    )
-    assert request.scanner_profile.schema_version == "scanner_profile_v1"
-
-
-def test_build_context_request_accepts_v2_profile_with_v2_only_leaf() -> None:
+def test_build_context_request_accepts_single_settings_shape() -> None:
     request = BuildContextRequest.model_validate(
         _build_context_request_payload(
             {
-                "schema_version": "scanner_profile_v2",
                 "max_workers": 3,
                 "total_deadline_ms": 45_000,
+                "worker_max_requests": 64,
             }
         )
     )
-    assert request.scanner_profile.schema_version == "scanner_profile_v2"
-    assert request.scanner_profile.total_deadline_ms == 45_000
+    assert request.scanner_settings.max_workers == 3
+    assert request.scanner_settings.total_deadline_ms == 45_000
+    assert request.scanner_settings.worker_max_requests == 64
 
 
-def test_build_context_request_rejects_unknown_profile_schema_version() -> None:
-    with pytest.raises(ValueError, match="scanner_profile_v3"):
+def test_scanner_settings_reject_removed_profile_and_session_keys() -> None:
+    for key in (
+        "schema_version",
+        "parser_profile_version",
+        "office_parser_backend",
+        "session_concurrency",
+        "max_requests_per_session",
+    ):
+        with pytest.raises(ValueError, match=key):
+            ScannerSettings.model_validate({key: 1})
+
+
+def test_build_context_request_rejects_unknown_settings_key() -> None:
+    with pytest.raises(ValueError, match="unknown_setting"):
         BuildContextRequest.model_validate(
-            _build_context_request_payload({"schema_version": "scanner_profile_v3"})
+            _build_context_request_payload({"unknown_setting": 1})
         )
-
-
-def test_v1_and_v2_profiles_normalize_to_same_frozen_defaults() -> None:
-    v1_leaves = {"schema_version": "scanner_profile_v1", "max_workers": 3}
-    v2_leaves = {**v1_leaves, "schema_version": "scanner_profile_v2"}
-    normalized_v1 = normalize_scanner_profile_v2(v1_leaves, "monthly")
-    normalized_v2 = normalize_scanner_profile_v2(v2_leaves, "monthly")
-    assert normalized_v1 == normalized_v2
-    assert normalized_v1["total_deadline_ms"] == 25_000
-    assert normalized_v1["max_candidate_files"] == 384
-    assert normalized_v1["max_total_pdf_classification_pages"] == 370
-    assert normalized_v1["max_pdf_text_extractions"] == 16
-    assert normalized_v1["pdf_classification_timeout_ms"] == 2_000
-    assert normalized_v1["session_concurrency"] == min(3, 4)
-
-
-def test_v2_only_leaf_flows_through_request_mirror() -> None:
-    request = BuildContextRequest.model_validate(
-        _build_context_request_payload(
-            {
-                "schema_version": "scanner_profile_v2",
-                "total_deadline_ms": 45_000,
-            }
-        )
-    )
-    normalized = normalize_scanner_profile_v2(
-        request.scanner_profile.model_dump(mode="json"),
-        request.report_mode,
-    )
-    assert normalized["total_deadline_ms"] == 45_000
-    assert normalized["max_candidate_files"] == 384
-
-
-def test_maintenance_request_and_response_round_trip() -> None:
-    request = MaintenanceRequestV1.model_validate(
-        {
-            "contract": "ai_daily_scanner_maintenance",
-            "protocol_version": 1,
-            "request_id": "123e4567-e89b-42d3-a456-426614174000",
-            "scan_db_path": "C:\\scan\\db.sqlite3",
-            "mode": "gc",
-            "dry_run": True,
-        }
-    )
-    assert request.dry_run is True
-    response = MaintenanceResponseV1.model_validate(
-        {
-            "contract": "ai_daily_scanner_maintenance",
-            "protocol_version": 1,
-            "request_id": "123e4567-e89b-42d3-a456-426614174000",
-            "status": "ok",
-            "cache_retention_policy": {
-                "policy_version": "cache_retention_v1",
-                "parse_cache_max_bytes": 1073741824,
-                "classification_cache_max_bytes": 134217728,
-                "context_artifacts_max_bytes": 536870912,
-                "terminal_audit_max_bytes": 2147483648,
-                "terminal_run_max_count": 500,
-                "terminal_run_max_age_days": 90,
-                "opportunistic_gc_budget_ms": 10,
-            },
-            "before": {
-                "parse_cache_logical_bytes": 1,
-                "classification_cache_logical_bytes": 2,
-                "context_artifacts_logical_bytes": 3,
-                "terminal_audit_logical_bytes": 4,
-                "database_file_bytes": 5,
-                "wal_file_bytes": 6,
-                "shm_file_bytes": 7,
-                "total_physical_bytes": 8,
-                "freelist_bytes": 9,
-                "auto_vacuum_mode": "incremental",
-            },
-            "after": {
-                "parse_cache_logical_bytes": 1,
-                "classification_cache_logical_bytes": 2,
-                "context_artifacts_logical_bytes": 3,
-                "terminal_audit_logical_bytes": 4,
-                "database_file_bytes": 5,
-                "wal_file_bytes": 6,
-                "shm_file_bytes": 7,
-                "total_physical_bytes": 8,
-                "freelist_bytes": 9,
-                "auto_vacuum_mode": "incremental",
-            },
-            "after_complete": True,
-            "deleted": {
-                "parse_cache_rows": 0,
-                "classification_cache_rows": 0,
-                "context_artifacts_rows": 0,
-                "context_artifact_files_rows": 0,
-                "context_artifact_decisions_rows": 0,
-                "scan_runs_rows": 0,
-                "scan_run_attempts_rows": 0,
-                "run_diagnostics_rows": 0,
-                "scan_file_results_rows": 0,
-                "scan_stage_metrics_rows": 0,
-                "scan_extension_metrics_rows": 0,
-                "context_runs_rows": 0,
-                "context_decisions_rows": 0,
-                "file_inventory_rows": 0,
-            },
-            "pre_integrity_check": "ok",
-            "post_integrity_check": "not_run",
-            "vacuum": {
-                "mode": "gc",
-                "status": "skipped_dry_run",
-                "pages_changed": 0,
-            },
-            "warnings": [],
-            "error": None,
-        }
-    )
-    assert response.status == "ok"
-    assert response.error is None
-
-
-def test_upgrade_database_request_and_response_round_trip() -> None:
-    request = UpgradeDatabaseRequestV1.model_validate(
-        {
-            "contract": "ai_daily_scanner_upgrade",
-            "protocol_version": 1,
-            "request_id": "123e4567-e89b-42d3-a456-426614174000",
-            "scan_db_path": "C:\\scan\\db.sqlite3",
-            "apply": False,
-        }
-    )
-    assert request.apply is False
-    response = UpgradeDatabaseResponseV1.model_validate(
-        {
-            "contract": "ai_daily_scanner_upgrade",
-            "protocol_version": 1,
-            "request_id": "123e4567-e89b-42d3-a456-426614174000",
-            "status": "ok",
-            "source_user_version": 1,
-            "target_user_version": 2,
-            "apply": True,
-            "schema_migrated": True,
-            "auto_vacuum_converted": True,
-            "legacy_parse_cache_rows_detected": 7,
-            "invalidated_parse_cache_rows": 7,
-            "pre_integrity_check": "ok",
-            "post_integrity_check": "ok",
-            "warnings": [],
-            "error": None,
-        }
-    )
-    assert response.schema_migrated is True
 
 
 def test_inspect_run_response_v2_error_sentinel_is_strict() -> None:
@@ -996,76 +704,3 @@ def test_file_audit_v2_backend_lane_and_miss_reason_matrix_is_enforced() -> None
     )
     with pytest.raises(ValueError, match="classifier failure"):
         FileAuditV2.model_validate(unknown_with_body_parser)
-
-
-def test_maintenance_response_v1_ok_rejects_invalid_post() -> None:
-    payload = {
-        "contract": "ai_daily_scanner_maintenance",
-        "protocol_version": 1,
-        "request_id": "123e4567-e89b-42d3-a456-426614174000",
-        "status": "ok",
-        "cache_retention_policy": {
-            "policy_version": "cache_retention_v1",
-            "parse_cache_max_bytes": 1073741824,
-            "classification_cache_max_bytes": 134217728,
-            "context_artifacts_max_bytes": 536870912,
-            "terminal_audit_max_bytes": 2147483648,
-            "terminal_run_max_count": 500,
-            "terminal_run_max_age_days": 90,
-            "opportunistic_gc_budget_ms": 10,
-        },
-        "before": {
-            "parse_cache_logical_bytes": 1,
-            "classification_cache_logical_bytes": 2,
-            "context_artifacts_logical_bytes": 3,
-            "terminal_audit_logical_bytes": 4,
-            "database_file_bytes": 5,
-            "wal_file_bytes": 6,
-            "shm_file_bytes": 7,
-            "total_physical_bytes": 8,
-            "freelist_bytes": 9,
-            "auto_vacuum_mode": "incremental",
-        },
-        "after": {
-            "parse_cache_logical_bytes": 1,
-            "classification_cache_logical_bytes": 2,
-            "context_artifacts_logical_bytes": 3,
-            "terminal_audit_logical_bytes": 4,
-            "database_file_bytes": 5,
-            "wal_file_bytes": 6,
-            "shm_file_bytes": 7,
-            "total_physical_bytes": 8,
-            "freelist_bytes": 9,
-            "auto_vacuum_mode": "incremental",
-        },
-        "after_complete": True,
-        "deleted": {
-            "parse_cache_rows": 0,
-            "classification_cache_rows": 0,
-            "context_artifacts_rows": 0,
-            "context_artifact_files_rows": 0,
-            "context_artifact_decisions_rows": 0,
-            "scan_runs_rows": 0,
-            "scan_run_attempts_rows": 0,
-            "run_diagnostics_rows": 0,
-            "scan_file_results_rows": 0,
-            "scan_stage_metrics_rows": 0,
-            "scan_extension_metrics_rows": 0,
-            "context_runs_rows": 0,
-            "context_decisions_rows": 0,
-            "file_inventory_rows": 0,
-        },
-        "pre_integrity_check": "ok",
-        "post_integrity_check": "not_run",
-        "vacuum": {"mode": "gc", "status": "skipped_dry_run", "pages_changed": 0},
-        "warnings": [],
-        "error": None,
-    }
-    MaintenanceResponseV1.model_validate(payload)
-    payload["post_integrity_check"] = "failed"
-    with pytest.raises(ValueError, match="status invariants"):
-        MaintenanceResponseV1.model_validate(payload)
-    payload["post_integrity_check"] = "not_run"
-    payload["after_complete"] = False
-    with pytest.raises(ValueError, match="status invariants"):
-        MaintenanceResponseV1.model_validate(payload)

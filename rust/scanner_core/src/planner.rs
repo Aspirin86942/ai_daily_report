@@ -1,6 +1,6 @@
 use crate::classifier::{classify_candidate, ClassificationError, ParserRoute};
 use ai_daily_discovery::DiscoveredFileOut;
-use ai_daily_scanner_contract::NormalizedScannerProfileV1;
+use ai_daily_scanner_contract::NormalizedScannerSettings;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlanAction {
@@ -17,7 +17,7 @@ pub struct PlannedFile {
 
 pub fn plan_candidates(
     mut files: Vec<DiscoveredFileOut>,
-    profile: &NormalizedScannerProfileV1,
+    profile: &NormalizedScannerSettings,
 ) -> Vec<PlannedFile> {
     files.sort_by(|left, right| left.path.cmp(&right.path));
     files
