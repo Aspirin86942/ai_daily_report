@@ -10,9 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from src.models.scanner_contract import (
-    WorkerParseRequest,
-)
+from src.workers.models import ParseRequest
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -120,9 +118,6 @@ def _classify_request(tmp_path: Path, request_id: str) -> dict[str, object]:
         "request_id": request_id,
         "operation": "pdf_classify",
         "payload": {
-            "contract": "ai_daily_pdf_classifier",
-            "protocol_version": 1,
-            "request_id": request_id,
             "file_path": str(pdf),
             "source_version": _source_version(pdf),
             "max_pages": 5,
@@ -137,9 +132,6 @@ def _parse_request(tmp_path: Path, request_id: str) -> dict[str, object]:
         pytest.skip("text pdf fixture is not built")
     source_version = _source_version(pdf)
     request = {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": request_id,
         "file_path": str(pdf),
         "file_type": ".pdf",
         "backend": "python_pdf_text_v2",
@@ -152,7 +144,7 @@ def _parse_request(tmp_path: Path, request_id: str) -> dict[str, object]:
         },
         "expected_source_version": source_version,
     }
-    WorkerParseRequest.model_validate(request)
+    ParseRequest.model_validate(request)
     return {
         "contract": "ai_daily_worker",
         "protocol_version": 2,
@@ -250,8 +242,8 @@ def test_session_parse_request_pairs_request_id(tmp_path: Path) -> None:
         assert response["status"] == "ok"
         assert response["error"] is None
         result = response["result"]
-        assert result["contract"] == "ai_daily_worker"
-        assert result["request_id"] == request_id
+        assert "contract" not in result
+        assert "request_id" not in result
         assert result["parser_backend"] == "python_pdf_text_v2"
         assert result["observed_source_version"] == request["payload"]["expected_source_version"]
     finally:
@@ -321,7 +313,7 @@ def test_session_rejects_bad_json_with_single_error_frame(tmp_path: Path) -> Non
             process.wait(timeout=10)
 
 
-def test_session_rejects_mismatched_inner_request_id(tmp_path: Path) -> None:
+def test_session_rejects_unknown_parse_payload_field(tmp_path: Path) -> None:
     if not TEXT_PDF.is_file():
         pytest.skip("text pdf fixture is not built")
     process = _spawn_session()
@@ -329,7 +321,7 @@ def test_session_rejects_mismatched_inner_request_id(tmp_path: Path) -> None:
         hello = _readline(process)
         assert hello["frame"] == "hello"
 
-        # 外层 request_id 与内嵌 WorkerParseRequest.request_id 不一致 → 协议损坏
+        # request id 只属于外层 envelope；payload 出现未知传输字段即协议损坏。
         request = _parse_request(tmp_path, "62222222-6222-4222-8222-622222222222")
         request["payload"]["request_id"] = "64444444-6444-4444-8444-644444444444"
         _write_request(process, request)

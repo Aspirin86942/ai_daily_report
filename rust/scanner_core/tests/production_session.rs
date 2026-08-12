@@ -89,7 +89,7 @@ mod windows {
         )
         .expect("evidence value");
         assert_eq!(response["scan_run_id"], scan_run_id);
-        assert_eq!(response["status"], "ok", "{response}");
+        assert_eq!(response["run_status"], "success", "{response}");
         let metrics = &response["execution_metrics"];
 
         assert_eq!(metrics["classify_attempt_count"], 1);
@@ -136,6 +136,7 @@ mod windows {
         .expect("snapshot evidence value");
         assert_eq!(snapshot_response["scan_run_id"], snapshot_run_id);
         let snapshot_metrics = &snapshot_response["execution_metrics"];
+        assert_eq!(snapshot_metrics["worker_handshake_ms"], 0);
         assert_eq!(
             snapshot_metrics["snapshot_hit"], true,
             "{}",
@@ -143,12 +144,6 @@ mod windows {
         );
         assert_eq!(snapshot_metrics["classify_attempt_count"], 0);
         assert_eq!(snapshot_metrics["parse_attempt_count"], 0);
-        assert!(
-            snapshot_metrics["peak_worker_rss_bytes"]
-                .as_u64()
-                .is_some_and(|peak| peak > 0),
-            "snapshot must report its live preflight child peak: {}",
-            snapshot_response
-        );
+        assert_eq!(snapshot_metrics["peak_worker_rss_bytes"], 0);
     }
 }

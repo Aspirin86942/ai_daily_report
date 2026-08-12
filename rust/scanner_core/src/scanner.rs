@@ -1,8 +1,6 @@
 //! In-process scanner interface.
 //!
-//! The command-line process is a temporary adapter around this module.  New
-//! callers should use [`Scanner`] and receive typed results instead of learning
-//! the JSON/stdin process protocol.
+//! Callers use [`Scanner`] and receive typed results without a transport layer.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -12,17 +10,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use ai_daily_scanner_contract::{
     AdapterPaths, BuildContextRequest, CompressionProfile, ContextEnvelope, DoctorRequest,
-    DoctorResponse, InspectRunRequest, InspectRunResponseV2, Nullable, ReportMode, ScannerSettings,
-    Validate,
+    DoctorResponse, Nullable, ReportMode, ScannerEvidence, ScannerSettings, Validate,
 };
 use serde::Serialize;
 use thiserror::Error;
 
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
-use crate::inspect::assemble_inspect_v2;
+use crate::evidence::assemble_scanner_evidence;
 use crate::parsers::{RegisteredWorker, WorkerCommand};
-use crate::run::{build_context_command, doctor_command, CommandOutput, EngineShellError};
+use crate::run::{build_context_command, doctor_command, EngineShellError};
 use crate::session::{SessionParams, WorkerPool};
 use crate::store::ScannerStore;
 
@@ -30,7 +27,7 @@ use crate::store::ScannerStore;
 #[derive(Debug, Serialize)]
 pub struct ContextResult {
     pub envelope: ContextEnvelope,
-    pub evidence: Option<InspectRunResponseV2>,
+    pub evidence: Option<ScannerEvidence>,
 }
 
 /// Stable configuration owned by a scanner instance rather than every run.
@@ -63,30 +60,15 @@ pub enum ScannerError {
     Busy,
 }
 
-/// A completed scanner operation and its legacy command exit semantics.
+/// A completed scanner operation and its stable success/error status.
 #[derive(Debug)]
 pub struct ScannerOperation<T> {
     pub value: T,
     pub exit_code: i32,
 }
 
-impl<T> ScannerOperation<T> {
-    fn from_command(output: CommandOutput) -> Result<Self, EngineShellError>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        Ok(Self {
-            value: serde_json::from_str(&output.json)?,
-            exit_code: output.exit_code,
-        })
-    }
-}
-
 /// The scanner's sole in-process interface.
 ///
-/// Configuration is still carried by the frozen request while the legacy CLI
-/// adapter exists.  A later native-only step moves stable runtime configuration
-/// into `Scanner::open` without changing this seam again for callers.
 pub struct Scanner {
     config: ScannerConfig,
     build_lock: Mutex<()>,
@@ -105,6 +87,19 @@ pub(crate) struct ScannerWorkerPools {
 }
 
 impl ScannerWorkerPools {
+    pub(crate) fn registered_workers(
+        &self,
+        office_command: &WorkerCommand,
+        python_command: &WorkerCommand,
+    ) -> Option<(RegisteredWorker, RegisteredWorker)> {
+        Some((
+            self.office.as_ref()?.registered_worker(office_command)?,
+            self.python_document
+                .as_ref()?
+                .registered_worker(python_command)?,
+        ))
+    }
+
     pub(crate) fn resolve(
         &mut self,
         office_command: WorkerCommand,
@@ -189,8 +184,7 @@ impl Scanner {
             .resources
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let operation: ScannerOperation<ContextEnvelope> =
-            ScannerOperation::from_command(build_context_command(&wire_request, &mut resources)?)?;
+        let operation = build_context_command(&wire_request, &mut resources);
         let evidence = match operation.value.scan_run_id.0 {
             Some(scan_run_id) => Some(load_run_evidence(
                 &mut resources.store,
@@ -223,7 +217,7 @@ impl Scanner {
             scan_db_path: self.config.scan_db_path.clone(),
             adapters: self.config.adapters.clone(),
         };
-        Ok(ScannerOperation::from_command(doctor_command(&request)?)?)
+        Ok(doctor_command(&request))
     }
 
     fn build_request(
@@ -321,17 +315,10 @@ fn load_run_evidence(
     store: &mut ScannerStore,
     request: &BuildContextRequest,
     scan_run_id: u64,
-) -> Result<InspectRunResponseV2, EngineShellError> {
-    let inspect_request = InspectRunRequest {
-        contract: "ai_daily_context".to_string(),
-        protocol_version: 1,
-        request_id: request.request_id.clone(),
-        scan_db_path: request.scan_db_path.clone(),
-        scan_run_id,
-        include_content: false,
-    };
+) -> Result<ScannerEvidence, EngineShellError> {
     let snapshot = store
-        .inspect_run(scan_run_id, false)
+        .load_evidence(scan_run_id)
         .map_err(|error| EngineShellError::Evidence(error.error.to_string()))?;
-    assemble_inspect_v2(&inspect_request, &snapshot).map_err(EngineShellError::Evidence)
+    assemble_scanner_evidence(&request.request_id, scan_run_id, &snapshot)
+        .map_err(EngineShellError::Evidence)
 }

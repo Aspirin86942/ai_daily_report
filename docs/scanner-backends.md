@@ -1,142 +1,86 @@
-# Scanner / Context Core
+# Native scanner and parser backends
 
-The production architecture is a Python application shell with a Rust
-scanner/context core. Python owns CLI input, local configuration, report
-storage, templates, and LLM integration. Rust owns discovery, classification,
-parser routing, worker deadlines, inventory, parse cache, planning,
-aggregation, deterministic compression, and scan/context audit.
-
-## Process boundary
+## Production chain
 
 ```text
-Python CLI
-  -> ContextScheduler
-     -> RustContextClient
-        -> ai-daily-scanner build-context
-           -> Rust discovery and light-text parsing
-           -> ai-daily-office-parser worker
-           -> Python document worker for configured formats/fallbacks
-           -> Rust v2 SQLite cache and audit
-        <- ContextEnvelope
-  -> report generation
+CLI → ReportRunner → NativeScanner → PyO3 Scanner
+→ scanner_core → worker v2 pools
 ```
 
-One scan-backed report crosses the application/core boundary once. Invalid
-scanner output, a process crash, timeout, or contract mismatch is an explicit
-error. There is no top-level fallback to another scanner implementation.
+`ReportRunner` owns report recipes and publication ordering. `NativeScanner` is
+the only Python adapter at the scanner seam. The PyO3 object owns one Rust
+`Scanner`, which keeps the v3 SQLite store and both lazy worker pools for its
+lifetime. A top-level `build_context` call is serialized; work inside that call
+may run concurrently and releases the GIL.
 
-## Production paths
+There is no scanner executable, JSON scanner transport, request-id transport
+protocol, or second database query for evidence. `ScanResult` returns the
+context envelope and `ScannerEvidence` from the same run.
 
-The repository values below are source-checkout defaults:
+## Parser routes
 
-```yaml
-scanner:
-  engine: "rust_v2"
-  rust_scanner_bin: "rust/target/release/ai-daily-scanner"
-  rust_office_parser_bin: "rust/target/release/ai-daily-office-parser"
-  rust_index_db_path: "data/db/scan_index_v2.sqlite3"
-```
+| File type | Parser backend | Worker lane | Isolation |
+|---|---|---|---|
+| text-like | `light_text_v2` | `rust_core` | in-process Rust |
+| `.xlsx` | `rust_xlsx_bounded_v2` | `rust_office_process_v2` | Office worker |
+| `.docx`, `.pptx` | `rust_office_oxide_v2` | `rust_office_process_v2` | Office worker |
+| `.pdf` | `python_pdf_text_v2` | `python_document_process_v2` | Python worker |
+| enabled `.doc`, `.ppt` | `python_sharepoint_text_v2` | `python_document_process_v2` | Python worker |
+| eligible Office fallback | `python_office_v2` | `python_document_process_v2` | Python worker |
 
-The discovery crate is a library linked into `ai-daily-scanner`; it is not a
-standalone production executable. The Office executable remains a separate,
-crash-isolated worker.
+`parser_backend` identifies who produced content. `worker_lane` identifies
+where it ran. Cache and acceptance evidence must keep them separate.
 
-An installed release does not trust caller cwd or version-local mutable paths.
-`run_current_release.ps1` selects one verified `releases/<version>` directory,
-sets it as the child working directory, and supplies absolute scanner, Office
-worker, Python worker, module-root, config, report, database, and log paths.
-Mutable state remains below `<install-root>/shared`; `Config` rejects a missing,
-relative, version-local, or `shared/`-escaping installed path. Strict doctor
-reports every effective path before probing the Rust core.
+Routing and ordinary fallback order are compiled Rust policy. The only runtime
+fallback switch is `fallback_after_timeout`, which defaults to false. A source
+version change returns outer retryable `SOURCE_VERSION_CHANGED`; the old
+request is never silently replayed or cached.
 
-Build and validate the source checkout on Windows with:
+## Worker v2
+
+Both isolated workers use the same strict NDJSON lifecycle:
+
+1. Start lazily and emit one `hello` frame.
+2. Declare worker kind, build identity, and supported operations.
+3. Accept request envelopes and return matching response envelopes.
+4. Recycle after the request cap, idle TTL, RSS limit, crash, timeout, or dirty
+   protocol.
+
+The Office worker supports `office_parse`. The Python worker supports
+`pdf_classify`, `pdf_parse`, `python_office_parse`, and
+`python_sharepoint_parse`. A capability/build mismatch fails before work is
+accepted.
+
+## Cache identity and evidence
+
+The v3 cache identity includes the native build identity, normalized mutable
+settings, backend, lane, worker contract/build, budgets, timeouts, and source
+fingerprint. Changing any of them invalidates incompatible cached content.
+
+One native result carries context status, diagnostics, warnings, summary,
+run ids, stage and extension metrics, file audit, decisions, artifact/reuse
+metadata, backend/lane/session data, RSS, and cache evidence. Cold and warm
+runs over unchanged inputs must render identical context bytes.
+
+## Benchmark
+
+Use only a synthetic or explicitly approved sanitized directory and a fresh
+state directory:
 
 ```powershell
-cargo test --manifest-path rust/Cargo.toml --workspace --locked
-cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
-.\.venv\Scripts\python.exe main.py doctor --strict
+$state = Join-Path $env:TEMP ('ai-daily-benchmark-' + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $state | Out-Null
+.\.venv\Scripts\python.exe scripts\benchmark_scanner.py `
+  --work-dir (Resolve-Path 'tests\fixtures\worker_documents') `
+  --state-dir $state `
+  --start-date 2000-01-01 `
+  --end-date 2100-01-01 `
+  --iterations 5 `
+  --json-out (Join-Path $state 'scanner.json') `
+  --markdown-out (Join-Path $state 'scanner.md')
 ```
 
-Strict doctor validates the scanner contract/build, writable v2 database
-parent, and both worker handshakes. It does not parse a business file or call
-an LLM.
-
-The Windows package manifest and `SHA256SUMS` cover both Rust executables,
-every shipped Python source/template/PowerShell file, `requirements.lock`, and
-the example config. A trusted external verifier checks the exact archive entry
-set and all hashes before extracting or executing package code, then validates
-the scanner and Office-worker handshakes. Side-by-side install and rollback
-switch only `current.json`; scanner cache, report storage, and logs remain in
-shared paths. See `windows-deployment.md` for the trust and rollback contract.
-
-## Parser routes and fallback
-
-- Text-like files run inside the Rust core.
-- `.xlsx` uses `rust_xlsx_bounded_v1` in the Office worker.
-- `.docx` and `.pptx` use `rust_office_oxide_v1` in the Office worker.
-- PDF and configured legacy document formats use the Python document worker.
-- Parser fallback decisions are owned and audited by Rust. Timeout fallback is
-  disabled unless `office_fallback_after_timeout` is explicitly enabled.
-
-`parser_backend` identifies the parser that produced content. `worker_lane`
-identifies the isolated execution lane. They are separate audit dimensions.
-
-## Cache identity
-
-The Rust core normalizes the raw scanner profile and owns cache identity.
-Parser budgets, backend/fallback settings, semantic profile versions, and the
-applicable scanner/worker build fingerprints participate in invalidation.
-Every run performs live worker handshakes before cache lookup; persisted
-fingerprints are audit evidence, not a substitute for a live check.
-
-Cold and warm runs over unchanged inputs must produce identical context bytes.
-Cache state is available through `inspect-run` and is not embedded in the
-report prompt context.
-
-## Benchmark evidence
-
-Use a synthetic or approved sanitized directory and a fresh v2 database. The
-following Windows PowerShell example runs the tracked Office fixtures once cold
-and once warm while keeping all generated evidence under the ignored `.uv/`
-directory:
-
-```powershell
-$benchmarkRun = Join-Path '.uv\benchmarks' (
-  'scanner-fixture-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
-)
-New-Item -ItemType Directory -Path $benchmarkRun -Force | Out-Null
-$previousWorkDir = $env:DAILY_REPORT_PATHS__WORK_DIR
-$env:DAILY_REPORT_PATHS__WORK_DIR = (
-  Resolve-Path -LiteralPath 'tests\fixtures\worker_documents'
-).Path
-
-try {
-  uv run python scripts\benchmark_scanner.py `
-    --start-date 2000-01-01 `
-    --end-date 2100-01-01 `
-    --scan-db-path (Join-Path $benchmarkRun 'scan_index_v2.sqlite3') `
-    --json-out (Join-Path $benchmarkRun 'cold.json') `
-    --markdown-out (Join-Path $benchmarkRun 'cold.md')
-
-  uv run python scripts\benchmark_scanner.py `
-    --start-date 2000-01-01 `
-    --end-date 2100-01-01 `
-    --scan-db-path (Join-Path $benchmarkRun 'scan_index_v2.sqlite3') `
-    --json-out (Join-Path $benchmarkRun 'warm.json') `
-    --markdown-out (Join-Path $benchmarkRun 'warm.md')
-} finally {
-  if ([string]::IsNullOrEmpty($previousWorkDir)) {
-    Remove-Item Env:DAILY_REPORT_PATHS__WORK_DIR -ErrorAction SilentlyContinue
-  } else {
-    $env:DAILY_REPORT_PATHS__WORK_DIR = $previousWorkDir
-  }
-}
-```
-
-Review parser-backend counts, worker-lane counts, cache status/reasons, stage
-durations, `files_per_second`, and structured diagnostics. The throughput is
-defined as `discovered_count * 1000 / total_duration_ms`. The fixed-corpus gate
-requires both runs to succeed without errors/timeouts, the warm run to reuse all
-files without reparsing, matching content hashes/backend/lane summaries, and
-positive warm throughput greater than cold throughput. Benchmarking a business
-directory is not authorization to send its content to an LLM.
+Each sample pair gets a distinct `scan_index_v3_pair_N.sqlite3` and reuses one
+`NativeScanner` for its cold and warm calls. The report includes median,
+nearest-rank p95, throughput, peak worker RSS, full warm reuse, native call
+count, zero scanner process starts, and zero scanner transport bytes.

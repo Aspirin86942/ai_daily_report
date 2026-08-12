@@ -49,9 +49,9 @@ def _diagnostic(
 def classify_pdf(path: str, max_pages: int, timeout_ms: int = 2000) -> dict[str, object]:
     """对单个 PDF 执行一次 ``pdf_text_presence_v1`` 分类。
 
-    返回 ``PdfClassifierResultV1`` 形状的 dict：status 为
+    返回 ``ClassifyResult`` 形状的 dict：status 为
     ``text_in_parse_window|no_text_in_parse_window|unknown|error``，
-    unknown/error 携带 ``PythonOperationDiagnosticV1`` 形状的 diagnostic，
+    unknown/error 携带 ``WorkerDiagnostic`` 形状的 diagnostic，
     不抛裸异常。``timeout_ms`` 由进程级 runner 在调用方强制执行。
     """
     # Capability handshakes only need package/source identity. Load the native

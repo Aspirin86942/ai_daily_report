@@ -1,7 +1,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use ai_daily_scanner_contract::{AdapterPaths, WorkerKind};
+use ai_daily_scanner_contract::AdapterPaths;
+use ai_daily_worker_contract::WorkerKind;
 
 use super::WorkerCommand;
 

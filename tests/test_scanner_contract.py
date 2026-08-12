@@ -12,7 +12,6 @@ import pytest
 
 from src.core.config import Config, SCANNER_SETTINGS_FIELDS
 from src.models.scanner_contract import (
-    WorkerParseRequest,
     build_rust_core_crashed_envelope,
     validate_contract_payload,
 )
@@ -54,15 +53,6 @@ def test_python_contract_rejects_every_invalid_fixture() -> None:
             )
 
 
-def test_worker_contract_rejects_embedded_nul_in_absolute_path() -> None:
-    payload = _load_json(FIXTURE_DIR / "worker-parse-xlsx-request.json")
-    assert isinstance(payload, dict)
-    payload["file_path"] = "C:\\evidence\x00hidden.xlsx"
-
-    with pytest.raises(ValueError, match="path must be absolute"):
-        WorkerParseRequest.model_validate(payload)
-
-
 def test_scanner_settings_copies_only_present_raw_leaves() -> None:
     """Python 只透传显式 scanner 叶子，不扩默认值或基础设施字段。"""
     cfg = object.__new__(Config)
@@ -90,7 +80,7 @@ def test_scanner_settings_copies_only_present_raw_leaves() -> None:
 
 def test_scanner_settings_allowlist_matches_wire_schema() -> None:
     """配置提取 allowlist 必须与单一 raw settings schema 同步。"""
-    schema = _load_json(CONTRACT_DIR / "scanner-profile-request-v1.schema.json")
+    schema = _load_json(CONTRACT_DIR / "scanner-settings.schema.json")
     assert isinstance(schema, dict)
     assert set(schema["properties"]) == set(SCANNER_SETTINGS_FIELDS)
 

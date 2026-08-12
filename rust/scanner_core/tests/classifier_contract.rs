@@ -8,18 +8,18 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-use ai_daily_scanner_contract::{
-    ClassifierResponseStatus, ClassifierVersionResponseV1, PdfClassifierRequestV1,
-    PdfClassifierResponseV1, PdfClassifierResultStatus, PdfClassifierResultV1,
-    PythonOperationDiagnosticV1, PythonOperationErrorCode, PythonOperationStage, Validate,
-};
-use ai_daily_scanner_contract::{ReportMode, ScannerSettings, WorkerKind};
+use ai_daily_scanner_contract::{ReportMode, ScannerSettings};
 use ai_daily_scanner_core::config::normalize_scanner_settings;
+use ai_daily_scanner_core::parsers::classifier::ClassifyOperation;
 use ai_daily_scanner_core::parsers::classifier::{PdfClassifierExecution, PdfClassifierPort};
 use ai_daily_scanner_core::parsers::{
-    register_worker, worker_hello_from_registered, WorkerCommand,
+    register_worker, worker_hello_from_registered, ParseOperation, WorkerCommand,
 };
 use ai_daily_scanner_core::store::classifier_profile_hash;
+use ai_daily_worker_contract::{
+    ClassifyRequest, ClassifyResult, ClassifyStatus, ParseRequest, ParserBackend, ParserLimits,
+    WorkerDiagnostic, WorkerKind,
+};
 
 fn normalized_settings(mode: ReportMode) -> ai_daily_scanner_contract::NormalizedScannerSettings {
     let raw: ScannerSettings =
@@ -31,104 +31,86 @@ fn request_id() -> String {
     "61111111-6111-4111-8111-611111111111".to_string()
 }
 
-fn text_result() -> PdfClassifierResultV1 {
-    PdfClassifierResultV1 {
-        status: PdfClassifierResultStatus::TextInParseWindow,
-        page_count: ai_daily_scanner_contract::Nullable(Some(1)),
-        result_examined_pages: ai_daily_scanner_contract::Nullable(Some(1)),
-        diagnostic: ai_daily_scanner_contract::Nullable(None),
+fn text_result() -> ClassifyResult {
+    ClassifyResult {
+        status: ClassifyStatus::TextInParseWindow,
+        page_count: Some(1),
+        result_examined_pages: Some(1),
+        diagnostic: None,
     }
 }
 
-fn request(file_path: &str, source_version: &str) -> PdfClassifierRequestV1 {
-    PdfClassifierRequestV1 {
-        contract: "ai_daily_pdf_classifier".to_string(),
-        protocol_version: 1,
+fn request(file_path: &str, source_version: &str) -> ClassifyOperation {
+    ClassifyOperation {
         request_id: request_id(),
-        file_path: file_path.to_string(),
-        source_version: source_version.to_string(),
-        max_pages: 5,
-        policy_version: "pdf_text_presence_v1".to_string(),
+        payload: ClassifyRequest {
+            file_path: file_path.to_string(),
+            source_version: source_version.to_string(),
+            max_pages: 5,
+            policy_version: "pdf_text_presence_v1".to_string(),
+        },
     }
 }
 
 #[test]
-fn classifier_wire_types_round_trip_and_validate() {
-    let response = PdfClassifierResponseV1 {
-        contract: "ai_daily_pdf_classifier".to_string(),
-        protocol_version: 1,
-        request_id: request_id(),
-        status: ClassifierResponseStatus::Ok,
-        result: ai_daily_scanner_contract::Nullable(Some(text_result())),
-        error: ai_daily_scanner_contract::Nullable(None),
-    };
-    response.validate().expect("ok response validates");
-    let json = serde_json::to_string(&response).expect("serialize");
-    let parsed: PdfClassifierResponseV1 = serde_json::from_str(&json).expect("deserialize");
+fn classifier_domain_types_round_trip_and_validate() {
+    let result = text_result();
+    result.validate().expect("text result validates");
+    let json = serde_json::to_string(&result).expect("serialize");
+    let parsed: ClassifyResult = serde_json::from_str(&json).expect("deserialize");
     parsed.validate().expect("round-trip validates");
-    assert_eq!(parsed, response);
+    assert_eq!(parsed, result);
 }
 
 #[test]
-fn classifier_wire_rejects_bad_status_invariants() {
+fn classifier_domain_rejects_bad_status_invariants() {
     // text result must not carry a diagnostic
-    let bad_result = PdfClassifierResultV1 {
-        status: PdfClassifierResultStatus::TextInParseWindow,
-        page_count: ai_daily_scanner_contract::Nullable(Some(1)),
-        result_examined_pages: ai_daily_scanner_contract::Nullable(Some(1)),
-        diagnostic: ai_daily_scanner_contract::Nullable(Some(PythonOperationDiagnosticV1 {
-            error_code: PythonOperationErrorCode::ParserFailed,
+    let bad_result = ClassifyResult {
+        status: ClassifyStatus::TextInParseWindow,
+        page_count: Some(1),
+        result_examined_pages: Some(1),
+        diagnostic: Some(WorkerDiagnostic {
+            error_code: "PARSER_FAILED".to_string(),
             message: "unexpected diagnostic".to_string(),
             retryable: false,
-            stage: PythonOperationStage::Parse,
-            file_path: ai_daily_scanner_contract::Nullable(None),
-            backend: ai_daily_scanner_contract::Nullable(None),
-        })),
+            stage: "parse".to_string(),
+            file_path: None,
+            backend: None,
+        }),
     };
     assert!(bad_result.validate().is_err());
 
     // unknown must carry a retryable diagnostic
-    let bad_unknown = PdfClassifierResultV1 {
-        status: PdfClassifierResultStatus::Unknown,
-        page_count: ai_daily_scanner_contract::Nullable(None),
-        result_examined_pages: ai_daily_scanner_contract::Nullable(None),
-        diagnostic: ai_daily_scanner_contract::Nullable(None),
+    let bad_unknown = ClassifyResult {
+        status: ClassifyStatus::Unknown,
+        page_count: None,
+        result_examined_pages: None,
+        diagnostic: None,
     };
     assert!(bad_unknown.validate().is_err());
 
     // error must not be retryable
-    let bad_error = PdfClassifierResultV1 {
-        status: PdfClassifierResultStatus::Error,
-        page_count: ai_daily_scanner_contract::Nullable(None),
-        result_examined_pages: ai_daily_scanner_contract::Nullable(None),
-        diagnostic: ai_daily_scanner_contract::Nullable(Some(PythonOperationDiagnosticV1 {
-            error_code: PythonOperationErrorCode::ParserFailed,
+    let bad_error = ClassifyResult {
+        status: ClassifyStatus::Error,
+        page_count: None,
+        result_examined_pages: None,
+        diagnostic: Some(WorkerDiagnostic {
+            error_code: "PARSER_FAILED".to_string(),
             message: "deterministic error".to_string(),
             retryable: true,
-            stage: PythonOperationStage::Parse,
-            file_path: ai_daily_scanner_contract::Nullable(None),
-            backend: ai_daily_scanner_contract::Nullable(None),
-        })),
+            stage: "parse".to_string(),
+            file_path: None,
+            backend: None,
+        }),
     };
     assert!(bad_error.validate().is_err());
-
-    // outer error response must not carry a result
-    let bad_response = PdfClassifierResponseV1 {
-        contract: "ai_daily_pdf_classifier".to_string(),
-        protocol_version: 1,
-        request_id: request_id(),
-        status: ClassifierResponseStatus::Error,
-        result: ai_daily_scanner_contract::Nullable(Some(text_result())),
-        error: ai_daily_scanner_contract::Nullable(None),
-    };
-    assert!(bad_response.validate().is_err());
 }
 
 #[test]
 fn classifier_result_is_bounded_by_the_request_window() {
     let mut text = text_result();
-    text.page_count = ai_daily_scanner_contract::Nullable(Some(10));
-    text.result_examined_pages = ai_daily_scanner_contract::Nullable(Some(6));
+    text.page_count = Some(10);
+    text.result_examined_pages = Some(6);
     text.validate()
         .expect("generic typed result is structurally valid");
     assert!(
@@ -137,26 +119,26 @@ fn classifier_result_is_bounded_by_the_request_window() {
     );
 
     let mut no_text = text_result();
-    no_text.status = PdfClassifierResultStatus::NoTextInParseWindow;
-    no_text.page_count = ai_daily_scanner_contract::Nullable(Some(10));
-    no_text.result_examined_pages = ai_daily_scanner_contract::Nullable(Some(4));
+    no_text.status = ClassifyStatus::NoTextInParseWindow;
+    no_text.page_count = Some(10);
+    no_text.result_examined_pages = Some(4);
     assert!(
         no_text.validate_for_max_pages(5).is_err(),
         "no-text must examine the complete request window"
     );
 
-    let unknown = PdfClassifierResultV1 {
-        status: PdfClassifierResultStatus::Unknown,
-        page_count: ai_daily_scanner_contract::Nullable(None),
-        result_examined_pages: ai_daily_scanner_contract::Nullable(Some(6)),
-        diagnostic: ai_daily_scanner_contract::Nullable(Some(PythonOperationDiagnosticV1 {
-            error_code: PythonOperationErrorCode::ParserFailed,
+    let unknown = ClassifyResult {
+        status: ClassifyStatus::Unknown,
+        page_count: None,
+        result_examined_pages: Some(6),
+        diagnostic: Some(WorkerDiagnostic {
+            error_code: "PARSER_FAILED".to_string(),
             message: "transient classifier failure".to_string(),
             retryable: true,
-            stage: PythonOperationStage::Parse,
-            file_path: ai_daily_scanner_contract::Nullable(None),
-            backend: ai_daily_scanner_contract::Nullable(None),
-        })),
+            stage: "parse".to_string(),
+            file_path: None,
+            backend: None,
+        }),
     };
     assert!(
         unknown.validate_for_max_pages(5).is_err(),
@@ -164,41 +146,15 @@ fn classifier_result_is_bounded_by_the_request_window() {
     );
 }
 
-#[test]
-fn classifier_version_response_round_trips() {
-    let version = ClassifierVersionResponseV1 {
-        contract: "ai_daily_pdf_classifier".to_string(),
-        protocol_version: 1,
-        classifier_contract_version: "ai_daily_pdf_classifier_v1".to_string(),
-        classifier_build: "a".repeat(64),
-        policy_version: "pdf_text_presence_v1".to_string(),
-        python_implementation: "cpython".to_string(),
-        python_version: "3.11.15".to_string(),
-        unicode_data_version: "14.0.0".to_string(),
-        pypdfium2_version: "5.12.1".to_string(),
-        pdfium_version: "152.0.7947.0".to_string(),
-        target_triple: "amd64-pc-windows-msvc".to_string(),
-    };
-    version.validate().expect("classifier version validates");
-    let json = serde_json::to_string(&version).expect("serialize");
-    let parsed: ClassifierVersionResponseV1 = serde_json::from_str(&json).expect("deserialize");
-    parsed.validate().expect("round-trip validates");
-    assert_eq!(parsed, version);
-
-    let mut bad = version;
-    bad.classifier_build = "not-a-sha".to_string();
-    assert!(bad.validate().is_err());
-}
-
 #[derive(Clone)]
 struct StubClassifier {
-    result: Option<PdfClassifierResultV1>,
+    result: Option<ClassifyResult>,
 }
 
 impl PdfClassifierPort for StubClassifier {
     fn classify_pdf(
         &self,
-        _request: &PdfClassifierRequestV1,
+        _request: &ClassifyOperation,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
         PdfClassifierExecution::test_execution(self.result.clone().ok_or_else(|| {
@@ -229,7 +185,7 @@ fn stub_classifier_port_returns_in_memory_results() {
         )
         .outcome
         .expect("stub returns the programmed result");
-    assert_eq!(outcome.status, PdfClassifierResultStatus::TextInParseWindow);
+    assert_eq!(outcome.status, ClassifyStatus::TextInParseWindow);
 }
 
 #[test]
@@ -422,37 +378,27 @@ fn session_process_classifies_and_parses_text_pdf() {
     let classify_result =
         session_classify(&mut session, &classify_request, Duration::from_secs(20))
             .expect("session classify completes");
-    assert_eq!(
-        classify_result.status,
-        PdfClassifierResultStatus::TextInParseWindow
-    );
-    assert_eq!(classify_result.page_count.0, Some(1));
+    assert_eq!(classify_result.status, ClassifyStatus::TextInParseWindow);
+    assert_eq!(classify_result.page_count, Some(1));
 
-    let parse_request = ai_daily_scanner_contract::WorkerParseRequest {
-        contract: "ai_daily_worker".to_string(),
-        protocol_version: 1,
+    let parse_request = ParseOperation {
         request_id: request_id(),
-        file_path: fixture.to_string_lossy().into_owned(),
-        file_type: ".pdf".to_string(),
-        backend: ai_daily_scanner_contract::WorkerBackend::PythonPdfTextV2,
-        remaining_timeout_ms: 30_000,
-        max_file_size_bytes: 1_000_000,
-        parser_limits: ai_daily_scanner_contract::WorkerParserLimits::Pdf {
-            max_pages: 5,
-            excerpt_max_chars: 4000,
+        payload: ParseRequest {
+            file_path: fixture.to_string_lossy().into_owned(),
+            file_type: ".pdf".to_string(),
+            backend: ParserBackend::PythonPdfTextV2,
+            remaining_timeout_ms: 30_000,
+            max_file_size_bytes: 1_000_000,
+            parser_limits: ParserLimits::Pdf {
+                max_pages: 5,
+                excerpt_max_chars: 4000,
+            },
+            expected_source_version: source_version.clone(),
         },
-        expected_source_version: source_version.clone(),
     };
     let parse_result = session_parse(&mut session, &parse_request, Duration::from_secs(20))
         .expect("session parse completes");
-    assert_eq!(
-        parse_result.status,
-        ai_daily_scanner_contract::WorkerStatus::Ok
-    );
-    assert_eq!(
-        parse_result.parser_backend,
-        ai_daily_scanner_contract::WorkerBackend::PythonPdfTextV2
-    );
+    assert_eq!(parse_result.parser_backend, ParserBackend::PythonPdfTextV2);
     assert_eq!(parse_result.observed_source_version, source_version);
 
     session.kill();

@@ -773,11 +773,11 @@ fn compressor_still_renders_golden_keep_compress_metadata_error() {
 // ===========================================================================
 
 use ai_daily_discovery::DiscoveredFileOut;
-use ai_daily_scanner_contract::{
-    CacheMissReason, PdfClassifierRequestV1, PdfClassifierResultStatus, PdfClassifierResultV1,
-};
+use ai_daily_scanner_contract::CacheMissReason;
 use ai_daily_scanner_core::fallback::ParseFailure;
-use ai_daily_scanner_core::parsers::classifier::{PdfClassifierExecution, PdfClassifierPort};
+use ai_daily_scanner_core::parsers::classifier::{
+    ClassifyOperation, PdfClassifierExecution, PdfClassifierPort,
+};
 use ai_daily_scanner_core::scheduler::{
     BudgetedContextScheduler, CachePort, CachePortError, Clock, GuardVerifier, ParseLookupOutcome,
     ParseRequest, ParseResult, ParserPort, RunDeadlines, ScheduledRunInput, TerminalIntent,
@@ -787,6 +787,7 @@ use ai_daily_scanner_core::store::{
     CacheEntry, CacheWriteRecord, ClassificationCacheLookup, ClassificationCacheWriteRecord,
     InventoryRecord,
 };
+use ai_daily_worker_contract::{ClassifyResult, ClassifyStatus, WorkerDiagnostic};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -836,7 +837,7 @@ impl TestCache {
             parser_backend: "light_text_v2".to_string(),
             worker_lane: "rust_core".to_string(),
             truncated: false,
-            worker_contract_version: "ai_daily_worker_v1".to_string(),
+            worker_contract_version: "ai_daily_worker_v2".to_string(),
             worker_version: "0.1.0".to_string(),
             worker_build: "engine-test".to_string(),
         }
@@ -993,7 +994,7 @@ fn success_parse(identity: &str, path: &str, content: &str) -> ParseResult {
 
 #[derive(Debug, Clone)]
 struct TestClassifier {
-    results: HashMap<String, PdfClassifierResultV1>,
+    results: HashMap<String, ClassifyResult>,
 }
 
 #[derive(Debug, Clone)]
@@ -1002,7 +1003,7 @@ struct RetryingClassifier;
 impl PdfClassifierPort for RetryingClassifier {
     fn classify_pdf(
         &self,
-        request: &PdfClassifierRequestV1,
+        request: &ClassifyOperation,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
         PdfClassifierExecution {
@@ -1038,7 +1039,7 @@ impl ConcurrencyClassifier {
 impl PdfClassifierPort for ConcurrencyClassifier {
     fn classify_pdf(
         &self,
-        request: &PdfClassifierRequestV1,
+        request: &ClassifyOperation,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
         let now = self
@@ -1089,7 +1090,7 @@ impl ParserPort for ConcurrencyParser {
 impl PdfClassifierPort for TestClassifier {
     fn classify_pdf(
         &self,
-        request: &PdfClassifierRequestV1,
+        request: &ClassifyOperation,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
         PdfClassifierExecution::test_execution(
@@ -1173,21 +1174,21 @@ fn discovered(rel: &str, ext: &str, size: u64) -> DiscoveredFileOut {
     }
 }
 
-fn text_result(_path: &str) -> PdfClassifierResultV1 {
-    PdfClassifierResultV1 {
-        status: PdfClassifierResultStatus::TextInParseWindow,
-        page_count: ai_daily_scanner_contract::Nullable(Some(2)),
-        result_examined_pages: ai_daily_scanner_contract::Nullable(Some(2)),
-        diagnostic: ai_daily_scanner_contract::Nullable(None),
+fn text_result(_path: &str) -> ClassifyResult {
+    ClassifyResult {
+        status: ClassifyStatus::TextInParseWindow,
+        page_count: Some(2),
+        result_examined_pages: Some(2),
+        diagnostic: None,
     }
 }
 
-fn no_text_result(_path: &str) -> PdfClassifierResultV1 {
-    PdfClassifierResultV1 {
-        status: PdfClassifierResultStatus::NoTextInParseWindow,
-        page_count: ai_daily_scanner_contract::Nullable(Some(2)),
-        result_examined_pages: ai_daily_scanner_contract::Nullable(Some(2)),
-        diagnostic: ai_daily_scanner_contract::Nullable(None),
+fn no_text_result(_path: &str) -> ClassifyResult {
+    ClassifyResult {
+        status: ClassifyStatus::NoTextInParseWindow,
+        page_count: Some(2),
+        result_examined_pages: Some(2),
+        diagnostic: None,
     }
 }
 
@@ -2195,7 +2196,7 @@ struct ClockAdvancingClassifier {
 impl PdfClassifierPort for ClockAdvancingClassifier {
     fn classify_pdf(
         &self,
-        request: &PdfClassifierRequestV1,
+        request: &ClassifyOperation,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
         let mut now = self.clock.lock().unwrap();
@@ -2475,23 +2476,20 @@ fn classifier_unknown_maps_timeout_vs_crash() {
     // transient I/O / protocol failure -> unknown -> Error retryable=true.
     let mut profile = normalized_settings(ReportMode::Daily);
     profile.parse.pdf.max_pages = 5;
-    let diag = |code: ai_daily_scanner_contract::PythonOperationErrorCode| {
-        ai_daily_scanner_contract::PythonOperationDiagnosticV1 {
-            error_code: code,
-            message: "classifier failure".to_string(),
-            retryable: true,
-            stage: ai_daily_scanner_contract::PythonOperationStage::Process,
-            file_path: ai_daily_scanner_contract::Nullable(None),
-            backend: ai_daily_scanner_contract::Nullable(None),
-        }
+    let diag = |code: &str| WorkerDiagnostic {
+        error_code: code.to_string(),
+        message: "classifier failure".to_string(),
+        retryable: true,
+        stage: "process".to_string(),
+        file_path: None,
+        backend: None,
     };
-    let unknown_result =
-        |code: ai_daily_scanner_contract::PythonOperationErrorCode| PdfClassifierResultV1 {
-            status: PdfClassifierResultStatus::Unknown,
-            page_count: ai_daily_scanner_contract::Nullable(None),
-            result_examined_pages: ai_daily_scanner_contract::Nullable(None),
-            diagnostic: ai_daily_scanner_contract::Nullable(Some(diag(code))),
-        };
+    let unknown_result = |code: &str| ClassifyResult {
+        status: ClassifyStatus::Unknown,
+        page_count: None,
+        result_examined_pages: None,
+        diagnostic: Some(diag(code)),
+    };
     let discovery = vec![
         discovered("timeout.pdf", ".pdf", 128),
         discovered("crash.pdf", ".pdf", 128),
@@ -2500,11 +2498,11 @@ fn classifier_unknown_maps_timeout_vs_crash() {
         results: HashMap::from([
             (
                 "C:\\corpus\\timeout.pdf".to_string(),
-                unknown_result(ai_daily_scanner_contract::PythonOperationErrorCode::ParserTimeout),
+                unknown_result("PARSER_TIMEOUT"),
             ),
             (
                 "C:\\corpus\\crash.pdf".to_string(),
-                unknown_result(ai_daily_scanner_contract::PythonOperationErrorCode::ParserFailed),
+                unknown_result("PARSER_FAILED"),
             ),
         ]),
     };

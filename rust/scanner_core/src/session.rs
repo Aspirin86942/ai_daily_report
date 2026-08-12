@@ -16,17 +16,16 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ai_daily_scanner_contract::{
-    NormalizedScannerSettings, PdfClassifierRequestV1, PdfClassifierResultV1, Validate,
-    WorkerBackend, WorkerParseRequest, WorkerParseResponse,
-};
+use ai_daily_scanner_contract::NormalizedScannerSettings;
 use ai_daily_worker_contract::{
-    WorkerDiagnostic, WorkerHello, WorkerOperation, WorkerRequest, WorkerResponse,
-    WorkerResponseStatus, CONTRACT, CONTRACT_VERSION, PROTOCOL_VERSION,
+    ClassifyRequest, ClassifyResult, ParseResult, ParserBackend, WorkerDiagnostic, WorkerHello,
+    WorkerOperation, WorkerRequest, WorkerResponse, WorkerResponseStatus, CONTRACT,
+    CONTRACT_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::fallback::ParseFailure;
-use crate::parsers::{RegisteredWorker, WorkerCommand};
+use crate::parsers::classifier::ClassifyOperation;
+use crate::parsers::{ParseOperation, RegisteredWorker, WorkerCommand};
 use crate::process::WorkerRssTracker;
 
 pub const SESSION_CONTRACT_VERSION: &str = CONTRACT_VERSION;
@@ -42,7 +41,7 @@ pub const SESSION_STDERR_LIMIT: usize = 1024 * 1024;
 /// 在收到后按 operation 再次校验。
 const SESSION_STDOUT_HARD_CAP: usize = 64 * 1024 * 1024;
 
-/// spec Part 7.3：classify_pdf_v1 与 parse_v1 各自独立 attempt 上限 3，
+/// spec Part 7.3：PDF classify 与 PDF parse 各自独立 attempt 上限 3，
 /// 一个 text PDF 依次产生两个独立 operation，禁止混成“单文件共 3 次”。
 pub const MAX_CLASSIFY_ATTEMPTS: u32 = 3;
 pub const MAX_PARSE_ATTEMPTS: u32 = 3;
@@ -596,9 +595,9 @@ impl WorkerSession {
 
     fn dispatch_classify(
         &mut self,
-        request: &PdfClassifierRequestV1,
+        request: &ClassifyOperation,
         timeout: Duration,
-    ) -> Result<PdfClassifierResultV1, SessionError> {
+    ) -> Result<ClassifyResult, SessionError> {
         request.validate().map_err(|message| {
             SessionError::ProtocolCorruption(format!(
                 "classify request violates the strict contract: {message}"
@@ -609,7 +608,7 @@ impl WorkerSession {
             protocol_version: SESSION_PROTOCOL_VERSION,
             request_id: request.request_id.clone(),
             operation: WorkerOperation::PdfClassify,
-            payload: serde_json::to_value(request).map_err(|_| SessionError::IoFailed)?,
+            payload: serde_json::to_value(&request.payload).map_err(|_| SessionError::IoFailed)?,
         };
         let frame = serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?;
         self.write_request(&frame)?;
@@ -627,12 +626,11 @@ impl WorkerSession {
                 result: Some(result),
                 ..
             } => {
-                let result: PdfClassifierResultV1 =
-                    serde_json::from_value(result).map_err(|_| {
-                        SessionError::ProtocolCorruption(
-                            "classify response result is not a classifier result".to_string(),
-                        )
-                    })?;
+                let result: ClassifyResult = serde_json::from_value(result).map_err(|_| {
+                    SessionError::ProtocolCorruption(
+                        "classify response result is not a classifier result".to_string(),
+                    )
+                })?;
                 result
                     .validate_for_max_pages(request.max_pages)
                     .map_err(|message| {
@@ -655,9 +653,9 @@ impl WorkerSession {
 
     fn dispatch_parse(
         &mut self,
-        request: &WorkerParseRequest,
+        request: &ParseOperation,
         timeout: Duration,
-    ) -> Result<WorkerParseResponse, SessionError> {
+    ) -> Result<ParseResult, SessionError> {
         request.validate().map_err(|message| {
             SessionError::ProtocolCorruption(format!(
                 "parse request violates the strict contract: {message}"
@@ -668,7 +666,7 @@ impl WorkerSession {
             protocol_version: SESSION_PROTOCOL_VERSION,
             request_id: request.request_id.clone(),
             operation: worker_operation(request.backend),
-            payload: serde_json::to_value(request).map_err(|_| SessionError::IoFailed)?,
+            payload: serde_json::to_value(&request.payload).map_err(|_| SessionError::IoFailed)?,
         };
         let frame = serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?;
         self.write_request(&frame)?;
@@ -688,19 +686,16 @@ impl WorkerSession {
                 result: Some(result),
                 ..
             } => {
-                let result: WorkerParseResponse = serde_json::from_value(result).map_err(|_| {
+                let result: ParseResult = serde_json::from_value(result).map_err(|_| {
                     SessionError::ProtocolCorruption(
                         "parse response result is not a parse result".to_string(),
                     )
                 })?;
-                if result.request_id != request.request_id
-                    || result.contract != "ai_daily_worker"
-                    || result.protocol_version != 1
-                {
-                    return Err(SessionError::ProtocolCorruption(
-                        "session parse response identity does not match the request".to_string(),
-                    ));
-                }
+                result.validate().map_err(|message| {
+                    SessionError::ProtocolCorruption(format!(
+                        "session parse result violates the domain contract: {message}"
+                    ))
+                })?;
                 Ok(result)
             }
             WorkerResponse {
@@ -764,29 +759,29 @@ impl WorkerSession {
 /// 便捷 wrapper：返回 typed classify 结果或 session 层失败（spec Part 7.2）。
 pub fn session_classify(
     session: &mut WorkerSession,
-    request: &PdfClassifierRequestV1,
+    request: &ClassifyOperation,
     timeout: Duration,
-) -> Result<PdfClassifierResultV1, SessionError> {
+) -> Result<ClassifyResult, SessionError> {
     session.dispatch_classify(request, timeout)
 }
 
 /// 便捷 wrapper：返回 typed parse 结果或 session 层失败（spec Part 7.2）。
 pub fn session_parse(
     session: &mut WorkerSession,
-    request: &WorkerParseRequest,
+    request: &ParseOperation,
     timeout: Duration,
-) -> Result<WorkerParseResponse, SessionError> {
+) -> Result<ParseResult, SessionError> {
     session.dispatch_parse(request, timeout)
 }
 
-fn worker_operation(backend: WorkerBackend) -> WorkerOperation {
+fn worker_operation(backend: ParserBackend) -> WorkerOperation {
     match backend {
-        WorkerBackend::RustOfficeOxideV2 | WorkerBackend::RustXlsxBoundedV2 => {
+        ParserBackend::RustOfficeOxideV2 | ParserBackend::RustXlsxBoundedV2 => {
             WorkerOperation::OfficeParse
         }
-        WorkerBackend::PythonPdfTextV2 => WorkerOperation::PdfParse,
-        WorkerBackend::PythonOfficeV2 => WorkerOperation::PythonOfficeParse,
-        WorkerBackend::PythonSharepointTextV2 => WorkerOperation::PythonSharepointParse,
+        ParserBackend::PythonPdfTextV2 => WorkerOperation::PdfParse,
+        ParserBackend::PythonOfficeV2 => WorkerOperation::PythonOfficeParse,
+        ParserBackend::PythonSharepointTextV2 => WorkerOperation::PythonSharepointParse,
     }
 }
 
@@ -944,6 +939,10 @@ impl WorkerPool {
             && self.params == params
     }
 
+    pub(crate) fn registered_worker(&self, command: &WorkerCommand) -> Option<RegisteredWorker> {
+        (self.command == *command).then(|| self.python_worker.clone())
+    }
+
     fn observe_rss(&self, value: Option<u64>) {
         self.counters.observe_rss(value);
         self.rss_tracker.observe_started_child(value);
@@ -951,9 +950,9 @@ impl WorkerPool {
 
     pub fn classify_pdf(
         &self,
-        request: &PdfClassifierRequestV1,
+        request: &ClassifyOperation,
         timeout: Duration,
-    ) -> Result<SessionOperationOutcome<PdfClassifierResultV1>, SessionOperationFailure> {
+    ) -> Result<SessionOperationOutcome<ClassifyResult>, SessionOperationFailure> {
         if let Err(failure) = crate::parsers::classifier::validate_classifier_source_before(request)
         {
             return Err(SessionOperationFailure {
@@ -981,9 +980,9 @@ impl WorkerPool {
 
     pub fn parse_pdf(
         &self,
-        request: &WorkerParseRequest,
+        request: &ParseOperation,
         timeout: Duration,
-    ) -> Result<SessionOperationOutcome<WorkerParseResponse>, SessionOperationFailure> {
+    ) -> Result<SessionOperationOutcome<ParseResult>, SessionOperationFailure> {
         if let Err(failure) = crate::parsers::validate_worker_request(&self.python_worker, request)
         {
             return Err(SessionOperationFailure {
@@ -1019,9 +1018,9 @@ impl WorkerPool {
 
     pub fn parse_worker(
         &self,
-        request: &WorkerParseRequest,
+        request: &ParseOperation,
         timeout: Duration,
-    ) -> Result<SessionOperationOutcome<WorkerParseResponse>, SessionOperationFailure> {
+    ) -> Result<SessionOperationOutcome<ParseResult>, SessionOperationFailure> {
         if let Err(failure) = crate::parsers::validate_worker_request(&self.python_worker, request)
         {
             return Err(SessionOperationFailure {
@@ -1268,14 +1267,14 @@ pub fn build_classify_request(
     file_path: &Path,
     source_version: &str,
     max_pages: u64,
-) -> PdfClassifierRequestV1 {
-    PdfClassifierRequestV1 {
-        contract: "ai_daily_pdf_classifier".to_string(),
-        protocol_version: 1,
+) -> ClassifyOperation {
+    ClassifyOperation {
         request_id,
-        file_path: file_path.to_string_lossy().into_owned(),
-        source_version: source_version.to_string(),
-        max_pages,
-        policy_version: "pdf_text_presence_v1".to_string(),
+        payload: ClassifyRequest {
+            file_path: file_path.to_string_lossy().into_owned(),
+            source_version: source_version.to_string(),
+            max_pages,
+            policy_version: "pdf_text_presence_v1".to_string(),
+        },
     }
 }

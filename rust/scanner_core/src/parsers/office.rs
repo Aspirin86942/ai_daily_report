@@ -1,26 +1,24 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use ai_daily_scanner_contract::{
-    AdapterPaths, FallbackBackend, OfficeParseProfile, WorkerBackend, WorkerKind,
-    WorkerParseRequest, WorkerParseResponse,
-};
+use ai_daily_scanner_contract::{AdapterPaths, FallbackBackend, OfficeParseProfile};
+use ai_daily_worker_contract::{ParseResult, ParserBackend, WorkerKind};
 
 use crate::fallback::{permits_office_fallback, ParseFailure};
 use crate::session::WorkerPool;
 
-use super::{next_request_id, WorkerCommand};
+use super::{next_request_id, ParseOperation, WorkerCommand};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfficeParseExecution {
-    pub response: Option<WorkerParseResponse>,
+    pub response: Option<ParseResult>,
     pub primary_failure: Option<ParseFailure>,
     pub final_failure: Option<ParseFailure>,
-    pub fallback_backend: Option<WorkerBackend>,
+    pub fallback_backend: Option<ParserBackend>,
     /// Backend of the last parser child that actually started. A fallback
     /// rejected during pre-dispatch validation must not replace primary
     /// provenance.
-    pub last_started_backend: Option<WorkerBackend>,
+    pub last_started_backend: Option<ParserBackend>,
     pub primary_duration_ms: u64,
     pub fallback_duration_ms: u64,
     /// Actual parser process attempts: primary once, plus one when the
@@ -49,7 +47,7 @@ pub fn worker_command(adapters: &AdapterPaths) -> WorkerCommand {
 pub fn parse_with_pools(
     primary_pool: &WorkerPool,
     fallback_pool: Option<&WorkerPool>,
-    request: &WorkerParseRequest,
+    request: &ParseOperation,
     profile: &OfficeParseProfile,
 ) -> OfficeParseExecution {
     let deadline = Instant::now() + Duration::from_millis(request.remaining_timeout_ms);
@@ -75,7 +73,7 @@ pub fn parse_with_pools(
         && profile
             .fallback_order
             .contains(&FallbackBackend::PythonOfficeV2)
-        && WorkerBackend::PythonOfficeV2.supports(&request.file_type);
+        && ParserBackend::PythonOfficeV2.supports(&request.file_type);
     let remaining = deadline.saturating_duration_since(Instant::now());
     let Some(fallback_pool) =
         fallback_pool.filter(|_| fallback_allowed && remaining >= Duration::from_millis(1))
@@ -94,7 +92,7 @@ pub fn parse_with_pools(
     };
     let mut fallback_request = request.clone();
     fallback_request.request_id = next_request_id();
-    fallback_request.backend = WorkerBackend::PythonOfficeV2;
+    fallback_request.backend = ParserBackend::PythonOfficeV2;
     fallback_request.remaining_timeout_ms = u64::try_from(remaining.as_millis())
         .unwrap_or(u64::MAX)
         .max(1);
@@ -103,8 +101,8 @@ pub fn parse_with_pools(
             response: Some(outcome.value),
             primary_failure: Some(primary_result),
             final_failure: None,
-            fallback_backend: Some(WorkerBackend::PythonOfficeV2),
-            last_started_backend: Some(WorkerBackend::PythonOfficeV2),
+            fallback_backend: Some(ParserBackend::PythonOfficeV2),
+            last_started_backend: Some(ParserBackend::PythonOfficeV2),
             primary_duration_ms,
             fallback_duration_ms: outcome.duration_ms,
             attempt_count: primary_attempt_count.saturating_add(outcome.attempt_count),
@@ -114,9 +112,9 @@ pub fn parse_with_pools(
             response: None,
             primary_failure: Some(primary_result),
             final_failure: Some(failure.failure),
-            fallback_backend: Some(WorkerBackend::PythonOfficeV2),
+            fallback_backend: Some(ParserBackend::PythonOfficeV2),
             last_started_backend: (failure.attempt_count > 0)
-                .then_some(WorkerBackend::PythonOfficeV2)
+                .then_some(ParserBackend::PythonOfficeV2)
                 .or((primary_attempt_count > 0).then_some(request.backend)),
             primary_duration_ms,
             fallback_duration_ms: failure.duration_ms,

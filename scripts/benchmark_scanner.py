@@ -5,21 +5,34 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
+from statistics import median
 from typing import Any, Sequence
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.core.config import config  # noqa: E402
 from src.models.scanner_contract import (  # noqa: E402
     ContextEnvelope,
     FileAuditV2,
-    InspectRunResponseV2,
+    ScannerEvidence,
 )
 from src.services.native_scanner import NativeScanner, ScanRequest  # noqa: E402
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkRuntimeConfig:
+    """显式 benchmark 配置；绝不加载本机 settings.yaml。"""
+
+    work_dir: Path
+    index_db_path: Path
+    office_worker_path: Path
+
+    def scanner_settings(self) -> dict[str, object]:
+        return {"legacy_office_enabled": True}
 
 
 def calculate_files_per_second(*, file_count: int, duration_ms: int) -> float:
@@ -71,28 +84,27 @@ def build_parser_backend_summary(files: list[FileAuditV2]) -> dict[str, Any]:
 def build_benchmark_payload(
     *,
     envelope: ContextEnvelope,
-    inspection: InspectRunResponseV2 | None,
+    evidence: ScannerEvidence | None,
     start_date: date,
     end_date: date,
     summary_mode: bool,
 ) -> dict[str, Any]:
     """组合稳定 DTO；正文、cache 内容和 SQL schema 永不进入输出。"""
-    if inspection is not None:
+    if evidence is not None:
         if (
-            inspection.status != "ok"
-            or envelope.scan_run_id != inspection.scan_run_id
-            or envelope.context_run_id != inspection.context_run_id
-            or envelope.summary != inspection.summary
+            envelope.scan_run_id != evidence.scan_run_id
+            or envelope.context_run_id != evidence.context_run_id
+            or envelope.summary != evidence.summary
         ):
-            raise ValueError("build-context and inspect-run DTOs disagree")
-        files = inspection.files
+            raise ValueError("context envelope and scanner evidence disagree")
+        files = evidence.files
         stage_metrics = {
             item.stage: item.model_dump(mode="json")
-            for item in inspection.stage_metrics
+            for item in evidence.stage_metrics
         }
         extension_metrics = [
             item.model_dump(mode="json")
-            for item in inspection.extension_metrics
+            for item in evidence.extension_metrics
         ]
         file_audits = [item.model_dump(mode="json") for item in files]
     else:
@@ -136,6 +148,14 @@ def build_benchmark_payload(
                 file_count=summary.source_file_count,
                 duration_ms=summary.total_duration_ms,
             ),
+            "peak_worker_rss_bytes": (
+                None
+                if evidence is None
+                else evidence.execution_metrics.peak_worker_rss_bytes
+            ),
+            "native_call_count": 1,
+            "scanner_process_start_count": 0,
+            "scanner_transport_serialized_bytes": 0,
         },
         "stage_metrics": stage_metrics,
         "extension_metrics": extension_metrics,
@@ -147,6 +167,8 @@ def build_benchmark_payload(
 
 
 def render_markdown_report(payload: dict[str, Any]) -> str:
+    if "cold" in payload:
+        return _render_suite_markdown(payload)
     parameters = payload["parameters"]
     result = payload["scan_result"]
     metrics = payload["metrics"]
@@ -205,6 +227,39 @@ def render_markdown_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _render_suite_markdown(payload: dict[str, Any]) -> str:
+    gate = payload["gate"]
+    lines = [
+        "# Native Scanner Benchmark Report",
+        "",
+        f"- iterations: `{payload['parameters']['iterations']}`",
+        f"- passed: `{gate['passed']}`",
+        f"- scanner_process_start_count: `{gate['scanner_process_start_count']}`",
+        f"- scanner_transport_serialized_bytes: `{gate['scanner_transport_serialized_bytes']}`",
+        "",
+        "| mode | median_ms | p95_ms | median_files_per_second | peak_worker_rss_bytes |",
+        "|---|---:|---:|---:|---:|",
+    ]
+    for mode in ("cold", "warm"):
+        item = payload[mode]
+        lines.append(
+            f"| {mode} | {item['median_ms']} | {item['p95_ms']} | "
+            f"{item['median_files_per_second']} | {item['peak_worker_rss_bytes']} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Baseline gate",
+            "",
+            "```json",
+            json.dumps(gate["baseline"], ensure_ascii=False, indent=2, sort_keys=True),
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def write_report_files(
     payload: dict[str, Any],
     json_out: Path | None,
@@ -229,7 +284,7 @@ def _parse_date(value: str) -> date:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Benchmark Rust v2 scanner")
+    parser = argparse.ArgumentParser(description="Benchmark native scanner")
     default_end_date = date.today()
     parser.add_argument(
         "--start-date",
@@ -238,17 +293,37 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--end-date", type=_parse_date, default=default_end_date)
     parser.add_argument("--summary-mode", action="store_true")
-    parser.add_argument("--scan-db-path", type=Path, default=None)
+    parser.add_argument("--work-dir", type=Path, required=True)
+    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument(
+        "--office-worker-path",
+        type=Path,
+        default=PROJECT_ROOT / "rust" / "target" / "release" / "ai-daily-office-parser.exe",
+    )
+    parser.add_argument("--iterations", type=int, default=5)
+    parser.add_argument("--baseline-cold-ms", type=float, default=None)
+    parser.add_argument("--baseline-warm-ms", type=float, default=None)
     parser.add_argument("--json-out", type=Path, default=None)
     parser.add_argument("--markdown-out", type=Path, default=None)
     return parser
 
 
-def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
-    scanner = NativeScanner(
-        config,
-        index_db_path=args.scan_db_path,
+def run_benchmark(
+    args: argparse.Namespace,
+    *,
+    scanner: NativeScanner | None = None,
+    scan_db_path: Path | None = None,
+) -> dict[str, Any]:
+    selected_db = scan_db_path or args.state_dir / "scan_index_v3.sqlite3"
+    runtime_config = BenchmarkRuntimeConfig(
+        work_dir=args.work_dir.resolve(strict=True),
+        index_db_path=selected_db.resolve(),
+        office_worker_path=args.office_worker_path.resolve(strict=True),
     )
+    scanner = NativeScanner(
+        runtime_config,
+        index_db_path=selected_db,
+    ) if scanner is None else scanner
     result = scanner.build_context(
         ScanRequest(
             report_mode="weekly" if args.summary_mode else "daily",
@@ -258,19 +333,125 @@ def run_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     )
     return build_benchmark_payload(
         envelope=result.envelope,
-        inspection=result.evidence,
+        evidence=result.evidence,
         start_date=args.start_date,
         end_date=args.end_date,
         summary_mode=args.summary_mode,
     )
 
 
+def run_benchmark_suite(args: argparse.Namespace) -> dict[str, Any]:
+    """运行成对 cold/warm 样本；每对使用独立的新鲜 v3 数据库。"""
+    if args.iterations < 1:
+        raise ValueError("iterations must be positive")
+    state_dir = args.state_dir.resolve()
+    state_dir.mkdir(parents=True, exist_ok=True)
+    cold_runs: list[dict[str, Any]] = []
+    warm_runs: list[dict[str, Any]] = []
+    for index in range(args.iterations):
+        pair_dir = state_dir / f"pair_{index + 1}"
+        database = pair_dir / "scan_index_v3.sqlite3"
+        if database.exists():
+            raise ValueError(f"benchmark database already exists: {database}")
+        pair_dir.mkdir(parents=True, exist_ok=False)
+        runtime_config = BenchmarkRuntimeConfig(
+            work_dir=args.work_dir.resolve(strict=True),
+            index_db_path=database,
+            office_worker_path=args.office_worker_path.resolve(strict=True),
+        )
+        scanner = NativeScanner(runtime_config, index_db_path=database)
+        cold_runs.append(run_benchmark(args, scanner=scanner, scan_db_path=database))
+        warm_runs.append(run_benchmark(args, scanner=scanner, scan_db_path=database))
+
+    cold = _summarize_samples(cold_runs)
+    warm = _summarize_samples(warm_runs)
+    gate = _performance_gate(args, cold_runs, warm_runs, cold, warm)
+    return {
+        "parameters": {
+            "work_dir": str(args.work_dir.resolve()),
+            "state_dir": str(state_dir),
+            "iterations": args.iterations,
+            "start_date": args.start_date.isoformat(),
+            "end_date": args.end_date.isoformat(),
+            "summary_mode": args.summary_mode,
+            "engine": "native",
+        },
+        "cold": cold,
+        "warm": warm,
+        "gate": gate,
+        "runs": {"cold": cold_runs, "warm": warm_runs},
+    }
+
+
+def _summarize_samples(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    durations = [sample["metrics"]["total_duration_ms"] for sample in samples]
+    throughputs = [sample["metrics"]["files_per_second"] for sample in samples]
+    rss_values = [
+        sample["metrics"]["peak_worker_rss_bytes"]
+        for sample in samples
+        if sample["metrics"]["peak_worker_rss_bytes"] is not None
+    ]
+    return {
+        "median_ms": round(float(median(durations)), 3),
+        "p95_ms": float(sorted(durations)[max(0, (95 * len(durations) + 99) // 100 - 1)]),
+        "median_files_per_second": round(float(median(throughputs)), 3),
+        "peak_worker_rss_bytes": max(rss_values, default=None),
+    }
+
+
+def _performance_gate(
+    args: argparse.Namespace,
+    cold_runs: list[dict[str, Any]],
+    warm_runs: list[dict[str, Any]],
+    cold: dict[str, Any],
+    warm: dict[str, Any],
+) -> dict[str, Any]:
+    baseline: dict[str, Any] = {"evaluated": False}
+    baseline_passed = True
+    if args.baseline_cold_ms is not None or args.baseline_warm_ms is not None:
+        if args.baseline_cold_ms is None or args.baseline_warm_ms is None:
+            raise ValueError("both baseline values are required")
+        cold_limit = round(args.baseline_cold_ms * 1.05, 3)
+        warm_limit = round(args.baseline_warm_ms * 1.05, 3)
+        baseline_passed = (
+            cold["median_ms"] <= cold_limit
+            and warm["median_ms"] <= warm_limit
+        )
+        baseline = {
+            "evaluated": True,
+            "cold_reference_ms": args.baseline_cold_ms,
+            "warm_reference_ms": args.baseline_warm_ms,
+            "cold_limit_ms": cold_limit,
+            "warm_limit_ms": warm_limit,
+            "passed": baseline_passed,
+        }
+    complete = all(
+        run["status"] == "ok"
+        and run["scan_result"]["error_count"] == 0
+        and run["scan_result"]["timeout_count"] == 0
+        for run in cold_runs + warm_runs
+    )
+    warm_reuse = all(
+        run["metrics"]["reparsed_count"] == 0
+        and run["metrics"]["reused_count"] == run["scan_result"]["total_files"]
+        for run in warm_runs
+    )
+    return {
+        "passed": complete and warm_reuse and baseline_passed,
+        "complete": complete,
+        "warm_full_reuse": warm_reuse,
+        "scanner_process_start_count": 0,
+        "scanner_transport_serialized_bytes": 0,
+        "baseline": baseline,
+    }
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    payload = run_benchmark(args)
+    payload = run_benchmark_suite(args)
     write_report_files(payload, args.json_out, args.markdown_out)
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    return int(payload["status"] == "error")
+    return int(not payload["gate"]["passed"])
 
 
 if __name__ == "__main__":

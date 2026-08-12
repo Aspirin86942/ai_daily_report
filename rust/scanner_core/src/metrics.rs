@@ -1,4 +1,4 @@
-//! Stable metric rows persisted for `inspect-run`.
+//! Stable metric rows persisted for scanner evidence.
 
 use ai_daily_scanner_contract::{ExtensionMetric, StageMetric, StageName, Validate};
 use rusqlite::{params, Transaction};

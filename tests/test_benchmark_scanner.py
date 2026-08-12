@@ -1,4 +1,4 @@
-"""测试 Rust inspect-run DTO 驱动的 scanner benchmark。"""
+"""测试 Rust scanner evidence 驱动的 scanner benchmark。"""
 
 from datetime import date
 from pathlib import Path
@@ -13,6 +13,7 @@ from scripts.benchmark_scanner import (
     calculate_files_per_second,
     render_markdown_report,
     run_benchmark,
+    run_benchmark_suite,
     write_report_files,
 )
 from src.models.scanner_contract import (
@@ -23,7 +24,7 @@ from src.models.scanner_contract import (
     ExecutionMetricsV2,
     ExtensionMetric,
     FileAuditV2,
-    InspectRunResponseV2,
+    ScannerEvidence,
     StageMetric,
 )
 from src.services.native_scanner import ScanResult
@@ -123,15 +124,13 @@ def _envelope() -> ContextEnvelope:
     )
 
 
-def _inspection() -> InspectRunResponseV2:
-    return InspectRunResponseV2(
+def _evidence() -> ScannerEvidence:
+    return ScannerEvidence(
         contract="ai_daily_context",
         protocol_version=1,
-        response_version=2,
         request_id="21111111-2111-4111-8111-211111111111",
         scan_run_id=7,
         context_run_id=7,
-        status="ok",
         run_status="partial",
         summary=_summary(),
         stage_metrics=[
@@ -182,7 +181,6 @@ def _inspection() -> InspectRunResponseV2:
             ),
         ],
         warnings=[_diagnostic()],
-        error=None,
         artifact_id=1,
         reused_from_context_run_id=None,
         reuse_kind="none",
@@ -249,10 +247,10 @@ def test_backend_summary_keeps_parser_and_worker_lane_dimensions_separate():
     }
 
 
-def test_payload_uses_inspect_dto_and_never_contains_context_content():
+def test_payload_uses_scanner_evidence_and_never_contains_context_content():
     payload = build_benchmark_payload(
         envelope=_envelope(),
-        inspection=_inspection(),
+        evidence=_evidence(),
         start_date=date(2026, 7, 15),
         end_date=date(2026, 7, 16),
         summary_mode=False,
@@ -268,13 +266,13 @@ def test_payload_uses_inspect_dto_and_never_contains_context_content():
     assert "file_context" not in str(payload)
 
 
-def test_payload_rejects_build_and_inspect_identity_mismatch():
-    inspection = _inspection().model_copy(update={"scan_run_id": 8})
+def test_payload_rejects_build_and_evidence_identity_mismatch():
+    evidence = _evidence().model_copy(update={"scan_run_id": 8})
 
-    with pytest.raises(ValueError, match="DTOs disagree"):
+    with pytest.raises(ValueError, match="scanner evidence disagree"):
         build_benchmark_payload(
             envelope=_envelope(),
-            inspection=inspection,
+            evidence=evidence,
             start_date=date(2026, 7, 15),
             end_date=date(2026, 7, 16),
             summary_mode=False,
@@ -284,7 +282,7 @@ def test_payload_rejects_build_and_inspect_identity_mismatch():
 def test_render_and_write_report_preserve_metadata_only(tmp_path: Path):
     payload = build_benchmark_payload(
         envelope=_envelope(),
-        inspection=_inspection(),
+        evidence=_evidence(),
         start_date=date(2026, 7, 15),
         end_date=date(2026, 7, 16),
         summary_mode=True,
@@ -304,8 +302,14 @@ def test_render_and_write_report_preserve_metadata_only(tmp_path: Path):
     )
 
 
-def test_run_benchmark_uses_single_native_result(monkeypatch):
+def test_run_benchmark_uses_single_native_result(monkeypatch, tmp_path: Path):
     calls: list[tuple[str, object]] = []
+    work_dir = tmp_path / "work"
+    state_dir = tmp_path / "state"
+    worker = tmp_path / "ai-daily-office-parser.exe"
+    work_dir.mkdir()
+    state_dir.mkdir()
+    worker.touch()
 
     class StubScanner:
         def __init__(self, runtime_config, **kwargs) -> None:
@@ -313,22 +317,100 @@ def test_run_benchmark_uses_single_native_result(monkeypatch):
 
         def build_context(self, request) -> ScanResult:
             calls.append(("build", request.report_mode))
-            return ScanResult(envelope=_envelope(), evidence=_inspection())
+            return ScanResult(envelope=_envelope(), evidence=_evidence())
 
     monkeypatch.setattr(benchmark_module, "NativeScanner", StubScanner)
-    monkeypatch.setattr(
-        benchmark_module,
-        "config",
-        SimpleNamespace(),
-    )
     args = SimpleNamespace(
         start_date=date(2026, 7, 15),
         end_date=date(2026, 7, 16),
         summary_mode=False,
-        scan_db_path=None,
+        work_dir=work_dir,
+        state_dir=state_dir,
+        office_worker_path=worker,
     )
 
     payload = run_benchmark(args)
 
     assert payload["status"] == "partial"
-    assert calls == [("init", {"index_db_path": None}), ("build", "daily")]
+    assert calls == [
+        (
+            "init",
+            {"index_db_path": state_dir / "scan_index_v3.sqlite3"},
+        ),
+        ("build", "daily"),
+    ]
+
+
+def test_benchmark_suite_pairs_cold_and_warm_on_fresh_databases(
+    monkeypatch,
+    tmp_path: Path,
+):
+    work_dir = tmp_path / "work"
+    state_dir = tmp_path / "state"
+    worker = tmp_path / "ai-daily-office-parser.exe"
+    work_dir.mkdir()
+    worker.touch()
+    scanner_databases: dict[int, Path] = {}
+    benchmark_calls: list[tuple[int, Path]] = []
+
+    class StubScanner:
+        def __init__(self, runtime_config, *, index_db_path: Path) -> None:
+            assert index_db_path.name == "scan_index_v3.sqlite3"
+            assert index_db_path.parent.is_dir()
+            scanner_databases[id(self)] = index_db_path
+
+    def stub_run_benchmark(args, *, scanner, scan_db_path):
+        scanner_id = id(scanner)
+        benchmark_calls.append((scanner_id, scan_db_path))
+        is_warm = sum(call[0] == scanner_id for call in benchmark_calls) == 2
+        duration_ms = 10 if is_warm else 100
+        return {
+            "status": "ok",
+            "scan_result": {
+                "total_files": 2,
+                "error_count": 0,
+                "timeout_count": 0,
+            },
+            "metrics": {
+                "total_duration_ms": duration_ms,
+                "files_per_second": 200.0 if is_warm else 20.0,
+                "peak_worker_rss_bytes": 1024,
+                "reparsed_count": 0 if is_warm else 2,
+                "reused_count": 2 if is_warm else 0,
+            },
+        }
+
+    monkeypatch.setattr(benchmark_module, "NativeScanner", StubScanner)
+    monkeypatch.setattr(benchmark_module, "run_benchmark", stub_run_benchmark)
+    args = SimpleNamespace(
+        start_date=date(2026, 7, 15),
+        end_date=date(2026, 7, 16),
+        summary_mode=False,
+        work_dir=work_dir,
+        state_dir=state_dir,
+        office_worker_path=worker,
+        iterations=2,
+        baseline_cold_ms=None,
+        baseline_warm_ms=None,
+    )
+
+    payload = run_benchmark_suite(args)
+
+    first_scanner, second_scanner = scanner_databases
+    assert first_scanner != second_scanner
+    assert benchmark_calls == [
+        (first_scanner, state_dir / "pair_1" / "scan_index_v3.sqlite3"),
+        (first_scanner, state_dir / "pair_1" / "scan_index_v3.sqlite3"),
+        (second_scanner, state_dir / "pair_2" / "scan_index_v3.sqlite3"),
+        (second_scanner, state_dir / "pair_2" / "scan_index_v3.sqlite3"),
+    ]
+    assert payload["cold"]["median_ms"] == 100.0
+    assert payload["warm"]["median_ms"] == 10.0
+    assert payload["gate"] == {
+        "passed": True,
+        "complete": True,
+        "warm_full_reuse": True,
+        "scanner_process_start_count": 0,
+        "scanner_transport_serialized_bytes": 0,
+        "baseline": {"evaluated": False},
+    }

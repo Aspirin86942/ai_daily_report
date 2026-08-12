@@ -1,4 +1,4 @@
-"""Python 文档 worker 的 v1 进程合同与 worker-owned parser adapter。"""
+"""Python document worker operation implementation behind worker v2."""
 
 from __future__ import annotations
 
@@ -9,23 +9,12 @@ from pathlib import Path
 from time import perf_counter
 from typing import Any
 
-from src.models.scanner_contract import (
-    TransportErrorResponse,
-    WorkerDiagnosticV1,
-    WorkerParseRequest,
-    WorkerParseResponse,
-    WorkerVersionResponse,
-)
 from src.workers.python_worker_identity import (
     PDF_TEXT_BACKEND,
     PYTHON_OFFICE_BACKEND,
     PYTHON_SHAREPOINT_TEXT_BACKEND,
-    PYTHON_WORKER_BUILD,
-    PYTHON_WORKER_BUILD_INPUTS,
-    PYTHON_WORKER_VERSION,
-    WORKER_CONTRACT_VERSION,
-    python_worker_version_payload,
 )
+from src.workers.models import ParseRequest, ParseResult, WorkerOperationError
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,52 +35,37 @@ DocumentParser = Callable[..., Any]
 ExcelReader = Callable[[Path, int, int, int], tuple[str, bool]]
 
 
-def python_worker_version_response() -> WorkerVersionResponse:
-    """返回排序稳定、可被 Rust 预检的 worker 身份。"""
-    return WorkerVersionResponse.model_validate(python_worker_version_payload())
-
-
 def parse_worker_request(
-    request: WorkerParseRequest,
+    request: ParseRequest,
     *,
     document_parser: DocumentParser | None = None,
-) -> WorkerParseResponse:
+) -> ParseResult:
     """执行一次严格 worker parse，并在前后验证同一 source version。"""
     started_at = perf_counter()
-    version = python_worker_version_response()
     file_path = Path(request.file_path)
     try:
         observed_before, size_bytes = _observe_source(file_path)
     except OSError:
-        return _error_response(
+        raise _operation_error(
             request,
-            version,
             error_code="PARSER_FAILED",
             message="file metadata is unavailable",
             retryable=False,
-            observed_source_version=request.expected_source_version,
-            started_at=started_at,
         )
 
     if size_bytes > request.max_file_size_bytes:
-        return _error_response(
+        raise _operation_error(
             request,
-            version,
             error_code="FILE_TOO_LARGE",
             message="file exceeds the configured size limit",
             retryable=False,
-            observed_source_version=observed_before,
-            started_at=started_at,
         )
     if observed_before != request.expected_source_version:
-        return _error_response(
+        raise _operation_error(
             request,
-            version,
             error_code="SOURCE_VERSION_CHANGED",
             message="file source version changed before parsing",
-            retryable=False,
-            observed_source_version=observed_before,
-            started_at=started_at,
+            retryable=True,
         )
 
     try:
@@ -115,67 +89,46 @@ def parse_worker_request(
         observed_after, _ = _observe_source(file_path)
     except OSError:
         observed_after = observed_before
-        return _error_response(
+        raise _operation_error(
             request,
-            version,
             error_code="SOURCE_VERSION_CHANGED",
             message="file source version became unavailable during parsing",
-            retryable=False,
-            observed_source_version=observed_after,
-            started_at=started_at,
+            retryable=True,
         )
     if observed_after != observed_before:
-        return _error_response(
+        raise _operation_error(
             request,
-            version,
             error_code="SOURCE_VERSION_CHANGED",
             message="file source version changed during parsing",
-            retryable=False,
-            observed_source_version=observed_after,
-            started_at=started_at,
+            retryable=True,
         )
     if (
         payload.file_path != request.file_path
         or payload.file_type != request.file_type
         or payload.parser_backend != request.backend
     ):
-        return _error_response(
+        raise _operation_error(
             request,
-            version,
             error_code="PARSER_INVALID_PAYLOAD",
             message="worker adapter returned a mismatched path, type, or backend",
             retryable=False,
-            observed_source_version=observed_after,
-            started_at=started_at,
         )
     if payload.error is not None:
-        return _error_response(
+        raise _operation_error(
             request,
-            version,
             error_code=payload.error_code or "PARSER_FAILED",
             message="document parser reported an error",
             retryable=payload.retryable,
-            observed_source_version=observed_after,
-            started_at=started_at,
         )
 
-    return WorkerParseResponse(
-        contract="ai_daily_worker",
-        protocol_version=1,
-        request_id=request.request_id,
-        status="ok",
+    return ParseResult(
         file_path=request.file_path,
         file_type=request.file_type,
         content=payload.content,
         parser_backend=request.backend,
         worker_lane="python_document_process_v2",
         truncated=payload.truncated,
-        warnings=[],
-        error=None,
         duration_ms=_elapsed_ms(started_at),
-        worker_contract_version=version.worker_contract_version,
-        worker_version=version.worker_version,
-        worker_build=version.worker_build,
         observed_source_version=observed_after,
     )
 
@@ -278,7 +231,7 @@ def parse_sharepoint_text_payload(
 
 
 def _dispatch_worker_parse(
-    request: WorkerParseRequest,
+    request: ParseRequest,
     *,
     document_parser: DocumentParser | None,
 ) -> WorkerParsePayload:
@@ -344,42 +297,20 @@ def _dispatch_worker_parse(
     )
 
 
-def _error_response(
-    request: WorkerParseRequest,
-    version: WorkerVersionResponse,
+def _operation_error(
+    request: ParseRequest,
     *,
     error_code: str,
     message: str,
     retryable: bool,
-    observed_source_version: str,
-    started_at: float,
-) -> WorkerParseResponse:
+) -> WorkerOperationError:
     safe_message = str(message).strip()[:4096] or "worker parse failed"
-    return WorkerParseResponse(
-        contract="ai_daily_worker",
-        protocol_version=1,
-        request_id=request.request_id,
-        status="error",
+    return WorkerOperationError(
+        error_code=error_code,
+        message=safe_message,
+        retryable=retryable,
         file_path=request.file_path,
-        file_type=request.file_type,
-        content="",
-        parser_backend=request.backend,
-        worker_lane="python_document_process_v2",
-        truncated=False,
-        warnings=[],
-        error=WorkerDiagnosticV1(
-            error_code=error_code,
-            message=safe_message,
-            retryable=retryable,
-            stage="parse",
-            file_path=request.file_path,
-            backend=request.backend,
-        ),
-        duration_ms=_elapsed_ms(started_at),
-        worker_contract_version=version.worker_contract_version,
-        worker_version=version.worker_version,
-        worker_build=version.worker_build,
-        observed_source_version=observed_source_version,
+        backend=request.backend,
     )
 
 
@@ -467,20 +398,3 @@ def _truncate_text(text: str, max_chars: int) -> tuple[str, bool]:
 
 def _elapsed_ms(started_at: float) -> int:
     return max(0, int((perf_counter() - started_at) * 1000))
-
-
-def invalid_request_response() -> TransportErrorResponse:
-    """无可信 request id 时只返回固定、无输入回显的 transport error。"""
-    return TransportErrorResponse(
-        contract="ai_daily_transport",
-        protocol_version=1,
-        status="error",
-        error=WorkerDiagnosticV1(
-            error_code="INVALID_REQUEST",
-            message="stdin is not a valid worker request",
-            retryable=False,
-            stage="request",
-            file_path=None,
-            backend=None,
-        ),
-    )

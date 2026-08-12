@@ -14,9 +14,9 @@ use crate::fallback::{FailureClass, ParseFailure};
 use crate::process::{run_process, ProcessError, ProcessSpec, WorkerRssTracker};
 use ai_daily_scanner_contract::{
     AdapterPaths, Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerSettings, Nullable,
-    Validate, WorkerBackend, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
-    WorkerDiagnosticV1Stage, WorkerKind, WorkerParseRequest, WorkerParseResponse,
-    WorkerParserLimits, WorkerStatus, WorkerVersionResponse,
+};
+use ai_daily_worker_contract::{
+    ParseRequest, ParseResult, ParserBackend, ParserLimits, WorkerHello, WorkerKind,
 };
 
 pub const WORKER_CONTRACT_VERSION: &str = ai_daily_worker_contract::CONTRACT_VERSION;
@@ -28,59 +28,23 @@ const MAX_DIAGNOSTIC_MESSAGE_CHARS: u64 = 4_096;
 const MAX_WORKER_IDENTITY_CHARS: u64 = 3 * 1_024;
 const RESPONSE_JSON_FIXED_ALLOWANCE: u64 = 64 * 1024;
 
-/// Adapter seam (spec Part 7.1): translate a frozen worker diagnostic to the
-/// scanner-side extended `Diagnostic`. Every path that reads a
-/// `WorkerDiagnosticV1` from the `ai_daily_worker_v1` / `ai_daily_transport`
-/// wires goes through here; the frozen code maps onto the extended enum so new
-/// scanner-side codes can never deserialize on the old worker wire.
-pub fn worker_diagnostic_to_scanner(worker: &WorkerDiagnosticV1) -> Diagnostic {
-    Diagnostic {
-        error_code: match worker.error_code {
-            WorkerDiagnosticV1ErrorCode::InvalidRequest => ErrorCode::InvalidRequest,
-            WorkerDiagnosticV1ErrorCode::ContractVersionMismatch => {
-                ErrorCode::ContractVersionMismatch
-            }
-            WorkerDiagnosticV1ErrorCode::WorkDirNotFound => ErrorCode::WorkDirNotFound,
-            WorkerDiagnosticV1ErrorCode::WorkDirNotDirectory => ErrorCode::WorkDirNotDirectory,
-            WorkerDiagnosticV1ErrorCode::DiscoveryEntryUnreadable => {
-                ErrorCode::DiscoveryEntryUnreadable
-            }
-            WorkerDiagnosticV1ErrorCode::FileTooLarge => ErrorCode::FileTooLarge,
-            WorkerDiagnosticV1ErrorCode::ParserStartFailed => ErrorCode::ParserStartFailed,
-            WorkerDiagnosticV1ErrorCode::ParserTimeout => ErrorCode::ParserTimeout,
-            WorkerDiagnosticV1ErrorCode::ParserInvalidPayload => ErrorCode::ParserInvalidPayload,
-            WorkerDiagnosticV1ErrorCode::ParserFailed => ErrorCode::ParserFailed,
-            WorkerDiagnosticV1ErrorCode::WorkerHandshakeFailed => ErrorCode::WorkerHandshakeFailed,
-            WorkerDiagnosticV1ErrorCode::WorkerVersionMismatch => ErrorCode::WorkerVersionMismatch,
-            WorkerDiagnosticV1ErrorCode::WorkerBuildChanged => ErrorCode::WorkerBuildChanged,
-            WorkerDiagnosticV1ErrorCode::SourceVersionChanged => ErrorCode::SourceVersionChanged,
-            WorkerDiagnosticV1ErrorCode::CacheOpenFailed => ErrorCode::CacheOpenFailed,
-            WorkerDiagnosticV1ErrorCode::CacheWriteFailed => ErrorCode::CacheWriteFailed,
-            WorkerDiagnosticV1ErrorCode::ScanAlreadyRunning => ErrorCode::ScanAlreadyRunning,
-            WorkerDiagnosticV1ErrorCode::RequestInProgress => ErrorCode::RequestInProgress,
-            WorkerDiagnosticV1ErrorCode::RequestIdConflict => ErrorCode::RequestIdConflict,
-            WorkerDiagnosticV1ErrorCode::RunNotFound => ErrorCode::RunNotFound,
-            WorkerDiagnosticV1ErrorCode::RunCorrupt => ErrorCode::RunCorrupt,
-            WorkerDiagnosticV1ErrorCode::ContextBudgetInvalid => ErrorCode::ContextBudgetInvalid,
-            WorkerDiagnosticV1ErrorCode::NotImplemented => ErrorCode::NotImplemented,
-            WorkerDiagnosticV1ErrorCode::RustCoreCrashed => ErrorCode::RustCoreCrashed,
-            WorkerDiagnosticV1ErrorCode::InternalError => ErrorCode::InternalError,
-        },
-        message: worker.message.clone(),
-        retryable: worker.retryable,
-        stage: match worker.stage {
-            WorkerDiagnosticV1Stage::Request => DiagnosticStage::Request,
-            WorkerDiagnosticV1Stage::Discovery => DiagnosticStage::Discovery,
-            WorkerDiagnosticV1Stage::Cache => DiagnosticStage::Cache,
-            WorkerDiagnosticV1Stage::Parse => DiagnosticStage::Parse,
-            WorkerDiagnosticV1Stage::Context => DiagnosticStage::Context,
-            WorkerDiagnosticV1Stage::Process => DiagnosticStage::Process,
-            WorkerDiagnosticV1Stage::Doctor => DiagnosticStage::Doctor,
-            WorkerDiagnosticV1Stage::Inspect => DiagnosticStage::Inspect,
-            WorkerDiagnosticV1Stage::Internal => DiagnosticStage::Internal,
-        },
-        file_path: worker.file_path.clone(),
-        backend: worker.backend.clone(),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseOperation {
+    pub request_id: String,
+    pub payload: ParseRequest,
+}
+
+impl std::ops::Deref for ParseOperation {
+    type Target = ParseRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.payload
+    }
+}
+
+impl std::ops::DerefMut for ParseOperation {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.payload
     }
 }
 
@@ -112,7 +76,7 @@ impl WorkerCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisteredWorker {
     pub command: WorkerCommand,
-    pub identity: WorkerVersionResponse,
+    pub identity: WorkerHello,
     pub rss_tracker: Option<WorkerRssTracker>,
 }
 
@@ -283,7 +247,7 @@ fn register_worker_inner(
             DiagnosticStage::Process,
         )
     })?;
-    if hello.worker_kind != worker_kind_v2(command.expected_kind)
+    if hello.worker_kind != command.expected_kind
         || hello.worker_contract_version != WORKER_CONTRACT_VERSION
         || hello.worker_version != env!("CARGO_PKG_VERSION")
         || !supports_required_operations(&hello, command)
@@ -296,19 +260,9 @@ fn register_worker_inner(
             DiagnosticStage::Process,
         ));
     }
-    let identity = WorkerVersionResponse {
-        contract: "ai_daily_worker".to_string(),
-        protocol_version: 1,
-        worker_kind: command.expected_kind,
-        worker_contract_version: hello.worker_contract_version,
-        worker_version: hello.worker_version,
-        worker_build: hello.worker_build,
-        supported_backends: command.required_backends.clone(),
-        supported_extensions: command.required_extensions.clone(),
-    };
     Ok(RegisteredWorker {
         command: command.clone(),
-        identity,
+        identity: hello,
         rss_tracker: rss_tracker.cloned(),
     })
 }
@@ -316,7 +270,7 @@ fn register_worker_inner(
 /// Shared pre-dispatch validation for worker-v2 sessions.
 pub(crate) fn validate_worker_request(
     worker: &RegisteredWorker,
-    request: &WorkerParseRequest,
+    request: &ParseOperation,
 ) -> Result<(), ParseFailure> {
     request.validate().map_err(|_| {
         contract_failure(
@@ -347,13 +301,6 @@ pub(crate) fn validate_worker_request(
         ));
     }
     validate_worker_source_before(request)
-}
-
-fn worker_kind_v2(kind: WorkerKind) -> ai_daily_worker_contract::WorkerKind {
-    match kind {
-        WorkerKind::Office => ai_daily_worker_contract::WorkerKind::Office,
-        WorkerKind::PythonDocument => ai_daily_worker_contract::WorkerKind::PythonDocument,
-    }
 }
 
 fn supports_required_operations(
@@ -387,25 +334,19 @@ pub fn worker_hello_from_registered(
             ai_daily_worker_contract::WorkerOperation::PythonSharepointParse,
         ],
     };
-    ai_daily_worker_contract::WorkerHello {
-        contract: ai_daily_worker_contract::CONTRACT.to_string(),
-        protocol_version: ai_daily_worker_contract::PROTOCOL_VERSION,
-        frame: "hello".to_string(),
-        worker_contract_version: worker.identity.worker_contract_version.clone(),
-        worker_kind: worker_kind_v2(worker.command.expected_kind),
-        worker_version: worker.identity.worker_version.clone(),
-        worker_build: worker.identity.worker_build.clone(),
+    WorkerHello {
         supported_operations,
+        ..worker.identity.clone()
     }
 }
 
 /// Validates a worker-v2 session response and applies source, identity, and
 /// domain-error mapping.
 pub(crate) fn validate_session_worker_response(
-    worker: &RegisteredWorker,
-    request: &WorkerParseRequest,
-    response: WorkerParseResponse,
-) -> Result<WorkerParseResponse, ParseFailure> {
+    _worker: &RegisteredWorker,
+    request: &ParseOperation,
+    response: ParseResult,
+) -> Result<ParseResult, ParseFailure> {
     response.validate().map_err(|_| {
         contract_failure(
             ErrorCode::ParserInvalidPayload,
@@ -415,128 +356,42 @@ pub(crate) fn validate_session_worker_response(
             DiagnosticStage::Parse,
         )
     })?;
-    let synthetic_exit_code = if response.status == WorkerStatus::Ok {
-        0
-    } else {
-        1
-    };
-    finish_worker_response(worker, request, response, synthetic_exit_code)
-}
-
-fn finish_worker_response(
-    worker: &RegisteredWorker,
-    request: &WorkerParseRequest,
-    response: WorkerParseResponse,
-    exit_code: u32,
-) -> Result<WorkerParseResponse, ParseFailure> {
     validate_worker_source_after(request, &response)?;
-    validate_response_identity(worker, request, &response, exit_code)?;
-
-    if let Some(error) = response.error.0.clone() {
-        let class = match error.error_code {
-            WorkerDiagnosticV1ErrorCode::ParserInvalidPayload
-            | WorkerDiagnosticV1ErrorCode::WorkerVersionMismatch
-            | WorkerDiagnosticV1ErrorCode::WorkerBuildChanged => FailureClass::ContractFailure,
-            WorkerDiagnosticV1ErrorCode::ParserStartFailed => FailureClass::EnvironmentUnavailable,
-            WorkerDiagnosticV1ErrorCode::ParserTimeout
-            | WorkerDiagnosticV1ErrorCode::FileTooLarge
-            | WorkerDiagnosticV1ErrorCode::SourceVersionChanged => FailureClass::Deterministic,
-            _ if error.retryable => FailureClass::RecoverableParserFailure,
-            _ => FailureClass::Deterministic,
-        };
-        return Err(ParseFailure {
-            class,
-            // Adapter seam (spec Part 7.1): frozen worker diagnostic -> scanner Diagnostic.
-            diagnostic: worker_diagnostic_to_scanner(&error),
-        });
+    let content_within_budget =
+        response.content.chars().count() as u64 <= worker_response_character_budget(request);
+    if response.file_path != request.file_path
+        || response.file_type != request.file_type
+        || response.parser_backend != request.backend
+        || response.worker_lane != request.backend.lane()
+        || response.duration_ms > request.remaining_timeout_ms
+        || !content_within_budget
+    {
+        return Err(contract_failure(
+            ErrorCode::ParserInvalidPayload,
+            "worker response route, source, or budget mismatch",
+            Some(&request.file_path),
+            Some(request.backend.as_str()),
+            DiagnosticStage::Parse,
+        ));
     }
     Ok(response)
 }
 
-fn validate_response_identity(
-    worker: &RegisteredWorker,
-    request: &WorkerParseRequest,
-    response: &WorkerParseResponse,
-    exit_code: u32,
-) -> Result<(), ParseFailure> {
-    let expected_exit = if response.status == WorkerStatus::Ok {
-        0
-    } else {
-        1
-    };
-    let source_matches = response.observed_source_version == request.expected_source_version
-        || response.error.0.as_ref().is_some_and(|error| {
-            error.error_code == WorkerDiagnosticV1ErrorCode::SourceVersionChanged
-        });
-    let error_identity_matches = response.error.0.as_ref().is_none_or(|error| {
-        error.stage == WorkerDiagnosticV1Stage::Parse
-            && error.file_path.0.as_deref() == Some(request.file_path.as_str())
-            && error.backend.0.as_deref() == Some(request.backend.as_str())
-    });
-    let warnings_match = response.warnings.iter().all(|warning| {
-        warning.stage == WorkerDiagnosticV1Stage::Parse
-            && warning
-                .file_path
-                .0
-                .as_deref()
-                .is_none_or(|path| path == request.file_path)
-            && warning
-                .backend
-                .0
-                .as_deref()
-                .is_none_or(|backend| backend == request.backend.as_str())
-    });
-    let content_within_budget =
-        response.content.chars().count() as u64 <= worker_response_character_budget(request);
-    if exit_code != expected_exit
-        || response.request_id != request.request_id
-        || response.file_path != request.file_path
-        || response.file_type != request.file_type
-        || response.parser_backend != request.backend
-        || response.worker_lane != request.backend.lane()
-        || response.worker_contract_version != worker.identity.worker_contract_version
-        || response.worker_version != worker.identity.worker_version
-        || response.duration_ms > request.remaining_timeout_ms
-        || !content_within_budget
-        || !source_matches
-        || !error_identity_matches
-        || !warnings_match
-    {
-        return Err(contract_failure(
-            ErrorCode::ParserInvalidPayload,
-            "worker response identity, route, source, or exit status mismatch",
-            Some(&request.file_path),
-            Some(request.backend.as_str()),
-            DiagnosticStage::Parse,
-        ));
-    }
-    if response.worker_build != worker.identity.worker_build {
-        return Err(contract_failure(
-            ErrorCode::WorkerBuildChanged,
-            "worker build changed after preflight",
-            Some(&request.file_path),
-            Some(request.backend.as_str()),
-            DiagnosticStage::Parse,
-        ));
-    }
-    Ok(())
-}
-
-fn worker_response_character_budget(request: &WorkerParseRequest) -> u64 {
+fn worker_response_character_budget(request: &ParseOperation) -> u64 {
     match &request.parser_limits {
-        WorkerParserLimits::Office {
+        ParserLimits::Office {
             document_excerpt_max_chars,
             ..
         } => *document_excerpt_max_chars,
-        WorkerParserLimits::Pdf {
+        ParserLimits::Pdf {
             excerpt_max_chars, ..
         }
-        | WorkerParserLimits::SharepointText { excerpt_max_chars } => *excerpt_max_chars,
+        | ParserLimits::SharepointText { excerpt_max_chars } => *excerpt_max_chars,
     }
 }
 
 pub(crate) fn worker_response_capture_limit(
-    request: &WorkerParseRequest,
+    request: &ParseOperation,
 ) -> Result<usize, ParseFailure> {
     // JSON permits one Unicode scalar to be represented by a surrogate pair
     // (12 ASCII bytes). Diagnostics may repeat only the request path because
@@ -633,7 +488,7 @@ fn parser_failure(
     code: ErrorCode,
     message: &str,
     retryable: bool,
-    request: &WorkerParseRequest,
+    request: &ParseOperation,
 ) -> ParseFailure {
     ParseFailure {
         class,
@@ -648,7 +503,7 @@ fn parser_failure(
     }
 }
 
-fn validate_worker_source_before(request: &WorkerParseRequest) -> Result<(), ParseFailure> {
+fn validate_worker_source_before(request: &ParseOperation) -> Result<(), ParseFailure> {
     let (source_version, size_bytes) = current_source(&request.file_path).map_err(|_| {
         parser_failure(
             FailureClass::Deterministic,
@@ -680,8 +535,8 @@ fn validate_worker_source_before(request: &WorkerParseRequest) -> Result<(), Par
 }
 
 fn validate_worker_source_after(
-    request: &WorkerParseRequest,
-    response: &WorkerParseResponse,
+    request: &ParseOperation,
+    response: &ParseResult,
 ) -> Result<(), ParseFailure> {
     let (source_version, size_bytes) = current_source(&request.file_path).map_err(|_| {
         parser_failure(
@@ -757,24 +612,24 @@ pub(crate) fn worker_request(
     route: ParserRoute,
     timeout_ms: u64,
     profile: &NormalizedScannerSettings,
-) -> WorkerParseRequest {
+) -> ParseOperation {
     let backend = match route {
-        ParserRoute::RustOffice => WorkerBackend::RustOfficeOxideV2,
-        ParserRoute::RustXlsx => WorkerBackend::RustXlsxBoundedV2,
-        ParserRoute::Pdf => WorkerBackend::PythonPdfTextV2,
-        ParserRoute::PythonOffice => WorkerBackend::PythonOfficeV2,
-        ParserRoute::PythonSharepointText => WorkerBackend::PythonSharepointTextV2,
+        ParserRoute::RustOffice => ParserBackend::RustOfficeOxideV2,
+        ParserRoute::RustXlsx => ParserBackend::RustXlsxBoundedV2,
+        ParserRoute::Pdf => ParserBackend::PythonPdfTextV2,
+        ParserRoute::PythonOffice => ParserBackend::PythonOfficeV2,
+        ParserRoute::PythonSharepointText => ParserBackend::PythonSharepointTextV2,
         ParserRoute::LightText => unreachable!("light text does not use a worker request"),
     };
     let parser_limits = match route {
-        ParserRoute::Pdf => WorkerParserLimits::Pdf {
+        ParserRoute::Pdf => ParserLimits::Pdf {
             max_pages: profile.parse.pdf.max_pages,
             excerpt_max_chars: profile.parse.pdf.excerpt_max_chars,
         },
-        ParserRoute::PythonSharepointText => WorkerParserLimits::SharepointText {
+        ParserRoute::PythonSharepointText => ParserLimits::SharepointText {
             excerpt_max_chars: profile.parse.office.document_excerpt_max_chars,
         },
-        _ => WorkerParserLimits::Office {
+        _ => ParserLimits::Office {
             excel_max_sheets: profile.parse.office.excel_max_sheets,
             excel_max_rows: profile.parse.office.excel_max_rows,
             excel_max_columns: profile.parse.office.excel_max_columns,
@@ -787,17 +642,17 @@ pub(crate) fn worker_request(
             document_excerpt_max_chars: profile.parse.office.document_excerpt_max_chars,
         },
     };
-    WorkerParseRequest {
-        contract: "ai_daily_worker".to_string(),
-        protocol_version: 1,
+    ParseOperation {
         request_id: next_request_id(),
-        file_path: file.path.clone(),
-        file_type: file.extension.clone(),
-        backend,
-        remaining_timeout_ms: timeout_ms,
-        max_file_size_bytes: profile.execution.max_file_size_bytes,
-        parser_limits,
-        expected_source_version: file.source_version.clone(),
+        payload: ParseRequest {
+            file_path: file.path.clone(),
+            file_type: file.extension.clone(),
+            backend,
+            remaining_timeout_ms: timeout_ms,
+            max_file_size_bytes: profile.execution.max_file_size_bytes,
+            parser_limits,
+            expected_source_version: file.source_version.clone(),
+        },
     }
 }
 

@@ -60,7 +60,7 @@
       "$ref": "#/$defs/absolutePath"
     },
     "scanner_settings": {
-      "$ref": "scanner-profile-request-v1.schema.json"
+      "$ref": "scanner-settings.schema.json"
     },
     "adapters": {
       "$ref": "#/$defs/adapterPaths"

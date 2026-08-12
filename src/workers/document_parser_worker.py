@@ -15,13 +15,11 @@ def main(argv: list[str] | tuple[str, ...] | None = None) -> int:
         _emit_json(python_worker_hello_payload())
         return 0
 
-    from .contracts import invalid_request_response
-
     if args == ["session"]:
         return _handle_session()
 
-    _emit_json(invalid_request_response().model_dump(mode="json"))
-    return 2
+    print("usage: python -m src.workers.document_parser_worker <hello|session>", file=sys.stderr)
+    return 1
 
 
 def _handle_session() -> int:
@@ -86,36 +84,25 @@ def _validate_worker_request(payload: object) -> dict[str, object]:
 
 def _session_dispatch(envelope: dict[str, object]) -> dict[str, object]:
     """执行一个 session 请求并返回 typed response；协议错误抛会话级异常。"""
-    from src.models.scanner_contract import (
-        PdfClassifierRequestV1,
-        WorkerParseRequest,
-    )
     from .contracts import parse_worker_request
+    from .models import ClassifyRequest, ParseRequest, WorkerOperationError
 
     operation = str(envelope["operation"])
     request_id = str(envelope["request_id"])
     payload = envelope["payload"]
     if operation == "pdf_classify":
         try:
-            request = PdfClassifierRequestV1.model_validate(payload)
+            request = ClassifyRequest.model_validate(payload)
         except ValueError as error:
             raise _SessionProtocolError(f"classify payload is invalid: {error}") from error
-        if request.request_id != request_id:
-            raise _SessionProtocolError(
-                "classify payload request_id does not match the session envelope"
-            )
         result = _session_classify(request)
         return _worker_ok(request_id, operation, result.model_dump(mode="json"))
 
     if operation in {"pdf_parse", "python_office_parse", "python_sharepoint_parse"}:
         try:
-            request = WorkerParseRequest.model_validate(payload)
+            request = ParseRequest.model_validate(payload)
         except ValueError as error:
             raise _SessionProtocolError(f"parse payload is invalid: {error}") from error
-        if request.request_id != request_id:
-            raise _SessionProtocolError(
-                "parse payload request_id does not match the session envelope"
-            )
         expected_backend = {
             "pdf_parse": "python_pdf_text_v2",
             "python_office_parse": "python_office_v2",
@@ -125,11 +112,16 @@ def _session_dispatch(envelope: dict[str, object]) -> dict[str, object]:
             raise _SessionProtocolError(
                 "worker operation does not match the requested backend"
             )
-        response = parse_worker_request(request)
-        if response.request_id != request_id:
-            raise _SessionProtocolError(
-                "parse response request_id does not match the session envelope"
-            )
+        try:
+            response = parse_worker_request(request)
+        except WorkerOperationError as error:
+            raise _SessionOperationError(
+                error_code=error.error_code,
+                message=error.message,
+                retryable=error.retryable,
+                file_path=error.file_path,
+                backend=error.backend,
+            ) from error
         return _worker_ok(request_id, operation, response.model_dump(mode="json"))
 
     raise _SessionProtocolError(f"unsupported session operation: {operation}")
@@ -148,15 +140,12 @@ def _worker_ok(request_id: str, operation: str, result: object) -> dict[str, obj
 
 
 def _session_classify(
-    request: "PdfClassifierRequestV1",
-) -> "PdfClassifierResultV1":
+    request: "ClassifyRequest",
+) -> "ClassifyResult":
     """Classify one PDF while preserving source-version checks."""
     from pathlib import Path
 
-    from src.models.scanner_contract import (
-        PdfClassifierResultV1,
-        PythonOperationDiagnosticV1,
-    )
+    from .models import ClassifyResult, WorkerDiagnostic
     from .contracts import _observe_source
     from .pdf_classifier import classify_pdf
 
@@ -198,22 +187,22 @@ def _session_classify(
         )
 
     if result["status"] in ("text_in_parse_window", "no_text_in_parse_window"):
-        return PdfClassifierResultV1(
+        return ClassifyResult(
             status=result["status"],
             page_count=result["page_count"],
             result_examined_pages=result["result_examined_pages"],
             diagnostic=None,
         )
-    return PdfClassifierResultV1(
+    return ClassifyResult(
         status=result["status"],
         page_count=result["page_count"],
         result_examined_pages=result["result_examined_pages"],
-        diagnostic=PythonOperationDiagnosticV1(**result["diagnostic"]),
+        diagnostic=WorkerDiagnostic(**result["diagnostic"]),
     )
 
 
 def _session_classify_error(
-    request: "PdfClassifierRequestV1",
+    request: "ClassifyRequest",
     *,
     error_code: str,
     message: str,
@@ -240,12 +229,14 @@ class _SessionOperationError(Exception):
         message: str,
         retryable: bool,
         file_path: str | None,
+        backend: str | None = None,
     ) -> None:
         super().__init__(message)
         self.error_code = error_code
         self.message = message
         self.retryable = retryable
         self.file_path = file_path
+        self.backend = backend
 
 
 class _SessionProtocolError(Exception):
@@ -291,6 +282,7 @@ def _session_rejected_error(
         error.retryable,
         "parse",
         error.file_path,
+        error.backend,
     )
 
 
@@ -313,6 +305,7 @@ def _worker_error(
     retryable: bool,
     stage: str,
     file_path: str | None = None,
+    backend: str | None = None,
 ) -> dict[str, object]:
     return {
         "contract": "ai_daily_worker",
@@ -327,7 +320,7 @@ def _worker_error(
             "retryable": retryable,
             "stage": stage,
             "file_path": file_path,
-            "backend": None,
+            "backend": backend,
         },
     }
 

@@ -9,8 +9,9 @@ pub mod config;
 pub mod context_audit;
 pub mod deadline;
 pub mod decision;
+mod evidence;
 pub mod fallback;
-pub mod inspect;
+mod identity;
 pub mod metrics;
 pub mod nominal;
 pub mod parsers;
@@ -31,12 +32,12 @@ pub mod discovery {
     pub use ai_daily_discovery::*;
 }
 
-pub use run::{
-    dispatch, dispatch_with_response_version, invalid_request_output, version_response,
-    CommandOutput, EngineShellError,
-};
 pub use scanner::{
     ContextResult, ScanRequest, Scanner, ScannerConfig, ScannerError, ScannerOperation,
 };
 
 pub const ENGINE_BUILD_IDENTITY: &str = env!("AI_DAILY_ENGINE_BUILD");
+
+pub fn engine_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}

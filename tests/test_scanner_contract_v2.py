@@ -8,147 +8,13 @@ from src.models.scanner_contract import (
     BuildContextRequest,
     Diagnostic,
     FileAuditV2,
-    InspectRunResponseV2,
+    ScannerEvidence,
     PdfClassificationAuditV1,
     ScannerSettings,
-    TransportErrorResponse,
-    WORKER_DIAGNOSTIC_V1_ERROR_CODES,
-    WORKER_DIAGNOSTIC_V1_STAGES,
-    WorkerDiagnosticV1,
-    WorkerParseResponse,
 )
 
 
-def test_worker_diagnostic_v1_error_code_set_is_frozen() -> None:
-    """scanner-side 新 ErrorCode/DiagnosticStage 绝不进入冻结 worker v1 集合。"""
-    assert len(WORKER_DIAGNOSTIC_V1_ERROR_CODES) == 25
-    assert "STAGE_DEADLINE_EXHAUSTED" not in WORKER_DIAGNOSTIC_V1_ERROR_CODES
-    assert "BUDGET_MODEL_MISMATCH" not in WORKER_DIAGNOSTIC_V1_ERROR_CODES
-    assert "INSPECT_V2_PROVENANCE_UNAVAILABLE" not in WORKER_DIAGNOSTIC_V1_ERROR_CODES
-    assert len(WORKER_DIAGNOSTIC_V1_STAGES) == 9
-    assert "maintenance" not in WORKER_DIAGNOSTIC_V1_STAGES
-
-
-def test_worker_diagnostic_v1_rejects_scanner_side_codes() -> None:
-    with pytest.raises(ValueError, match="STAGE_DEADLINE_EXHAUSTED"):
-        WorkerDiagnosticV1.model_validate(
-            {
-                "error_code": "STAGE_DEADLINE_EXHAUSTED",
-                "message": "scanner-only code must not enter worker v1",
-                "retryable": True,
-                "stage": "parse",
-                "file_path": None,
-                "backend": None,
-            }
-        )
-    with pytest.raises(ValueError, match="maintenance"):
-        WorkerDiagnosticV1.model_validate(
-            {
-                "error_code": "PARSER_FAILED",
-                "message": "scanner-only stage must not enter worker v1",
-                "retryable": False,
-                "stage": "maintenance",
-                "file_path": None,
-                "backend": None,
-            }
-        )
-
-
-def _worker_parse_response_payload(error_code: str, *, stage: str) -> dict:
-    return {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "34444444-3444-4444-8444-344444444444",
-        "status": "error",
-        "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
-        "file_type": ".doc",
-        "content": "",
-        "parser_backend": "python_sharepoint_text_v2",
-        "worker_lane": "python_document_process_v2",
-        "truncated": False,
-        "warnings": [],
-        "error": {
-            "error_code": error_code,
-            "message": "synthetic worker failure",
-            "retryable": False,
-            "stage": stage,
-            "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
-            "backend": "python_sharepoint_text_v2",
-        },
-        "duration_ms": 3,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-python-worker-build-v1",
-        "observed_source_version": "mtime_ns=4000000001:size=1024",
-    }
-
-
-def test_worker_parse_response_rejects_scanner_side_error_code() -> None:
-    """WorkerParseResponse 必须使用 frozen WorkerDiagnosticV1：scanner-side code 拒绝。"""
-    with pytest.raises(ValueError, match="STAGE_DEADLINE_EXHAUSTED"):
-        WorkerParseResponse.model_validate(
-            _worker_parse_response_payload("STAGE_DEADLINE_EXHAUSTED", stage="parse")
-        )
-
-
-def test_worker_parse_response_round_trips_frozen_error_code() -> None:
-    """Frozen legit code 在 worker v1 wire 上往返并保留原值。"""
-    response = WorkerParseResponse.model_validate(
-        _worker_parse_response_payload("PARSER_TIMEOUT", stage="parse")
-    )
-    assert response.status == "error"
-    assert response.error is not None
-    assert response.error.error_code == "PARSER_TIMEOUT"
-    assert response.error.stage == "parse"
-    assert response.error.retryable is False
-    assert response.error.file_path == "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc"
-    assert response.error.backend == "python_sharepoint_text_v2"
-
-
-def test_transport_error_rejects_scanner_side_code() -> None:
-    """ai_daily_transport wire 也使用 frozen WorkerDiagnosticV1：scanner-side code 拒绝。"""
-    with pytest.raises(ValueError, match="STAGE_DEADLINE_EXHAUSTED"):
-        TransportErrorResponse.model_validate(
-            {
-                "contract": "ai_daily_transport",
-                "protocol_version": 1,
-                "status": "error",
-                "error": {
-                    "error_code": "STAGE_DEADLINE_EXHAUSTED",
-                    "message": "scanner-only code must not enter the transport wire",
-                    "retryable": True,
-                    "stage": "parse",
-                    "file_path": None,
-                    "backend": None,
-                },
-            }
-        )
-
-
-def test_transport_error_round_trips_frozen_invalid_request() -> None:
-    """Frozen INVALID_REQUEST 在 ai_daily_transport wire 上往返并保留原值。"""
-    response = TransportErrorResponse.model_validate(
-        {
-            "contract": "ai_daily_transport",
-            "protocol_version": 1,
-            "status": "error",
-            "error": {
-                "error_code": "INVALID_REQUEST",
-                "message": "stdin is not a valid worker request",
-                "retryable": False,
-                "stage": "request",
-                "file_path": None,
-                "backend": None,
-            },
-        }
-    )
-    assert response.error.error_code == "INVALID_REQUEST"
-    assert response.error.stage == "request"
-    assert response.error.file_path is None
-    assert response.error.backend is None
-
-
-def test_scanner_diagnostic_accepts_the_new_codes_and_stage() -> None:
+def test_scanner_diagnostic_accepts_current_error_codes() -> None:
     Diagnostic(
         error_code="STAGE_DEADLINE_EXHAUSTED",
         message="work deadline exhausted",
@@ -157,16 +23,6 @@ def test_scanner_diagnostic_accepts_the_new_codes_and_stage() -> None:
         file_path=None,
         backend=None,
     )
-    Diagnostic(
-        error_code="MAINTENANCE_MODE_UNAVAILABLE",
-        message="incremental vacuum unavailable",
-        retryable=False,
-        stage="maintenance",
-        file_path=None,
-        backend=None,
-    )
-
-
 def _build_context_request_payload(scanner_settings: dict) -> dict:
     return {
         "contract": "ai_daily_context",
@@ -222,94 +78,13 @@ def test_build_context_request_rejects_unknown_settings_key() -> None:
         )
 
 
-def test_inspect_run_response_v2_error_sentinel_is_strict() -> None:
-    payload = {
-        "contract": "ai_daily_context",
-        "protocol_version": 1,
-        "response_version": 2,
-        "request_id": "123e4567-e89b-42d3-a456-426614174000",
-        "scan_run_id": 1,
-        "context_run_id": None,
-        "status": "error",
-        "run_status": None,
-        "summary": {
-            "source_file_count": 0,
-            "success_count": 0,
-            "timeout_count": 0,
-            "included_file_count": 0,
-            "omitted_file_count": 0,
-            "error_file_count": 0,
-            "input_chars": 0,
-            "output_chars": 0,
-            "total_duration_ms": 0,
-            "discovery_duration_ms": 0,
-            "parse_duration_ms": 0,
-            "compression_duration_ms": 0,
-        },
-        "stage_metrics": [],
-        "extension_metrics": [],
-        "files": [],
-        "decisions": [],
-        "warnings": [],
-        "error": {
-            "error_code": "INSPECT_V2_PROVENANCE_UNAVAILABLE",
-            "message": "migrated v1 run lacks v2 provenance",
-            "retryable": False,
-            "stage": "inspect",
-            "file_path": None,
-            "backend": None,
-        },
-        "artifact_id": None,
-        "reused_from_context_run_id": None,
-        "reuse_kind": "none",
-        "execution_metrics": {
-            "discovery_observed_file_count": 0,
-            "source_guard_content_hash_file_count": 0,
-            "source_guard_unavailable_count": 0,
-            "source_guard_bytes_read": 0,
-            "candidate_file_count": 0,
-            "admitted_file_count": 0,
-            "classification_slot_count": 0,
-            "confirmed_run_inspected_pages_total": 0,
-            "unobserved_classification_attempt_count": 0,
-            "nominal_charged_pages_total": 0,
-            "extraction_slot_count": 0,
-            "pdfplumber_invocations": 0,
-            "snapshot_hit": False,
-            "parse_cache_lookup_count": 0,
-            "classification_cache_lookup_count": 0,
-            "parse_cache_all_hit": None,
-            "classification_cache_all_hit": None,
-            "stage_deadline_exhausted_count": 0,
-            "session_restart_count": 0,
-            "session_fallback_count": 0,
-            "classify_attempt_count": 0,
-            "parse_attempt_count": 0,
-            "reserved_chars": 0,
-            "rendered_chars": 0,
-            "worker_handshake_ms": 0,
-            "discovery_ms": 0,
-            "snapshot_lookup_ms": 0,
-            "current_run_audit_write_ms": 0,
-            "terminal_precommit_ms": 0,
-            "deadline_precommit_elapsed_ms": 0,
-            "envelope_rebuild_ms": 0,
-            "terminal_rows_written": 0,
-            "peak_worker_rss_bytes": None,
-        },
-    }
-    InspectRunResponseV2.model_validate(payload)
-
-
-def _ok_inspect_v2_payload() -> dict:
+def _scanner_evidence_payload() -> dict:
     return {
         "contract": "ai_daily_context",
         "protocol_version": 1,
-        "response_version": 2,
         "request_id": "123e4567-e89b-42d3-a456-426614174000",
         "scan_run_id": 1,
         "context_run_id": 1,
-        "status": "ok",
         "run_status": "success",
         "summary": {
             "source_file_count": 1,
@@ -330,7 +105,6 @@ def _ok_inspect_v2_payload() -> dict:
         "files": [],
         "decisions": [],
         "warnings": [],
-        "error": None,
         "artifact_id": 1,
         "reused_from_context_run_id": None,
         "reuse_kind": "none",
@@ -372,43 +146,23 @@ def _ok_inspect_v2_payload() -> dict:
     }
 
 
-def test_inspect_run_response_v2_ok_success_requires_artifact_id() -> None:
-    InspectRunResponseV2.model_validate(_ok_inspect_v2_payload())
-    payload = _ok_inspect_v2_payload()
+def test_scanner_evidence_success_requires_artifact_id() -> None:
+    ScannerEvidence.model_validate(_scanner_evidence_payload())
+    payload = _scanner_evidence_payload()
     payload["artifact_id"] = None
     with pytest.raises(ValueError, match="artifact_id"):
-        InspectRunResponseV2.model_validate(payload)
+        ScannerEvidence.model_validate(payload)
 
 
-def test_inspect_run_response_v2_error_sentinel_rejects_nonzero_metrics() -> None:
-    payload = _ok_inspect_v2_payload()
-    payload["status"] = "error"
-    payload["run_status"] = None
-    payload["context_run_id"] = None
-    payload["artifact_id"] = None
-    payload["error"] = {
-        "error_code": "INSPECT_V2_PROVENANCE_UNAVAILABLE",
-        "message": "migrated v1 run lacks v2 provenance",
-        "retryable": False,
-        "stage": "inspect",
-        "file_path": None,
-        "backend": None,
-    }
-    InspectRunResponseV2.model_validate(payload)
-    payload["execution_metrics"]["discovery_observed_file_count"] = 1
-    with pytest.raises(ValueError, match="sentinel"):
-        InspectRunResponseV2.model_validate(payload)
-
-
-def test_inspect_run_response_v2_parse_cache_reuse_requires_all_hit() -> None:
-    payload = _ok_inspect_v2_payload()
+def test_scanner_evidence_parse_cache_reuse_requires_all_hit() -> None:
+    payload = _scanner_evidence_payload()
     payload["reuse_kind"] = "parse_cache"
     payload["execution_metrics"]["parse_cache_lookup_count"] = 1
     payload["execution_metrics"]["parse_cache_all_hit"] = True
-    InspectRunResponseV2.model_validate(payload)
+    ScannerEvidence.model_validate(payload)
     payload["execution_metrics"]["parse_cache_all_hit"] = False
     with pytest.raises(ValueError, match="all-hit"):
-        InspectRunResponseV2.model_validate(payload)
+        ScannerEvidence.model_validate(payload)
 
 
 def _file_audit_v2_payload() -> dict:

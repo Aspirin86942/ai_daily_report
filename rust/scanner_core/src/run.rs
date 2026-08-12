@@ -5,14 +5,10 @@ use ai_daily_discovery::{
 use ai_daily_scanner_contract::{
     AuditWorkerLane, BuildContextRequest, CacheMissReason, CacheStatus, ContextAction,
     ContextDecision, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
-    DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, InspectRunRequest,
-    InspectRunResponse, InspectStatus, Nullable, ParseStatus, RunStatus, StageMetric, StageName,
-    TransportErrorResponse, Validate, VersionResponse, WorkerDiagnosticV1,
-    WorkerDiagnosticV1ErrorCode, WorkerDiagnosticV1Stage,
+    DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, Nullable,
+    ParseStatus, RunStatus, StageMetric, StageName,
 };
 use chrono::NaiveDate;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -26,14 +22,15 @@ use crate::artifact::{
     PdfClassificationProvenanceV1, SemanticSummary, CLASSIFIER_CONTRACT_VERSION,
 };
 use crate::config::normalize_scanner_settings;
-use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
+use crate::context_audit::{context_profile_hash, rejected_profile_hash};
+use crate::identity::{engine_identity, EngineIdentity};
 use crate::parsers::classifier::ClassifierPort;
 use crate::parsers::{
     document, office, register_worker, register_worker_pair_observed, RegisteredWorker,
-    WorkerCommand, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
+    WorkerCommand, WORKER_HANDSHAKE_TIMEOUT,
 };
 use crate::process::WorkerRssTracker;
-use crate::scanner::{ScanRequest, Scanner, ScannerConfig, ScannerResources, ScannerWorkerPools};
+use crate::scanner::{ScannerOperation, ScannerResources, ScannerWorkerPools};
 use crate::scheduler::{
     BudgetedContextScheduler, BudgetedScanOutcome, Clock, RealClock, RealGuardVerifier,
     RunDeadlines, ScheduledRunInput, TerminalIntent, WorkerIdentities,
@@ -53,16 +50,8 @@ use crate::store::{
 
 #[derive(Debug, Error)]
 pub enum EngineShellError {
-    #[error("failed to serialize scanner response: {0}")]
-    Serialization(#[from] serde_json::Error),
     #[error("failed to assemble scanner evidence: {0}")]
     Evidence(String),
-}
-
-#[derive(Debug)]
-pub struct CommandOutput {
-    pub json: String,
-    pub exit_code: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -92,101 +81,7 @@ impl ActiveRunTiming {
     }
 }
 
-impl CommandOutput {
-    fn success<T: Serialize>(payload: &T) -> Result<Self, EngineShellError> {
-        Ok(Self {
-            json: serde_json::to_string(payload)?,
-            exit_code: 0,
-        })
-    }
-
-    fn with_exit<T: Serialize>(payload: &T, exit_code: i32) -> Result<Self, EngineShellError> {
-        Ok(Self {
-            json: serde_json::to_string(payload)?,
-            exit_code,
-        })
-    }
-
-    fn canonical_json(json: String, exit_code: i32) -> Result<Self, EngineShellError> {
-        let _: serde_json::Value = serde_json::from_str(&json)?;
-        Ok(Self { json, exit_code })
-    }
-}
-
-pub fn dispatch(command: &str, input: &[u8]) -> Result<CommandOutput, EngineShellError> {
-    dispatch_with_response_version(command, input, 1)
-}
-
-/// Legacy CLI adapter for the remaining build/doctor/inspect compatibility tests.
-pub fn dispatch_with_response_version(
-    command: &str,
-    input: &[u8],
-    response_version: u64,
-) -> Result<CommandOutput, EngineShellError> {
-    if response_version == 2 {
-        match command {
-            "version" => CommandOutput::success(&version_response()),
-            "inspect-run" => {
-                let request = match decode_request::<InspectRunRequest>(input) {
-                    Ok(request) => request,
-                    Err(_) => return invalid_request_output(),
-                };
-                inspect_run_command_v2(&request)
-            }
-            _ => invalid_request_output(),
-        }
-    } else {
-        match command {
-            "version" => CommandOutput::success(&version_response()),
-            "build-context" => {
-                let request = match decode_request::<BuildContextRequest>(input) {
-                    Ok(request) => request,
-                    Err(_) => return invalid_request_output(),
-                };
-                let scanner = Scanner::open(ScannerConfig::from_build_request(&request))
-                    .map_err(|error| EngineShellError::Evidence(error.to_string()))?;
-                let operation = scanner
-                    .build_context_with_request_id(
-                        &ScanRequest::from_build_request(&request),
-                        request.request_id.clone(),
-                    )
-                    .map_err(|error| EngineShellError::Evidence(error.to_string()))?;
-                CommandOutput::with_exit(&operation.value.envelope, operation.exit_code)
-            }
-            "doctor" => {
-                let request = match decode_request::<DoctorRequest>(input) {
-                    Ok(request) => request,
-                    Err(_) => return invalid_request_output(),
-                };
-                let config = ScannerConfig {
-                    work_dir: request.scan_db_path.rsplit_once(['/', '\\']).map_or_else(
-                        || request.scan_db_path.clone(),
-                        |(parent, _)| parent.to_string(),
-                    ),
-                    scan_db_path: request.scan_db_path.clone(),
-                    scanner_settings: serde_json::from_value(serde_json::json!({}))?,
-                    adapters: request.adapters.clone(),
-                };
-                let scanner = Scanner::open(config)
-                    .map_err(|error| EngineShellError::Evidence(error.to_string()))?;
-                let operation = scanner
-                    .doctor_with_request_id(request.request_id.clone())
-                    .map_err(|error| EngineShellError::Evidence(error.to_string()))?;
-                CommandOutput::with_exit(&operation.value, operation.exit_code)
-            }
-            "inspect-run" => {
-                let request = match decode_request::<InspectRunRequest>(input) {
-                    Ok(request) => request,
-                    Err(_) => return invalid_request_output(),
-                };
-                inspect_run_command(&request)
-            }
-            _ => invalid_request_output(),
-        }
-    }
-}
-
-pub(crate) fn doctor_command(request: &DoctorRequest) -> Result<CommandOutput, EngineShellError> {
+pub(crate) fn doctor_command(request: &DoctorRequest) -> ScannerOperation<DoctorResponse> {
     let mut checks = Vec::new();
     let mut first_error = None;
 
@@ -229,7 +124,7 @@ pub(crate) fn doctor_command(request: &DoctorRequest) -> Result<CommandOutput, E
         "python_office_v2",
     );
 
-    let version = version_response();
+    let identity = engine_identity();
     let status = if first_error.is_some() {
         EngineStatus::Error
     } else {
@@ -241,13 +136,16 @@ pub(crate) fn doctor_command(request: &DoctorRequest) -> Result<CommandOutput, E
         protocol_version: 1,
         request_id: request.request_id.clone(),
         status,
-        engine_version: version.engine_version,
-        engine_build: version.engine_build,
+        engine_version: identity.engine_version,
+        engine_build: identity.engine_build,
         checks,
         warnings: Vec::new(),
         error: Nullable(first_error),
     };
-    CommandOutput::with_exit(&response, exit_code)
+    ScannerOperation {
+        value: response,
+        exit_code,
+    }
 }
 
 fn probe_scan_db_parent(scan_db_path: &str) -> Result<String, String> {
@@ -315,166 +213,12 @@ fn record_handshake(
     }
 }
 
-fn inspect_run_command(request: &InspectRunRequest) -> Result<CommandOutput, EngineShellError> {
-    let mut store = match ScannerStore::open_existing(Path::new(&request.scan_db_path)) {
-        Ok(store) => store,
-        Err(error) => {
-            return inspect_error_output(
-                request,
-                error.error_code(),
-                error.to_string(),
-                error.retryable(),
-                None,
-            );
-        }
-    };
-    match store.inspect_run(request.scan_run_id, request.include_content) {
-        Ok(snapshot) => {
-            // Current evidence is projected lossily into v1 and the projection
-            // warnings are appended (output-only, bounded to 257).
-            let warnings =
-                crate::inspect::v1_lossy_projection_warnings(&snapshot, &snapshot.warnings);
-            let response = InspectRunResponse {
-                contract: "ai_daily_context".to_string(),
-                protocol_version: 1,
-                request_id: request.request_id.clone(),
-                scan_run_id: request.scan_run_id,
-                context_run_id: Nullable(snapshot.context_run_id),
-                status: InspectStatus::Ok,
-                run_status: Nullable(Some(snapshot.run_status)),
-                summary: snapshot.summary,
-                stage_metrics: snapshot.stage_metrics,
-                extension_metrics: snapshot.extension_metrics,
-                files: snapshot.files,
-                decisions: snapshot.decisions,
-                warnings,
-                error: Nullable(None),
-            };
-            CommandOutput::success(&response)
-        }
-        Err(error) => {
-            let (error_code, retryable) = match &error.error {
-                InspectAuditError::RunNotFound => (ErrorCode::RunNotFound, false),
-                InspectAuditError::RunCorrupt(_) => (ErrorCode::RunCorrupt, false),
-                InspectAuditError::ContentForbidden => (ErrorCode::InvalidRequest, false),
-                InspectAuditError::Sql(_) => (ErrorCode::CacheOpenFailed, true),
-            };
-            inspect_error_output(
-                request,
-                error_code,
-                error.error.to_string(),
-                retryable,
-                error.run_status,
-            )
-        }
-    }
-}
-
-/// `inspect-run --response-version 2`: returns the strict `InspectRunResponseV2`.
-fn inspect_run_command_v2(request: &InspectRunRequest) -> Result<CommandOutput, EngineShellError> {
-    let mut store = match ScannerStore::open_existing(Path::new(&request.scan_db_path)) {
-        Ok(store) => store,
-        Err(error) => {
-            return CommandOutput::with_exit(
-                &crate::inspect::inspect_v2_error(
-                    request,
-                    error.error_code(),
-                    error.to_string(),
-                    error.retryable(),
-                    None,
-                ),
-                1,
-            );
-        }
-    };
-    match store.inspect_run(request.scan_run_id, request.include_content) {
-        Ok(snapshot) => {
-            let response = if snapshot
-                .files_v2
-                .iter()
-                .any(|row| row.parse_transport.is_none() || row.parse_attempt_count.is_none())
-            {
-                crate::inspect::inspect_v2_error(
-                    request,
-                    ErrorCode::InspectV2ProvenanceUnavailable,
-                    "run lacks per-file execution provenance".to_string(),
-                    false,
-                    Some(snapshot.run_status),
-                )
-            } else {
-                match crate::inspect::assemble_inspect_v2(request, &snapshot) {
-                    Ok(response) => return CommandOutput::success(&response),
-                    Err(message) => crate::inspect::inspect_v2_error(
-                        request,
-                        ErrorCode::RunCorrupt,
-                        message,
-                        false,
-                        Some(snapshot.run_status),
-                    ),
-                }
-            };
-            CommandOutput::with_exit(&response, 1)
-        }
-        Err(error) => {
-            let (error_code, retryable) = match &error.error {
-                InspectAuditError::RunNotFound => (ErrorCode::RunNotFound, false),
-                InspectAuditError::RunCorrupt(_) => (ErrorCode::RunCorrupt, false),
-                InspectAuditError::ContentForbidden => (ErrorCode::InvalidRequest, false),
-                InspectAuditError::Sql(_) => (ErrorCode::CacheOpenFailed, true),
-            };
-            CommandOutput::with_exit(
-                &crate::inspect::inspect_v2_error(
-                    request,
-                    error_code,
-                    error.error.to_string(),
-                    retryable,
-                    error.run_status,
-                ),
-                1,
-            )
-        }
-    }
-}
-
-fn inspect_error_output(
-    request: &InspectRunRequest,
-    error_code: ErrorCode,
-    message: String,
-    retryable: bool,
-    run_status: Option<RunStatus>,
-) -> Result<CommandOutput, EngineShellError> {
-    let response = InspectRunResponse {
-        contract: "ai_daily_context".to_string(),
-        protocol_version: 1,
-        request_id: request.request_id.clone(),
-        scan_run_id: request.scan_run_id,
-        context_run_id: Nullable(None),
-        status: InspectStatus::Error,
-        run_status: Nullable(run_status),
-        summary: empty_summary(),
-        stage_metrics: Vec::new(),
-        extension_metrics: Vec::new(),
-        files: Vec::new(),
-        decisions: Vec::new(),
-        warnings: Vec::new(),
-        error: Nullable(Some(Diagnostic {
-            error_code,
-            message: truncate_chars(&message, 4_096),
-            retryable,
-            stage: DiagnosticStage::Inspect,
-            file_path: Nullable(None),
-            backend: Nullable(None),
-        })),
-    };
-    CommandOutput::with_exit(&response, 1)
-}
-
 pub(crate) fn build_context_command(
     request: &BuildContextRequest,
     resources: &mut ScannerResources,
-) -> Result<CommandOutput, EngineShellError> {
+) -> ScannerOperation<ContextEnvelope> {
     let started_at = Instant::now();
-    let version = version_response();
+    let version = engine_identity();
     let work_dir = match validate_build_work_dir(&request.work_dir) {
         Ok(path) => path,
         Err(error) => {
@@ -531,7 +275,7 @@ pub(crate) fn build_context_command(
             );
         }
     };
-    let runtime = match AttemptRuntime::from_request(request, &version) {
+    let runtime = match AttemptRuntime::from_request(request) {
         Ok(runtime) => runtime,
         Err(error) => {
             return build_error_output(
@@ -564,7 +308,10 @@ pub(crate) fn build_context_command(
     let active = match store.begin_run(&request.request_id, &canonical, &runtime, now_ms) {
         Ok(BeginRunOutcome::Stored(stored)) => {
             let exit_code = i32::from(stored.envelope.status == EngineStatus::Error);
-            return CommandOutput::canonical_json(stored.envelope_json, exit_code);
+            return ScannerOperation {
+                value: stored.envelope,
+                exit_code,
+            };
         }
         Ok(BeginRunOutcome::Started(active)) => active,
         Err(error) => {
@@ -623,7 +370,7 @@ pub(crate) fn build_context_command(
 #[allow(clippy::too_many_arguments)]
 fn execute_active_build(
     request: &BuildContextRequest,
-    version: &VersionResponse,
+    version: &EngineIdentity,
     profile: &ai_daily_scanner_contract::NormalizedScannerSettings,
     normalized_settings: &ai_daily_scanner_contract::NormalizedScannerSettings,
     work_dir: &Path,
@@ -633,41 +380,48 @@ fn execute_active_build(
     heartbeat: &mut LeaseHeartbeat,
     started_at: Instant,
     timing: &ActiveRunTiming,
-) -> Result<CommandOutput, EngineShellError> {
+) -> ScannerOperation<ContextEnvelope> {
     let rss_tracker = WorkerRssTracker::default();
     // ---- bounded parallel worker handshakes (spec Solution run.rs order) ----
-    // spec Part 5.3: `worker_handshake_ms` is the whole-batch parallel preflight
-    // wall span from one monotonic clock.
-    let handshake_started = Instant::now();
+    // A Scanner owns the verified worker identities with its long-lived pools.
+    // The first run performs the parallel preflight; later runs reuse those
+    // identities and each session still validates its own hello on startup.
     let office_command = office::worker_command(&request.adapters);
     let python_command = document::worker_command(&request.adapters);
-    // One bounded parallel hello batch validates both worker-v2 implementations.
-    // The long-lived pools start lazily when an operation is actually dispatched.
-    let remaining_handshake_ms = timing.remaining_work_ms();
-    if remaining_handshake_ms == 0 {
-        return finish_active_error(
-            request,
-            version,
-            store,
-            active,
-            heartbeat,
-            Vec::new(),
-            stage_deadline_exhausted("worker handshake"),
-            elapsed_summary(started_at),
-            0,
+    let (office_python_pair, worker_handshake_ms) = if let Some((office, python)) =
+        worker_pools.registered_workers(&office_command, &python_command)
+    {
+        ((Ok(office), Ok(python)), 0)
+    } else {
+        // One bounded parallel hello batch validates both worker-v2
+        // implementations. Pools start lazily on the first operation.
+        let remaining_handshake_ms = timing.remaining_work_ms();
+        if remaining_handshake_ms == 0 {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                Vec::new(),
+                stage_deadline_exhausted("worker handshake"),
+                elapsed_summary(started_at),
+                0,
+                &rss_tracker,
+                timing,
+            );
+        }
+        let handshake_timeout =
+            WORKER_HANDSHAKE_TIMEOUT.min(Duration::from_millis(remaining_handshake_ms.max(1)));
+        let handshake_started = Instant::now();
+        let pair = register_worker_pair_observed(
+            &office_command,
+            &python_command,
+            handshake_timeout,
             &rss_tracker,
-            timing,
         );
-    }
-    let handshake_timeout =
-        WORKER_HANDSHAKE_TIMEOUT.min(Duration::from_millis(remaining_handshake_ms.max(1)));
-    let office_python_pair = register_worker_pair_observed(
-        &office_command,
-        &python_command,
-        handshake_timeout,
-        &rss_tracker,
-    );
-    let worker_handshake_ms = elapsed_ms(handshake_started);
+        (pair, elapsed_ms(handshake_started))
+    };
     let (office_result, python_result) = office_python_pair;
     let (office_worker, office_error) = split_handshake(office_result, "rust_office_oxide_v2");
     let (python_worker, python_error) = split_handshake(python_result, "python_office_v2");
@@ -1377,9 +1131,7 @@ fn execute_active_build(
         timing.deadlines,
         &timing.clock,
     ) {
-        Ok(timings) => {
-            complete_committed_terminal(store, timing, timings, envelope_json, exit_code)
-        }
+        Ok(timings) => complete_committed_terminal(store, timing, timings, envelope, exit_code),
         Err(error) => abandon_after_finalization_failure(
             request,
             version,
@@ -1426,7 +1178,7 @@ fn worker_rss_unavailable_diagnostic() -> Diagnostic {
 /// onto the envelope shape and the terminal record.
 fn scheduler_outcome_envelope(
     request: &BuildContextRequest,
-    version: &VersionResponse,
+    version: &EngineIdentity,
     active: &ActiveRun,
     outcome: &crate::scheduler::BudgetedScanOutcome,
     error_context: Option<&ContextRunRecord>,
@@ -1761,7 +1513,7 @@ fn assemble_engine_error_execution_metrics(
 #[allow(clippy::too_many_arguments)]
 fn finalize_snapshot_hit(
     request: &BuildContextRequest,
-    version: &VersionResponse,
+    version: &EngineIdentity,
     store: &mut ScannerStore,
     active: &ActiveRun,
     heartbeat: &mut LeaseHeartbeat,
@@ -1778,7 +1530,7 @@ fn finalize_snapshot_hit(
     rss_tracker: &WorkerRssTracker,
     started_at: Instant,
     timing: &ActiveRunTiming,
-) -> Result<CommandOutput, EngineShellError> {
+) -> ScannerOperation<ContextEnvelope> {
     let file_results = snapshot_file_results(&artifact, Some(classifier_identity));
     let decisions: Vec<ContextDecisionRecord> = artifact
         .decision_rows
@@ -1967,7 +1719,7 @@ fn finalize_snapshot_hit(
         timing.deadlines,
         &timing.clock,
     ) {
-        Ok(timings) => complete_committed_terminal(store, timing, timings, envelope_json, 0),
+        Ok(timings) => complete_committed_terminal(store, timing, timings, envelope, 0),
         Err(error) => abandon_after_finalization_failure(
             request,
             version,
@@ -2316,7 +2068,7 @@ fn worker_fingerprint(worker: &RegisteredWorker) -> WorkerFingerprint {
 }
 
 fn route_stack_fingerprints(
-    version: &VersionResponse,
+    version: &EngineIdentity,
     profile: &ai_daily_scanner_contract::NormalizedScannerSettings,
     office_worker: &RegisteredWorker,
     python_worker: &RegisteredWorker,
@@ -2532,7 +2284,7 @@ fn discovery_issue_diagnostic(issue: &DiscoveryIssue) -> Diagnostic {
 #[allow(clippy::too_many_arguments)]
 fn finish_active_error(
     request: &BuildContextRequest,
-    version: &VersionResponse,
+    version: &EngineIdentity,
     store: &mut ScannerStore,
     active: &ActiveRun,
     heartbeat: &mut LeaseHeartbeat,
@@ -2542,7 +2294,7 @@ fn finish_active_error(
     worker_handshake_ms: u64,
     rss_tracker: &WorkerRssTracker,
     timing: &ActiveRunTiming,
-) -> Result<CommandOutput, EngineShellError> {
+) -> ScannerOperation<ContextEnvelope> {
     heartbeat.stop();
     if let Some(background_error) = heartbeat.take_background_error() {
         warnings.push(diagnostic(
@@ -2571,7 +2323,7 @@ fn finish_active_error(
 #[allow(clippy::too_many_arguments)]
 fn persist_active_error_without_heartbeat(
     request: &BuildContextRequest,
-    version: &VersionResponse,
+    version: &EngineIdentity,
     store: &mut ScannerStore,
     active: &ActiveRun,
     mut warnings: Vec<Diagnostic>,
@@ -2581,7 +2333,7 @@ fn persist_active_error_without_heartbeat(
     discovery_ms: u64,
     rss_tracker: &WorkerRssTracker,
     timing: &ActiveRunTiming,
-) -> Result<CommandOutput, EngineShellError> {
+) -> ScannerOperation<ContextEnvelope> {
     let discovery_observed_file_count = summary.source_file_count;
     let summary = empty_summary();
     let peak_worker_rss_bytes = rss_tracker.peak_worker_rss_bytes();
@@ -2676,7 +2428,7 @@ fn persist_active_error_without_heartbeat(
         }
     };
     match store.finalize(active, &batch, now_ms, timing.deadlines, &timing.clock) {
-        Ok(timings) => complete_committed_terminal(store, timing, timings, envelope_json, 1),
+        Ok(timings) => complete_committed_terminal(store, timing, timings, envelope, 1),
         Err(write_error) => abandon_after_finalization_failure(
             request,
             version,
@@ -2693,12 +2445,15 @@ fn complete_committed_terminal(
     store: &mut ScannerStore,
     timing: &ActiveRunTiming,
     timings: TerminalAuditTimings,
-    envelope_json: String,
+    envelope: ContextEnvelope,
     exit_code: i32,
-) -> Result<CommandOutput, EngineShellError> {
+) -> ScannerOperation<ContextEnvelope> {
     if timings.busy_timeout_restore_failed {
         eprintln!("scanner warning: SQLite busy timeout restore failed after terminal commit");
-        return CommandOutput::canonical_json(envelope_json, exit_code);
+        return ScannerOperation {
+            value: envelope,
+            exit_code,
+        };
     }
 
     // Optional GC is admitted only after the authoritative terminal COMMIT.
@@ -2723,18 +2478,21 @@ fn complete_committed_terminal(
             }
         }
     }
-    CommandOutput::canonical_json(envelope_json, exit_code)
+    ScannerOperation {
+        value: envelope,
+        exit_code,
+    }
 }
 
 fn abandon_after_finalization_failure(
     request: &BuildContextRequest,
-    version: &VersionResponse,
+    version: &EngineIdentity,
     store: &mut ScannerStore,
     active: &ActiveRun,
     error: StoreError,
     mut warnings: Vec<Diagnostic>,
     summary: ContextSummary,
-) -> Result<CommandOutput, EngineShellError> {
+) -> ScannerOperation<ContextEnvelope> {
     let cleanup = current_time_millis().and_then(|now_ms| store.abandon_active_run(active, now_ms));
     if let Err(cleanup_error) = cleanup {
         warnings.push(cleanup_error.diagnostic(DiagnosticStage::Cache));
@@ -2752,7 +2510,7 @@ fn abandon_after_finalization_failure(
 #[allow(clippy::too_many_arguments)]
 fn persist_post_outcome_failure_if_invalid(
     request: &BuildContextRequest,
-    version: &VersionResponse,
+    version: &EngineIdentity,
     store: &mut ScannerStore,
     active: &ActiveRun,
     batch: &FinalizationBatch,
@@ -2760,7 +2518,7 @@ fn persist_post_outcome_failure_if_invalid(
     discovery_ms: u64,
     rss_tracker: &WorkerRssTracker,
     timing: &ActiveRunTiming,
-) -> Option<Result<CommandOutput, EngineShellError>> {
+) -> Option<ScannerOperation<ContextEnvelope>> {
     let error = match store.validate_finalization_batch(active, batch) {
         Ok(()) => return None,
         Err(error) => error,
@@ -2787,12 +2545,12 @@ fn persist_post_outcome_failure_if_invalid(
 
 fn build_error_output(
     request: &BuildContextRequest,
-    version: &VersionResponse,
+    version: &EngineIdentity,
     error: Diagnostic,
     mut warnings: Vec<Diagnostic>,
     summary: ContextSummary,
     scan_run_id: Option<u64>,
-) -> Result<CommandOutput, EngineShellError> {
+) -> ScannerOperation<ContextEnvelope> {
     warnings.truncate(100_000);
     let response = ContextEnvelope {
         contract: "ai_daily_context".to_string(),
@@ -2808,7 +2566,10 @@ fn build_error_output(
         warnings,
         error: Nullable(Some(error)),
     };
-    CommandOutput::with_exit(&response, 1)
+    ScannerOperation {
+        value: response,
+        exit_code: 1,
+    }
 }
 
 struct LeaseHeartbeat {
@@ -2937,68 +2698,9 @@ fn empty_summary() -> ContextSummary {
     }
 }
 
-fn decode_request<T>(input: &[u8]) -> Result<T, String>
-where
-    T: DeserializeOwned + Validate,
-{
-    let request: T = serde_json::from_slice(input).map_err(|error| error.to_string())?;
-    request.validate()?;
-    Ok(request)
-}
-
-pub fn invalid_request_output() -> Result<CommandOutput, EngineShellError> {
-    let response = TransportErrorResponse {
-        contract: "ai_daily_transport".to_string(),
-        protocol_version: 1,
-        status: "error".to_string(),
-        error: WorkerDiagnosticV1 {
-            error_code: WorkerDiagnosticV1ErrorCode::InvalidRequest,
-            message: "command request could not be decoded".to_string(),
-            retryable: false,
-            stage: WorkerDiagnosticV1Stage::Request,
-            file_path: Nullable(None),
-            backend: Nullable(None),
-        },
-    };
-    CommandOutput::with_exit(&response, 2)
-}
-
-pub fn version_response() -> VersionResponse {
-    VersionResponse {
-        contract: "ai_daily_context".to_string(),
-        protocol_version: 1,
-        binary_name: "ai-daily-scanner".to_string(),
-        engine_version: env!("CARGO_PKG_VERSION").to_string(),
-        engine_build: env!("AI_DAILY_ENGINE_BUILD").to_string(),
-        target_triple: target_triple(),
-        supported_commands: vec![
-            "version".to_string(),
-            "doctor".to_string(),
-            "build-context".to_string(),
-            "inspect-run".to_string(),
-        ],
-        office_worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
-        python_worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
-    }
-}
-
-fn target_triple() -> String {
-    let arch = std::env::consts::ARCH;
-    if cfg!(all(target_os = "windows", target_env = "msvc")) {
-        format!("{arch}-pc-windows-msvc")
-    } else if cfg!(target_os = "windows") {
-        format!("{arch}-pc-windows-gnu")
-    } else if cfg!(target_os = "macos") {
-        format!("{arch}-apple-darwin")
-    } else {
-        format!("{arch}-unknown-linux-gnu")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ai_daily_scanner_contract::Validate;
     use tempfile::tempdir;
 
     #[test]
@@ -3008,6 +2710,20 @@ mod tests {
         let mut store = ScannerStore::open(&db_path).unwrap();
         let timing = ActiveRunTiming::start(5_000).unwrap();
         let _ = crate::store::take_test_opportunistic_gc_calls();
+        let envelope = ContextEnvelope {
+            contract: "ai_daily_context".to_string(),
+            protocol_version: 1,
+            request_id: "00000000-0000-4000-8000-000000000001".to_string(),
+            engine_version: "test".to_string(),
+            engine_build: "test".to_string(),
+            status: EngineStatus::Ok,
+            file_context: "committed".to_string(),
+            summary: empty_summary(),
+            scan_run_id: Nullable(None),
+            context_run_id: Nullable(None),
+            warnings: Vec::new(),
+            error: Nullable(None),
+        };
 
         let output = complete_committed_terminal(
             &mut store,
@@ -3016,11 +2732,10 @@ mod tests {
                 busy_timeout_restore_failed: true,
                 ..TerminalAuditTimings::default()
             },
-            "{\"status\":\"committed\"}".to_string(),
+            envelope.clone(),
             0,
-        )
-        .unwrap();
-        assert_eq!(output.json, "{\"status\":\"committed\"}");
+        );
+        assert_eq!(output.value.file_context, "committed");
         assert_eq!(output.exit_code, 0);
         assert_eq!(
             crate::store::take_test_opportunistic_gc_calls(),
@@ -3035,28 +2750,18 @@ mod tests {
             &mut store,
             &timing,
             TerminalAuditTimings::default(),
-            "{\"status\":\"committed\"}".to_string(),
+            envelope,
             7,
-        )
-        .unwrap();
+        );
         locker.execute_batch("ROLLBACK").unwrap();
-        assert_eq!(output.json, "{\"status\":\"committed\"}");
+        assert_eq!(output.value.file_context, "committed");
         assert_eq!(output.exit_code, 7);
         assert_eq!(crate::store::take_test_opportunistic_gc_calls(), 1);
     }
 
     #[test]
-    fn scanner_version_uses_the_frozen_command_order() {
-        let response = version_response();
-
-        response.validate().expect("version response must be valid");
-        assert_eq!(response.binary_name, "ai-daily-scanner");
-        assert_eq!(response.supported_commands[0], "version");
-    }
-
-    #[test]
     fn local_scanner_build_uses_a_deterministic_source_fingerprint() {
-        let build = version_response().engine_build;
+        let build = engine_identity().engine_build;
         if let Some(ci_build) =
             option_env!("AI_DAILY_BUILD_ID").filter(|value| !value.trim().is_empty())
         {
@@ -3116,8 +2821,7 @@ mod tests {
             .expect("normalized scanner profile");
         let canonical =
             ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
-        let runtime =
-            AttemptRuntime::from_request(&request, &version_response()).expect("attempt runtime");
+        let runtime = AttemptRuntime::from_request(&request).expect("attempt runtime");
         let mut store = ScannerStore::open(&scan_db).expect("scanner store");
         let now_ms = current_time_millis().expect("current time");
         let active = match store
@@ -3128,12 +2832,12 @@ mod tests {
             BeginRunOutcome::Stored(_) => panic!("expected a new active run"),
         };
         let office = WorkerFingerprint {
-            contract: "ai_daily_worker_v1".to_string(),
+            contract: "ai_daily_worker_v2".to_string(),
             version: "0.1.0".to_string(),
             build: "office-build".to_string(),
         };
         let python = WorkerFingerprint {
-            contract: "ai_daily_worker_v1".to_string(),
+            contract: "ai_daily_worker_v2".to_string(),
             version: "0.1.0".to_string(),
             build: "python-build".to_string(),
         };
@@ -3158,7 +2862,7 @@ mod tests {
         let timing = ActiveRunTiming::start(10_000).expect("test deadline");
         let output = persist_post_outcome_failure_if_invalid(
             &request,
-            &version_response(),
+            &engine_identity(),
             &mut store,
             &active,
             &invalid_outcome,
@@ -3167,16 +2871,15 @@ mod tests {
             &WorkerRssTracker::default(),
             &timing,
         )
-        .expect("invalid outcome must be converted")
-        .expect("terminal failure output");
+        .expect("invalid outcome must be converted");
         assert_eq!(output.exit_code, 1);
 
         let stored = store
             .load_terminal_envelope(active.scan_run_id())
             .unwrap_or_else(|error| {
                 panic!(
-                    "committed terminal failure must be replayable: {error}; output={}",
-                    output.json
+                    "committed terminal failure must be replayable: {error}; output={:?}",
+                    output.value.status
                 )
             });
         assert_eq!(stored.envelope.scan_run_id.0, Some(active.scan_run_id()));

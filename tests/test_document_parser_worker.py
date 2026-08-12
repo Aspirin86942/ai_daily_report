@@ -10,17 +10,18 @@ from docx import Document
 from openpyxl import Workbook
 from pptx import Presentation
 
-from src.models.scanner_contract import (
-    OfficeLimits,
-    PdfLimits,
-    SharePointTextLimits,
-    WorkerParseRequest,
-)
 from src.workers.contracts import (
     WorkerParsePayload,
     parse_legacy_excel_payload,
     parse_sharepoint_text_payload,
     parse_worker_request,
+)
+from src.workers.models import (
+    OfficeLimits,
+    ParseRequest,
+    PdfLimits,
+    SharePointTextLimits,
+    WorkerOperationError,
 )
 
 
@@ -57,11 +58,8 @@ def _request(
     *,
     max_file_size_bytes: int = 1_000_000,
     expected_source_version: str | None = None,
-) -> WorkerParseRequest:
-    return WorkerParseRequest(
-        contract="ai_daily_worker",
-        protocol_version=1,
-        request_id="61111111-6111-4111-8111-611111111111",
+) -> ParseRequest:
+    return ParseRequest(
         file_path=str(path.resolve()),
         file_type=file_type,
         backend=backend,
@@ -101,8 +99,6 @@ def test_python_office_worker_parses_modern_office_fixtures(
         _request(sample, file_type, "python_office_v2", _office_limits())
     )
 
-    assert response.status == "ok"
-    assert response.error is None
     assert response.parser_backend == "python_office_v2"
     assert response.worker_lane == "python_document_process_v2"
     assert "worker content" in response.content
@@ -118,8 +114,6 @@ def test_pdf_worker_parses_a_bounded_text_layer(tmp_path: Path) -> None:
         _request(sample, ".pdf", "python_pdf_text_v2", limits)
     )
 
-    assert response.status == "ok"
-    assert response.error is None
     assert response.parser_backend == "python_pdf_text_v2"
     assert "PDF worker text" in response.content
 
@@ -132,20 +126,19 @@ def test_worker_size_guard_runs_before_document_parser(tmp_path: Path) -> None:
     def forbidden_parser(*args: object, **kwargs: object) -> object:
         raise AssertionError("parser must not run after the size guard")
 
-    response = parse_worker_request(
-        _request(
-            sample,
-            ".pdf",
-            "python_pdf_text_v2",
-            limits,
-            max_file_size_bytes=9,
-        ),
-        document_parser=forbidden_parser,
-    )
+    with pytest.raises(WorkerOperationError) as captured:
+        parse_worker_request(
+            _request(
+                sample,
+                ".pdf",
+                "python_pdf_text_v2",
+                limits,
+                max_file_size_bytes=9,
+            ),
+            document_parser=forbidden_parser,
+        )
 
-    assert response.status == "error"
-    assert response.error is not None
-    assert response.error.error_code == "FILE_TOO_LARGE"
+    assert captured.value.error_code == "FILE_TOO_LARGE"
 
 
 def test_worker_rejects_changed_source_before_parser(tmp_path: Path) -> None:
@@ -156,21 +149,20 @@ def test_worker_rejects_changed_source_before_parser(tmp_path: Path) -> None:
     def forbidden_parser(*args: object, **kwargs: object) -> object:
         raise AssertionError("parser must not run for a stale source version")
 
-    response = parse_worker_request(
-        _request(
-            sample,
-            ".pdf",
-            "python_pdf_text_v2",
-            limits,
-            expected_source_version="mtime_ns=1:size=7",
-        ),
-        document_parser=forbidden_parser,
-    )
+    with pytest.raises(WorkerOperationError) as captured:
+        parse_worker_request(
+            _request(
+                sample,
+                ".pdf",
+                "python_pdf_text_v2",
+                limits,
+                expected_source_version="mtime_ns=1:size=7",
+            ),
+            document_parser=forbidden_parser,
+        )
 
-    assert response.status == "error"
-    assert response.error is not None
-    assert response.error.error_code == "SOURCE_VERSION_CHANGED"
-    assert response.observed_source_version == _source_version(sample)
+    assert captured.value.error_code == "SOURCE_VERSION_CHANGED"
+    assert captured.value.retryable is True
 
 
 def test_worker_diagnostic_does_not_expose_parser_exception_text(
@@ -183,15 +175,14 @@ def test_worker_diagnostic_does_not_expose_parser_exception_text(
     def secret_parser(*args: object, **kwargs: object) -> object:
         raise RuntimeError("SECRET_CELL_VALUE must not cross the worker contract")
 
-    response = parse_worker_request(
-        _request(sample, ".pdf", "python_pdf_text_v2", limits),
-        document_parser=secret_parser,
-    )
+    with pytest.raises(WorkerOperationError) as captured:
+        parse_worker_request(
+            _request(sample, ".pdf", "python_pdf_text_v2", limits),
+            document_parser=secret_parser,
+        )
 
-    assert response.status == "error"
-    assert response.error is not None
-    assert response.error.message == "document parser reported an error"
-    assert "SECRET_CELL_VALUE" not in response.model_dump_json()
+    assert captured.value.message == "document parser reported an error"
+    assert "SECRET_CELL_VALUE" not in str(captured.value)
 
 
 @pytest.mark.parametrize(
@@ -235,8 +226,6 @@ def test_strict_python_worker_parses_real_legacy_office_fixtures(
 
     response = parse_worker_request(_request(sample, file_type, backend, limits))
 
-    assert response.status == "ok"
-    assert response.error is None
     assert response.parser_backend == backend
     assert response.worker_lane == "python_document_process_v2"
     assert expected_text in response.content
@@ -279,7 +268,6 @@ def test_strict_xls_worker_enforces_sheet_row_and_column_budgets() -> None:
         _request(sample, ".xls", "python_office_v2", limits)
     )
 
-    assert response.status == "ok"
     assert response.truncated is True
     assert "Legacy XLS worker content" in response.content
     assert "Column beyond budget" not in response.content

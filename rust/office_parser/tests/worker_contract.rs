@@ -1,8 +1,5 @@
 use ai_daily_office_parser::parse_worker_request;
-use ai_daily_scanner_contract::{
-    Nullable, WorkerBackend, WorkerDiagnosticV1ErrorCode, WorkerLane, WorkerParseRequest,
-    WorkerParserLimits, WorkerStatus,
-};
+use ai_daily_worker_contract::{ParseRequest, ParserBackend, ParserLimits, WorkerLane};
 use std::fs::{self, File};
 use std::io::Write;
 use std::time::UNIX_EPOCH;
@@ -15,11 +12,9 @@ fn strict_worker_request_parses_bounded_xlsx() {
     write_minimal_xlsx(&path);
     let request = request_for(&path, source_version(&path), 1_000_000);
 
-    let response = parse_worker_request(&request);
+    let response = parse_worker_request(&request).expect("xlsx should parse");
 
-    assert_eq!(response.status, WorkerStatus::Ok);
-    assert_eq!(response.error, Nullable(None));
-    assert_eq!(response.parser_backend, WorkerBackend::RustXlsxBoundedV2);
+    assert_eq!(response.parser_backend, ParserBackend::RustXlsxBoundedV2);
     assert_eq!(response.worker_lane, WorkerLane::RustOfficeProcessV2);
     assert!(response.content.contains("XLSX strict worker"));
     assert_eq!(response.observed_source_version, source_version(&path));
@@ -35,18 +30,16 @@ fn strict_worker_request_parses_valid_docx_and_pptx() {
         let request = request_for_route(
             &path,
             extension,
-            WorkerBackend::RustOfficeOxideV2,
+            ParserBackend::RustOfficeOxideV2,
             source_version(&path),
             1_000_000,
         );
 
-        let response = parse_worker_request(&request);
+        let response = parse_worker_request(&request).expect("office file should parse");
 
-        assert_eq!(response.status, WorkerStatus::Ok, "{extension}");
-        assert_eq!(response.error, Nullable(None), "{extension}");
         assert_eq!(
             response.parser_backend,
-            WorkerBackend::RustOfficeOxideV2,
+            ParserBackend::RustOfficeOxideV2,
             "{extension}"
         );
         assert_eq!(
@@ -66,11 +59,8 @@ fn corrupt_xlsx_is_a_non_retryable_structured_failure() {
     fs::write(&path, b"not a zip").expect("corrupt fixture should be written");
     let request = request_for(&path, source_version(&path), 1_000_000);
 
-    let response = parse_worker_request(&request);
-
-    assert_eq!(response.status, WorkerStatus::Error);
-    let error = response.error.0.expect("error response needs a diagnostic");
-    assert_eq!(error.error_code, WorkerDiagnosticV1ErrorCode::ParserFailed);
+    let error = parse_worker_request(&request).expect_err("corrupt xlsx must fail");
+    assert_eq!(error.error_code, "PARSER_FAILED");
     assert!(!error.retryable);
 }
 
@@ -78,19 +68,16 @@ fn corrupt_xlsx_is_a_non_retryable_structured_failure() {
 fn corrupt_docx_and_pptx_are_non_retryable_structured_failures() {
     let directory = tempdir().expect("temporary root should exist");
     for (extension, backend) in [
-        (".docx", WorkerBackend::RustOfficeOxideV2),
-        (".pptx", WorkerBackend::RustOfficeOxideV2),
+        (".docx", ParserBackend::RustOfficeOxideV2),
+        (".pptx", ParserBackend::RustOfficeOxideV2),
     ] {
         let path = directory.path().join(format!("corrupt{extension}"));
         fs::write(&path, b"not a zip").expect("corrupt fixture should be written");
         let request =
             request_for_route(&path, extension, backend, source_version(&path), 1_000_000);
 
-        let response = parse_worker_request(&request);
-
-        assert_eq!(response.status, WorkerStatus::Error);
-        let error = response.error.0.expect("error response needs a diagnostic");
-        assert_eq!(error.error_code, WorkerDiagnosticV1ErrorCode::ParserFailed);
+        let error = parse_worker_request(&request).expect_err("corrupt office must fail");
+        assert_eq!(error.error_code, "PARSER_FAILED");
         assert!(!error.retryable, "{extension}");
     }
 }
@@ -102,10 +89,8 @@ fn worker_size_guard_runs_before_office_parser() {
     fs::write(&path, b"not a zip").expect("fixture should be written");
     let request = request_for(&path, source_version(&path), 8);
 
-    let response = parse_worker_request(&request);
-
-    let error = response.error.0.expect("size rejection needs a diagnostic");
-    assert_eq!(error.error_code, WorkerDiagnosticV1ErrorCode::FileTooLarge);
+    let error = parse_worker_request(&request).expect_err("size guard must reject");
+    assert_eq!(error.error_code, "FILE_TOO_LARGE");
 }
 
 #[test]
@@ -115,28 +100,20 @@ fn worker_rejects_a_stale_expected_source_version() {
     write_minimal_xlsx(&path);
     let request = request_for(&path, "mtime_ns=1:size=2".to_string(), 1_000_000);
 
-    let response = parse_worker_request(&request);
-
-    let error = response
-        .error
-        .0
-        .expect("source-version rejection needs a diagnostic");
-    assert_eq!(
-        error.error_code,
-        WorkerDiagnosticV1ErrorCode::SourceVersionChanged
-    );
-    assert_eq!(response.observed_source_version, source_version(&path));
+    let error = parse_worker_request(&request).expect_err("stale source must reject");
+    assert_eq!(error.error_code, "SOURCE_VERSION_CHANGED");
+    assert!(error.retryable);
 }
 
 fn request_for(
     path: &std::path::Path,
     expected_source_version: String,
     max_file_size_bytes: u64,
-) -> WorkerParseRequest {
+) -> ParseRequest {
     request_for_route(
         path,
         ".xlsx",
-        WorkerBackend::RustXlsxBoundedV2,
+        ParserBackend::RustXlsxBoundedV2,
         expected_source_version,
         max_file_size_bytes,
     )
@@ -145,20 +122,17 @@ fn request_for(
 fn request_for_route(
     path: &std::path::Path,
     file_type: &str,
-    backend: WorkerBackend,
+    backend: ParserBackend,
     expected_source_version: String,
     max_file_size_bytes: u64,
-) -> WorkerParseRequest {
-    WorkerParseRequest {
-        contract: "ai_daily_worker".to_string(),
-        protocol_version: 1,
-        request_id: "62222222-6222-4222-8222-622222222222".to_string(),
+) -> ParseRequest {
+    ParseRequest {
         file_path: path.to_string_lossy().to_string(),
         file_type: file_type.to_string(),
         backend,
         remaining_timeout_ms: 30_000,
         max_file_size_bytes,
-        parser_limits: WorkerParserLimits::Office {
+        parser_limits: ParserLimits::Office {
             excel_max_sheets: 2,
             excel_max_rows: 10,
             excel_max_columns: 12,

@@ -544,8 +544,7 @@ fn resolve_cache_lookup(
     }
     if same_source_and_guard {
         // spec Part 4: exact key absent but another identity row with the same
-        // source + guard exists → `parser_identity_changed` (v2). The v1 inspect
-        // projects it losslessly to `parser_profile_changed`.
+        // source + guard exists → `parser_identity_changed`.
         return CacheLookup::Miss(CacheMissReason::ParserIdentityChanged);
     }
     if same_identity {
@@ -553,8 +552,7 @@ fn resolve_cache_lookup(
     }
     if inventory_existed_before {
         // spec Part 4 step 4: inventory existed before this round but the exact
-        // entry is absent/evicted → `entry_absent_or_evicted` (v2). The v1
-        // inspect projects it to `new_file` + `CACHE_MISS_REASON_PROJECTED_AS_NEW_FILE`.
+        // entry is absent or evicted → `entry_absent_or_evicted`.
         CacheLookup::Miss(CacheMissReason::EntryAbsentOrEvicted)
     } else {
         CacheLookup::Miss(CacheMissReason::NewFile)
@@ -1290,7 +1288,7 @@ mod tests {
         let changed_route = RouteStackFingerprint::text("build-b").unwrap();
         let changed_backend_route = RouteStackFingerprint::modern_office(
             "build-a",
-            "ai_daily_worker_v1",
+            "ai_daily_worker_v2",
             "office-build",
             None,
         )
@@ -1342,30 +1340,30 @@ mod tests {
             .expect("normalized profile");
         let without_fallback = RouteStackFingerprint::modern_office(
             "engine-build",
-            "ai_daily_worker_v1",
+            "ai_daily_worker_v2",
             "office-build",
             None,
         )
         .unwrap();
         let with_fallback = RouteStackFingerprint::modern_office(
             "engine-build",
-            "ai_daily_worker_v1",
+            "ai_daily_worker_v2",
             "office-build",
-            Some(("ai_daily_worker_v1", "python-build")),
+            Some(("ai_daily_worker_v2", "python-build")),
         )
         .unwrap();
         let changed_python = RouteStackFingerprint::modern_office(
             "engine-build",
-            "ai_daily_worker_v1",
+            "ai_daily_worker_v2",
             "office-build",
-            Some(("ai_daily_worker_v1", "python-build-2")),
+            Some(("ai_daily_worker_v2", "python-build-2")),
         )
         .unwrap();
         let changed_contract = RouteStackFingerprint::modern_office(
             "engine-build",
-            "ai_daily_worker_v2",
+            "ai_daily_worker_v2_changed",
             "office-build",
-            Some(("ai_daily_worker_v1", "python-build")),
+            Some(("ai_daily_worker_v2", "python-build")),
         )
         .unwrap();
 
@@ -1615,7 +1613,6 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn parse_record(identity: &str, source_version: &str, profile_hash: &str) -> CacheWriteRecord {
-        let version = crate::version_response();
         CacheWriteRecord {
             file_identity: identity.to_string(),
             source_version: source_version.to_string(),
@@ -1628,8 +1625,8 @@ mod tests {
             worker_lane: "rust_core".to_string(),
             truncated: false,
             worker_contract_version: "ai_daily_context_v1".to_string(),
-            worker_version: version.engine_version,
-            worker_build: version.engine_build,
+            worker_version: crate::engine_version().to_string(),
+            worker_build: crate::ENGINE_BUILD_IDENTITY.to_string(),
         }
     }
 

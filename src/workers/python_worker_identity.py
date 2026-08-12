@@ -20,6 +20,7 @@ PYTHON_WORKER_BUILD_INPUTS = (
     "src/services/document_parser.py",
     "src/workers/contracts.py",
     "src/workers/document_parser_worker.py",
+    "src/workers/models.py",
     "src/workers/pdf_classifier.py",
     "src/workers/pdf_classifier_identity.py",
     "src/workers/python_worker_identity.py",
@@ -51,32 +52,6 @@ def _compute_python_worker_build() -> str:
 
 
 PYTHON_WORKER_BUILD = _compute_python_worker_build()
-
-
-def python_worker_version_payload() -> dict[str, object]:
-    """Return the identity embedded in the existing typed parse result."""
-    return {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "worker_kind": "python_document",
-        "worker_contract_version": WORKER_CONTRACT_VERSION,
-        "worker_version": PYTHON_WORKER_VERSION,
-        "worker_build": PYTHON_WORKER_BUILD,
-        "supported_backends": [
-            PYTHON_OFFICE_BACKEND,
-            PDF_TEXT_BACKEND,
-            PYTHON_SHAREPOINT_TEXT_BACKEND,
-        ],
-        "supported_extensions": [
-            ".doc",
-            ".docx",
-            ".pdf",
-            ".ppt",
-            ".pptx",
-            ".xls",
-            ".xlsx",
-        ],
-    }
 
 
 def python_worker_hello_payload() -> dict[str, object]:

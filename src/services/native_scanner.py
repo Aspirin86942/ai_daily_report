@@ -14,7 +14,7 @@ from typing import Any, Literal, Protocol
 from ..models.scanner_contract import (
     ContextEnvelope,
     DoctorResponse,
-    InspectRunResponseV2,
+    ScannerEvidence,
 )
 
 ReportMode = Literal["daily", "weekly", "monthly"]
@@ -41,7 +41,7 @@ class ScanRequest:
 @dataclass(frozen=True, slots=True)
 class ScanResult:
     envelope: ContextEnvelope
-    evidence: InspectRunResponseV2 | None
+    evidence: ScannerEvidence | None
 
     @classmethod
     def from_native(cls, value: object) -> "ScanResult":
@@ -56,7 +56,7 @@ class ScanResult:
         evidence = (
             None
             if raw_evidence is None
-            else InspectRunResponseV2.model_validate(raw_evidence)
+            else ScannerEvidence.model_validate(raw_evidence)
         )
         if envelope.scan_run_id is not None:
             if evidence is None or evidence.scan_run_id != envelope.scan_run_id:

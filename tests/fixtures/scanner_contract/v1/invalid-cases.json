@@ -3,7 +3,7 @@
   "cases": [
     {
       "name": "profile_null_optional_leaf",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "nullability"
@@ -14,7 +14,7 @@
     },
     {
       "name": "profile_unknown_infrastructure_leaf",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "unknown_field"
@@ -25,7 +25,7 @@
     },
     {
       "name": "profile_integer_boolean",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "type"
@@ -36,7 +36,7 @@
     },
     {
       "name": "profile_max_workers_below_limit",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound"
@@ -47,7 +47,7 @@
     },
     {
       "name": "profile_max_file_size_over_limit",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound"
@@ -58,7 +58,7 @@
     },
     {
       "name": "profile_timeout_over_limit",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound"
@@ -69,7 +69,7 @@
     },
     {
       "name": "profile_read_budget_over_limit",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound"
@@ -80,7 +80,7 @@
     },
     {
       "name": "profile_char_budget_over_limit",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound"
@@ -91,7 +91,7 @@
     },
     {
       "name": "profile_pdf_pages_over_limit",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound"
@@ -102,7 +102,7 @@
     },
     {
       "name": "profile_rows_over_limit",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound"
@@ -113,7 +113,7 @@
     },
     {
       "name": "profile_array_over_limit",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound"
@@ -382,7 +382,7 @@
     },
     {
       "name": "profile_string_over_limit",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound"
@@ -395,7 +395,7 @@
     },
     {
       "name": "profile_extension_invalid",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "enum"
@@ -408,7 +408,7 @@
     },
     {
       "name": "profile_fallback_backend_invalid",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "enum"
@@ -905,27 +905,6 @@
       }
     },
     {
-      "name": "transport_wrong_request_error",
-      "schema": "transport-error-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "status_invariant"
-      ],
-      "payload": {
-        "contract": "ai_daily_transport",
-        "protocol_version": 1,
-        "status": "error",
-        "error": {
-          "error_code": "INTERNAL_ERROR",
-          "message": "synthetic contract rejection",
-          "retryable": false,
-          "stage": "internal",
-          "file_path": null,
-          "backend": null
-        }
-      }
-    },
-    {
       "name": "doctor_invalid_check_status",
       "schema": "doctor-response-v1.schema.json",
       "validation_layer": "schema",
@@ -951,72 +930,8 @@
       }
     },
     {
-      "name": "inspect_relative_db_path",
-      "schema": "inspect-run-request-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "path"
-      ],
-      "payload": {
-        "contract": "ai_daily_context",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "scan_db_path": "relative\\scan.sqlite3",
-        "scan_run_id": 1,
-        "include_content": false
-      }
-    },
-    {
-      "name": "inspect_invalid_decision_action",
-      "schema": "inspect-run-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "enum"
-      ],
-      "payload": {
-        "contract": "ai_daily_context",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "scan_run_id": 1,
-        "context_run_id": 1,
-        "status": "ok",
-        "run_status": "success",
-        "summary": {
-          "source_file_count": 1,
-          "success_count": 1,
-          "timeout_count": 0,
-          "included_file_count": 1,
-          "omitted_file_count": 0,
-          "error_file_count": 0,
-          "input_chars": 12,
-          "output_chars": 12,
-          "total_duration_ms": 4,
-          "discovery_duration_ms": 1,
-          "parse_duration_ms": 2,
-          "compression_duration_ms": 1
-        },
-        "stage_metrics": [],
-        "extension_metrics": [],
-        "files": [],
-        "decisions": [
-          {
-            "relative_path": "work\\sample.xlsx",
-            "action": "include",
-            "reason": "synthetic",
-            "priority": 1,
-            "input_chars": 12,
-            "output_chars": 12,
-            "truncated": false,
-            "error_code": ""
-          }
-        ],
-        "warnings": [],
-        "error": null
-      }
-    },
-    {
       "name": "normalized_context_threshold_order",
-      "schema": "scanner-profile-normalized-v1.schema.json",
+      "schema": "normalized-scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound",
@@ -1114,7 +1029,7 @@
     },
     {
       "name": "normalized_context_global_less_than_file",
-      "schema": "scanner-profile-normalized-v1.schema.json",
+      "schema": "normalized-scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "bound",
@@ -1212,7 +1127,7 @@
     },
     {
       "name": "normalized_unknown_infrastructure_leaf",
-      "schema": "scanner-profile-normalized-v1.schema.json",
+      "schema": "normalized-scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "unknown_field"
@@ -1310,7 +1225,7 @@
     },
     {
       "name": "normalized_set_array_not_sorted",
-      "schema": "scanner-profile-normalized-v1.schema.json",
+      "schema": "normalized-scanner-settings.schema.json",
       "validation_layer": "semantic",
       "rule_classes": [
         "canonicalization"
@@ -1398,177 +1313,8 @@
       }
     },
     {
-      "name": "worker_parse_backend_limits_mismatch",
-      "schema": "worker-parse-request-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "enum",
-        "status_invariant"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "backend": "python_pdf_text_v2",
-        "remaining_timeout_ms": 30000,
-        "max_file_size_bytes": 52428800,
-        "parser_limits": {
-          "kind": "office",
-          "excel_max_sheets": 5,
-          "excel_max_rows": 50,
-          "excel_max_columns": 20,
-          "docx_max_paragraphs": 200,
-          "docx_max_tables": 20,
-          "docx_table_max_rows": 50,
-          "docx_table_max_cols": 12,
-          "pptx_max_slides": 50,
-          "pptx_include_notes": true,
-          "document_excerpt_max_chars": 6000
-        },
-        "expected_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_parse_relative_file_path",
-      "schema": "worker-parse-request-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "path"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "file_path": "relative\\sample.docx",
-        "file_type": ".docx",
-        "backend": "rust_office_oxide_v2",
-        "remaining_timeout_ms": 30000,
-        "max_file_size_bytes": 52428800,
-        "parser_limits": {
-          "kind": "office",
-          "excel_max_sheets": 5,
-          "excel_max_rows": 50,
-          "excel_max_columns": 20,
-          "docx_max_paragraphs": 200,
-          "docx_max_tables": 20,
-          "docx_table_max_rows": 50,
-          "docx_table_max_cols": 12,
-          "pptx_max_slides": 50,
-          "pptx_include_notes": true,
-          "document_excerpt_max_chars": 6000
-        },
-        "expected_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_parse_invalid_lane",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "enum"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "content": "synthetic",
-        "parser_backend": "rust_office_oxide_v2",
-        "worker_lane": "rust_core",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_parse_response_backend_mismatch",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "status_invariant"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "content": "synthetic",
-        "parser_backend": "rust_xlsx_bounded_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_version_invalid_kind",
-      "schema": "worker-version-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "enum"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "worker_kind": "python",
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "supported_backends": [
-          "rust_office_oxide_v2",
-          "rust_xlsx_bounded_v2"
-        ],
-        "supported_extensions": [
-          ".docx",
-          ".pptx",
-          ".xlsx"
-        ]
-      }
-    },
-    {
-      "name": "worker_version_backends_not_sorted",
-      "schema": "worker-version-response-v1.schema.json",
-      "validation_layer": "semantic",
-      "rule_classes": [
-        "canonicalization"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "worker_kind": "office",
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "supported_backends": [
-          "rust_xlsx_bounded_v2",
-          "rust_office_oxide_v2"
-        ],
-        "supported_extensions": [
-          ".docx",
-          ".pptx",
-          ".xlsx"
-        ]
-      }
-    },
-    {
       "name": "profile_integer_float",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "semantic",
       "rule_classes": [
         "type"
@@ -1579,7 +1325,7 @@
     },
     {
       "name": "profile_integer_numeric_string",
-      "schema": "scanner-profile-request-v1.schema.json",
+      "schema": "scanner-settings.schema.json",
       "validation_layer": "schema",
       "rule_classes": [
         "type"
@@ -1921,762 +1667,6 @@
         ],
         "warnings": [],
         "error": null
-      }
-    },
-    {
-      "name": "inspect_ok_without_run_status",
-      "schema": "inspect-run-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "status_invariant"
-      ],
-      "payload": {
-        "contract": "ai_daily_context",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "scan_run_id": 1,
-        "context_run_id": 1,
-        "status": "ok",
-        "run_status": null,
-        "summary": {
-          "source_file_count": 1,
-          "success_count": 1,
-          "timeout_count": 0,
-          "included_file_count": 1,
-          "omitted_file_count": 0,
-          "error_file_count": 0,
-          "input_chars": 12,
-          "output_chars": 12,
-          "total_duration_ms": 4,
-          "discovery_duration_ms": 1,
-          "parse_duration_ms": 2,
-          "compression_duration_ms": 1
-        },
-        "stage_metrics": [],
-        "extension_metrics": [],
-        "files": [],
-        "decisions": [
-          {
-            "relative_path": "work\\sample.xlsx",
-            "action": "keep",
-            "reason": "synthetic",
-            "priority": 1,
-            "input_chars": 12,
-            "output_chars": 12,
-            "truncated": false,
-            "error_code": ""
-          }
-        ],
-        "warnings": [],
-        "error": null
-      }
-    },
-    {
-      "name": "inspect_ok_with_error",
-      "schema": "inspect-run-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "status_invariant"
-      ],
-      "payload": {
-        "contract": "ai_daily_context",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "scan_run_id": 1,
-        "context_run_id": 1,
-        "status": "ok",
-        "run_status": "success",
-        "summary": {
-          "source_file_count": 1,
-          "success_count": 1,
-          "timeout_count": 0,
-          "included_file_count": 1,
-          "omitted_file_count": 0,
-          "error_file_count": 0,
-          "input_chars": 12,
-          "output_chars": 12,
-          "total_duration_ms": 4,
-          "discovery_duration_ms": 1,
-          "parse_duration_ms": 2,
-          "compression_duration_ms": 1
-        },
-        "stage_metrics": [],
-        "extension_metrics": [],
-        "files": [],
-        "decisions": [
-          {
-            "relative_path": "work\\sample.xlsx",
-            "action": "keep",
-            "reason": "synthetic",
-            "priority": 1,
-            "input_chars": 12,
-            "output_chars": 12,
-            "truncated": false,
-            "error_code": ""
-          }
-        ],
-        "warnings": [],
-        "error": {
-          "error_code": "INTERNAL_ERROR",
-          "message": "synthetic contract rejection",
-          "retryable": false,
-          "stage": "internal",
-          "file_path": null,
-          "backend": null
-        }
-      }
-    },
-    {
-      "name": "inspect_error_without_error",
-      "schema": "inspect-run-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "status_invariant"
-      ],
-      "payload": {
-        "contract": "ai_daily_context",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "scan_run_id": 1,
-        "context_run_id": 1,
-        "status": "error",
-        "run_status": null,
-        "summary": {
-          "source_file_count": 1,
-          "success_count": 1,
-          "timeout_count": 0,
-          "included_file_count": 1,
-          "omitted_file_count": 0,
-          "error_file_count": 0,
-          "input_chars": 12,
-          "output_chars": 12,
-          "total_duration_ms": 4,
-          "discovery_duration_ms": 1,
-          "parse_duration_ms": 2,
-          "compression_duration_ms": 1
-        },
-        "stage_metrics": [],
-        "extension_metrics": [],
-        "files": [],
-        "decisions": [
-          {
-            "relative_path": "work\\sample.xlsx",
-            "action": "keep",
-            "reason": "synthetic",
-            "priority": 1,
-            "input_chars": 12,
-            "output_chars": 12,
-            "truncated": false,
-            "error_code": ""
-          }
-        ],
-        "warnings": [],
-        "error": null
-      }
-    },
-    {
-      "name": "worker_parse_xlsx_wrong_backend",
-      "schema": "worker-parse-request-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "route"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.xlsx",
-        "file_type": ".xlsx",
-        "backend": "rust_office_oxide_v2",
-        "remaining_timeout_ms": 30000,
-        "max_file_size_bytes": 52428800,
-        "parser_limits": {
-          "kind": "office",
-          "excel_max_sheets": 5,
-          "excel_max_rows": 50,
-          "excel_max_columns": 20,
-          "docx_max_paragraphs": 200,
-          "docx_max_tables": 20,
-          "docx_table_max_rows": 50,
-          "docx_table_max_cols": 12,
-          "pptx_max_slides": 50,
-          "pptx_include_notes": true,
-          "document_excerpt_max_chars": 6000
-        },
-        "expected_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_parse_xlsx_wrong_lane",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "route"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.xlsx",
-        "file_type": ".xlsx",
-        "content": "synthetic",
-        "parser_backend": "rust_xlsx_bounded_v2",
-        "worker_lane": "python_document_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_parse_pdf_wrong_lane",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "route"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.pdf",
-        "file_type": ".pdf",
-        "content": "synthetic",
-        "parser_backend": "python_pdf_text_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_parse_ok_with_error",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "status_invariant"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "content": "synthetic",
-        "parser_backend": "rust_office_oxide_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": {
-          "error_code": "INTERNAL_ERROR",
-          "message": "synthetic contract rejection",
-          "retryable": false,
-          "stage": "internal",
-          "file_path": null,
-          "backend": null
-        },
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_parse_error_with_content",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "status_invariant"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "error",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "content": "synthetic",
-        "parser_backend": "rust_office_oxide_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": {
-          "error_code": "INTERNAL_ERROR",
-          "message": "synthetic contract rejection",
-          "retryable": false,
-          "stage": "internal",
-          "file_path": null,
-          "backend": null
-        },
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_parse_error_without_error",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "status_invariant"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "error",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "content": "",
-        "parser_backend": "rust_office_oxide_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      }
-    },
-    {
-      "name": "worker_response_request_id_mismatch",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "semantic",
-      "rule_classes": [
-        "request_id",
-        "echo"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "62222222-6222-4222-8222-622222222222",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "content": "synthetic",
-        "parser_backend": "rust_office_oxide_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      },
-      "related_payloads": [
-        {
-          "role": "request",
-          "schema": "worker-parse-request-v1.schema.json",
-          "payload": {
-            "contract": "ai_daily_worker",
-            "protocol_version": 1,
-            "request_id": "51111111-5111-4111-8111-511111111111",
-            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-            "file_type": ".docx",
-            "backend": "rust_office_oxide_v2",
-            "remaining_timeout_ms": 30000,
-            "max_file_size_bytes": 52428800,
-            "parser_limits": {
-              "kind": "office",
-              "excel_max_sheets": 5,
-              "excel_max_rows": 50,
-              "excel_max_columns": 20,
-              "docx_max_paragraphs": 200,
-              "docx_max_tables": 20,
-              "docx_table_max_rows": 50,
-              "docx_table_max_cols": 12,
-              "pptx_max_slides": 50,
-              "pptx_include_notes": true,
-              "document_excerpt_max_chars": 6000
-            },
-            "expected_source_version": "mtime_ns=1:size=1"
-          }
-        }
-      ]
-    },
-    {
-      "name": "worker_response_path_mismatch",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "semantic",
-      "rule_classes": [
-        "path",
-        "echo"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\other.docx",
-        "file_type": ".docx",
-        "content": "synthetic",
-        "parser_backend": "rust_office_oxide_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      },
-      "related_payloads": [
-        {
-          "role": "request",
-          "schema": "worker-parse-request-v1.schema.json",
-          "payload": {
-            "contract": "ai_daily_worker",
-            "protocol_version": 1,
-            "request_id": "51111111-5111-4111-8111-511111111111",
-            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-            "file_type": ".docx",
-            "backend": "rust_office_oxide_v2",
-            "remaining_timeout_ms": 30000,
-            "max_file_size_bytes": 52428800,
-            "parser_limits": {
-              "kind": "office",
-              "excel_max_sheets": 5,
-              "excel_max_rows": 50,
-              "excel_max_columns": 20,
-              "docx_max_paragraphs": 200,
-              "docx_max_tables": 20,
-              "docx_table_max_rows": 50,
-              "docx_table_max_cols": 12,
-              "pptx_max_slides": 50,
-              "pptx_include_notes": true,
-              "document_excerpt_max_chars": 6000
-            },
-            "expected_source_version": "mtime_ns=1:size=1"
-          }
-        }
-      ]
-    },
-    {
-      "name": "worker_response_file_type_mismatch",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "semantic",
-      "rule_classes": [
-        "route",
-        "echo"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".pptx",
-        "content": "synthetic",
-        "parser_backend": "rust_office_oxide_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      },
-      "related_payloads": [
-        {
-          "role": "request",
-          "schema": "worker-parse-request-v1.schema.json",
-          "payload": {
-            "contract": "ai_daily_worker",
-            "protocol_version": 1,
-            "request_id": "51111111-5111-4111-8111-511111111111",
-            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-            "file_type": ".docx",
-            "backend": "rust_office_oxide_v2",
-            "remaining_timeout_ms": 30000,
-            "max_file_size_bytes": 52428800,
-            "parser_limits": {
-              "kind": "office",
-              "excel_max_sheets": 5,
-              "excel_max_rows": 50,
-              "excel_max_columns": 20,
-              "docx_max_paragraphs": 200,
-              "docx_max_tables": 20,
-              "docx_table_max_rows": 50,
-              "docx_table_max_cols": 12,
-              "pptx_max_slides": 50,
-              "pptx_include_notes": true,
-              "document_excerpt_max_chars": 6000
-            },
-            "expected_source_version": "mtime_ns=1:size=1"
-          }
-        }
-      ]
-    },
-    {
-      "name": "worker_response_backend_echo_mismatch",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "semantic",
-      "rule_classes": [
-        "route",
-        "echo"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "content": "synthetic",
-        "parser_backend": "python_office_v2",
-        "worker_lane": "python_document_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-python-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      },
-      "related_payloads": [
-        {
-          "role": "request",
-          "schema": "worker-parse-request-v1.schema.json",
-          "payload": {
-            "contract": "ai_daily_worker",
-            "protocol_version": 1,
-            "request_id": "51111111-5111-4111-8111-511111111111",
-            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-            "file_type": ".docx",
-            "backend": "rust_office_oxide_v2",
-            "remaining_timeout_ms": 30000,
-            "max_file_size_bytes": 52428800,
-            "parser_limits": {
-              "kind": "office",
-              "excel_max_sheets": 5,
-              "excel_max_rows": 50,
-              "excel_max_columns": 20,
-              "docx_max_paragraphs": 200,
-              "docx_max_tables": 20,
-              "docx_table_max_rows": 50,
-              "docx_table_max_cols": 12,
-              "pptx_max_slides": 50,
-              "pptx_include_notes": true,
-              "document_excerpt_max_chars": 6000
-            },
-            "expected_source_version": "mtime_ns=1:size=1"
-          }
-        }
-      ]
-    },
-    {
-      "name": "worker_response_source_version_mismatch",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "semantic",
-      "rule_classes": [
-        "source_version",
-        "echo"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "content": "synthetic",
-        "parser_backend": "rust_office_oxide_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=2:size=1"
-      },
-      "related_payloads": [
-        {
-          "role": "request",
-          "schema": "worker-parse-request-v1.schema.json",
-          "payload": {
-            "contract": "ai_daily_worker",
-            "protocol_version": 1,
-            "request_id": "51111111-5111-4111-8111-511111111111",
-            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-            "file_type": ".docx",
-            "backend": "rust_office_oxide_v2",
-            "remaining_timeout_ms": 30000,
-            "max_file_size_bytes": 52428800,
-            "parser_limits": {
-              "kind": "office",
-              "excel_max_sheets": 5,
-              "excel_max_rows": 50,
-              "excel_max_columns": 20,
-              "docx_max_paragraphs": 200,
-              "docx_max_tables": 20,
-              "docx_table_max_rows": 50,
-              "docx_table_max_cols": 12,
-              "pptx_max_slides": 50,
-              "pptx_include_notes": true,
-              "document_excerpt_max_chars": 6000
-            },
-            "expected_source_version": "mtime_ns=1:size=1"
-          }
-        }
-      ]
-    },
-    {
-      "name": "worker_response_handshake_build_mismatch",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "semantic",
-      "rule_classes": [
-        "worker_identity",
-        "echo"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "51111111-5111-4111-8111-511111111111",
-        "status": "ok",
-        "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-        "file_type": ".docx",
-        "content": "synthetic",
-        "parser_backend": "rust_office_oxide_v2",
-        "worker_lane": "rust_office_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": null,
-        "duration_ms": 1,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "changed-office-worker-build-v1",
-        "observed_source_version": "mtime_ns=1:size=1"
-      },
-      "related_payloads": [
-        {
-          "role": "request",
-          "schema": "worker-parse-request-v1.schema.json",
-          "payload": {
-            "contract": "ai_daily_worker",
-            "protocol_version": 1,
-            "request_id": "51111111-5111-4111-8111-511111111111",
-            "file_path": "C:\\scanner-fixtures\\work\\sample.docx",
-            "file_type": ".docx",
-            "backend": "rust_office_oxide_v2",
-            "remaining_timeout_ms": 30000,
-            "max_file_size_bytes": 52428800,
-            "parser_limits": {
-              "kind": "office",
-              "excel_max_sheets": 5,
-              "excel_max_rows": 50,
-              "excel_max_columns": 20,
-              "docx_max_paragraphs": 200,
-              "docx_max_tables": 20,
-              "docx_table_max_rows": 50,
-              "docx_table_max_cols": 12,
-              "pptx_max_slides": 50,
-              "pptx_include_notes": true,
-              "document_excerpt_max_chars": 6000
-            },
-            "expected_source_version": "mtime_ns=1:size=1"
-          }
-        },
-        {
-          "role": "handshake",
-          "schema": "worker-version-response-v1.schema.json",
-          "payload": {
-            "contract": "ai_daily_worker",
-            "protocol_version": 1,
-            "worker_kind": "office",
-            "worker_contract_version": "ai_daily_worker_v1",
-            "worker_version": "0.1.0",
-            "worker_build": "fixture-office-worker-build-v1",
-            "supported_backends": [
-              "rust_office_oxide_v2",
-              "rust_xlsx_bounded_v2"
-            ],
-            "supported_extensions": [
-              ".docx",
-              ".pptx",
-              ".xlsx"
-            ]
-          }
-        }
-      ]
-    },
-    {
-      "name": "transport_error_scanner_side_code_rejected",
-      "schema": "transport-error-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "enum"
-      ],
-      "payload": {
-        "contract": "ai_daily_transport",
-        "protocol_version": 1,
-        "status": "error",
-        "error": {
-          "error_code": "STAGE_DEADLINE_EXHAUSTED",
-          "message": "scanner-only code must not enter the transport wire",
-          "retryable": true,
-          "stage": "parse",
-          "file_path": null,
-          "backend": null
-        }
-      }
-    },
-    {
-      "name": "worker_parse_scanner_side_error_code_rejected",
-      "schema": "worker-parse-response-v1.schema.json",
-      "validation_layer": "schema",
-      "rule_classes": [
-        "enum"
-      ],
-      "payload": {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "34444444-3444-4444-8444-344444444444",
-        "status": "error",
-        "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
-        "file_type": ".doc",
-        "content": "",
-        "parser_backend": "python_sharepoint_text_v2",
-        "worker_lane": "python_document_process_v2",
-        "truncated": false,
-        "warnings": [],
-        "error": {
-          "error_code": "STAGE_DEADLINE_EXHAUSTED",
-          "message": "scanner-only code must not enter the worker v1 wire",
-          "retryable": true,
-          "stage": "parse",
-          "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
-          "backend": "python_sharepoint_text_v2"
-        },
-        "duration_ms": 3,
-        "worker_contract_version": "ai_daily_worker_v1",
-        "worker_version": "0.1.0",
-        "worker_build": "fixture-python-worker-build-v1",
-        "observed_source_version": "mtime_ns=4000000001:size=1024"
       }
     }
   ]

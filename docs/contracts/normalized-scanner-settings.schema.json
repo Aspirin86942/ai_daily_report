@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "scanner-profile-normalized-v1.schema.json",
+  "$id": "normalized-scanner-settings.schema.json",
   "title": "NormalizedScannerSettings",
   "type": "object",
   "additionalProperties": false,

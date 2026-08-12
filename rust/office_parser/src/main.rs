@@ -1,10 +1,9 @@
 use std::io::{self, BufRead, Write};
 
 use ai_daily_office_parser::{parse_worker_request, worker_hello};
-use ai_daily_scanner_contract::{Validate, WorkerParseRequest};
 use ai_daily_worker_contract::{
-    WorkerDiagnostic, WorkerOperation, WorkerRequest, WorkerResponse, WorkerResponseStatus,
-    CONTRACT, PROTOCOL_VERSION,
+    ParseRequest, WorkerDiagnostic, WorkerOperation, WorkerRequest, WorkerResponse,
+    WorkerResponseStatus, CONTRACT, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 
@@ -46,31 +45,37 @@ fn worker_session() -> i32 {
             }
             continue;
         }
-        let parse_request =
-            match serde_json::from_value::<WorkerParseRequest>(request.payload.clone())
-                .map_err(|error| error.to_string())
-                .and_then(|request| request.validate().map(|()| request))
-            {
-                Ok(parse_request) if parse_request.request_id == request.request_id => {
-                    parse_request
+        let parse_request = match serde_json::from_value::<ParseRequest>(request.payload.clone())
+            .map_err(|error| error.to_string())
+            .and_then(|request| request.validate().map(|()| request))
+        {
+            Ok(parse_request) => parse_request,
+            _ => {
+                if emit(&session_error(&request, "INVALID_REQUEST", false)).is_err() {
+                    return 1;
                 }
-                _ => {
-                    if emit(&session_error(&request, "INVALID_REQUEST", false)).is_err() {
-                        return 1;
-                    }
-                    return 2;
-                }
-            };
-        let parsed = parse_worker_request(&parse_request);
-        let result = serde_json::to_value(parsed).expect("parse response must serialize");
-        let response = WorkerResponse {
-            contract: CONTRACT.to_string(),
-            protocol_version: PROTOCOL_VERSION,
-            request_id: request.request_id,
-            operation: request.operation,
-            status: WorkerResponseStatus::Ok,
-            result: Some(result),
-            error: None,
+                return 2;
+            }
+        };
+        let response = match parse_worker_request(&parse_request) {
+            Ok(parsed) => WorkerResponse {
+                contract: CONTRACT.to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                request_id: request.request_id,
+                operation: request.operation,
+                status: WorkerResponseStatus::Ok,
+                result: Some(serde_json::to_value(parsed).expect("parse result must serialize")),
+                error: None,
+            },
+            Err(error) => WorkerResponse {
+                contract: CONTRACT.to_string(),
+                protocol_version: PROTOCOL_VERSION,
+                request_id: request.request_id,
+                operation: request.operation,
+                status: WorkerResponseStatus::Error,
+                result: None,
+                error: Some(*error),
+            },
         };
         if emit(&response).is_err() {
             return 1;

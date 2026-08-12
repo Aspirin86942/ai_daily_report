@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "scanner-profile-request-v1.schema.json",
+  "$id": "scanner-settings.schema.json",
   "title": "ScannerSettings",
   "type": "object",
   "additionalProperties": false,

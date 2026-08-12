@@ -269,7 +269,7 @@ impl WaveExecutor {
 struct ClassificationTask {
     file: DiscoveredFileOut,
     guard: SourceGuardV2,
-    request: ai_daily_scanner_contract::PdfClassifierRequestV1,
+    request: crate::parsers::classifier::ClassifyOperation,
     /// The classifier's own per-file timeout (capped by the remaining work
     /// deadline at admission); the wave dispatch re-caps it by the remaining
     /// work deadline at dispatch time.
@@ -1434,14 +1434,14 @@ impl BudgetedContextScheduler {
                     tasks.push(ClassificationTask {
                         file: (*file).clone(),
                         guard,
-                        request: ai_daily_scanner_contract::PdfClassifierRequestV1 {
-                            contract: "ai_daily_pdf_classifier".to_string(),
-                            protocol_version: 1,
+                        request: crate::parsers::classifier::ClassifyOperation {
                             request_id: next_request_id(),
-                            file_path: file.path.clone(),
-                            source_version: file.source_version.clone(),
-                            max_pages: profile.parse.pdf.max_pages,
-                            policy_version: profile.classifier_policy_version.clone(),
+                            payload: ai_daily_worker_contract::ClassifyRequest {
+                                file_path: file.path.clone(),
+                                source_version: file.source_version.clone(),
+                                max_pages: profile.parse.pdf.max_pages,
+                                policy_version: profile.classifier_policy_version.clone(),
+                            },
                         },
                         own_timeout_ms: timeout_ms,
                         classifier_profile_hash: classifier_profile_hash.to_string(),
@@ -1527,33 +1527,32 @@ impl BudgetedContextScheduler {
             let classification = match execution.outcome {
                 Ok(result) => {
                     let status = match result.status {
-                        ai_daily_scanner_contract::PdfClassifierResultStatus::TextInParseWindow => {
+                        ai_daily_worker_contract::ClassifyStatus::TextInParseWindow => {
                             PdfClassificationStatus::TextInParseWindow
                         }
-                        ai_daily_scanner_contract::PdfClassifierResultStatus::NoTextInParseWindow => {
+                        ai_daily_worker_contract::ClassifyStatus::NoTextInParseWindow => {
                             PdfClassificationStatus::NoTextInParseWindow
                         }
-                        ai_daily_scanner_contract::PdfClassifierResultStatus::Unknown => {
+                        ai_daily_worker_contract::ClassifyStatus::Unknown => {
                             PdfClassificationStatus::Unknown
                         }
-                        ai_daily_scanner_contract::PdfClassifierResultStatus::Error => {
+                        ai_daily_worker_contract::ClassifyStatus::Error => {
                             PdfClassificationStatus::Error
                         }
                     };
-                    let error_code = result.diagnostic.0.as_ref().map(|diag| match diag.error_code {
-                        ai_daily_scanner_contract::PythonOperationErrorCode::SourceVersionChanged => {
-                            "SOURCE_VERSION_CHANGED".to_string()
-                        }
-                        ai_daily_scanner_contract::PythonOperationErrorCode::ParserTimeout => {
-                            "PARSER_TIMEOUT".to_string()
-                        }
+                    let error_code = result.diagnostic.as_ref().map(|diagnostic| match diagnostic
+                        .error_code
+                        .as_str()
+                    {
+                        "SOURCE_VERSION_CHANGED" => "SOURCE_VERSION_CHANGED".to_string(),
+                        "PARSER_TIMEOUT" => "PARSER_TIMEOUT".to_string(),
                         _ => "PARSER_FAILED".to_string(),
                     });
                     PdfClassificationResult {
                         file_identity: identity.clone(),
                         status,
-                        page_count: result.page_count.0,
-                        result_examined_pages: result.result_examined_pages.0,
+                        page_count: result.page_count,
+                        result_examined_pages: result.result_examined_pages,
                         error_code,
                     }
                 }
@@ -1696,7 +1695,7 @@ impl BudgetedContextScheduler {
                 self.stored_workers
                     .office_contract
                     .clone()
-                    .unwrap_or_else(|| "ai_daily_worker_v1".to_string()),
+                    .unwrap_or_else(|| "ai_daily_worker_v2".to_string()),
                 self.stored_workers
                     .office_version
                     .clone()
@@ -1710,7 +1709,7 @@ impl BudgetedContextScheduler {
                 self.stored_workers
                     .python_contract
                     .clone()
-                    .unwrap_or_else(|| "ai_daily_worker_v1".to_string()),
+                    .unwrap_or_else(|| "ai_daily_worker_v2".to_string()),
                 self.stored_workers
                     .python_version
                     .clone()

@@ -84,7 +84,7 @@ pub struct PdfClassificationProvenanceV1 {
 pub struct ArtifactFileRow {
     pub file_identity: String,
     pub relative_path: String,
-    /// Frozen worker-v1 legacy source version (`mtime_ns=...:size=...`).
+    /// Frozen source version retained for artifact identity (`mtime_ns=...:size=...`).
     pub legacy_source_version: String,
     pub source_guard_kind: Option<String>,
     pub source_guard_sha256: Option<String>,

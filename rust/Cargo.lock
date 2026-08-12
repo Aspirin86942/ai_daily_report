@@ -24,7 +24,6 @@ name = "ai-daily-office-parser"
 version = "0.1.0"
 dependencies = [
  "ai-daily-discovery",
- "ai-daily-scanner-contract",
  "ai-daily-worker-contract",
  "office_oxide",
  "quick-xml",

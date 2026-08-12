@@ -1,4 +1,4 @@
-//! Scanner evidence normalization, persistence DTO assembly, and inspect snapshots.
+//! Scanner evidence normalization, persistence DTO assembly, and stored snapshots.
 
 use ai_daily_scanner_contract::{
     AuditWorkerLane, ContextAction, ContextDecision, ContextProfile, ContextSummary, Diagnostic,
@@ -14,8 +14,6 @@ use thiserror::Error;
 
 use crate::artifact::PdfClassificationProvenanceV1;
 use crate::store::{sha256_hex, FileResultRecord, InventoryRecord};
-
-pub const SANITIZED_FIXTURE_APPLICATION_ID: i64 = 0x4149_4446;
 
 pub fn extension_metrics(
     inventory: &[InventoryRecord],
@@ -168,13 +166,12 @@ pub fn stage_metrics(input: StageMetricInputs) -> Vec<StageMetric> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InspectSnapshot {
+pub struct EvidenceSnapshot {
     pub context_run_id: Option<u64>,
     pub run_status: RunStatus,
     pub summary: ContextSummary,
     pub stage_metrics: Vec<StageMetric>,
     pub extension_metrics: Vec<ExtensionMetric>,
-    pub files: Vec<FileAudit>,
     pub decisions: Vec<ContextDecision>,
     pub warnings: Vec<Diagnostic>,
     pub artifact_id: Option<u64>,
@@ -217,8 +214,7 @@ pub struct FileAuditV2Source {
     pub failure_class: String,
     pub fallback_backend: String,
     pub fallback_reason_code: String,
-    /// `None` only for historical full-v2 rows created before the execution
-    /// child table amendment. V1 inspect remains usable; v2 fails closed.
+    /// Missing provenance fails closed when current evidence is assembled.
     pub parse_transport: Option<ParseTransport>,
     pub parse_attempt_count: Option<u64>,
     pub final_diagnostic: Option<Diagnostic>,
@@ -233,7 +229,7 @@ pub struct FileAuditV2Source {
 /// current run legitimately reports 0 for every plan/execution count because
 /// the scheduler did not run. The two `*_all_hit` nullables follow the
 /// `lookup_count=0 -> null` rule.
-pub fn assemble_execution_metrics_v2(snapshot: &InspectSnapshot) -> ExecutionMetricsV2 {
+pub fn assemble_execution_metrics_v2(snapshot: &EvidenceSnapshot) -> ExecutionMetricsV2 {
     let discovery_observed_file_count = snapshot
         .stage_metrics
         .iter()
@@ -390,32 +386,30 @@ pub fn assemble_execution_metrics_v2(snapshot: &InspectSnapshot) -> ExecutionMet
 }
 
 #[derive(Debug, Error)]
-pub enum InspectAuditError {
+pub enum EvidenceAuditError {
     #[error("scanner run was not found")]
     RunNotFound,
     #[error("persisted scanner run is corrupt: {0}")]
     RunCorrupt(String),
-    #[error("inspect content is restricted to sanitized fixture databases")]
-    ContentForbidden,
     #[error("scanner database could not be read")]
     Sql(#[source] rusqlite::Error),
 }
 
 #[derive(Debug)]
-pub struct InspectLoadError {
-    pub error: InspectAuditError,
+pub struct EvidenceLoadError {
+    pub error: EvidenceAuditError,
     pub run_status: Option<RunStatus>,
 }
 
-impl InspectLoadError {
-    fn before_status(error: InspectAuditError) -> Self {
+impl EvidenceLoadError {
+    fn before_status(error: EvidenceAuditError) -> Self {
         Self {
             error,
             run_status: None,
         }
     }
 
-    fn after_status(error: InspectAuditError, run_status: RunStatus) -> Self {
+    fn after_status(error: EvidenceAuditError, run_status: RunStatus) -> Self {
         Self {
             error,
             run_status: Some(run_status),
@@ -423,13 +417,12 @@ impl InspectLoadError {
     }
 }
 
-pub(crate) fn load_inspect_snapshot(
+pub(crate) fn load_evidence_snapshot(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-    include_content: bool,
-) -> Result<InspectSnapshot, InspectLoadError> {
-    type InspectRunRow = (String, String, String, String, Option<String>);
-    let run_row: Option<InspectRunRow> = transaction
+) -> Result<EvidenceSnapshot, EvidenceLoadError> {
+    type EvidenceRunRow = (String, String, String, String, Option<String>);
+    let run_row: Option<EvidenceRunRow> = transaction
         .query_row(
             "SELECT request_id, canonical_request_json, request_hash, status,
                     final_envelope_metadata_json
@@ -446,38 +439,24 @@ pub(crate) fn load_inspect_snapshot(
             },
         )
         .optional()
-        .map_err(|error| InspectLoadError::before_status(InspectAuditError::Sql(error)))?;
+        .map_err(|error| EvidenceLoadError::before_status(EvidenceAuditError::Sql(error)))?;
     let (
         stored_request_id,
         canonical_request_json,
         request_hash,
         run_status_text,
         envelope_metadata_json,
-    ) = run_row.ok_or_else(|| InspectLoadError::before_status(InspectAuditError::RunNotFound))?;
+    ) = run_row.ok_or_else(|| EvidenceLoadError::before_status(EvidenceAuditError::RunNotFound))?;
     if crate::store::cache::domain_hash(b"request-v1\0", canonical_request_json.as_bytes())
         != request_hash
     {
-        return Err(InspectLoadError::before_status(
-            InspectAuditError::RunCorrupt("stored logical request hash is invalid".to_string()),
+        return Err(EvidenceLoadError::before_status(
+            EvidenceAuditError::RunCorrupt("stored logical request hash is invalid".to_string()),
         ));
     }
     let run_status = parse_run_status(&run_status_text).map_err(|message| {
-        InspectLoadError::before_status(InspectAuditError::RunCorrupt(message))
+        EvidenceLoadError::before_status(EvidenceAuditError::RunCorrupt(message))
     })?;
-
-    if include_content {
-        let application_id: i64 = transaction
-            .query_row("PRAGMA application_id", [], |row| row.get(0))
-            .map_err(|error| {
-                InspectLoadError::after_status(InspectAuditError::Sql(error), run_status)
-            })?;
-        if application_id != SANITIZED_FIXTURE_APPLICATION_ID {
-            return Err(InspectLoadError::after_status(
-                InspectAuditError::ContentForbidden,
-                run_status,
-            ));
-        }
-    }
 
     // spec Part 5.1: the full ContextEnvelope is REBUILT from the body-free
     // final_envelope_metadata_json + summary + artifact (never from a
@@ -485,14 +464,14 @@ pub(crate) fn load_inspect_snapshot(
     let envelope = match (run_status, envelope_metadata_json) {
         (RunStatus::Running | RunStatus::Abandoned, None) => None,
         (RunStatus::Running | RunStatus::Abandoned, Some(_)) => {
-            return Err(InspectLoadError::after_status(
-                InspectAuditError::RunCorrupt("nonterminal run has a final envelope".to_string()),
+            return Err(EvidenceLoadError::after_status(
+                EvidenceAuditError::RunCorrupt("nonterminal run has a final envelope".to_string()),
                 run_status,
             ));
         }
         (_, None) => {
-            return Err(InspectLoadError::after_status(
-                InspectAuditError::RunCorrupt(
+            return Err(EvidenceLoadError::after_status(
+                EvidenceAuditError::RunCorrupt(
                     "terminal run has no final envelope metadata".to_string(),
                 ),
                 run_status,
@@ -505,8 +484,8 @@ pub(crate) fn load_inspect_snapshot(
                 &metadata_json,
             )
             .map_err(|error| {
-                InspectLoadError::after_status(
-                    InspectAuditError::RunCorrupt(error.to_string()),
+                EvidenceLoadError::after_status(
+                    EvidenceAuditError::RunCorrupt(error.to_string()),
                     run_status,
                 )
             })?;
@@ -520,8 +499,8 @@ pub(crate) fn load_inspect_snapshot(
                 || rebuilt.request_id != stored_request_id
                 || rebuilt.scan_run_id.0 != Some(scan_run_id as u64)
             {
-                return Err(InspectLoadError::after_status(
-                    InspectAuditError::RunCorrupt(
+                return Err(EvidenceLoadError::after_status(
+                    EvidenceAuditError::RunCorrupt(
                         "rebuilt envelope does not match its run".to_string(),
                     ),
                     run_status,
@@ -531,17 +510,17 @@ pub(crate) fn load_inspect_snapshot(
         }
     };
     let context = load_context_row(transaction, scan_run_id)
-        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+        .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
     let stage_metrics = load_stage_metrics(transaction, scan_run_id)
-        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+        .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
     let extension_metrics = load_extension_metrics(transaction, scan_run_id)
-        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+        .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
     let files = load_file_audits(transaction, scan_run_id)
-        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+        .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
     let persisted_decisions = load_context_decisions(transaction, scan_run_id)
-        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+        .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
     let (warnings, persisted_error) = load_run_diagnostics(transaction, scan_run_id)
-        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+        .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
 
     let (context_run_id, summary) = match (&context, &envelope) {
         (Some(context), Some(envelope)) => {
@@ -555,8 +534,8 @@ pub(crate) fn load_inspect_snapshot(
                 // mismatch is corrupt.
                 || persisted_error != envelope.error.0
             {
-                return Err(InspectLoadError::after_status(
-                    InspectAuditError::RunCorrupt(
+                return Err(EvidenceLoadError::after_status(
+                    EvidenceAuditError::RunCorrupt(
                         "context row and final envelope disagree".to_string(),
                     ),
                     run_status,
@@ -569,7 +548,7 @@ pub(crate) fn load_inspect_snapshot(
                 &files,
                 &persisted_decisions,
             )
-            .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+            .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
             (Some(context.context_run_id), context.summary.clone())
         }
         (None, Some(envelope)) if run_status == RunStatus::Error => {
@@ -577,16 +556,16 @@ pub(crate) fn load_inspect_snapshot(
                 || !files.is_empty()
                 || !persisted_decisions.is_empty()
             {
-                return Err(InspectLoadError::after_status(
-                    InspectAuditError::RunCorrupt(
+                return Err(EvidenceLoadError::after_status(
+                    EvidenceAuditError::RunCorrupt(
                         "error envelope has unexpected context rows".to_string(),
                     ),
                     run_status,
                 ));
             }
             if warnings != envelope.warnings || persisted_error != envelope.error.0 {
-                return Err(InspectLoadError::after_status(
-                    InspectAuditError::RunCorrupt(
+                return Err(EvidenceLoadError::after_status(
+                    EvidenceAuditError::RunCorrupt(
                         "run warnings and error envelope disagree".to_string(),
                     ),
                     run_status,
@@ -602,8 +581,8 @@ pub(crate) fn load_inspect_snapshot(
                 || !warnings.is_empty()
                 || persisted_error.is_some()
             {
-                return Err(InspectLoadError::after_status(
-                    InspectAuditError::RunCorrupt(
+                return Err(EvidenceLoadError::after_status(
+                    EvidenceAuditError::RunCorrupt(
                         "nonterminal run exposes committed final rows".to_string(),
                     ),
                     run_status,
@@ -612,8 +591,8 @@ pub(crate) fn load_inspect_snapshot(
             (None, empty_context_summary())
         }
         _ => {
-            return Err(InspectLoadError::after_status(
-                InspectAuditError::RunCorrupt(
+            return Err(EvidenceLoadError::after_status(
+                EvidenceAuditError::RunCorrupt(
                     "run status, envelope, and context rows disagree".to_string(),
                 ),
                 run_status,
@@ -629,10 +608,10 @@ pub(crate) fn load_inspect_snapshot(
         Some(_) => {
             let (artifact_id, reused_from, snapshot_hit) =
                 load_context_run_provenance(transaction, scan_run_id)
-                    .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+                    .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
             if artifact_id.is_none() && !matches!(run_status, RunStatus::Error) {
-                return Err(InspectLoadError::after_status(
-                    InspectAuditError::RunCorrupt(
+                return Err(EvidenceLoadError::after_status(
+                    EvidenceAuditError::RunCorrupt(
                         "success/partial context run has no artifact".to_string(),
                     ),
                     run_status,
@@ -645,13 +624,13 @@ pub(crate) fn load_inspect_snapshot(
     let (reserved_chars, rendered_chars) = match (context.as_ref(), artifact_id) {
         (Some(_), Some(artifact_id)) => {
             let artifact_id = i64::try_from(artifact_id).map_err(|_| {
-                InspectLoadError::after_status(
-                    InspectAuditError::RunCorrupt("artifact_id exceeds i64".to_string()),
+                EvidenceLoadError::after_status(
+                    EvidenceAuditError::RunCorrupt("artifact_id exceeds i64".to_string()),
                     run_status,
                 )
             })?;
             load_artifact_semantic_chars(transaction, artifact_id)
-                .map_err(|error| InspectLoadError::after_status(error, run_status))?
+                .map_err(|error| EvidenceLoadError::after_status(error, run_status))?
         }
         _ => (0, 0),
     };
@@ -661,30 +640,29 @@ pub(crate) fn load_inspect_snapshot(
     ) {
         let artifact_id = match artifact_id {
             Some(value) => Some(i64::try_from(value).map_err(|_| {
-                InspectLoadError::after_status(
-                    InspectAuditError::RunCorrupt("artifact_id exceeds i64".to_string()),
+                EvidenceLoadError::after_status(
+                    EvidenceAuditError::RunCorrupt("artifact_id exceeds i64".to_string()),
                     run_status,
                 )
             })?),
             None => None,
         };
         load_file_audits_v2(transaction, scan_run_id, artifact_id)
-            .map_err(|error| InspectLoadError::after_status(error, run_status))?
+            .map_err(|error| EvidenceLoadError::after_status(error, run_status))?
     } else {
         Vec::new()
     };
     let stage_deadline_exhausted = load_stage_deadline_exhausted(transaction, scan_run_id)
-        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+        .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
     let execution_metrics = load_execution_metrics(transaction, scan_run_id)
-        .map_err(|error| InspectLoadError::after_status(error, run_status))?;
+        .map_err(|error| EvidenceLoadError::after_status(error, run_status))?;
 
-    Ok(InspectSnapshot {
+    Ok(EvidenceSnapshot {
         context_run_id,
         run_status,
         summary,
         stage_metrics,
         extension_metrics,
-        files,
         decisions,
         warnings,
         artifact_id,
@@ -703,7 +681,7 @@ pub(crate) fn load_inspect_snapshot(
 fn load_execution_metrics(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-) -> Result<Option<ExecutionMetricsV2>, InspectAuditError> {
+) -> Result<Option<ExecutionMetricsV2>, EvidenceAuditError> {
     #[allow(clippy::type_complexity)]
     let row: Option<(
         i64,
@@ -796,14 +774,14 @@ fn load_execution_metrics(
             },
         )
         .optional()
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let Some(row) = row else {
         return Ok(None);
     };
     let parse_bool = |value: i64| match value {
         0 => Ok(false),
         1 => Ok(true),
-        _ => Err(InspectAuditError::RunCorrupt(
+        _ => Err(EvidenceAuditError::RunCorrupt(
             "persisted metric bool is invalid".to_string(),
         )),
     };
@@ -854,7 +832,7 @@ fn load_execution_metrics(
     };
     metrics
         .validate()
-        .map_err(|message| InspectAuditError::RunCorrupt(message.to_string()))?;
+        .map_err(|message| EvidenceAuditError::RunCorrupt(message.to_string()))?;
     Ok(Some(metrics))
 }
 
@@ -863,7 +841,7 @@ fn load_execution_metrics(
 fn load_stage_deadline_exhausted(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-) -> Result<bool, InspectAuditError> {
+) -> Result<bool, EvidenceAuditError> {
     let count: i64 = transaction
         .query_row(
             "SELECT count(*) FROM run_diagnostics
@@ -871,9 +849,9 @@ fn load_stage_deadline_exhausted(
             [scan_run_id],
             |row| row.get(0),
         )
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     if count > 1 {
-        return Err(InspectAuditError::RunCorrupt(
+        return Err(EvidenceAuditError::RunCorrupt(
             "run persisted multiple stage deadline triggers".to_string(),
         ));
     }
@@ -885,7 +863,7 @@ fn load_stage_deadline_exhausted(
 fn load_context_run_provenance(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-) -> Result<(Option<u64>, Option<u64>, bool), InspectAuditError> {
+) -> Result<(Option<u64>, Option<u64>, bool), EvidenceAuditError> {
     let row: Option<(Option<i64>, Option<i64>, i64)> = transaction
         .query_row(
             "SELECT artifact_id, reused_from_context_run_id, snapshot_hit
@@ -894,7 +872,7 @@ fn load_context_run_provenance(
             |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)?)),
         )
         .optional()
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let Some((artifact_id, reused_from, snapshot_hit)) = row else {
         return Ok((None, None, false));
     };
@@ -902,18 +880,18 @@ fn load_context_run_provenance(
         0 => false,
         1 => true,
         _ => {
-            return Err(InspectAuditError::RunCorrupt(
+            return Err(EvidenceAuditError::RunCorrupt(
                 "context run snapshot_hit is invalid".to_string(),
             ));
         }
     };
     if snapshot_hit && reused_from.is_none() {
-        return Err(InspectAuditError::RunCorrupt(
+        return Err(EvidenceAuditError::RunCorrupt(
             "snapshot hit context run has no reused_from source".to_string(),
         ));
     }
     if !snapshot_hit && reused_from.is_some() {
-        return Err(InspectAuditError::RunCorrupt(
+        return Err(EvidenceAuditError::RunCorrupt(
             "non-snapshot context run has a reused_from source".to_string(),
         ));
     }
@@ -929,27 +907,27 @@ fn load_context_run_provenance(
 fn load_artifact_semantic_chars(
     transaction: &Transaction<'_>,
     artifact_id: i64,
-) -> Result<(u64, u64), InspectAuditError> {
+) -> Result<(u64, u64), EvidenceAuditError> {
     let summary_json: String = transaction
         .query_row(
             "SELECT semantic_summary_json FROM context_artifacts WHERE artifact_id=?1",
             [artifact_id],
             |row| row.get(0),
         )
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let value: serde_json::Value = serde_json::from_str(&summary_json)
-        .map_err(|error| InspectAuditError::RunCorrupt(error.to_string()))?;
+        .map_err(|error| EvidenceAuditError::RunCorrupt(error.to_string()))?;
     let reserved = value
         .get("reserved_chars")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| {
-            InspectAuditError::RunCorrupt("artifact summary is missing reserved_chars".to_string())
+            EvidenceAuditError::RunCorrupt("artifact summary is missing reserved_chars".to_string())
         })?;
     let rendered = value
         .get("rendered_chars")
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| {
-            InspectAuditError::RunCorrupt("artifact summary is missing rendered_chars".to_string())
+            EvidenceAuditError::RunCorrupt("artifact summary is missing rendered_chars".to_string())
         })?;
     Ok((reserved, rendered))
 }
@@ -960,7 +938,7 @@ fn load_file_audits_v2(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
     artifact_id: Option<i64>,
-) -> Result<Vec<FileAuditV2Source>, InspectAuditError> {
+) -> Result<Vec<FileAuditV2Source>, EvidenceAuditError> {
     #[allow(clippy::type_complexity)]
     let mut statement = transaction
         .prepare(
@@ -991,7 +969,7 @@ fn load_file_audits_v2(
          WHERE fr.scan_run_id = ?1
          ORDER BY lower(fr.relative_path), fr.relative_path, fr.file_identity",
         )
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let raw = statement
         .query_map([scan_run_id, artifact_id.unwrap_or(-1)], |row| {
             #[allow(clippy::type_complexity)]
@@ -1042,9 +1020,9 @@ fn load_file_audits_v2(
                 row.get::<_, Option<String>>(43)?,
             ))
         })
-        .map_err(InspectAuditError::Sql)?
+        .map_err(EvidenceAuditError::Sql)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
 
     let mut rows = Vec::with_capacity(raw.len());
     for row in raw {
@@ -1062,20 +1040,20 @@ fn load_file_audits_v2(
         };
         if let Some(diagnostic) = &final_diagnostic {
             diagnostic.validate().map_err(|_| {
-                InspectAuditError::RunCorrupt("file final diagnostic is invalid".to_string())
+                EvidenceAuditError::RunCorrupt("file final diagnostic is invalid".to_string())
             })?;
         }
         if matches!(parse_status, ParseStatus::Error | ParseStatus::Timeout)
             && final_diagnostic.is_none()
         {
-            return Err(InspectAuditError::RunCorrupt(
+            return Err(EvidenceAuditError::RunCorrupt(
                 "error/timeout file audit is missing its final diagnostic".to_string(),
             ));
         }
         if matches!(parse_status, ParseStatus::Success | ParseStatus::NotParsed)
             && final_diagnostic.is_some()
         {
-            return Err(InspectAuditError::RunCorrupt(
+            return Err(EvidenceAuditError::RunCorrupt(
                 "success/not_parsed file audit carries a final diagnostic".to_string(),
             ));
         }
@@ -1103,7 +1081,7 @@ fn load_file_audits_v2(
             }
             (None, None, None, None, None, None) => None,
             _ => {
-                return Err(InspectAuditError::RunCorrupt(
+                return Err(EvidenceAuditError::RunCorrupt(
                     "classifier provenance columns are inconsistent".to_string(),
                 ));
             }
@@ -1112,14 +1090,14 @@ fn load_file_audits_v2(
             (Some(transport), Some(attempt_count)) => (
                 Some(parse_enum(transport, "file v2 parse_transport")?),
                 Some(u64::try_from(attempt_count).map_err(|_| {
-                    InspectAuditError::RunCorrupt(
+                    EvidenceAuditError::RunCorrupt(
                         "file v2 parse_attempt_count is negative".to_string(),
                     )
                 })?),
             ),
             (None, None) => (None, None),
             _ => {
-                return Err(InspectAuditError::RunCorrupt(
+                return Err(EvidenceAuditError::RunCorrupt(
                     "file execution provenance columns are inconsistent".to_string(),
                 ));
             }
@@ -1172,18 +1150,18 @@ fn load_file_audits_v2(
                         "classification execution run pages",
                     )?),
                     nominal_charged_pages: u64::try_from(nominal_pages).map_err(|_| {
-                        InspectAuditError::RunCorrupt(
+                        EvidenceAuditError::RunCorrupt(
                             "classification execution nominal pages is negative".to_string(),
                         )
                     })?,
                     duration_ms: u64::try_from(duration_ms).map_err(|_| {
-                        InspectAuditError::RunCorrupt(
+                        EvidenceAuditError::RunCorrupt(
                             "classification execution duration is negative".to_string(),
                         )
                     })?,
                     transport: parse_enum(transport, "classification execution transport")?,
                     attempt_count: u64::try_from(attempt_count).map_err(|_| {
-                        InspectAuditError::RunCorrupt(
+                        EvidenceAuditError::RunCorrupt(
                             "classification execution attempt count is negative".to_string(),
                         )
                     })?,
@@ -1191,7 +1169,7 @@ fn load_file_audits_v2(
                     classifier_profile_hash: profile.to_string(),
                 };
                 audit.validate().map_err(|message| {
-                    InspectAuditError::RunCorrupt(format!(
+                    EvidenceAuditError::RunCorrupt(format!(
                         "classification execution audit is invalid: {message}"
                     ))
                 })?;
@@ -1199,7 +1177,7 @@ fn load_file_audits_v2(
             }
             (None, None, None, None, None, None, None, None, None, None, None, None) => None,
             _ => {
-                return Err(InspectAuditError::RunCorrupt(
+                return Err(EvidenceAuditError::RunCorrupt(
                     "classification execution columns are inconsistent".to_string(),
                 ));
             }
@@ -1241,7 +1219,7 @@ fn assemble_final_diagnostic(
     error_stage: &Option<String>,
     error_file_path: &Option<String>,
     error_backend: &Option<String>,
-) -> Result<Option<Diagnostic>, InspectAuditError> {
+) -> Result<Option<Diagnostic>, EvidenceAuditError> {
     match (error_code, error_message, error_retryable, error_stage) {
         (None, None, None, None) => Ok(None),
         (Some(_), Some(_), Some(_), Some(_)) => {
@@ -1260,31 +1238,31 @@ fn assemble_final_diagnostic(
                 backend: Nullable(error_backend.clone()),
             };
             diagnostic.validate().map_err(|_| {
-                InspectAuditError::RunCorrupt("final diagnostic is invalid".to_string())
+                EvidenceAuditError::RunCorrupt("final diagnostic is invalid".to_string())
             })?;
             Ok(Some(diagnostic))
         }
-        _ => Err(InspectAuditError::RunCorrupt(
+        _ => Err(EvidenceAuditError::RunCorrupt(
             "persisted final diagnostic is partially populated".to_string(),
         )),
     }
 }
 
-fn to_positive_u64(value: Option<i64>, field: &str) -> Result<Option<u64>, InspectAuditError> {
+fn to_positive_u64(value: Option<i64>, field: &str) -> Result<Option<u64>, EvidenceAuditError> {
     value
         .map(|value| {
             u64::try_from(value).map_err(|_| {
-                InspectAuditError::RunCorrupt(format!("persisted {field} is negative"))
+                EvidenceAuditError::RunCorrupt(format!("persisted {field} is negative"))
             })
         })
         .transpose()
 }
 
-fn to_u64_opt(value: Option<i64>, field: &str) -> Result<u64, InspectAuditError> {
+fn to_u64_opt(value: Option<i64>, field: &str) -> Result<u64, EvidenceAuditError> {
     let value = value
-        .ok_or_else(|| InspectAuditError::RunCorrupt(format!("persisted {field} is missing")))?;
+        .ok_or_else(|| EvidenceAuditError::RunCorrupt(format!("persisted {field} is missing")))?;
     u64::try_from(value)
-        .map_err(|_| InspectAuditError::RunCorrupt(format!("persisted {field} is negative")))
+        .map_err(|_| EvidenceAuditError::RunCorrupt(format!("persisted {field} is negative")))
 }
 
 #[derive(Debug)]
@@ -1304,7 +1282,7 @@ struct PersistedDecision {
 fn load_context_row(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-) -> Result<Option<PersistedContext>, InspectAuditError> {
+) -> Result<Option<PersistedContext>, EvidenceAuditError> {
     #[allow(clippy::type_complexity)]
     let row: Option<(
         i64,
@@ -1356,11 +1334,11 @@ fn load_context_row(
             },
         )
         .optional()
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let Some(row) = row else {
         return Ok(None);
     };
-    let status = parse_run_status(&row.2).map_err(InspectAuditError::RunCorrupt)?;
+    let status = parse_run_status(&row.2).map_err(EvidenceAuditError::RunCorrupt)?;
     if row.0 != scan_run_id
         || !is_sha256(&row.1)
         || !matches!(
@@ -1369,7 +1347,7 @@ fn load_context_row(
         )
         || sha256_hex(row.3.as_bytes()) != row.4
     {
-        return Err(InspectAuditError::RunCorrupt(
+        return Err(EvidenceAuditError::RunCorrupt(
             "context row identity or hash is invalid".to_string(),
         ));
     }
@@ -1389,7 +1367,7 @@ fn load_context_row(
     };
     summary
         .validate()
-        .map_err(|_| InspectAuditError::RunCorrupt("context summary is invalid".to_string()))?;
+        .map_err(|_| EvidenceAuditError::RunCorrupt("context summary is invalid".to_string()))?;
     Ok(Some(PersistedContext {
         context_run_id: row.0 as u64,
         status,
@@ -1401,7 +1379,7 @@ fn load_context_row(
 fn load_stage_metrics(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-) -> Result<Vec<StageMetric>, InspectAuditError> {
+) -> Result<Vec<StageMetric>, EvidenceAuditError> {
     let mut statement = transaction
         .prepare(
             "SELECT stage, item_count, duration_ms FROM scan_stage_metrics
@@ -1409,7 +1387,7 @@ fn load_stage_metrics(
              ORDER BY CASE stage WHEN 'discovery' THEN 1 WHEN 'cache' THEN 2
                                   WHEN 'parse' THEN 3 WHEN 'context' THEN 4 END",
         )
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let raw = statement
         .query_map([scan_run_id], |row| {
             Ok((
@@ -1418,9 +1396,9 @@ fn load_stage_metrics(
                 row.get::<_, i64>(2)?,
             ))
         })
-        .map_err(InspectAuditError::Sql)?
+        .map_err(EvidenceAuditError::Sql)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     raw.into_iter()
         .map(|row| {
             let metric = StageMetric {
@@ -1429,7 +1407,7 @@ fn load_stage_metrics(
                 duration_ms: to_u64(row.2, "stage duration_ms")?,
             };
             metric.validate().map_err(|_| {
-                InspectAuditError::RunCorrupt("stage metric is invalid".to_string())
+                EvidenceAuditError::RunCorrupt("stage metric is invalid".to_string())
             })?;
             Ok(metric)
         })
@@ -1439,14 +1417,14 @@ fn load_stage_metrics(
 fn load_extension_metrics(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-) -> Result<Vec<ExtensionMetric>, InspectAuditError> {
+) -> Result<Vec<ExtensionMetric>, EvidenceAuditError> {
     let mut statement = transaction
         .prepare(
             "SELECT extension, file_count, parse_duration_ms, success_count,
                     error_count, timeout_count
              FROM scan_extension_metrics WHERE scan_run_id=?1 ORDER BY extension",
         )
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let raw = statement
         .query_map([scan_run_id], |row| {
             Ok((
@@ -1458,9 +1436,9 @@ fn load_extension_metrics(
                 row.get::<_, i64>(5)?,
             ))
         })
-        .map_err(InspectAuditError::Sql)?
+        .map_err(EvidenceAuditError::Sql)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     raw.into_iter()
         .map(|row| {
             let metric = ExtensionMetric {
@@ -1472,7 +1450,7 @@ fn load_extension_metrics(
                 timeout_count: to_u64(row.5, "extension timeout_count")?,
             };
             metric.validate().map_err(|_| {
-                InspectAuditError::RunCorrupt("extension metric is invalid".to_string())
+                EvidenceAuditError::RunCorrupt("extension metric is invalid".to_string())
             })?;
             Ok(metric)
         })
@@ -1482,7 +1460,7 @@ fn load_extension_metrics(
 fn load_file_audits(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-) -> Result<Vec<FileAudit>, InspectAuditError> {
+) -> Result<Vec<FileAudit>, EvidenceAuditError> {
     #[allow(clippy::type_complexity)]
     let mut statement = transaction
         .prepare(
@@ -1493,7 +1471,7 @@ fn load_file_audits(
              FROM scan_file_results WHERE scan_run_id=?1
              ORDER BY lower(relative_path), relative_path, file_identity",
         )
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let raw = statement
         .query_map([scan_run_id], |row| {
             Ok((
@@ -1513,9 +1491,9 @@ fn load_file_audits(
                 row.get::<_, String>(13)?,
             ))
         })
-        .map_err(InspectAuditError::Sql)?
+        .map_err(EvidenceAuditError::Sql)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     raw.into_iter()
         .map(|row| {
             // spec Part 5.3 v1 lossy projection: v2-only miss reasons are
@@ -1545,7 +1523,7 @@ fn load_file_audits(
                 fallback_reason_code: row.13,
             };
             file.validate()
-                .map_err(|_| InspectAuditError::RunCorrupt("file audit is invalid".to_string()))?;
+                .map_err(|_| EvidenceAuditError::RunCorrupt("file audit is invalid".to_string()))?;
             Ok(file)
         })
         .collect()
@@ -1554,7 +1532,7 @@ fn load_file_audits(
 fn load_context_decisions(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-) -> Result<Vec<PersistedDecision>, InspectAuditError> {
+) -> Result<Vec<PersistedDecision>, EvidenceAuditError> {
     let mut statement = transaction
         .prepare(
             "SELECT d.file_identity, d.relative_path, d.action, d.reason, d.priority,
@@ -1564,7 +1542,7 @@ fn load_context_decisions(
              WHERE c.scan_run_id=?1
              ORDER BY d.priority, lower(d.relative_path), d.relative_path, d.file_identity",
         )
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let raw = statement
         .query_map([scan_run_id], |row| {
             Ok((
@@ -1579,9 +1557,9 @@ fn load_context_decisions(
                 row.get::<_, String>(8)?,
             ))
         })
-        .map_err(InspectAuditError::Sql)?
+        .map_err(EvidenceAuditError::Sql)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     raw.into_iter()
         .map(|row| {
             let decision = ContextDecision {
@@ -1595,7 +1573,7 @@ fn load_context_decisions(
                 error_code: row.8,
             };
             decision.validate().map_err(|_| {
-                InspectAuditError::RunCorrupt("context decision is invalid".to_string())
+                EvidenceAuditError::RunCorrupt("context decision is invalid".to_string())
             })?;
             Ok(PersistedDecision {
                 file_identity: row.0,
@@ -1608,13 +1586,13 @@ fn load_context_decisions(
 fn load_run_diagnostics(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
-) -> Result<(Vec<Diagnostic>, Option<Diagnostic>), InspectAuditError> {
+) -> Result<(Vec<Diagnostic>, Option<Diagnostic>), EvidenceAuditError> {
     let mut statement = transaction
         .prepare(
             "SELECT severity, error_code, message, retryable, stage, file_path, backend
              FROM run_diagnostics WHERE scan_run_id=?1 ORDER BY sequence",
         )
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let raw = statement
         .query_map([scan_run_id], |row| {
             Ok((
@@ -1627,14 +1605,14 @@ fn load_run_diagnostics(
                 row.get::<_, Option<String>>(6)?,
             ))
         })
-        .map_err(InspectAuditError::Sql)?
+        .map_err(EvidenceAuditError::Sql)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(InspectAuditError::Sql)?;
+        .map_err(EvidenceAuditError::Sql)?;
     let mut warnings = Vec::new();
     let mut persisted_error = None;
     for row in raw {
         if !matches!(row.0.as_str(), "warning" | "error") {
-            return Err(InspectAuditError::RunCorrupt(
+            return Err(EvidenceAuditError::RunCorrupt(
                 "run diagnostic severity is invalid".to_string(),
             ));
         }
@@ -1648,11 +1626,11 @@ fn load_run_diagnostics(
         };
         diagnostic
             .validate()
-            .map_err(|_| InspectAuditError::RunCorrupt("run diagnostic is invalid".to_string()))?;
+            .map_err(|_| EvidenceAuditError::RunCorrupt("run diagnostic is invalid".to_string()))?;
         if row.0 == "warning" {
             warnings.push(diagnostic);
         } else if persisted_error.replace(diagnostic).is_some() {
-            return Err(InspectAuditError::RunCorrupt(
+            return Err(EvidenceAuditError::RunCorrupt(
                 "run contains multiple terminal errors".to_string(),
             ));
         }
@@ -1666,7 +1644,7 @@ fn validate_relational_summary(
     extensions: &[ExtensionMetric],
     files: &[FileAudit],
     decisions: &[PersistedDecision],
-) -> Result<(), InspectAuditError> {
+) -> Result<(), EvidenceAuditError> {
     let summary = &context.summary;
     let success_count = files
         .iter()
@@ -1686,7 +1664,7 @@ fn validate_relational_summary(
         .and_then(|value| value.checked_sub(timeout_count as usize))
         .and_then(|value| value.checked_sub(error_count as usize))
         .map(|value| value as u64)
-        .ok_or_else(|| InspectAuditError::RunCorrupt("file status counts overflow".to_string()))?;
+        .ok_or_else(|| EvidenceAuditError::RunCorrupt("file status counts overflow".to_string()))?;
     let included_count = decisions
         .iter()
         .filter(|record| {
@@ -1708,7 +1686,7 @@ fn validate_relational_summary(
         total
             .checked_add(record.decision.input_chars)
             .ok_or_else(|| {
-                InspectAuditError::RunCorrupt("decision input count overflows".to_string())
+                EvidenceAuditError::RunCorrupt("decision input count overflows".to_string())
             })
     })?;
     let files_by_identity: HashMap<&str, &str> = files
@@ -1722,7 +1700,7 @@ fn validate_relational_summary(
                 .is_none_or(|path| *path != record.decision.relative_path)
         })
     {
-        return Err(InspectAuditError::RunCorrupt(
+        return Err(EvidenceAuditError::RunCorrupt(
             "context decisions do not match file identities and paths".to_string(),
         ));
     }
@@ -1743,7 +1721,7 @@ fn validate_relational_summary(
         || summary.input_chars != input_chars
         || summary.output_chars != context.final_context.chars().count() as u64
     {
-        return Err(InspectAuditError::RunCorrupt(
+        return Err(EvidenceAuditError::RunCorrupt(
             "context summary disagrees with file or decision rows".to_string(),
         ));
     }
@@ -1768,35 +1746,35 @@ fn validate_relational_summary(
                 || metric.duration_ms != summary.compression_duration_ms
         })
     {
-        return Err(InspectAuditError::RunCorrupt(
+        return Err(EvidenceAuditError::RunCorrupt(
             "context summary disagrees with stage metrics".to_string(),
         ));
     }
     let measured_duration = stages.iter().try_fold(0_u64, |total, metric| {
         total.checked_add(metric.duration_ms).ok_or_else(|| {
-            InspectAuditError::RunCorrupt("stage duration sum overflows".to_string())
+            EvidenceAuditError::RunCorrupt("stage duration sum overflows".to_string())
         })
     })?;
     if summary.total_duration_ms < measured_duration {
-        return Err(InspectAuditError::RunCorrupt(
+        return Err(EvidenceAuditError::RunCorrupt(
             "total duration is shorter than its stages".to_string(),
         ));
     }
     let extension_totals = extensions.iter().try_fold(
         (0_u64, 0_u64, 0_u64, 0_u64),
         |(files, successes, errors, timeouts), metric| {
-            Ok::<_, InspectAuditError>((
+            Ok::<_, EvidenceAuditError>((
                 files.checked_add(metric.file_count).ok_or_else(|| {
-                    InspectAuditError::RunCorrupt("extension file count overflows".to_string())
+                    EvidenceAuditError::RunCorrupt("extension file count overflows".to_string())
                 })?,
                 successes.checked_add(metric.success_count).ok_or_else(|| {
-                    InspectAuditError::RunCorrupt("extension success count overflows".to_string())
+                    EvidenceAuditError::RunCorrupt("extension success count overflows".to_string())
                 })?,
                 errors.checked_add(metric.error_count).ok_or_else(|| {
-                    InspectAuditError::RunCorrupt("extension error count overflows".to_string())
+                    EvidenceAuditError::RunCorrupt("extension error count overflows".to_string())
                 })?,
                 timeouts.checked_add(metric.timeout_count).ok_or_else(|| {
-                    InspectAuditError::RunCorrupt("extension timeout count overflows".to_string())
+                    EvidenceAuditError::RunCorrupt("extension timeout count overflows".to_string())
                 })?,
             ))
         },
@@ -1812,7 +1790,7 @@ fn validate_relational_summary(
         || extension_error_count != summary.error_file_count
         || extension_timeout_count != summary.timeout_count
     {
-        return Err(InspectAuditError::RunCorrupt(
+        return Err(EvidenceAuditError::RunCorrupt(
             "context summary disagrees with extension metrics".to_string(),
         ));
     }
@@ -1833,24 +1811,24 @@ fn parse_run_status(value: &str) -> Result<RunStatus, String> {
 fn parse_enum<T: serde::de::DeserializeOwned>(
     value: &str,
     field: &str,
-) -> Result<T, InspectAuditError> {
+) -> Result<T, EvidenceAuditError> {
     serde_json::from_value(serde_json::Value::String(value.to_string()))
-        .map_err(|_| InspectAuditError::RunCorrupt(format!("persisted {field} is invalid")))
+        .map_err(|_| EvidenceAuditError::RunCorrupt(format!("persisted {field} is invalid")))
 }
 
-fn parse_bool(value: i64, field: &str) -> Result<bool, InspectAuditError> {
+fn parse_bool(value: i64, field: &str) -> Result<bool, EvidenceAuditError> {
     match value {
         0 => Ok(false),
         1 => Ok(true),
-        _ => Err(InspectAuditError::RunCorrupt(format!(
+        _ => Err(EvidenceAuditError::RunCorrupt(format!(
             "persisted {field} is invalid"
         ))),
     }
 }
 
-fn to_u64(value: i64, field: &str) -> Result<u64, InspectAuditError> {
+fn to_u64(value: i64, field: &str) -> Result<u64, EvidenceAuditError> {
     u64::try_from(value)
-        .map_err(|_| InspectAuditError::RunCorrupt(format!("persisted {field} is negative")))
+        .map_err(|_| EvidenceAuditError::RunCorrupt(format!("persisted {field} is negative")))
 }
 
 fn empty_context_summary() -> ContextSummary {

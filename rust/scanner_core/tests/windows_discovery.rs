@@ -18,15 +18,21 @@ fn rust_defaults_match_all_frozen_normalized_profiles() {
     let cases = [
         (
             ReportMode::Daily,
-            include_str!("../../../tests/fixtures/scanner_contract/v1/profile-daily.json"),
+            include_str!(
+                "../../../tests/fixtures/scanner_contract/v1/normalized-settings-daily.json"
+            ),
         ),
         (
             ReportMode::Weekly,
-            include_str!("../../../tests/fixtures/scanner_contract/v1/profile-weekly.json"),
+            include_str!(
+                "../../../tests/fixtures/scanner_contract/v1/normalized-settings-weekly.json"
+            ),
         ),
         (
             ReportMode::Monthly,
-            include_str!("../../../tests/fixtures/scanner_contract/v1/profile-monthly.json"),
+            include_str!(
+                "../../../tests/fixtures/scanner_contract/v1/normalized-settings-monthly.json"
+            ),
         ),
     ];
 

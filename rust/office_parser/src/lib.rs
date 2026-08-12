@@ -1,12 +1,8 @@
 use ai_daily_discovery::build_source_version;
-use ai_daily_scanner_contract::{
-    Nullable, Validate, WorkerBackend, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
-    WorkerDiagnosticV1Stage, WorkerKind, WorkerLane, WorkerParseRequest, WorkerParseResponse,
-    WorkerParserLimits, WorkerStatus, WorkerVersionResponse,
-};
 use ai_daily_worker_contract::{
-    WorkerHello, WorkerKind as WorkerKindV2, WorkerOperation, CONTRACT as WORKER_CONTRACT,
-    CONTRACT_VERSION as WORKER_CONTRACT_VERSION_V2, PROTOCOL_VERSION as WORKER_PROTOCOL_VERSION,
+    ParseRequest, ParseResult, ParserBackend, ParserLimits, WorkerDiagnostic, WorkerHello,
+    WorkerKind, WorkerLane, WorkerOperation, CONTRACT as WORKER_CONTRACT,
+    CONTRACT_VERSION as WORKER_CONTRACT_VERSION, PROTOCOL_VERSION as WORKER_PROTOCOL_VERSION,
 };
 use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use serde::{Deserialize, Serialize};
@@ -19,38 +15,16 @@ use zip::read::ZipArchive;
 
 pub const RUST_OFFICE_BACKEND: &str = "rust_office_oxide_v2";
 pub const RUST_XLSX_BOUNDED_BACKEND: &str = "rust_xlsx_bounded_v2";
-pub const WORKER_CONTRACT_VERSION: &str = "ai_daily_worker_v1";
-
 pub fn worker_hello() -> WorkerHello {
     WorkerHello {
         contract: WORKER_CONTRACT.to_string(),
         protocol_version: WORKER_PROTOCOL_VERSION,
         frame: "hello".to_string(),
-        worker_contract_version: WORKER_CONTRACT_VERSION_V2.to_string(),
-        worker_kind: WorkerKindV2::Office,
+        worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
+        worker_kind: WorkerKind::Office,
         worker_version: env!("CARGO_PKG_VERSION").to_string(),
         worker_build: env!("AI_DAILY_OFFICE_WORKER_BUILD").to_string(),
         supported_operations: vec![WorkerOperation::OfficeParse],
-    }
-}
-
-pub fn worker_version_response() -> WorkerVersionResponse {
-    WorkerVersionResponse {
-        contract: "ai_daily_worker".to_string(),
-        protocol_version: 1,
-        worker_kind: WorkerKind::Office,
-        worker_contract_version: WORKER_CONTRACT_VERSION.to_string(),
-        worker_version: env!("CARGO_PKG_VERSION").to_string(),
-        worker_build: env!("AI_DAILY_OFFICE_WORKER_BUILD").to_string(),
-        supported_backends: vec![
-            RUST_OFFICE_BACKEND.to_string(),
-            RUST_XLSX_BOUNDED_BACKEND.to_string(),
-        ],
-        supported_extensions: vec![
-            ".docx".to_string(),
-            ".pptx".to_string(),
-            ".xlsx".to_string(),
-        ],
     }
 }
 
@@ -163,82 +137,63 @@ pub fn parse_office_file(request: &OfficeParseRequest) -> FileContextOut {
     }
 }
 
-pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse {
+pub fn parse_worker_request(request: &ParseRequest) -> Result<ParseResult, Box<WorkerDiagnostic>> {
     let started_at = Instant::now();
-    let version = worker_version_response();
     if let Err(message) = request.validate() {
-        return worker_error_response(
+        return Err(Box::new(worker_error(
             request,
-            &version,
-            WorkerDiagnosticV1ErrorCode::ParserInvalidPayload,
+            "PARSER_INVALID_PAYLOAD",
             message,
             false,
-            request.expected_source_version.clone(),
-            started_at,
-        );
+        )));
     }
     if request.backend.lane() != WorkerLane::RustOfficeProcessV2 {
-        return worker_error_response(
+        return Err(Box::new(worker_error(
             request,
-            &version,
-            WorkerDiagnosticV1ErrorCode::ParserInvalidPayload,
+            "PARSER_INVALID_PAYLOAD",
             "backend is not supported by the Office worker".to_string(),
             false,
-            request.expected_source_version.clone(),
-            started_at,
-        );
+        )));
     }
 
     let path = PathBuf::from(&request.file_path);
     let metadata = match std::fs::metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) => {
-            return worker_error_response(
+            return Err(Box::new(worker_error(
                 request,
-                &version,
-                WorkerDiagnosticV1ErrorCode::ParserFailed,
+                "PARSER_FAILED",
                 format!("file metadata is unavailable: {error}"),
                 false,
-                request.expected_source_version.clone(),
-                started_at,
-            );
+            )));
         }
     };
     let observed_before = match metadata_source_version(&metadata) {
         Ok(value) => value,
         Err(error) => {
-            return worker_error_response(
+            return Err(Box::new(worker_error(
                 request,
-                &version,
-                WorkerDiagnosticV1ErrorCode::ParserFailed,
+                "PARSER_FAILED",
                 format!("file source version is unavailable: {error}"),
                 false,
-                request.expected_source_version.clone(),
-                started_at,
-            );
+            )));
         }
     };
     if metadata.len() > request.max_file_size_bytes {
-        return worker_error_response(
+        return Err(Box::new(worker_error(
             request,
-            &version,
-            WorkerDiagnosticV1ErrorCode::FileTooLarge,
+            "FILE_TOO_LARGE",
             "file exceeds the configured size limit".to_string(),
             false,
-            observed_before,
-            started_at,
-        );
+        )));
     }
     if observed_before != request.expected_source_version {
-        return worker_error_response(
+        return Err(Box::new(worker_error(
             request,
-            &version,
-            WorkerDiagnosticV1ErrorCode::SourceVersionChanged,
+            "SOURCE_VERSION_CHANGED",
             "file source version changed before parsing".to_string(),
-            false,
-            observed_before,
-            started_at,
-        );
+            true,
+        )));
     }
 
     let (context, retryable) = parse_strict_office_context(request);
@@ -246,62 +201,44 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
         match std::fs::metadata(&path).and_then(|value| metadata_source_version(&value)) {
             Ok(value) => value,
             Err(_) => {
-                return worker_error_response(
+                return Err(Box::new(worker_error(
                     request,
-                    &version,
-                    WorkerDiagnosticV1ErrorCode::SourceVersionChanged,
+                    "SOURCE_VERSION_CHANGED",
                     "file source version became unavailable during parsing".to_string(),
-                    false,
-                    observed_before,
-                    started_at,
-                );
+                    true,
+                )));
             }
         };
     if observed_after != observed_before {
-        return worker_error_response(
+        return Err(Box::new(worker_error(
             request,
-            &version,
-            WorkerDiagnosticV1ErrorCode::SourceVersionChanged,
+            "SOURCE_VERSION_CHANGED",
             "file source version changed during parsing".to_string(),
-            false,
-            observed_after,
-            started_at,
-        );
+            true,
+        )));
     }
     if context.error.is_some() {
-        return worker_error_response(
+        return Err(Box::new(worker_error(
             request,
-            &version,
-            WorkerDiagnosticV1ErrorCode::ParserFailed,
+            "PARSER_FAILED",
             "Office parser reported an error".to_string(),
             retryable,
-            observed_after,
-            started_at,
-        );
+        )));
     }
 
-    WorkerParseResponse {
-        contract: "ai_daily_worker".to_string(),
-        protocol_version: 1,
-        request_id: request.request_id.clone(),
-        status: WorkerStatus::Ok,
+    Ok(ParseResult {
         file_path: request.file_path.clone(),
         file_type: request.file_type.clone(),
         content: context.content,
         parser_backend: request.backend,
         worker_lane: WorkerLane::RustOfficeProcessV2,
         truncated: context.truncated,
-        warnings: Vec::new(),
-        error: Nullable(None),
         duration_ms: elapsed_ms(started_at),
-        worker_contract_version: version.worker_contract_version,
-        worker_version: version.worker_version,
-        worker_build: version.worker_build,
         observed_source_version: observed_after,
-    }
+    })
 }
 
-fn parse_strict_office_context(request: &WorkerParseRequest) -> (FileContextOut, bool) {
+fn parse_strict_office_context(request: &ParseRequest) -> (FileContextOut, bool) {
     let limits = office_limits_map(&request.parser_limits);
     let office_request = OfficeParseRequest {
         file_path: PathBuf::from(&request.file_path),
@@ -309,7 +246,7 @@ fn parse_strict_office_context(request: &WorkerParseRequest) -> (FileContextOut,
         limits,
         parser_backend: request.backend.as_str().to_string(),
     };
-    if request.backend == WorkerBackend::RustXlsxBoundedV2 {
+    if request.backend == ParserBackend::RustXlsxBoundedV2 {
         let max_chars = positive_limit(&office_request.limits, "document_excerpt_max_chars", 6000);
         return match parse_bounded_xlsx_inner(&office_request, max_chars) {
             Ok((content, truncated)) => (
@@ -364,8 +301,8 @@ fn validate_ooxml_zip(file_path: &PathBuf) -> Result<(), (String, bool)> {
     })
 }
 
-fn office_limits_map(limits: &WorkerParserLimits) -> BTreeMap<String, serde_json::Value> {
-    let WorkerParserLimits::Office {
+fn office_limits_map(limits: &ParserLimits) -> BTreeMap<String, serde_json::Value> {
+    let ParserLimits::Office {
         excel_max_sheets,
         excel_max_rows,
         excel_max_columns,
@@ -424,46 +361,24 @@ fn office_limits_map(limits: &WorkerParserLimits) -> BTreeMap<String, serde_json
     ])
 }
 
-#[allow(clippy::too_many_arguments)]
-fn worker_error_response(
-    request: &WorkerParseRequest,
-    version: &WorkerVersionResponse,
-    error_code: WorkerDiagnosticV1ErrorCode,
+fn worker_error(
+    request: &ParseRequest,
+    error_code: &str,
     message: String,
     retryable: bool,
-    observed_source_version: String,
-    started_at: Instant,
-) -> WorkerParseResponse {
+) -> WorkerDiagnostic {
     let message: String = message.chars().take(4096).collect();
-    WorkerParseResponse {
-        contract: "ai_daily_worker".to_string(),
-        protocol_version: 1,
-        request_id: request.request_id.clone(),
-        status: WorkerStatus::Error,
-        file_path: request.file_path.clone(),
-        file_type: request.file_type.clone(),
-        content: String::new(),
-        parser_backend: request.backend,
-        worker_lane: WorkerLane::RustOfficeProcessV2,
-        truncated: false,
-        warnings: Vec::new(),
-        error: Nullable(Some(WorkerDiagnosticV1 {
-            error_code,
-            message: if message.is_empty() {
-                "Office worker parse failed".to_string()
-            } else {
-                message
-            },
-            retryable,
-            stage: WorkerDiagnosticV1Stage::Parse,
-            file_path: Nullable(Some(request.file_path.clone())),
-            backend: Nullable(Some(request.backend.as_str().to_string())),
-        })),
-        duration_ms: elapsed_ms(started_at),
-        worker_contract_version: version.worker_contract_version.clone(),
-        worker_version: version.worker_version.clone(),
-        worker_build: version.worker_build.clone(),
-        observed_source_version,
+    WorkerDiagnostic {
+        error_code: error_code.to_string(),
+        message: if message.is_empty() {
+            "Office worker parse failed".to_string()
+        } else {
+            message
+        },
+        retryable,
+        stage: "parse".to_string(),
+        file_path: Some(request.file_path.clone()),
+        backend: Some(request.backend.as_str().to_string()),
     }
 }
 
@@ -491,7 +406,7 @@ mod tests {
 
     #[test]
     fn local_office_worker_build_uses_the_shared_source_fingerprint() {
-        let build = worker_version_response().worker_build;
+        let build = worker_hello().worker_build;
         if let Some(ci_build) =
             option_env!("AI_DAILY_BUILD_ID").filter(|value| !value.trim().is_empty())
         {

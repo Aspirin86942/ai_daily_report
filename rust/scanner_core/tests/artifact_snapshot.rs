@@ -62,10 +62,10 @@ fn request(mode: ReportMode, request_id: &str) -> BuildContextRequest {
 
 fn workers(office_build: &str, python_build: &str) -> WorkerIdentities {
     WorkerIdentities {
-        office_contract: Some("ai_daily_worker_v1".to_string()),
+        office_contract: Some("ai_daily_worker_v2".to_string()),
         office_version: Some("1.0".to_string()),
         office_build: Some(office_build.to_string()),
-        python_contract: Some("ai_daily_worker_v1".to_string()),
+        python_contract: Some("ai_daily_worker_v2".to_string()),
         python_version: Some("1.0".to_string()),
         python_build: Some(python_build.to_string()),
         classifier_build: Some(python_build.to_string()),
@@ -789,8 +789,7 @@ fn snapshot_store_harness() -> (
         .expect("normalized v1 profile");
     let canonical =
         ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
-    let runtime =
-        AttemptRuntime::from_request(&request, &ai_daily_scanner_core::version_response()).unwrap();
+    let runtime = AttemptRuntime::from_request(&request).unwrap();
     let store = ScannerStore::open(&db_path).expect("scanner store");
     (directory, store, request, canonical, runtime, profile)
 }
@@ -804,12 +803,12 @@ fn snapshot_started(outcome: BeginRunOutcome) -> ActiveRun {
 
 fn record_snapshot_workers(store: &mut ScannerStore, active: &ActiveRun, now_ms: u64) {
     let office = WorkerFingerprint {
-        contract: "ai_daily_worker_v1".to_string(),
+        contract: "ai_daily_worker_v2".to_string(),
         version: "1.0".to_string(),
         build: "office-a".to_string(),
     };
     let python = WorkerFingerprint {
-        contract: "ai_daily_worker_v1".to_string(),
+        contract: "ai_daily_worker_v2".to_string(),
         version: "1.0".to_string(),
         build: "python-a".to_string(),
     };
@@ -1033,13 +1032,12 @@ fn snapshot_envelope(
     active: &ActiveRun,
     summary: ContextSummary,
 ) -> ai_daily_scanner_contract::ContextEnvelope {
-    let version = ai_daily_scanner_core::version_response();
     ai_daily_scanner_contract::ContextEnvelope {
         contract: "ai_daily_context".to_string(),
         protocol_version: 1,
         request_id: active.request_id().to_string(),
-        engine_version: version.engine_version,
-        engine_build: version.engine_build,
+        engine_version: ai_daily_scanner_core::engine_version().to_string(),
+        engine_build: ai_daily_scanner_core::ENGINE_BUILD_IDENTITY.to_string(),
         status: EngineStatus::Ok,
         file_context: FINAL_CONTEXT.to_string(),
         summary,

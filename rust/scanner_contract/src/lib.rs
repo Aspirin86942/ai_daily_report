@@ -1085,9 +1085,6 @@ pub enum ErrorCode {
     ContextBudgetInvalid,
     NotImplemented,
     RustCoreCrashed,
-    // scanner-side extensions (spec Part 8.2): these never enter the frozen
-    // WorkerDiagnosticV1 sets and are not allowed on the ai_daily_worker_v1
-    // or ai_daily_transport wires.
     StageDeadlineExhausted,
     BudgetModelMismatch,
     ContextFixedSectionsOverBudget,
@@ -1100,7 +1097,6 @@ pub enum ErrorCode {
     ParseCacheNotApplicableProjectedAsMiss,
     CacheMissReasonProjectedAsNewFile,
     SourceGuardNotProjected,
-    InspectV2ProvenanceUnavailable,
     WorkerRssUnavailable,
     InternalError,
 }
@@ -1115,7 +1111,6 @@ pub enum DiagnosticStage {
     Context,
     Process,
     Doctor,
-    Inspect,
     Internal,
 }
 
@@ -1140,81 +1135,6 @@ impl Validate for Diagnostic {
         }
         if let Some(backend) = &self.backend.0 {
             require_non_empty(backend, 1024, "diagnostic.backend")?;
-        }
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Frozen worker v1 diagnostic.  wire 形状与 Diagnostic 相同，但 ErrorCode 与
-// DiagnosticStage 集合是冻结的 v1 集合，scanner-side 新 code/stage 绝不进入。
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum WorkerDiagnosticV1ErrorCode {
-    InvalidRequest,
-    ContractVersionMismatch,
-    WorkDirNotFound,
-    WorkDirNotDirectory,
-    DiscoveryEntryUnreadable,
-    FileTooLarge,
-    ParserStartFailed,
-    ParserTimeout,
-    ParserInvalidPayload,
-    ParserFailed,
-    WorkerHandshakeFailed,
-    WorkerVersionMismatch,
-    WorkerBuildChanged,
-    SourceVersionChanged,
-    CacheOpenFailed,
-    CacheWriteFailed,
-    ScanAlreadyRunning,
-    RequestInProgress,
-    RequestIdConflict,
-    RunNotFound,
-    RunCorrupt,
-    ContextBudgetInvalid,
-    NotImplemented,
-    RustCoreCrashed,
-    InternalError,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerDiagnosticV1Stage {
-    Request,
-    Discovery,
-    Cache,
-    Parse,
-    Context,
-    Process,
-    Doctor,
-    Inspect,
-    Internal,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerDiagnosticV1 {
-    pub error_code: WorkerDiagnosticV1ErrorCode,
-    pub message: String,
-    pub retryable: bool,
-    pub stage: WorkerDiagnosticV1Stage,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub file_path: Nullable<String>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub backend: Nullable<String>,
-}
-
-impl Validate for WorkerDiagnosticV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_non_empty(&self.message, 4096, "worker_diagnostic.message")?;
-        if let Some(file_path) = &self.file_path.0 {
-            require_absolute_path(file_path, "worker_diagnostic.file_path")?;
-        }
-        if let Some(backend) = &self.backend.0 {
-            require_non_empty(backend, 1024, "worker_diagnostic.backend")?;
         }
         Ok(())
     }
@@ -1342,83 +1262,6 @@ impl Validate for ContextEnvelope {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct TransportErrorResponse {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub status: String,
-    // ai_daily_transport wire carries the frozen worker diagnostic (spec Part
-    // 7.1): scanner-side new ErrorCode/stage must never deserialize here.
-    pub error: WorkerDiagnosticV1,
-}
-
-impl Validate for TransportErrorResponse {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_transport", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_const(&self.status, "error", "status")?;
-        self.error.validate()?;
-        if self.error.error_code == WorkerDiagnosticV1ErrorCode::InvalidRequest
-            && self.error.stage == WorkerDiagnosticV1Stage::Request
-            && self.error.file_path.0.is_none()
-            && self.error.backend.0.is_none()
-        {
-            Ok(())
-        } else {
-            Err("transport error must describe an invalid request".to_string())
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct VersionResponse {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub binary_name: String,
-    pub engine_version: String,
-    pub engine_build: String,
-    pub target_triple: String,
-    pub supported_commands: Vec<String>,
-    pub office_worker_contract_version: String,
-    pub python_worker_contract_version: String,
-}
-
-impl Validate for VersionResponse {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_context", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_const(&self.binary_name, "ai-daily-scanner", "binary_name")?;
-        for (field, value) in [
-            ("engine_version", self.engine_version.as_str()),
-            ("engine_build", self.engine_build.as_str()),
-            ("target_triple", self.target_triple.as_str()),
-            (
-                "office_worker_contract_version",
-                self.office_worker_contract_version.as_str(),
-            ),
-            (
-                "python_worker_contract_version",
-                self.python_worker_contract_version.as_str(),
-            ),
-        ] {
-            require_non_empty(value, 1024, field)?;
-        }
-        let expected = ["version", "doctor", "build-context", "inspect-run"];
-        if self
-            .supported_commands
-            .iter()
-            .map(String::as_str)
-            .eq(expected)
-        {
-            Ok(())
-        } else {
-            Err("supported_commands must use the frozen v1 order".to_string())
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct DoctorRequest {
     pub contract: String,
     pub protocol_version: u64,
@@ -1500,326 +1343,6 @@ impl Validate for DoctorResponse {
             EngineStatus::Error if self.error.0.is_some() => Ok(()),
             _ => Err("doctor response violates status invariants".to_string()),
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerKind {
-    Office,
-    PythonDocument,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerVersionResponse {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub worker_kind: WorkerKind,
-    pub worker_contract_version: String,
-    pub worker_version: String,
-    pub worker_build: String,
-    pub supported_backends: Vec<String>,
-    pub supported_extensions: Vec<String>,
-}
-
-impl Validate for WorkerVersionResponse {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_worker", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        for (field, value) in [
-            (
-                "worker_contract_version",
-                self.worker_contract_version.as_str(),
-            ),
-            ("worker_version", self.worker_version.as_str()),
-            ("worker_build", self.worker_build.as_str()),
-        ] {
-            require_non_empty(value, 1024, field)?;
-        }
-        if self.supported_backends.is_empty() || self.supported_extensions.is_empty() {
-            return Err("worker support sets must not be empty".to_string());
-        }
-        validate_strings(&self.supported_backends, "supported_backends", true)?;
-        validate_extensions(&self.supported_extensions, "supported_extensions", true)
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum WorkerBackend {
-    #[serde(rename = "rust_office_oxide_v2")]
-    RustOfficeOxideV2,
-    #[serde(rename = "rust_xlsx_bounded_v2")]
-    RustXlsxBoundedV2,
-    #[serde(rename = "python_office_v2")]
-    PythonOfficeV2,
-    #[serde(rename = "python_pdf_text_v2")]
-    PythonPdfTextV2,
-    #[serde(rename = "python_sharepoint_text_v2")]
-    PythonSharepointTextV2,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerLane {
-    RustOfficeProcessV2,
-    PythonDocumentProcessV2,
-}
-
-impl WorkerBackend {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::RustOfficeOxideV2 => "rust_office_oxide_v2",
-            Self::RustXlsxBoundedV2 => "rust_xlsx_bounded_v2",
-            Self::PythonOfficeV2 => "python_office_v2",
-            Self::PythonPdfTextV2 => "python_pdf_text_v2",
-            Self::PythonSharepointTextV2 => "python_sharepoint_text_v2",
-        }
-    }
-
-    pub fn supports(self, extension: &str) -> bool {
-        match self {
-            Self::RustOfficeOxideV2 => matches!(extension, ".docx" | ".pptx"),
-            Self::RustXlsxBoundedV2 => extension == ".xlsx",
-            Self::PythonOfficeV2 => matches!(extension, ".docx" | ".pptx" | ".xls" | ".xlsx"),
-            Self::PythonPdfTextV2 => extension == ".pdf",
-            Self::PythonSharepointTextV2 => matches!(extension, ".doc" | ".ppt"),
-        }
-    }
-
-    pub const fn lane(self) -> WorkerLane {
-        match self {
-            Self::RustOfficeOxideV2 | Self::RustXlsxBoundedV2 => WorkerLane::RustOfficeProcessV2,
-            _ => WorkerLane::PythonDocumentProcessV2,
-        }
-    }
-
-    pub const fn limit_kind(self) -> &'static str {
-        match self {
-            Self::RustOfficeOxideV2 | Self::RustXlsxBoundedV2 | Self::PythonOfficeV2 => "office",
-            Self::PythonPdfTextV2 => "pdf",
-            Self::PythonSharepointTextV2 => "sharepoint_text",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", deny_unknown_fields)]
-pub enum WorkerParserLimits {
-    #[serde(rename = "office")]
-    Office {
-        excel_max_sheets: u64,
-        excel_max_rows: u64,
-        excel_max_columns: u64,
-        docx_max_paragraphs: u64,
-        docx_max_tables: u64,
-        docx_table_max_rows: u64,
-        docx_table_max_cols: u64,
-        pptx_max_slides: u64,
-        pptx_include_notes: bool,
-        document_excerpt_max_chars: u64,
-    },
-    #[serde(rename = "pdf")]
-    Pdf {
-        max_pages: u64,
-        excerpt_max_chars: u64,
-    },
-    #[serde(rename = "sharepoint_text")]
-    SharepointText { excerpt_max_chars: u64 },
-}
-
-impl WorkerParserLimits {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Office { .. } => "office",
-            Self::Pdf { .. } => "pdf",
-            Self::SharepointText { .. } => "sharepoint_text",
-        }
-    }
-}
-
-impl Validate for WorkerParserLimits {
-    fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::Office {
-                excel_max_sheets,
-                excel_max_rows,
-                excel_max_columns,
-                docx_max_paragraphs,
-                docx_max_tables,
-                docx_table_max_rows,
-                docx_table_max_cols,
-                pptx_max_slides,
-                document_excerpt_max_chars,
-                ..
-            } => {
-                require_range(*excel_max_sheets, 1, 1024, "excel_max_sheets")?;
-                require_range(*excel_max_rows, 1, 1_048_576, "excel_max_rows")?;
-                require_range(*excel_max_columns, 1, 16_384, "excel_max_columns")?;
-                require_range(*docx_max_paragraphs, 1, 1_000_000, "docx_max_paragraphs")?;
-                require_range(*docx_max_tables, 1, 100_000, "docx_max_tables")?;
-                require_range(*docx_table_max_rows, 1, 1_048_576, "docx_table_max_rows")?;
-                require_range(*docx_table_max_cols, 1, 16_384, "docx_table_max_cols")?;
-                require_range(*pptx_max_slides, 1, 100_000, "pptx_max_slides")?;
-                require_range(
-                    *document_excerpt_max_chars,
-                    1,
-                    10_000_000,
-                    "document_excerpt_max_chars",
-                )
-            }
-            Self::Pdf {
-                max_pages,
-                excerpt_max_chars,
-            } => {
-                require_range(*max_pages, 1, 10_000, "max_pages")?;
-                require_range(*excerpt_max_chars, 1, 10_000_000, "excerpt_max_chars")
-            }
-            Self::SharepointText { excerpt_max_chars } => {
-                require_range(*excerpt_max_chars, 1, 10_000_000, "excerpt_max_chars")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerParseRequest {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub file_path: String,
-    pub file_type: String,
-    pub backend: WorkerBackend,
-    pub remaining_timeout_ms: u64,
-    pub max_file_size_bytes: u64,
-    pub parser_limits: WorkerParserLimits,
-    pub expected_source_version: String,
-}
-
-impl Validate for WorkerParseRequest {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_worker", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        require_absolute_path(&self.file_path, "file_path")?;
-        require_extension(&self.file_type, "file_type")?;
-        require_range(
-            self.remaining_timeout_ms,
-            1,
-            3_600_000,
-            "remaining_timeout_ms",
-        )?;
-        require_range(
-            self.max_file_size_bytes,
-            1,
-            4_294_967_296,
-            "max_file_size_bytes",
-        )?;
-        self.parser_limits.validate()?;
-        require_source_version(&self.expected_source_version, "expected_source_version")?;
-        if self.backend.supports(&self.file_type)
-            && self.backend.limit_kind() == self.parser_limits.kind()
-        {
-            Ok(())
-        } else {
-            Err("worker request route is inconsistent".to_string())
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkerStatus {
-    Ok,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct WorkerParseResponse {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub status: WorkerStatus,
-    pub file_path: String,
-    pub file_type: String,
-    pub content: String,
-    pub parser_backend: WorkerBackend,
-    pub worker_lane: WorkerLane,
-    pub truncated: bool,
-    // Frozen worker-v1 diagnostics only: scanner-side new ErrorCode/stage must
-    // never deserialize on the ai_daily_worker_v1 parse wire (spec Part 7.1).
-    pub warnings: Vec<WorkerDiagnosticV1>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub error: Nullable<WorkerDiagnosticV1>,
-    pub duration_ms: u64,
-    pub worker_contract_version: String,
-    pub worker_version: String,
-    pub worker_build: String,
-    pub observed_source_version: String,
-}
-
-impl Validate for WorkerParseResponse {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_worker", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        require_absolute_path(&self.file_path, "file_path")?;
-        require_extension(&self.file_type, "file_type")?;
-        if self.warnings.len() > 256 {
-            return Err("too many worker warnings".to_string());
-        }
-        for warning in &self.warnings {
-            warning.validate()?;
-        }
-        if let Some(error) = &self.error.0 {
-            error.validate()?;
-        }
-        for (field, value) in [
-            (
-                "worker_contract_version",
-                self.worker_contract_version.as_str(),
-            ),
-            ("worker_version", self.worker_version.as_str()),
-            ("worker_build", self.worker_build.as_str()),
-        ] {
-            require_non_empty(value, 1024, field)?;
-        }
-        require_source_version(&self.observed_source_version, "observed_source_version")?;
-        let status_valid = match self.status {
-            WorkerStatus::Ok => self.error.0.is_none(),
-            WorkerStatus::Error => self.content.is_empty() && self.error.0.is_some(),
-        };
-        if status_valid
-            && self.parser_backend.supports(&self.file_type)
-            && self.parser_backend.lane() == self.worker_lane
-        {
-            Ok(())
-        } else {
-            Err("worker response status or route is inconsistent".to_string())
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InspectRunRequest {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub scan_db_path: String,
-    pub scan_run_id: u64,
-    pub include_content: bool,
-}
-
-impl Validate for InspectRunRequest {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_context", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        require_absolute_path(&self.scan_db_path, "scan_db_path")?;
-        require_range(self.scan_run_id, 1, u64::MAX, "scan_run_id")
     }
 }
 
@@ -1999,79 +1522,6 @@ impl Validate for ContextDecision {
             Ok(())
         } else {
             Err("decision error_code is too long".to_string())
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InspectStatus {
-    Ok,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InspectRunResponse {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub scan_run_id: u64,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub context_run_id: Nullable<u64>,
-    pub status: InspectStatus,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub run_status: Nullable<RunStatus>,
-    pub summary: ContextSummary,
-    pub stage_metrics: Vec<StageMetric>,
-    pub extension_metrics: Vec<ExtensionMetric>,
-    pub files: Vec<FileAudit>,
-    pub decisions: Vec<ContextDecision>,
-    pub warnings: Vec<Diagnostic>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub error: Nullable<Diagnostic>,
-}
-
-impl Validate for InspectRunResponse {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_context", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        require_range(self.scan_run_id, 1, u64::MAX, "scan_run_id")?;
-        if let Some(context_run_id) = self.context_run_id.0 {
-            require_range(context_run_id, 1, u64::MAX, "context_run_id")?;
-        }
-        self.summary.validate()?;
-        if self.stage_metrics.len() > 32
-            || self.extension_metrics.len() > 256
-            || self.files.len() > 1_000_000
-            || self.decisions.len() > 1_000_000
-            || self.warnings.len() > 100_000
-        {
-            return Err("inspect response contains too many items".to_string());
-        }
-        for metric in &self.stage_metrics {
-            metric.validate()?;
-        }
-        for metric in &self.extension_metrics {
-            metric.validate()?;
-        }
-        for file in &self.files {
-            file.validate()?;
-        }
-        for decision in &self.decisions {
-            decision.validate()?;
-        }
-        for warning in &self.warnings {
-            warning.validate()?;
-        }
-        if let Some(error) = &self.error.0 {
-            error.validate()?;
-        }
-        match self.status {
-            InspectStatus::Ok if self.run_status.0.is_some() && self.error.0.is_none() => Ok(()),
-            InspectStatus::Error if self.error.0.is_some() => Ok(()),
-            _ => Err("inspect response violates status invariants".to_string()),
         }
     }
 }
@@ -2375,282 +1825,6 @@ impl Validate for PdfClassificationAuditV1 {
             {
                 return Err("observable run pages cannot be smaller than result pages".to_string());
             }
-        }
-        Ok(())
-    }
-}
-
-// ---------------------------------------------------------------------------
-// ai_daily_pdf_classifier_v1 wire（spec Part 7.1）：独立于共享 worker v1
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum PythonOperationErrorCode {
-    #[serde(rename = "INVALID_REQUEST")]
-    InvalidRequest,
-    #[serde(rename = "PARSER_START_FAILED")]
-    ParserStartFailed,
-    #[serde(rename = "PARSER_TIMEOUT")]
-    ParserTimeout,
-    #[serde(rename = "PARSER_INVALID_PAYLOAD")]
-    ParserInvalidPayload,
-    #[serde(rename = "PARSER_FAILED")]
-    ParserFailed,
-    #[serde(rename = "SOURCE_VERSION_CHANGED")]
-    SourceVersionChanged,
-    #[serde(rename = "INTERNAL_ERROR")]
-    InternalError,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PythonOperationStage {
-    Request,
-    Parse,
-    Process,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PythonOperationDiagnosticV1 {
-    pub error_code: PythonOperationErrorCode,
-    pub message: String,
-    pub retryable: bool,
-    pub stage: PythonOperationStage,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub file_path: Nullable<String>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub backend: Nullable<String>,
-}
-
-impl Validate for PythonOperationDiagnosticV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_range(self.message.chars().count() as u64, 1, 4_096, "message")?;
-        if let Some(path) = self.file_path.0.as_deref() {
-            require_absolute_path(path, "file_path")?;
-        }
-        if let Some(backend) = self.backend.0.as_deref() {
-            require_non_empty(backend, 1_024, "backend")?;
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PdfClassifierRequestV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub file_path: String,
-    pub source_version: String,
-    pub max_pages: u64,
-    pub policy_version: String,
-}
-
-impl Validate for PdfClassifierRequestV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_pdf_classifier", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        require_absolute_path(&self.file_path, "file_path")?;
-        require_source_version(&self.source_version, "source_version")?;
-        require_range(self.max_pages, 1, 10_000, "max_pages")?;
-        require_const(
-            &self.policy_version,
-            CLASSIFIER_POLICY_VERSION,
-            "policy_version",
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PdfClassifierResultStatus {
-    TextInParseWindow,
-    NoTextInParseWindow,
-    Unknown,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PdfClassifierResultV1 {
-    pub status: PdfClassifierResultStatus,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub page_count: Nullable<u64>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub result_examined_pages: Nullable<u64>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub diagnostic: Nullable<PythonOperationDiagnosticV1>,
-}
-
-impl Validate for PdfClassifierResultV1 {
-    fn validate(&self) -> Result<(), String> {
-        match self.status {
-            PdfClassifierResultStatus::TextInParseWindow
-            | PdfClassifierResultStatus::NoTextInParseWindow => {
-                if self.diagnostic.0.is_some() {
-                    return Err("text/no-text result must not carry a diagnostic".to_string());
-                }
-                if self.page_count.0.is_none() || self.result_examined_pages.0.is_none() {
-                    return Err("text/no-text result requires page counts".to_string());
-                }
-                let page_count = self.page_count.0.expect("checked above");
-                let result_pages = self.result_examined_pages.0.expect("checked above");
-                if page_count == 0 || result_pages == 0 {
-                    return Err("text/no-text result page counts must be positive".to_string());
-                }
-                if result_pages > page_count {
-                    return Err("result examined pages cannot exceed page_count".to_string());
-                }
-            }
-            PdfClassifierResultStatus::Unknown | PdfClassifierResultStatus::Error => {
-                let diagnostic = self
-                    .diagnostic
-                    .0
-                    .as_ref()
-                    .ok_or_else(|| "unknown/error result requires a diagnostic".to_string())?;
-                diagnostic.validate()?;
-                if diagnostic.retryable != (self.status == PdfClassifierResultStatus::Unknown) {
-                    return Err("unknown must be retryable and error must not be".to_string());
-                }
-            }
-        }
-        Ok(())
-    }
-}
-
-impl PdfClassifierResultV1 {
-    /// Validate the typed result against the request-specific classifier window.
-    pub fn validate_for_max_pages(&self, max_pages: u64) -> Result<(), String> {
-        self.validate()?;
-        if max_pages == 0 {
-            return Err("classifier max_pages must be positive".to_string());
-        }
-        match self.status {
-            PdfClassifierResultStatus::TextInParseWindow
-            | PdfClassifierResultStatus::NoTextInParseWindow => {
-                let page_count = self.page_count.0.expect("validated above");
-                let result_pages = self.result_examined_pages.0.expect("validated above");
-                let window_pages = page_count.min(max_pages);
-                match self.status {
-                    PdfClassifierResultStatus::TextInParseWindow
-                        if !(1..=window_pages).contains(&result_pages) =>
-                    {
-                        Err("text result pages exceed the request parse window".to_string())
-                    }
-                    PdfClassifierResultStatus::NoTextInParseWindow
-                        if result_pages != window_pages =>
-                    {
-                        Err("no-text result did not inspect the complete request window"
-                            .to_string())
-                    }
-                    _ => Ok(()),
-                }
-            }
-            PdfClassifierResultStatus::Unknown | PdfClassifierResultStatus::Error => {
-                if self.result_examined_pages.0.is_some_and(|result_pages| {
-                    result_pages > max_pages
-                        || self
-                            .page_count
-                            .0
-                            .is_some_and(|page_count| result_pages > page_count.min(max_pages))
-                }) {
-                    Err("typed failure result pages exceed the request parse window".to_string())
-                } else {
-                    Ok(())
-                }
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ClassifierResponseStatus {
-    Ok,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PdfClassifierResponseV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub status: ClassifierResponseStatus,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub result: Nullable<PdfClassifierResultV1>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub error: Nullable<PythonOperationDiagnosticV1>,
-}
-
-impl Validate for PdfClassifierResponseV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_pdf_classifier", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        match self.status {
-            ClassifierResponseStatus::Ok => {
-                if self.result.0.is_none() || self.error.0.is_some() {
-                    return Err("ok classifier response requires a result and no error".to_string());
-                }
-                self.result.0.as_ref().expect("checked above").validate()?;
-            }
-            ClassifierResponseStatus::Error => {
-                if self.result.0.is_some() || self.error.0.is_none() {
-                    return Err(
-                        "error classifier response requires an error and no result".to_string()
-                    );
-                }
-                self.error.0.as_ref().expect("checked above").validate()?;
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClassifierVersionResponseV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub classifier_contract_version: String,
-    pub classifier_build: String,
-    pub policy_version: String,
-    pub python_implementation: String,
-    pub python_version: String,
-    pub unicode_data_version: String,
-    pub pypdfium2_version: String,
-    pub pdfium_version: String,
-    pub target_triple: String,
-}
-
-impl Validate for ClassifierVersionResponseV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_pdf_classifier", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_const(
-            &self.classifier_contract_version,
-            "ai_daily_pdf_classifier_v1",
-            "classifier_contract_version",
-        )?;
-        require_sha256_hex(&self.classifier_build, "classifier_build")?;
-        require_const(
-            &self.policy_version,
-            CLASSIFIER_POLICY_VERSION,
-            "policy_version",
-        )?;
-        for (field, value) in [
-            ("python_implementation", self.python_implementation.as_str()),
-            ("python_version", self.python_version.as_str()),
-            ("unicode_data_version", self.unicode_data_version.as_str()),
-            ("pypdfium2_version", self.pypdfium2_version.as_str()),
-            ("pdfium_version", self.pdfium_version.as_str()),
-            ("target_triple", self.target_triple.as_str()),
-        ] {
-            require_non_empty(value, 1_024, field)?;
         }
         Ok(())
     }
@@ -2984,67 +2158,22 @@ impl Validate for ExecutionMetricsV2 {
     }
 }
 
-impl ExecutionMetricsV2 {
-    /// Inspect v2 `status=error` 的固定 sentinel：所有 non-nullable numeric=0、
-    /// 三个 nullable 字段均为 null、`snapshot_hit=false`（spec Part 5.3）。
-    pub fn is_error_sentinel(&self) -> bool {
-        self.discovery_observed_file_count == 0
-            && self.source_guard_content_hash_file_count == 0
-            && self.source_guard_unavailable_count == 0
-            && self.source_guard_bytes_read == 0
-            && self.candidate_file_count == 0
-            && self.admitted_file_count == 0
-            && self.classification_slot_count == 0
-            && self.confirmed_run_inspected_pages_total == 0
-            && self.unobserved_classification_attempt_count == 0
-            && self.nominal_charged_pages_total == 0
-            && self.extraction_slot_count == 0
-            && self.pdfplumber_invocations == 0
-            && !self.snapshot_hit
-            && self.parse_cache_lookup_count == 0
-            && self.classification_cache_lookup_count == 0
-            && self.parse_cache_all_hit.0.is_none()
-            && self.classification_cache_all_hit.0.is_none()
-            && self.stage_deadline_exhausted_count == 0
-            && self.session_restart_count == 0
-            && self.session_fallback_count == 0
-            && self.classify_attempt_count == 0
-            && self.parse_attempt_count == 0
-            && self.reserved_chars == 0
-            && self.rendered_chars == 0
-            && self.worker_handshake_ms == 0
-            && self.discovery_ms == 0
-            && self.snapshot_lookup_ms == 0
-            && self.current_run_audit_write_ms == 0
-            && self.terminal_precommit_ms == 0
-            && self.deadline_precommit_elapsed_ms == 0
-            && self.envelope_rebuild_ms == 0
-            && self.terminal_rows_written == 0
-            && self.peak_worker_rss_bytes.0.is_none()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct InspectRunResponseV2 {
+pub struct ScannerEvidence {
     pub contract: String,
     pub protocol_version: u64,
-    pub response_version: u64,
     pub request_id: String,
     pub scan_run_id: u64,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub context_run_id: Nullable<u64>,
-    pub status: InspectStatus,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub run_status: Nullable<RunStatus>,
+    pub run_status: RunStatus,
     pub summary: ContextSummary,
     pub stage_metrics: Vec<StageMetric>,
     pub extension_metrics: Vec<ExtensionMetric>,
     pub files: Vec<FileAuditV2>,
     pub decisions: Vec<ContextDecision>,
     pub warnings: Vec<Diagnostic>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub error: Nullable<Diagnostic>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub artifact_id: Nullable<u64>,
     #[serde(deserialize_with = "deserialize_required_nullable")]
@@ -3053,11 +2182,10 @@ pub struct InspectRunResponseV2 {
     pub execution_metrics: ExecutionMetricsV2,
 }
 
-impl Validate for InspectRunResponseV2 {
+impl Validate for ScannerEvidence {
     fn validate(&self) -> Result<(), String> {
         require_const(&self.contract, "ai_daily_context", "contract")?;
         require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_range(self.response_version, 2, 2, "response_version")?;
         require_request_id(&self.request_id)?;
         require_range(self.scan_run_id, 1, u64::MAX, "scan_run_id")?;
         if let Some(context_run_id) = self.context_run_id.0 {
@@ -3076,7 +2204,7 @@ impl Validate for InspectRunResponseV2 {
             || self.decisions.len() > 1_000_000
             || self.warnings.len() > 100_000
         {
-            return Err("inspect response contains too many items".to_string());
+            return Err("scanner evidence contains too many items".to_string());
         }
         for metric in &self.stage_metrics {
             metric.validate()?;
@@ -3093,48 +2221,15 @@ impl Validate for InspectRunResponseV2 {
         for warning in &self.warnings {
             warning.validate()?;
         }
-        if let Some(error) = &self.error.0 {
-            error.validate()?;
-        }
         self.execution_metrics.validate()?;
-        match self.status {
-            InspectStatus::Ok => {
-                if self.run_status.0.is_none() || self.error.0.is_some() {
-                    return Err(
-                        "ok inspect v2 response requires run status and no error".to_string()
-                    );
-                }
-                match self.run_status.0 {
-                    Some(RunStatus::Success | RunStatus::Partial) => {
-                        if self.artifact_id.0.is_none() {
-                            return Err(
-                                "successful inspect v2 run requires artifact_id".to_string()
-                            );
-                        }
-                    }
-                    Some(RunStatus::Error) if self.artifact_id.0.is_some() => {
-                        return Err("error run inspect v2 response must have a null artifact_id"
-                            .to_string());
-                    }
-                    _ => {}
-                }
+        match self.run_status {
+            RunStatus::Success | RunStatus::Partial if self.artifact_id.0.is_none() => {
+                return Err("successful scanner evidence requires artifact_id".to_string());
             }
-            InspectStatus::Error => {
-                if self.error.0.is_none() {
-                    return Err("error inspect v2 response requires a diagnostic".to_string());
-                }
-                if self.artifact_id.0.is_some()
-                    || self.reused_from_context_run_id.0.is_some()
-                    || self.reuse_kind != ReuseKind::None
-                    || !self.files.is_empty()
-                    || !self.decisions.is_empty()
-                    || !self.execution_metrics.is_error_sentinel()
-                {
-                    return Err(
-                        "error inspect v2 response must carry the empty sentinel shape".to_string(),
-                    );
-                }
+            RunStatus::Error if self.artifact_id.0.is_some() => {
+                return Err("error scanner evidence must have a null artifact_id".to_string());
             }
+            _ => {}
         }
         if self.reuse_kind == ReuseKind::ContextSnapshot
             && self.reused_from_context_run_id.0.is_none()
@@ -3177,18 +2272,10 @@ enum ContractPayload {
     BuildContextRequest(Box<BuildContextRequest>),
     ContextEnvelope(ContextEnvelope),
     Diagnostic(Diagnostic),
-    WorkerDiagnosticV1(WorkerDiagnosticV1),
     DoctorRequest(DoctorRequest),
     DoctorResponse(DoctorResponse),
-    InspectRunRequest(InspectRunRequest),
-    InspectRunResponse(InspectRunResponse),
     NormalizedScannerSettings(Box<NormalizedScannerSettings>),
     RawScannerSettings(Box<ScannerSettings>),
-    TransportError(TransportErrorResponse),
-    VersionResponse(VersionResponse),
-    WorkerParseRequest(WorkerParseRequest),
-    WorkerParseResponse(WorkerParseResponse),
-    WorkerVersionResponse(WorkerVersionResponse),
 }
 
 fn parse_typed<T>(value: &Value) -> Result<T, String>
@@ -3209,40 +2296,16 @@ fn parse_contract_payload(schema: &str, value: &Value) -> Result<ContractPayload
             Ok(ContractPayload::ContextEnvelope(parse_typed(value)?))
         }
         "diagnostic-v1.schema.json" => Ok(ContractPayload::Diagnostic(parse_typed(value)?)),
-        "worker-diagnostic-v1.schema.json" => {
-            Ok(ContractPayload::WorkerDiagnosticV1(parse_typed(value)?))
-        }
         "doctor-request-v1.schema.json" => Ok(ContractPayload::DoctorRequest(parse_typed(value)?)),
         "doctor-response-v1.schema.json" => {
             Ok(ContractPayload::DoctorResponse(parse_typed(value)?))
         }
-        "inspect-run-request-v1.schema.json" => {
-            Ok(ContractPayload::InspectRunRequest(parse_typed(value)?))
-        }
-        "inspect-run-response-v1.schema.json" => {
-            Ok(ContractPayload::InspectRunResponse(parse_typed(value)?))
-        }
-        "scanner-profile-normalized-v1.schema.json" => Ok(
+        "normalized-scanner-settings.schema.json" => Ok(
             ContractPayload::NormalizedScannerSettings(Box::new(parse_typed(value)?)),
         ),
-        "scanner-profile-request-v1.schema.json" => Ok(ContractPayload::RawScannerSettings(
-            Box::new(parse_typed(value)?),
-        )),
-        "transport-error-v1.schema.json" => {
-            Ok(ContractPayload::TransportError(parse_typed(value)?))
-        }
-        "version-response-v1.schema.json" => {
-            Ok(ContractPayload::VersionResponse(parse_typed(value)?))
-        }
-        "worker-parse-request-v1.schema.json" => {
-            Ok(ContractPayload::WorkerParseRequest(parse_typed(value)?))
-        }
-        "worker-parse-response-v1.schema.json" => {
-            Ok(ContractPayload::WorkerParseResponse(parse_typed(value)?))
-        }
-        "worker-version-response-v1.schema.json" => {
-            Ok(ContractPayload::WorkerVersionResponse(parse_typed(value)?))
-        }
+        "scanner-settings.schema.json" => Ok(ContractPayload::RawScannerSettings(Box::new(
+            parse_typed(value)?,
+        ))),
         _ => Err(format!("unknown scanner contract schema: {schema}")),
     }
 }
@@ -3258,18 +2321,10 @@ impl ContractPayload {
             Self::BuildContextRequest(payload) => serialize!(payload),
             Self::ContextEnvelope(payload) => serialize!(payload),
             Self::Diagnostic(payload) => serialize!(payload),
-            Self::WorkerDiagnosticV1(payload) => serialize!(payload),
             Self::DoctorRequest(payload) => serialize!(payload),
             Self::DoctorResponse(payload) => serialize!(payload),
-            Self::InspectRunRequest(payload) => serialize!(payload),
-            Self::InspectRunResponse(payload) => serialize!(payload),
             Self::NormalizedScannerSettings(payload) => serialize!(payload),
             Self::RawScannerSettings(payload) => serialize!(payload),
-            Self::TransportError(payload) => serialize!(payload),
-            Self::VersionResponse(payload) => serialize!(payload),
-            Self::WorkerParseRequest(payload) => serialize!(payload),
-            Self::WorkerParseResponse(payload) => serialize!(payload),
-            Self::WorkerVersionResponse(payload) => serialize!(payload),
         }
     }
 }
@@ -3282,12 +2337,10 @@ pub fn validate_contract_payload(
 ) -> Result<Value, String> {
     let parsed = parse_contract_payload(schema, value)?;
     let mut request = None;
-    let mut handshake = None;
     for related in related_payloads {
         let related_parsed = parse_contract_payload(&related.schema, &related.payload)?;
         match related.role.as_str() {
             "request" => request = Some(related_parsed),
-            "handshake" => handshake = Some(related_parsed),
             _ => return Err(format!("unknown related payload role: {}", related.role)),
         }
     }
@@ -3299,42 +2352,6 @@ pub fn validate_contract_payload(
     {
         if response.request_id != request.request_id {
             return Err("context response request_id mismatch".to_string());
-        }
-    }
-
-    if let (
-        ContractPayload::WorkerParseResponse(response),
-        Some(ContractPayload::WorkerParseRequest(request)),
-    ) = (&parsed, &request)
-    {
-        if response.request_id != request.request_id
-            || response.file_path != request.file_path
-            || response.file_type != request.file_type
-            || response.parser_backend != request.backend
-            || response.observed_source_version != request.expected_source_version
-        {
-            return Err("worker response does not echo its request".to_string());
-        }
-        if let Some(ContractPayload::WorkerVersionResponse(handshake)) = &handshake {
-            let expected_kind = match request.backend.lane() {
-                WorkerLane::RustOfficeProcessV2 => WorkerKind::Office,
-                WorkerLane::PythonDocumentProcessV2 => WorkerKind::PythonDocument,
-            };
-            if response.worker_contract_version != handshake.worker_contract_version
-                || response.worker_version != handshake.worker_version
-                || response.worker_build != handshake.worker_build
-                || handshake.worker_kind != expected_kind
-                || !handshake
-                    .supported_backends
-                    .iter()
-                    .any(|backend| backend == request.backend.as_str())
-                || !handshake
-                    .supported_extensions
-                    .iter()
-                    .any(|extension| extension == &request.file_type)
-            {
-                return Err("worker identity changed after handshake".to_string());
-            }
         }
     }
 
@@ -3459,91 +2476,5 @@ mod tests {
             row.cache_miss_reason = "new_file".to_string();
             assert!(row.validate().is_err(), "{status:?} with reason must fail");
         }
-    }
-
-    #[test]
-    fn worker_diagnostic_v1_rejects_scanner_only_codes_and_stages() {
-        for (error_code, stage) in [
-            ("STAGE_DEADLINE_EXHAUSTED", "parse"),
-            ("BUDGET_MODEL_MISMATCH", "parse"),
-            ("PARSER_FAILED", "maintenance"),
-        ] {
-            let payload = serde_json::json!({
-                "error_code": error_code,
-                "message": "scanner-only value must not enter worker v1",
-                "retryable": true,
-                "stage": stage,
-                "file_path": null,
-                "backend": null,
-            });
-            let result =
-                validate_contract_payload("worker-diagnostic-v1.schema.json", &payload, &[]);
-            assert!(
-                result.is_err(),
-                "{error_code}/{stage} unexpectedly passed frozen worker v1 validation"
-            );
-        }
-    }
-
-    #[test]
-    fn worker_parse_response_rejects_scanner_side_diagnostic_on_the_wire() {
-        // spec Part 7.1 split: a scanner-only ErrorCode must never deserialize on
-        // the ai_daily_worker_v1 parse wire, even though it is legal scanner-side.
-        let payload = serde_json::json!({
-            "contract": "ai_daily_worker",
-            "protocol_version": 1,
-            "request_id": "34444444-3444-4444-8444-344444444444",
-            "status": "error",
-            "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
-            "file_type": ".doc",
-            "content": "",
-            "parser_backend": "python_sharepoint_text_v2",
-            "worker_lane": "python_document_process_v2",
-            "truncated": false,
-            "warnings": [],
-            "error": {
-                "error_code": "STAGE_DEADLINE_EXHAUSTED",
-                "message": "scanner-only code must not enter the worker v1 wire",
-                "retryable": true,
-                "stage": "parse",
-                "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
-                "backend": "python_sharepoint_text_v2"
-            },
-            "duration_ms": 3,
-            "worker_contract_version": "ai_daily_worker_v1",
-            "worker_version": "0.1.0",
-            "worker_build": "fixture-python-worker-build-v1",
-            "observed_source_version": "mtime_ns=4000000001:size=1024"
-        });
-        let result =
-            validate_contract_payload("worker-parse-response-v1.schema.json", &payload, &[]);
-        assert!(
-            result.is_err(),
-            "scanner-side error code must be rejected on the worker wire"
-        );
-    }
-
-    #[test]
-    fn transport_error_rejects_scanner_side_code_at_deserialization() {
-        // spec Part 7.1: the ai_daily_transport wire also carries only the frozen
-        // WorkerDiagnosticV1, so a scanner-only code must fail serde, not merely
-        // the semantic validator.
-        let payload = serde_json::json!({
-            "contract": "ai_daily_transport",
-            "protocol_version": 1,
-            "status": "error",
-            "error": {
-                "error_code": "STAGE_DEADLINE_EXHAUSTED",
-                "message": "scanner-only code must not enter the transport wire",
-                "retryable": true,
-                "stage": "parse",
-                "file_path": null,
-                "backend": null
-            }
-        });
-        assert!(
-            serde_json::from_value::<TransportErrorResponse>(payload).is_err(),
-            "scanner-side code must fail transport deserialization"
-        );
     }
 }

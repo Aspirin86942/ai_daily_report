@@ -1,4 +1,4 @@
-"""Worker v1 的无请求体 version 进程合同。"""
+"""Worker v2 的 hello 与 request/response 进程合同。"""
 
 from __future__ import annotations
 
@@ -12,15 +12,14 @@ from docx import Document
 from openpyxl import Workbook
 from pptx import Presentation
 
-from src.models.scanner_contract import (
-    WorkerParseResponse,
-)
+from src.workers.models import ParseResult
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 OFFICE_WORKER_BIN = (
     PROJECT_ROOT / "rust" / "target" / "release" / "ai-daily-office-parser.exe"
 )
+REQUEST_ID = "63333333-6333-4333-8333-633333333333"
 
 
 def _require_office_worker() -> None:
@@ -129,7 +128,7 @@ def test_python_document_worker_process_parses_real_legacy_office(
     envelope = {
         "contract": "ai_daily_worker",
         "protocol_version": 2,
-        "request_id": request["request_id"],
+        "request_id": REQUEST_ID,
         "operation": operation,
         "payload": request,
     }
@@ -154,8 +153,10 @@ def test_python_document_worker_process_parses_real_legacy_office(
     assert completed.stderr == b""
     frames = completed.stdout.splitlines()
     assert json.loads(frames[0])["frame"] == "hello"
-    response = WorkerParseResponse.model_validate(json.loads(frames[1])["result"])
-    assert response.status == "ok"
+    envelope_response = json.loads(frames[1])
+    assert envelope_response["status"] == "ok"
+    assert envelope_response["error"] is None
+    response = ParseResult.model_validate(envelope_response["result"])
     assert response.parser_backend == backend
     assert response.worker_lane == "python_document_process_v2"
     assert expected_text in response.content
@@ -234,7 +235,7 @@ def test_office_worker_strict_parse_handles_modern_office(
                 {
                     "contract": "ai_daily_worker",
                     "protocol_version": 2,
-                    "request_id": request["request_id"],
+                    "request_id": REQUEST_ID,
                     "operation": "office_parse",
                     "payload": request,
                 },
@@ -252,8 +253,10 @@ def test_office_worker_strict_parse_handles_modern_office(
     )
     frames = completed.stdout.splitlines()
     assert json.loads(frames[0])["frame"] == "hello"
-    response = WorkerParseResponse.model_validate(json.loads(frames[1])["result"])
-    assert response.status == "ok"
+    envelope_response = json.loads(frames[1])
+    assert envelope_response["status"] == "ok"
+    assert envelope_response["error"] is None
+    response = ParseResult.model_validate(envelope_response["result"])
     assert response.parser_backend == backend
     assert response.worker_lane == "rust_office_process_v2"
     assert "strict content" in response.content
@@ -275,7 +278,7 @@ def test_office_worker_corrupt_zip_is_deterministic_error(tmp_path: Path) -> Non
         input=(json.dumps({
             "contract": "ai_daily_worker",
             "protocol_version": 2,
-            "request_id": request["request_id"],
+            "request_id": REQUEST_ID,
             "operation": "office_parse",
             "payload": request,
         }) + "\n").encode("utf-8"),
@@ -285,11 +288,11 @@ def test_office_worker_corrupt_zip_is_deterministic_error(tmp_path: Path) -> Non
 
     assert completed.returncode == 0
     frames = completed.stdout.splitlines()
-    response = WorkerParseResponse.model_validate(json.loads(frames[1])["result"])
-    assert response.status == "error"
-    assert response.error is not None
-    assert response.error.error_code == "PARSER_FAILED"
-    assert response.error.retryable is False
+    response = json.loads(frames[1])
+    assert response["status"] == "error"
+    assert response["result"] is None
+    assert response["error"]["error_code"] == "PARSER_FAILED"
+    assert response["error"]["retryable"] is False
 
 
 def test_office_worker_invalid_v2_request_exits_with_protocol_error() -> None:
@@ -310,9 +313,6 @@ def test_office_worker_invalid_v2_request_exits_with_protocol_error() -> None:
 def _office_parse_request(path: Path, file_type: str, backend: str) -> dict[str, object]:
     stat = path.stat()
     return {
-        "contract": "ai_daily_worker",
-        "protocol_version": 1,
-        "request_id": "63333333-6333-4333-8333-633333333333",
         "file_path": str(path.resolve()),
         "file_type": file_type,
         "backend": backend,

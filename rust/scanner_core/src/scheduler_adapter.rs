@@ -613,14 +613,14 @@ fn parser_route(route: RouteKind) -> ParserRoute {
     }
 }
 
-fn worker_lane_for_backend(backend: ai_daily_scanner_contract::WorkerBackend) -> &'static str {
+fn worker_lane_for_backend(backend: ai_daily_worker_contract::ParserBackend) -> &'static str {
     worker_lane_name(backend.lane())
 }
 
-fn worker_lane_name(lane: ai_daily_scanner_contract::WorkerLane) -> &'static str {
+fn worker_lane_name(lane: ai_daily_worker_contract::WorkerLane) -> &'static str {
     match lane {
-        ai_daily_scanner_contract::WorkerLane::RustOfficeProcessV2 => "rust_office_process_v2",
-        ai_daily_scanner_contract::WorkerLane::PythonDocumentProcessV2 => {
+        ai_daily_worker_contract::WorkerLane::RustOfficeProcessV2 => "rust_office_process_v2",
+        ai_daily_worker_contract::WorkerLane::PythonDocumentProcessV2 => {
             "python_document_process_v2"
         }
     }

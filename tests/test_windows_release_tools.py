@@ -103,7 +103,7 @@ def test_bundle_verifier_rejects_tamper_and_extra_file(tmp_path: Path) -> None:
 def test_sqlite_backup_is_integrity_checked_read_only_and_source_unchanged(
     tmp_path: Path,
 ) -> None:
-    source = tmp_path / "scan_index_v2.sqlite3"
+    source = tmp_path / "previous_scan_index.sqlite3"
     with sqlite3.connect(source) as connection:
         connection.execute("CREATE TABLE evidence(id INTEGER PRIMARY KEY, value TEXT)")
         connection.execute("INSERT INTO evidence(value) VALUES ('kept')")
@@ -144,7 +144,7 @@ def test_release_pointer_rollback_restores_old_database_without_deleting_v3(
     switch_release_pointer(
         pointer,
         release_version="old",
-        scanner_db_path="shared/data/db/scan_index_v2.sqlite3",
+        scanner_db_path="shared/data/db/previous_scan_index.sqlite3",
     )
     switched = switch_release_pointer(
         pointer,
@@ -152,7 +152,9 @@ def test_release_pointer_rollback_restores_old_database_without_deleting_v3(
         scanner_db_path="shared/data/db/scan_index_v3.sqlite3",
     )
     assert switched["current"]["release_version"] == "new"
-    assert switched["previous"]["scanner_db_path"].endswith("scan_index_v2.sqlite3")
+    assert switched["previous"]["scanner_db_path"].endswith(
+        "previous_scan_index.sqlite3"
+    )
 
     rolled_back = rollback_release_pointer(pointer)
     assert rolled_back["current"]["release_version"] == "old"

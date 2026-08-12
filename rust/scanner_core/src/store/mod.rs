@@ -9,7 +9,7 @@ use ai_daily_scanner_contract::{
     BuildContextRequest, CacheMissReason, ContextAction, ContextDecision, ContextEnvelope,
     ContextSummary, Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, ExecutionMetricsV2,
     ExtensionMetric, NormalizedScannerSettings, Nullable, ParseStatus, RunStatus, StageMetric,
-    StageName, Validate, VersionResponse,
+    StageName, Validate,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
@@ -22,6 +22,7 @@ use thiserror::Error;
 
 use crate::artifact::{ArtifactDecisionRow, ArtifactDraft, ArtifactFileRow, SnapshotKeyParts};
 use crate::deadline::{Clock, RunDeadlines};
+use crate::identity::{engine_identity, EngineIdentity};
 
 pub use cache::{
     classifier_profile_hash, parse_profile_hash, sha256_hex, CacheAwarePlanEntry, CacheEntry,
@@ -190,18 +191,21 @@ struct EngineFingerprint {
 }
 
 impl AttemptRuntime {
-    pub fn from_request(
+    pub fn from_request(request: &BuildContextRequest) -> Result<Self, StoreError> {
+        Self::from_request_with_identity(request, &engine_identity())
+    }
+
+    pub(crate) fn from_request_with_identity(
         request: &BuildContextRequest,
-        version: &VersionResponse,
+        identity: &EngineIdentity,
     ) -> Result<Self, StoreError> {
-        version.validate().map_err(StoreError::InvalidRequest)?;
         let engine_fingerprint = serde_json::to_string(&EngineFingerprint {
-            contract: version.contract.clone(),
-            protocol_version: version.protocol_version,
-            binary_name: version.binary_name.clone(),
-            engine_version: version.engine_version.clone(),
-            engine_build: version.engine_build.clone(),
-            target_triple: version.target_triple.clone(),
+            contract: "ai_daily_context".to_string(),
+            protocol_version: 1,
+            binary_name: "ai_daily_scanner_native".to_string(),
+            engine_version: identity.engine_version.clone(),
+            engine_build: identity.engine_build.clone(),
+            target_triple: identity.target_triple.clone(),
         })
         .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
         Ok(Self {
@@ -406,7 +410,7 @@ pub struct FinalizationBatch {
     /// `reused_from_context_run_id` are recorded on the current `context_runs`).
     pub snapshot_hit: Option<SnapshotHitRef>,
     /// Authoritative `execution_metrics` (spec Part 5.3), written at finalize and
-    /// read back by inspect v2. `None` only for non-production test batches.
+    /// returned with current-run evidence. `None` only for test-only batches.
     pub execution_metrics: Option<ExecutionMetricsV2>,
 }
 
@@ -2050,32 +2054,28 @@ impl ScannerStore {
             .collect()
     }
 
-    pub fn inspect_run(
+    pub fn load_evidence(
         &mut self,
         scan_run_id: u64,
-        include_content: bool,
-    ) -> Result<crate::context_audit::InspectSnapshot, crate::context_audit::InspectLoadError> {
+    ) -> Result<crate::context_audit::EvidenceSnapshot, crate::context_audit::EvidenceLoadError>
+    {
         let scan_run_id =
-            i64::try_from(scan_run_id).map_err(|_| crate::context_audit::InspectLoadError {
-                error: crate::context_audit::InspectAuditError::RunNotFound,
+            i64::try_from(scan_run_id).map_err(|_| crate::context_audit::EvidenceLoadError {
+                error: crate::context_audit::EvidenceAuditError::RunNotFound,
                 run_status: None,
             })?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Deferred)
-            .map_err(|error| crate::context_audit::InspectLoadError {
-                error: crate::context_audit::InspectAuditError::Sql(error),
+            .map_err(|error| crate::context_audit::EvidenceLoadError {
+                error: crate::context_audit::EvidenceAuditError::Sql(error),
                 run_status: None,
             })?;
-        let snapshot = crate::context_audit::load_inspect_snapshot(
-            &transaction,
-            scan_run_id,
-            include_content,
-        )?;
+        let snapshot = crate::context_audit::load_evidence_snapshot(&transaction, scan_run_id)?;
         transaction
             .commit()
-            .map_err(|error| crate::context_audit::InspectLoadError {
-                error: crate::context_audit::InspectAuditError::Sql(error),
+            .map_err(|error| crate::context_audit::EvidenceLoadError {
+                error: crate::context_audit::EvidenceAuditError::Sql(error),
                 run_status: Some(snapshot.run_status),
             })?;
         Ok(snapshot)
@@ -2166,7 +2166,7 @@ fn schema_open(error: schema::SchemaError) -> StoreError {
 /// 计算，不接受 wire 输入。
 /// Logical INSERT/UPDATE row count of the terminal transaction (spec Part 5.3
 /// `terminal_rows_written`): current run/artifact/context/metric rows only;
-/// retention DELETE, cache-transaction and maintenance rows are excluded.
+/// retention deletions and cache-transaction rows are excluded.
 fn compute_terminal_rows_written(batch: &FinalizationBatch, artifact_deduplicated: bool) -> u64 {
     let mut rows = 0_u64;
     rows = rows.saturating_add(batch.file_results.len() as u64);
@@ -2867,8 +2867,6 @@ fn restore_default_busy_timeout(connection: &Connection) -> rusqlite::Result<()>
 thread_local! {
     static TEST_FORCE_BUSY_TIMEOUT_RESTORE_FAILURE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
-    static TEST_FORCE_MAINTENANCE_GC_FAILURE: std::cell::Cell<bool> =
-        const { std::cell::Cell::new(false) };
     static TEST_FORCE_INCREMENTAL_VACUUM_FAILURE: std::cell::Cell<bool> =
         const { std::cell::Cell::new(false) };
     static TEST_TERMINAL_DIAGNOSTIC_BATCHES_WRITTEN: std::cell::Cell<usize> =
@@ -2991,10 +2989,10 @@ fn load_stored_envelope_ref(
     })
 }
 
-/// Shared spec Part 5.1 envelope rebuild for both idempotent replay and
-/// inspect: parse the body-free `final_envelope_metadata_json`, read the stored
-/// summary, load the referenced artifact, and rebuild + re-validate the full
-/// `ContextEnvelope v1`. `final_context` is never read from scan_runs.
+/// Shared spec Part 5.1 envelope rebuild for idempotent replay: parse the
+/// body-free `final_envelope_metadata_json`, read the stored summary, load the
+/// referenced artifact, and rebuild + re-validate the full `ContextEnvelope v1`.
+/// `final_context` is never read from scan_runs.
 pub(crate) fn rebuild_envelope_from_metadata(
     connection: &Connection,
     scan_run_id: i64,
@@ -4553,7 +4551,7 @@ mod tests {
             .expect("normalized scanner profile");
         let canonical =
             ScannerStore::canonicalize_request(&request, &profile).expect("canonical request");
-        let runtime = AttemptRuntime::from_request(&request, &crate::version_response()).unwrap();
+        let runtime = AttemptRuntime::from_request(&request).unwrap();
         let store = ScannerStore::open(&db_path).expect("scanner store");
         Harness {
             _directory: directory,
@@ -4688,13 +4686,12 @@ mod tests {
 
     fn error_batch(active: &ActiveRun) -> FinalizationBatch {
         let error = run_error();
-        let version = crate::version_response();
         let envelope = ContextEnvelope {
             contract: "ai_daily_context".to_string(),
             protocol_version: 1,
             request_id: active.request_id().to_string(),
-            engine_version: version.engine_version,
-            engine_build: version.engine_build,
+            engine_version: crate::engine_version().to_string(),
+            engine_build: crate::ENGINE_BUILD_IDENTITY.to_string(),
             status: EngineStatus::Error,
             file_context: String::new(),
             summary: empty_summary(),
@@ -4864,7 +4861,6 @@ mod tests {
         profile_hash: &str,
         content: &str,
     ) -> CacheWriteRecord {
-        let version = crate::version_response();
         CacheWriteRecord {
             file_identity: identity.to_string(),
             source_version: source_version.to_string(),
@@ -4877,8 +4873,8 @@ mod tests {
             worker_lane: "rust_core".to_string(),
             truncated: false,
             worker_contract_version: "ai_daily_context_v1".to_string(),
-            worker_version: version.engine_version,
-            worker_build: version.engine_build,
+            worker_version: crate::engine_version().to_string(),
+            worker_build: crate::ENGINE_BUILD_IDENTITY.to_string(),
         }
     }
 
@@ -4898,12 +4894,12 @@ mod tests {
 
     fn record_both_workers(store: &mut ScannerStore, active: &ActiveRun, now_ms: u64) {
         let office = WorkerFingerprint {
-            contract: "ai_daily_worker_v1".to_string(),
+            contract: "ai_daily_worker_v2".to_string(),
             version: "0.1.0".to_string(),
             build: "office-build".to_string(),
         };
         let python = WorkerFingerprint {
-            contract: "ai_daily_worker_v1".to_string(),
+            contract: "ai_daily_worker_v2".to_string(),
             version: "0.1.0".to_string(),
             build: "python-build".to_string(),
         };
@@ -4919,7 +4915,6 @@ mod tests {
         profile_hash: &str,
         content: &str,
     ) -> FinalizationBatch {
-        let version = crate::version_response();
         let summary = ContextSummary {
             source_file_count: 1,
             success_count: 1,
@@ -4938,8 +4933,8 @@ mod tests {
             contract: "ai_daily_context".to_string(),
             protocol_version: 1,
             request_id: active.request_id().to_string(),
-            engine_version: version.engine_version,
-            engine_build: version.engine_build,
+            engine_version: crate::engine_version().to_string(),
+            engine_build: crate::ENGINE_BUILD_IDENTITY.to_string(),
             status: EngineStatus::Ok,
             file_context: content.to_string(),
             summary: summary.clone(),
@@ -5090,14 +5085,14 @@ mod tests {
             text_like: RouteStackFingerprint::text("engine-build").unwrap(),
             modern_office: RouteStackFingerprint::modern_office(
                 "engine-build",
-                "ai_daily_worker_v1",
+                "ai_daily_worker_v2",
                 "office-build",
-                Some(("ai_daily_worker_v1", "python-build")),
+                Some(("ai_daily_worker_v2", "python-build")),
             )
             .unwrap(),
             python_document: RouteStackFingerprint::python_document(
                 "engine-build",
-                "ai_daily_worker_v1",
+                "ai_daily_worker_v2",
                 "python-build",
             )
             .unwrap(),
@@ -5423,10 +5418,11 @@ mod tests {
         let expected = batch.envelope_json.clone();
         finalize_for_test(&mut harness.store, &active, &batch, 2).unwrap();
 
-        let mut changed_version = crate::version_response();
-        changed_version.engine_build = "engine-build-that-did-not-exist-on-first-run".to_string();
+        let mut changed_identity = crate::identity::engine_identity();
+        changed_identity.engine_build = "engine-build-that-did-not-exist-on-first-run".to_string();
         let changed_runtime =
-            AttemptRuntime::from_request(&harness.request, &changed_version).unwrap();
+            AttemptRuntime::from_request_with_identity(&harness.request, &changed_identity)
+                .unwrap();
         let stored = harness
             .store
             .begin_run(
@@ -5540,10 +5536,10 @@ mod tests {
     }
 
     #[test]
-    fn error_run_with_file_rows_inspects_cleanly_v1_and_v2() {
+    fn error_run_with_file_rows_produces_complete_evidence() {
         // spec Part 2.3: a committed Error run with file rows must carry a
         // context_runs row (artifact_id=NULL) whose summary reconciles with the
-        // persisted file/decision/stage rows, so v1 AND v2 inspect both succeed
+        // persisted file/decision/stage rows, so current evidence is complete
         // (previously: "error envelope has unexpected context rows" RUN_CORRUPT).
         let mut harness = harness("00000000-0000-4000-8000-000000000024");
         let active = started(
@@ -5602,13 +5598,12 @@ mod tests {
                 },
             }],
         };
-        let version = crate::version_response();
         let envelope = ContextEnvelope {
             contract: "ai_daily_context".to_string(),
             protocol_version: 1,
             request_id: active.request_id().to_string(),
-            engine_version: version.engine_version,
-            engine_build: version.engine_build,
+            engine_version: crate::engine_version().to_string(),
+            engine_build: crate::ENGINE_BUILD_IDENTITY.to_string(),
             status: EngineStatus::Error,
             file_context: String::new(),
             summary: summary.clone(),
@@ -5748,28 +5743,21 @@ mod tests {
             "error run must reference no artifact"
         );
 
-        // v1 inspect succeeds.
         let snapshot = harness
             .store
-            .inspect_run(active.scan_run_id(), false)
-            .expect("v1 inspect must succeed for an error run with file rows");
+            .load_evidence(active.scan_run_id())
+            .expect("evidence must load for an error run with file rows");
         assert_eq!(snapshot.run_status, RunStatus::Error);
 
-        // v2 inspect succeeds with a reconciling summary.
-        let request = ai_daily_scanner_contract::InspectRunRequest {
-            contract: "ai_daily_context".to_string(),
-            protocol_version: 1,
-            request_id: "00000000-0000-4000-8000-000000000024".to_string(),
-            scan_db_path: harness.db_path.to_string_lossy().to_string(),
-            scan_run_id: active.scan_run_id(),
-            include_content: false,
-        };
-        let v2 = crate::inspect::assemble_inspect_v2(&request, &snapshot)
-            .expect("v2 inspect must succeed for an error run with file rows");
-        assert_eq!(v2.status, ai_daily_scanner_contract::InspectStatus::Ok);
-        assert_eq!(v2.artifact_id.0, None, "error run has no artifact");
-        assert_eq!(v2.execution_metrics.worker_handshake_ms, 5);
-        assert_eq!(v2.execution_metrics.discovery_ms, 2);
+        let evidence = crate::evidence::assemble_scanner_evidence(
+            active.request_id(),
+            active.scan_run_id(),
+            &snapshot,
+        )
+        .expect("scanner evidence must assemble");
+        assert_eq!(evidence.artifact_id.0, None, "error run has no artifact");
+        assert_eq!(evidence.execution_metrics.worker_handshake_ms, 5);
+        assert_eq!(evidence.execution_metrics.discovery_ms, 2);
 
         let rows_written: i64 = harness
             .store
@@ -5785,10 +5773,7 @@ mod tests {
             "terminal rows include scan_file_execution but exclude global inventory"
         );
 
-        // A historical full-v2 database amended with an empty execution child
-        // table must keep default v1 inspect usable. V2 fails closed with the
-        // dedicated provenance-unavailable code instead of fabricating values
-        // or classifying the otherwise valid run as corrupt.
+        // Missing per-file execution provenance fails closed.
         harness
             .store
             .connection
@@ -5799,31 +5784,28 @@ mod tests {
             .expect("simulate pre-amendment full-v2 run");
         let historical = harness
             .store
-            .inspect_run(active.scan_run_id(), false)
-            .expect("v1 inspect remains available");
-        assert_eq!(historical.files.len(), 1);
+            .load_evidence(active.scan_run_id())
+            .expect("persisted rows remain readable");
         assert_eq!(historical.files_v2[0].parse_transport, None);
         assert_eq!(historical.files_v2[0].parse_attempt_count, None);
 
-        let input = serde_json::to_vec(&request).expect("inspect request JSON");
-        let output = crate::dispatch_with_response_version("inspect-run", &input, 2)
-            .expect("v2 inspect response");
-        assert_eq!(output.exit_code, 1);
-        let value: serde_json::Value = serde_json::from_str(&output.json).expect("v2 JSON");
-        assert_eq!(
-            value
-                .pointer("/error/error_code")
-                .and_then(serde_json::Value::as_str),
-            Some("INSPECT_V2_PROVENANCE_UNAVAILABLE")
+        assert!(
+            crate::evidence::assemble_scanner_evidence(
+                active.request_id(),
+                active.scan_run_id(),
+                &historical,
+            )
+            .is_err(),
+            "current evidence must fail closed when provenance is unavailable"
         );
     }
 
     #[test]
-    fn zero_file_error_run_inspects_cleanly_v1_and_v2() {
+    fn zero_file_error_run_produces_complete_evidence() {
         // spec Part 2.3 regression: a zero-file scheduler Error outcome
         // (source-file ceiling, BUDGET_MODEL_MISMATCH, enforced-render mismatch)
         // commits a context_runs row with 4 reconciling zero stage metrics, so
-        // v1 AND v2 inspect both succeed (previously `stages.len() != 4` RUN_CORRUPT).
+        // current evidence succeeds (previously `stages.len() != 4` RUN_CORRUPT).
         let mut harness = harness("00000000-0000-4000-8000-000000000025");
         let active = started(
             harness
@@ -5856,13 +5838,12 @@ mod tests {
             summary: summary.clone(),
             decisions: Vec::new(),
         };
-        let version = crate::version_response();
         let envelope = ContextEnvelope {
             contract: "ai_daily_context".to_string(),
             protocol_version: 1,
             request_id: active.request_id().to_string(),
-            engine_version: version.engine_version,
-            engine_build: version.engine_build,
+            engine_version: crate::engine_version().to_string(),
+            engine_build: crate::ENGINE_BUILD_IDENTITY.to_string(),
             status: EngineStatus::Error,
             file_context: String::new(),
             summary,
@@ -5962,8 +5943,8 @@ mod tests {
 
         let snapshot = harness
             .store
-            .inspect_run(active.scan_run_id(), false)
-            .expect("v1 inspect must succeed for a zero-file error run");
+            .load_evidence(active.scan_run_id())
+            .expect("evidence must load for a zero-file error run");
         assert_eq!(snapshot.run_status, RunStatus::Error);
         assert_eq!(
             snapshot.stage_metrics.len(),
@@ -5971,19 +5952,14 @@ mod tests {
             "zero-file error must persist 4 stage rows"
         );
 
-        let request = ai_daily_scanner_contract::InspectRunRequest {
-            contract: "ai_daily_context".to_string(),
-            protocol_version: 1,
-            request_id: "00000000-0000-4000-8000-000000000025".to_string(),
-            scan_db_path: harness.db_path.to_string_lossy().to_string(),
-            scan_run_id: active.scan_run_id(),
-            include_content: false,
-        };
-        let v2 = crate::inspect::assemble_inspect_v2(&request, &snapshot)
-            .expect("v2 inspect must succeed for a zero-file error run");
-        assert_eq!(v2.status, ai_daily_scanner_contract::InspectStatus::Ok);
+        let evidence = crate::evidence::assemble_scanner_evidence(
+            active.request_id(),
+            active.scan_run_id(),
+            &snapshot,
+        )
+        .expect("scanner evidence must assemble");
         assert_eq!(
-            v2.execution_metrics.discovery_observed_file_count,
+            evidence.execution_metrics.discovery_observed_file_count,
             1_000_001
         );
     }
@@ -7346,7 +7322,7 @@ mod tests {
                 .unwrap(),
         );
         let office = WorkerFingerprint {
-            contract: "ai_daily_worker_v1".to_string(),
+            contract: "ai_daily_worker_v2".to_string(),
             version: "0.1.0".to_string(),
             build: "office-build".to_string(),
         };
@@ -7387,7 +7363,7 @@ mod tests {
     }
 
     #[test]
-    fn inspect_run_returns_stable_rows_and_guards_fixture_content_mode() {
+    fn evidence_returns_stable_rows_and_rejects_tampering() {
         let mut harness = harness("00000000-0000-4000-8000-000000000019");
         let active = started(
             harness
@@ -7412,38 +7388,14 @@ mod tests {
 
         let snapshot = harness
             .store
-            .inspect_run(active.scan_run_id(), false)
-            .expect("metadata-only inspect");
+            .load_evidence(active.scan_run_id())
+            .expect("evidence snapshot");
         assert_eq!(snapshot.run_status, RunStatus::Success);
         assert_eq!(snapshot.context_run_id, Some(active.context_run_id()));
         assert_eq!(snapshot.summary.source_file_count, 1);
         assert_eq!(snapshot.stage_metrics.len(), 4);
-        assert_eq!(snapshot.files.len(), 1);
+        assert_eq!(snapshot.files_v2.len(), 1);
         assert_eq!(snapshot.decisions.len(), 1);
-
-        let restricted = harness
-            .store
-            .inspect_run(active.scan_run_id(), true)
-            .expect_err("production databases reject content mode");
-        assert!(matches!(
-            restricted.error,
-            crate::context_audit::InspectAuditError::ContentForbidden
-        ));
-        assert_eq!(restricted.run_status, Some(RunStatus::Success));
-
-        harness
-            .store
-            .connection
-            .pragma_update(
-                None,
-                "application_id",
-                crate::context_audit::SANITIZED_FIXTURE_APPLICATION_ID,
-            )
-            .unwrap();
-        harness
-            .store
-            .inspect_run(active.scan_run_id(), true)
-            .expect("sanitized fixture content mode");
 
         harness
             .store
@@ -7456,11 +7408,11 @@ mod tests {
             .unwrap();
         let corrupt = harness
             .store
-            .inspect_run(active.scan_run_id(), false)
+            .load_evidence(active.scan_run_id())
             .expect_err("decision identity/path mismatch is corrupt");
         assert!(matches!(
             corrupt.error,
-            crate::context_audit::InspectAuditError::RunCorrupt(_)
+            crate::context_audit::EvidenceAuditError::RunCorrupt(_)
         ));
     }
 

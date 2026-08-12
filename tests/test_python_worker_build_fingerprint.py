@@ -5,7 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from src.workers.contracts import (
+from src.workers.python_worker_identity import (
     PYTHON_WORKER_BUILD,
     PYTHON_WORKER_BUILD_INPUTS,
 )

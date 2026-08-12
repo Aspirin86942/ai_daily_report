@@ -1,215 +1,109 @@
-# Adopt a Windows-first Rust scanner/context core
+# Adopt an in-process Windows native scanner
 
 ## Status
 
-Accepted on 2026-07-15.
+Accepted on 2026-08-12. This revision supersedes the earlier process-based
+scanner decision while retaining its Windows-first and crash-isolation goals.
 
 ## Context
 
-The application currently uses Python to orchestrate discovery, parser routing,
-timeouts, cache access, aggregation, compression, and audit while delegating
-selected discovery and Office parsing work to Rust helpers. That split leaves
-the most important scanner semantics distributed across process boundaries and
-makes cache identity, timeout ownership, and fallback evidence harder to audit.
+The previous report path split scanner orchestration across multiple Python
+layers and a standalone Rust process. Validation, parameter forwarding, DTO
+shrinking, JSON transport, and later evidence reads made the interface nearly
+as complex as the implementation. Office/PDF parsers still need crash
+isolation, but deterministic scanner orchestration does not.
 
-The deployed environment is Windows x64. Its path rules, process-tree timeout
-behavior, Task Scheduler launch context, and native release artifacts are
-therefore production requirements rather than incidental portability details.
+The deployment target is Windows x64 with exact CPython 3.13.13. Cache identity,
+worker process lifetime, rollback, and native packaging are production
+contracts rather than incidental portability details.
 
 ## Decision
 
-- Windows x64 is the production and release platform. Linux remains a
-  compatibility-only target and does not define production behavior.
-- Python remains the application shell. It owns the CLI, local configuration
-  loading, secrets, LLM integration, report models, report history, Jinja2, and
-  Markdown rendering.
-- Rust becomes the deterministic scanner/context core. It owns scanner-profile
-  defaults and validation, discovery, classification, parser routing, worker
-  deadlines, inventory, parse cache, planning, aggregation, deterministic
-  compression, scan/context audit, and scanner metrics.
-- One report scan crosses the production process seam exactly once: Python
-  sends one strict `BuildContextRequest` to `build-context`, and Rust returns
-  one strict `ContextEnvelope`.
-- Python transports only explicitly configured scanner-profile leaves. It does
-  not apply Rust-owned defaults, unit conversion, classification, or fallback
-  selection.
-- The production scanner cache and audit database has one writer: Rust. Python
-  reads diagnostic data only through versioned CLI DTOs such as `inspect-run`.
-- After cutover there is no silent top-level fallback from the Rust core to the
-  retired Python scanner chain. Invalid output, crash, timeout, or contract
-  mismatch is an explicit scanner error and stops scan-backed report commands
-  before any LLM call.
-- The old parse cache is not migrated. The ownership and profile semantics have
-  changed, so v2 starts cold while the legacy database remains untouched until
-  the legacy implementation is deleted.
-- `.xlsx` uses the bounded Office-worker backend
-  `rust_xlsx_bounded_v1`; `.docx` and `.pptx` use
-  `rust_office_oxide_v1`. Both use the strict `OfficeLimits` request shape and
-  the `rust_office_process` lane. A successful worker response reports the
-  exact requested backend, keeping `parser_backend` separate from
-  `worker_lane`.
-- `cache_status` remains mandatory audit evidence in `inspect-run`, but it is
-  excluded from `file_context`. Cache state is operational metadata, so an
-  unchanged cold and warm run must produce identical context bytes.
-- `parser_profile_version` is part of every route's parse-cache fingerprint.
-  Changing that semantic version invalidates otherwise unchanged entries.
-- Every new or resumed run performs both live worker version handshakes before
-  discovery or parse-cache lookup. Persisted fingerprints are audit evidence
-  only and are never substituted for a current handshake.
+The production chain is:
 
-## Accepted parity difference
+```text
+CLI → ReportRunner → NativeScanner → PyO3 Scanner
+→ scanner_core → worker v2 pools
+```
 
-Task 10 froze a sanitized corpus and its expected root-normalized
-complete-context hashes. Those migration-only executables and fixtures were
-removed with the legacy core after acceptance; the verified evidence remains
-in the Task 10 commit history and ephemeral evidence bundle. On that corpus,
-both engines had to discover the same inventory, produce identical
-normalized hashes for text/PDF and any same-backend parse, make the same file
-decisions, stay within budget, and be independently byte-deterministic. The
-two frozen final context hashes intentionally differ: Rust replaces the legacy
-`ScanAggregator` plus `ContextCompressor` double-budget path with the single
-budgeting/rendering pipeline approved by this ADR. Any renderer drift changes
-the accepted evidence and requires an explicit ADR review; no parser-content,
-decision, fallback, or nondeterminism difference was accepted under that
-exception.
+- Python remains the application shell and owns CLI, local configuration,
+  secrets, LLM integration, report models, report SQLite, templates, and
+  Markdown publication.
+- `ReportRunner.run(ReportRunRequest) -> ReportRunOutcome` remains the single
+  report interface and preserves daily/weekly/monthly behavior.
+- `NativeScanner` is the only Python adapter at the scanner seam. It lazily
+  imports `ai_daily_scanner_native`, maps the small request, validates one
+  result, and maps stable errors.
+- Rust `Scanner` is the scanner deep module. It hides normalized settings,
+  store, scheduler/planner/parser assembly, caches, evidence, and two lazy
+  worker pools behind `open`, `build_context`, and `doctor`.
+- One report scan performs one PyO3 call. Rust releases the GIL during work.
+  Top-level context builds are serialized while work inside one build remains
+  concurrent.
+- Context and complete evidence return together from the current run and are
+  persisted from the same domain data.
+- Office/PDF remain crash-isolated under one strict worker-v2 envelope. Pools
+  enforce hello capabilities, request limits, idle TTL, RSS limits, timeout,
+  dirty-protocol recovery, and controlled restart.
+- Routing and ordinary fallback are compile-time Rust policy. Timeout fallback
+  is the sole runtime policy switch and defaults off.
+- The scanner database is fresh-only `user_version=3`; other versions are
+  rejected without migration or modification.
 
-## Task 10 cutover evidence (2026-07-16)
+## Error contract
 
-Warm-start work retained every frozen safety boundary: each new run still
-performs both live worker handshakes before discovery/cache lookup, error rows
-are retried, and Windows workers still use suspended creation followed by Job
-assignment and resume. The measured implementation overlaps the independent
-handshakes, uses a stdlib-only `-S` Python version path, avoids a Rayon pool for
-zero/one parse candidates, creates the heartbeat connection only after the
-first interval, and uses `synchronous=NORMAL` for staging transactions before
-restoring `FULL` for the atomic terminal transaction. On Windows venvs it may
-create a hash-verified, content-addressed copy of the base CPython image beside
-the existing launcher; it never replaces the launcher or `pyvenv.cfg`, and an
-unverifiable existing target falls back to the configured executable. The
-Windows one-request Python worker explicitly flushes its contract response
-before using the native process exit path, avoiding interpreter-finalizer work
-without reusing a process or skipping a live handshake.
+Expected file, worker, timeout, and budget failures remain in the typed scan
+status and diagnostics. Invalid request/configuration values become
+`ValueError`. Native initialization, SQLite invariants, busy state, and caught
+panic failures become `NativeScannerError` with `error_code`, `message`, and
+`retryable`.
 
-The final full cutover run used 21 alternating cold/warm pairs per engine and
-remained red:
+Release builds use unwind panic strategy and catch panics before FFI. Error
+messages must not disclose file contents, credentials, prompts, or environment
+dumps.
 
-| boundary | Python legacy | Rust v2 | criterion |
-|---|---:|---:|---|
-| cold median | 2055.858 ms | 1360.819 ms | pass (`<= +10%`) |
-| cold p95 | 2256.308 ms | 1437.662 ms | pass (`<= +20%`) |
-| warm median | 59.271 ms | 60.931 ms | fail (`+1.660 ms`, `+2.80%`) |
+## Database and cache identity
 
-Parity, cache semantics, the frozen fault matrix, real-directory comparison,
-and process cleanup all passed in that same run. The real-directory evidence
-contained one eligible `.xlsx`, reported `rust_xlsx_bounded_v1` on
-`rust_office_process`, and retained only aggregate metadata. The performance
-run completed without a freeze in 76.909 seconds, contained parser-backend and
-worker-lane evidence for both engines, and left no new scanner/worker/orphan
-process. Earlier scheduling-favorable samples are not accepted in place of
-this final-source full run. The warm criterion therefore remains recorded as a
-technical regression rather than being relabeled as a pass. On 2026-07-16 the
-user explicitly waived only this `+1.660 ms` / `+2.80%` warm-median criterion
-for the current migration round after reviewing the complete evidence. That
-waiver authorizes Task 11; every other Task 10 result and all Task 11 production
-checks remain mandatory.
+The v3 store is owned for the life of the Rust `Scanner`. Cache identity
+includes native build identity, normalized mutable settings, backend/lane,
+worker contract/build, budgets, timeouts, and source fingerprint.
 
-## Task 11 production-default evidence (2026-07-16)
+Cold and warm runs over unchanged inputs must produce identical context bytes.
+Cache state is operational evidence returned in `ScannerEvidence`, not report
+prompt content.
 
-The Windows production default is now `rust_v2`. Strict doctor probes the
-scanner version and contract, validates its build identity, and requires the
-scan DB parent plus both crash-isolated worker handshakes to succeed before a
-deployment is accepted. At that time, the Windows CI job set a process-level
-LLM prohibition that failed before any SDK call, used only synthetic
-Chinese/space-path data for end-to-end scanning, and ran cold, warm, and
-source-version cache checks.
+## Windows release and rollback
 
-The final Task 11 source tree passed 119 focused Python tests and 448 full
-Python tests with the LLM prohibition enabled, Python bytecode compilation,
-Cargo fmt/clippy, all Rust workspace tests, and a locked release build. A clean
-staging checkout then ran the real source-build deployment twice. Strict doctor
-passed both times; the first run took 207.370 seconds and the idempotent second
-run took 6.868 seconds. The temporary non-secret configuration retained the
-same SHA-256, and a hash-checked sentinel created inside the first `.venv`
-survived the second run, proving that the local configuration and existing
-virtual environment were preserved. No business directory was scanned and no
-LLM call was made.
+A release contains an exact `cp313-win_amd64` wheel, the Office worker
+executable, Python application files, and a hash/build-identity manifest.
+Packaging validates wheel installation/import in a disposable CPython 3.13.13
+venv and rejects the wrong Python version.
 
-## Task 12 legacy-core deletion evidence (2026-07-16)
+Deployment is side by side. Before an authorized cutover, operators stop report
+processes, use the SQLite backup API to archive the old scanner database with
+integrity/hash evidence, and point the new release at a new v3 database. The
+old scanner database and report SQLite are retained unchanged.
 
-The Python scanner, planner, index/cache, aggregation, compression, discovery,
-and top-level fallback implementations have been deleted. `ContextScheduler`
-now exposes only the single Rust `build-context` seam, while the retained
-Python document worker uses its own worker-internal result type. The standalone
-Rust discovery executable and the commandless Office-parser CLI branch were
-also removed; discovery remains a Rust library used by the scanner core and the
-Office worker requires an explicit versioned command.
-
-The deletion tree passed both required zero-match static gates, 211 Python
-tests with the LLM prohibition enabled, two real-release Windows Rust-core E2E
-tests, Python bytecode compilation, Cargo formatting and Clippy, all 127 Rust
-workspace tests, and a release build. Local settings were not modified, no API
-key material was read or output, and no business directory was scanned or sent
-to an LLM.
-
-## Task 13 Windows release evidence (2026-07-16)
-
-The Windows x64 release is a manifest-allowlisted ZIP verified by a trusted
-bootstrap before extraction or package-code execution. Installation is
-side-by-side under `releases/<version>`; all mutable configuration, report and
-scanner databases, Markdown output, and logs remain under `shared/`.
-`current.json` is replaced atomically only after integrity checks, dependency
-installation, binary/worker handshakes, and strict doctor succeed. Rollback
-revalidates the previous release and runs its strict doctor before changing the
-pointer.
-
-The final fast Python suite passed 235 tests with the LLM prohibition enabled;
-the clean installed-package E2E was then enabled separately and passed in
-284.21 seconds. That E2E built and installed locally identified A and B
-packages under a GUID path containing spaces and Chinese characters, launched
-strict doctor and a zero-network command from an unrelated cwd, created both
-report and scanner databases only under `shared/`, preserved shared config and
-data hashes across the B switch and B-to-A rollback, and reran doctor plus a
-scanner smoke after rollback. Fourteen package structure/tamper tests proved
-that Python, template, lock, PowerShell, Rust binary, manifest-path, unsafe ZIP
-name, duplicate/case collision, symlink, and extra-entry changes fail before
-pointer mutation or untrusted code execution. Cargo formatting, Clippy, all
-127 Rust workspace tests, and the locked release build also passed. No local
-settings were overwritten, no API key material was read or output, no business
-directory was scanned, and no LLM call was permitted.
-
-## Contract authority
-
-The exact v1 wire shapes are frozen by the JSON Schemas under
-`docs/contracts/`, the semantic rules in `scanner-context-v1.md`, and the
-golden corpus under `tests/fixtures/scanner_contract/v1/`. Rust and Python must
-consume the same fixtures. Unknown fields are rejected, and required nullable
-fields must be present with either a value or JSON `null`.
-
-## Relationship to ADR 0001
-
-ADR 0001 remains the historical decision for the helper phase. This ADR
-supersedes its ownership boundary after cutover: Rust, not Python, chooses and
-audits parser routes and fallback. It does not supersede ADR 0001's
-performance-first timeout principle. One file still has one total deadline,
-fallback may consume only remaining time, and timeout fallback stays disabled
-unless explicitly configured.
+Rollback stops the new process, restores the previous release and its original
+database pointer, and leaves the new v3 database for diagnosis. No backward
+database conversion is provided.
 
 ## Consequences
 
-- The Windows release builds one workspace and ships the scanner plus Office
-  worker artifacts together.
-- Scanner behavior becomes testable through one typed boundary and one
-  canonical fixture corpus.
-- Cache keys include normalized parse semantics and route-specific build
-  fingerprints known before cache lookup.
-- Linux failures may block compatibility claims but do not redefine the Windows
-  release contract.
-- Rollback after Python legacy deletion is a Git revert and rebuild, not a
-  runtime compatibility shim.
+- Callers learn two high-leverage interfaces instead of the scanner's internal
+  assembly and transport details.
+- Scanner process startup and scanner JSON serialization are eliminated.
+- Only document workers can remain as child processes.
+- The native wheel is tied to Windows x64 and exact CPython 3.13.13; no abi3,
+  alternate Python, or Linux compatibility layer is promised.
+- Old scanner history is not readable through runtime compatibility surfaces;
+  Git history and read-only database archives provide audit recovery.
+- Actual install, process control, configuration pointer changes, database
+  archival, push, and release remain separately authorized actions.
 
-## Security constraints
+## Verification
 
-The Rust request never receives API keys, LLM endpoints, prompts, free-form
-user report input, report output, or environment dumps. Contract fixtures use
-only synthetic paths and content. `doctor` performs capability checks without
-opening a business document, mutating the scanner database, or calling an LLM.
+Acceptance requires Python and Rust suites, format/clippy/release build, exact
+wheel install/import, worker-v2 failure/recycle tests, v3 schema gates, fixed
+corpus cold/warm evidence, package manifest verification, strict doctor, CLI
+help, compileall, dependency audits, and a clean diff check.

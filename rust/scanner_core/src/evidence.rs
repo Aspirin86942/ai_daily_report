@@ -1,60 +1,20 @@
-//! Inspect v2 assembly + v1 lossy projection.
+//! Complete evidence assembly for the current scanner run.
 
 use ai_daily_scanner_contract::{
-    ClassificationCacheStatus, ClassificationTransport, Diagnostic, DiagnosticStage, ErrorCode,
-    FileAuditV2, InspectRunRequest, InspectRunResponseV2, InspectStatus, Nullable,
-    ParseCacheStatus, PdfClassificationAuditV1, PdfClassificationStatus, ReuseKind, RunStatus,
+    ClassificationCacheStatus, ClassificationTransport, FileAuditV2, Nullable, ParseCacheStatus,
+    PdfClassificationAuditV1, PdfClassificationStatus, ReuseKind, RunStatus, ScannerEvidence,
     SourceGuardKind, Validate,
 };
 
 use crate::artifact::PdfClassificationProvenanceV1;
-use crate::context_audit::{assemble_execution_metrics_v2, FileAuditV2Source, InspectSnapshot};
+use crate::context_audit::{assemble_execution_metrics_v2, EvidenceSnapshot, FileAuditV2Source};
 
-/// Error sentinel execution object is validated by `InspectRunResponseV2`
-/// `status=error`; it never represents the inspected run.
-fn error_sentinel() -> ai_daily_scanner_contract::ExecutionMetricsV2 {
-    ai_daily_scanner_contract::ExecutionMetricsV2 {
-        discovery_observed_file_count: 0,
-        source_guard_content_hash_file_count: 0,
-        source_guard_unavailable_count: 0,
-        source_guard_bytes_read: 0,
-        candidate_file_count: 0,
-        admitted_file_count: 0,
-        classification_slot_count: 0,
-        confirmed_run_inspected_pages_total: 0,
-        unobserved_classification_attempt_count: 0,
-        nominal_charged_pages_total: 0,
-        extraction_slot_count: 0,
-        pdfplumber_invocations: 0,
-        snapshot_hit: false,
-        parse_cache_lookup_count: 0,
-        classification_cache_lookup_count: 0,
-        parse_cache_all_hit: Nullable(None),
-        classification_cache_all_hit: Nullable(None),
-        stage_deadline_exhausted_count: 0,
-        session_restart_count: 0,
-        session_fallback_count: 0,
-        classify_attempt_count: 0,
-        parse_attempt_count: 0,
-        reserved_chars: 0,
-        rendered_chars: 0,
-        worker_handshake_ms: 0,
-        discovery_ms: 0,
-        snapshot_lookup_ms: 0,
-        current_run_audit_write_ms: 0,
-        terminal_precommit_ms: 0,
-        deadline_precommit_elapsed_ms: 0,
-        envelope_rebuild_ms: 0,
-        terminal_rows_written: 0,
-        peak_worker_rss_bytes: Nullable(None),
-    }
-}
-
-/// Assembles the strict response from the current schema's complete evidence.
-pub fn assemble_inspect_v2(
-    request: &InspectRunRequest,
-    snapshot: &InspectSnapshot,
-) -> Result<InspectRunResponseV2, String> {
+/// Assembles complete evidence from the current schema's committed rows.
+pub fn assemble_scanner_evidence(
+    request_id: &str,
+    scan_run_id: u64,
+    snapshot: &EvidenceSnapshot,
+) -> Result<ScannerEvidence, String> {
     if snapshot
         .files_v2
         .iter()
@@ -81,31 +41,28 @@ pub fn assemble_inspect_v2(
         .validate()
         .map_err(|message| format!("execution metrics are invalid: {message}"))?;
     let reuse_kind = determine_reuse_kind(snapshot, &execution_metrics);
-    let response = InspectRunResponseV2 {
+    let evidence = ScannerEvidence {
         contract: "ai_daily_context".to_string(),
         protocol_version: 1,
-        response_version: 2,
-        request_id: request.request_id.clone(),
-        scan_run_id: request.scan_run_id,
+        request_id: request_id.to_string(),
+        scan_run_id,
         context_run_id: Nullable(snapshot.context_run_id),
-        status: InspectStatus::Ok,
-        run_status: Nullable(Some(snapshot.run_status)),
+        run_status: snapshot.run_status,
         summary: snapshot.summary.clone(),
         stage_metrics: snapshot.stage_metrics.clone(),
         extension_metrics: snapshot.extension_metrics.clone(),
         files,
         decisions: snapshot.decisions.clone(),
         warnings: snapshot.warnings.clone(),
-        error: Nullable(None),
         artifact_id: Nullable(snapshot.artifact_id),
         reused_from_context_run_id: Nullable(snapshot.reused_from_context_run_id),
         reuse_kind,
         execution_metrics,
     };
-    response
+    evidence
         .validate()
-        .map_err(|message| format!("inspect v2 response is invalid: {message}"))?;
-    Ok(response)
+        .map_err(|message| format!("scanner evidence is invalid: {message}"))?;
+    Ok(evidence)
 }
 
 /// Spec Part 5.3 reuse-kind rules:
@@ -114,7 +71,7 @@ pub fn assemble_inspect_v2(
 /// - `parse_cache`: no snapshot, >=1 parse lookup and parse_cache_all_hit=true;
 /// - otherwise `none`.
 fn determine_reuse_kind(
-    snapshot: &InspectSnapshot,
+    snapshot: &EvidenceSnapshot,
     metrics: &ai_daily_scanner_contract::ExecutionMetricsV2,
 ) -> ReuseKind {
     if snapshot.run_status == RunStatus::Error {
@@ -129,67 +86,6 @@ fn determine_reuse_kind(
         ReuseKind::ParseCache
     } else {
         ReuseKind::None
-    }
-}
-
-/// Strict error-arm v2 response (sentinel execution metrics; never the
-/// inspected run's evidence).
-pub fn inspect_v2_error(
-    request: &InspectRunRequest,
-    error_code: ErrorCode,
-    message: String,
-    retryable: bool,
-    run_status: Option<RunStatus>,
-) -> InspectRunResponseV2 {
-    let response = InspectRunResponseV2 {
-        contract: "ai_daily_context".to_string(),
-        protocol_version: 1,
-        response_version: 2,
-        request_id: request.request_id.clone(),
-        scan_run_id: request.scan_run_id,
-        context_run_id: Nullable(None),
-        status: InspectStatus::Error,
-        run_status: Nullable(run_status),
-        summary: empty_summary(),
-        stage_metrics: Vec::new(),
-        extension_metrics: Vec::new(),
-        files: Vec::new(),
-        decisions: Vec::new(),
-        warnings: Vec::new(),
-        error: Nullable(Some(Diagnostic {
-            error_code,
-            message: message.chars().take(4_096).collect(),
-            retryable,
-            stage: DiagnosticStage::Inspect,
-            file_path: Nullable(None),
-            backend: Nullable(None),
-        })),
-        artifact_id: Nullable(None),
-        reused_from_context_run_id: Nullable(None),
-        reuse_kind: ReuseKind::None,
-        execution_metrics: error_sentinel(),
-    };
-    debug_assert!(
-        response.validate().is_ok(),
-        "inspect v2 error sentinel violates the wire contract"
-    );
-    response
-}
-
-fn empty_summary() -> ai_daily_scanner_contract::ContextSummary {
-    ai_daily_scanner_contract::ContextSummary {
-        source_file_count: 0,
-        success_count: 0,
-        timeout_count: 0,
-        included_file_count: 0,
-        omitted_file_count: 0,
-        error_file_count: 0,
-        input_chars: 0,
-        output_chars: 0,
-        total_duration_ms: 0,
-        discovery_duration_ms: 0,
-        parse_duration_ms: 0,
-        compression_duration_ms: 0,
     }
 }
 
@@ -215,7 +111,7 @@ fn assemble_file_audit_v2(row: &FileAuditV2Source) -> Result<FileAuditV2, String
         .ok_or_else(|| "file execution provenance is unavailable".to_string())?;
     // spec Part 5.3/Part 3: the immutable artifact provenance only maps to a
     // snapshot audit when THIS current row is actually a snapshot row. A cold
-    // run's own inspect must never stamp snapshot identity onto real execution
+    // run must never stamp snapshot identity onto real execution
     // (its run pages/duration are not persisted), so `pdf_classification` is
     // null for miss/not_applicable rows.
     let pdf_classification = match row.classification_execution.as_ref() {
@@ -306,84 +202,5 @@ fn parse_source_guard_kind(value: &str) -> Result<SourceGuardKind, String> {
         "content_sha256_v1" => Ok(SourceGuardKind::ContentSha256V1),
         "unavailable" => Ok(SourceGuardKind::Unavailable),
         _ => Err(format!("unknown source guard kind: {value}")),
-    }
-}
-
-// ---------------------------------------------------------------------------
-// v1 lossy projection (spec Part 5.3)
-// ---------------------------------------------------------------------------
-
-/// Projection warning diagnostic with the frozen `stage=inspect,
-/// retryable=false, file_path/backend=null` shape.
-fn projection_warning(error_code: ErrorCode, message: &str) -> Diagnostic {
-    Diagnostic {
-        error_code,
-        message: message.to_string(),
-        retryable: false,
-        stage: DiagnosticStage::Inspect,
-        file_path: Nullable(None),
-        backend: Nullable(None),
-    }
-}
-
-/// Adds the v1 lossy projection warnings to the existing warnings.
-/// Output-only: never written back to full
-/// diagnostics, envelope metadata or snapshot eligibility. Merged warnings stay
-/// within the 257 projection bound (256 detail + 1 `DIAGNOSTICS_AGGREGATED`).
-pub fn v1_lossy_projection_warnings(
-    snapshot: &InspectSnapshot,
-    existing: &[Diagnostic],
-) -> Vec<Diagnostic> {
-    let mut warnings = existing.to_vec();
-    let mut any_source_guard = false;
-    for file in &snapshot.files_v2 {
-        match file.parse_cache_status.as_deref() {
-            Some("snapshot") => warnings.push(projection_warning(
-                ErrorCode::SnapshotReuseProjectedAsFresh,
-                "snapshot reuse projected as a fresh parse-cache hit",
-            )),
-            Some("not_applicable") => warnings.push(projection_warning(
-                ErrorCode::ParseCacheNotApplicableProjectedAsMiss,
-                "not-applicable parse cache projected as a miss",
-            )),
-            _ => {}
-        }
-        if file.cache_miss_reason == "entry_absent_or_evicted" {
-            warnings.push(projection_warning(
-                ErrorCode::CacheMissReasonProjectedAsNewFile,
-                "cache miss reason projected as new_file",
-            ));
-        }
-        if file.source_guard_kind.is_some() {
-            any_source_guard = true;
-        }
-    }
-    if any_source_guard {
-        warnings.push(projection_warning(
-            ErrorCode::SourceGuardNotProjected,
-            "SourceGuardV2 is not representable in the v1 inspect projection",
-        ));
-    }
-    apply_warning_bound(warnings)
-}
-
-/// Keeps at most 256 detail warnings plus one `DIAGNOSTICS_AGGREGATED` row.
-fn apply_warning_bound(mut warnings: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    let detail_limit = 256;
-    if warnings.len() <= detail_limit {
-        return warnings;
-    }
-    let aggregate = warnings
-        .iter()
-        .any(|warning| warning.error_code == ErrorCode::DiagnosticsAggregated);
-    warnings.truncate(detail_limit);
-    if aggregate {
-        warnings
-    } else {
-        warnings.push(projection_warning(
-            ErrorCode::DiagnosticsAggregated,
-            "too many diagnostics were aggregated",
-        ));
-        warnings
     }
 }

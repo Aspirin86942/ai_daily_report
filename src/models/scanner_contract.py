@@ -1,4 +1,4 @@
-"""Windows-first Rust scanner core 的严格 v1 进程合同。"""
+"""Windows-first native scanner 的严格领域合同。"""
 
 from __future__ import annotations
 
@@ -397,14 +397,12 @@ class Diagnostic(ContractModel):
         "PROFILE_ROUTE_INVARIANT",
         "SOURCE_FILE_LIMIT_EXCEEDED",
         "SOURCE_GUARD_UNAVAILABLE",
-        "MAINTENANCE_MODE_UNAVAILABLE",
         "SCANNER_DB_SCHEMA_MISMATCH",
         "DIAGNOSTICS_AGGREGATED",
         "SNAPSHOT_REUSE_PROJECTED_AS_FRESH",
         "PARSE_CACHE_NOT_APPLICABLE_PROJECTED_AS_MISS",
         "CACHE_MISS_REASON_PROJECTED_AS_NEW_FILE",
         "SOURCE_GUARD_NOT_PROJECTED",
-        "INSPECT_V2_PROVENANCE_UNAVAILABLE",
         "WORKER_RSS_UNAVAILABLE",
         "INTERNAL_ERROR",
     ]
@@ -418,100 +416,6 @@ class Diagnostic(ContractModel):
         "context",
         "process",
         "doctor",
-        "inspect",
-        "maintenance",
-        "internal",
-    ]
-    file_path: AbsolutePath | None
-    backend: NonEmpty1024 | None
-
-
-WORKER_DIAGNOSTIC_V1_ERROR_CODES = (
-    "INVALID_REQUEST",
-    "CONTRACT_VERSION_MISMATCH",
-    "WORK_DIR_NOT_FOUND",
-    "WORK_DIR_NOT_DIRECTORY",
-    "DISCOVERY_ENTRY_UNREADABLE",
-    "FILE_TOO_LARGE",
-    "PARSER_START_FAILED",
-    "PARSER_TIMEOUT",
-    "PARSER_INVALID_PAYLOAD",
-    "PARSER_FAILED",
-    "WORKER_HANDSHAKE_FAILED",
-    "WORKER_VERSION_MISMATCH",
-    "WORKER_BUILD_CHANGED",
-    "SOURCE_VERSION_CHANGED",
-    "CACHE_OPEN_FAILED",
-    "CACHE_WRITE_FAILED",
-    "SCAN_ALREADY_RUNNING",
-    "REQUEST_IN_PROGRESS",
-    "REQUEST_ID_CONFLICT",
-    "RUN_NOT_FOUND",
-    "RUN_CORRUPT",
-    "CONTEXT_BUDGET_INVALID",
-    "NOT_IMPLEMENTED",
-    "RUST_CORE_CRASHED",
-    "INTERNAL_ERROR",
-)
-
-WORKER_DIAGNOSTIC_V1_STAGES = (
-    "request",
-    "discovery",
-    "cache",
-    "parse",
-    "context",
-    "process",
-    "doctor",
-    "inspect",
-    "internal",
-)
-
-
-class WorkerDiagnosticV1(ContractModel):
-    """frozen ai_daily_worker_v1 diagnostic。
-
-    wire 形状与 Diagnostic 相同，但 ErrorCode/DiagnosticStage 集合是冻结的
-    v1 集合；scanner-side 新 code/stage 绝不进入。
-    """
-
-    error_code: Literal[
-        "INVALID_REQUEST",
-        "CONTRACT_VERSION_MISMATCH",
-        "WORK_DIR_NOT_FOUND",
-        "WORK_DIR_NOT_DIRECTORY",
-        "DISCOVERY_ENTRY_UNREADABLE",
-        "FILE_TOO_LARGE",
-        "PARSER_START_FAILED",
-        "PARSER_TIMEOUT",
-        "PARSER_INVALID_PAYLOAD",
-        "PARSER_FAILED",
-        "WORKER_HANDSHAKE_FAILED",
-        "WORKER_VERSION_MISMATCH",
-        "WORKER_BUILD_CHANGED",
-        "SOURCE_VERSION_CHANGED",
-        "CACHE_OPEN_FAILED",
-        "CACHE_WRITE_FAILED",
-        "SCAN_ALREADY_RUNNING",
-        "REQUEST_IN_PROGRESS",
-        "REQUEST_ID_CONFLICT",
-        "RUN_NOT_FOUND",
-        "RUN_CORRUPT",
-        "CONTEXT_BUDGET_INVALID",
-        "NOT_IMPLEMENTED",
-        "RUST_CORE_CRASHED",
-        "INTERNAL_ERROR",
-    ]
-    message: NonEmpty4096
-    retryable: bool
-    stage: Literal[
-        "request",
-        "discovery",
-        "cache",
-        "parse",
-        "context",
-        "process",
-        "doctor",
-        "inspect",
         "internal",
     ]
     file_path: AbsolutePath | None
@@ -624,24 +528,6 @@ def build_rust_core_crashed_envelope(
     )
 
 
-class TransportErrorResponse(ContractModel):
-    contract: Literal["ai_daily_transport"]
-    protocol_version: Literal[1]
-    status: Literal["error"]
-    error: WorkerDiagnosticV1
-
-    @model_validator(mode="after")
-    def validate_request_error(self) -> "TransportErrorResponse":
-        if (
-            self.error.error_code != "INVALID_REQUEST"
-            or self.error.stage != "request"
-            or self.error.file_path is not None
-            or self.error.backend is not None
-        ):
-            raise ValueError("transport error must describe an invalid request")
-        return self
-
-
 class DoctorRequest(ContractModel):
     contract: Literal["ai_daily_context"]
     protocol_version: Literal[1]
@@ -676,151 +562,6 @@ class DoctorResponse(ContractModel):
         if self.status == "error" and self.error is None:
             raise ValueError("error doctor response requires a diagnostic")
         return self
-
-
-class WorkerVersionResponse(ContractModel):
-    contract: Literal["ai_daily_worker"]
-    protocol_version: Literal[1]
-    worker_kind: Literal["office", "python_document"]
-    worker_contract_version: NonEmpty1024
-    worker_version: NonEmpty1024
-    worker_build: NonEmpty1024
-    supported_backends: Annotated[
-        list[NonEmpty1024],
-        Field(min_length=1, max_length=256),
-    ]
-    supported_extensions: Annotated[
-        list[Extension],
-        Field(min_length=1, max_length=256),
-    ]
-
-    @model_validator(mode="after")
-    def validate_canonical_sets(self) -> "WorkerVersionResponse":
-        if self.supported_backends != sorted(set(self.supported_backends)):
-            raise ValueError("supported_backends must be sorted and unique")
-        if self.supported_extensions != sorted(set(self.supported_extensions)):
-            raise ValueError("supported_extensions must be sorted and unique")
-        return self
-
-
-class OfficeLimits(ContractModel):
-    kind: Literal["office"]
-    excel_max_sheets: ExcelSheetBudget
-    excel_max_rows: RowBudget
-    excel_max_columns: ColumnBudget
-    docx_max_paragraphs: ParagraphBudget
-    docx_max_tables: CollectionBudget
-    docx_table_max_rows: RowBudget
-    docx_table_max_cols: ColumnBudget
-    pptx_max_slides: CollectionBudget
-    pptx_include_notes: bool
-    document_excerpt_max_chars: CharBudget
-
-
-class PdfLimits(ContractModel):
-    kind: Literal["pdf"]
-    max_pages: PdfPageBudget
-    excerpt_max_chars: CharBudget
-
-
-class SharePointTextLimits(ContractModel):
-    kind: Literal["sharepoint_text"]
-    excerpt_max_chars: CharBudget
-
-
-WorkerParserLimits = Annotated[
-    OfficeLimits | PdfLimits | SharePointTextLimits,
-    Field(discriminator="kind"),
-]
-
-WORKER_ROUTES: dict[str, tuple[set[str], str, str]] = {
-    "rust_office_oxide_v2": (
-        {".docx", ".pptx"},
-        "rust_office_process_v2",
-        "office",
-    ),
-    "rust_xlsx_bounded_v2": ({".xlsx"}, "rust_office_process_v2", "office"),
-    "python_office_v2": (
-        {".docx", ".pptx", ".xls", ".xlsx"},
-        "python_document_process_v2",
-        "office",
-    ),
-    "python_pdf_text_v2": ({".pdf"}, "python_document_process_v2", "pdf"),
-    "python_sharepoint_text_v2": (
-        {".doc", ".ppt"},
-        "python_document_process_v2",
-        "sharepoint_text",
-    ),
-}
-WorkerBackend = Literal[
-    "rust_office_oxide_v2",
-    "rust_xlsx_bounded_v2",
-    "python_office_v2",
-    "python_pdf_text_v2",
-    "python_sharepoint_text_v2",
-]
-
-
-class WorkerParseRequest(ContractModel):
-    contract: Literal["ai_daily_worker"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    file_path: AbsolutePath
-    file_type: Extension
-    backend: WorkerBackend
-    remaining_timeout_ms: TimeoutMilliseconds
-    max_file_size_bytes: Annotated[int, Field(ge=1, le=4_294_967_296)]
-    parser_limits: WorkerParserLimits
-    expected_source_version: SourceVersion
-
-    @model_validator(mode="after")
-    def validate_route(self) -> "WorkerParseRequest":
-        file_types, _, limit_kind = WORKER_ROUTES[self.backend]
-        if self.file_type not in file_types:
-            raise ValueError("worker backend does not support file type")
-        if self.parser_limits.kind != limit_kind:
-            raise ValueError("worker backend and parser limits do not match")
-        return self
-
-
-class WorkerParseResponse(ContractModel):
-    contract: Literal["ai_daily_worker"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    status: Literal["ok", "error"]
-    file_path: AbsolutePath
-    file_type: Extension
-    content: str
-    parser_backend: WorkerBackend
-    worker_lane: Literal["rust_office_process_v2", "python_document_process_v2"]
-    truncated: bool
-    warnings: Annotated[list[WorkerDiagnosticV1], Field(max_length=256)]
-    error: WorkerDiagnosticV1 | None
-    duration_ms: NonNegativeInt
-    worker_contract_version: NonEmpty1024
-    worker_version: NonEmpty1024
-    worker_build: NonEmpty1024
-    observed_source_version: SourceVersion
-
-    @model_validator(mode="after")
-    def validate_status_and_route(self) -> "WorkerParseResponse":
-        if self.status == "ok" and self.error is not None:
-            raise ValueError("successful worker response cannot contain an error")
-        if self.status == "error" and (self.content or self.error is None):
-            raise ValueError("worker error requires empty content and a diagnostic")
-        file_types, lane, _ = WORKER_ROUTES[self.parser_backend]
-        if self.file_type not in file_types or self.worker_lane != lane:
-            raise ValueError("worker response route is inconsistent")
-        return self
-
-
-class InspectRunRequest(ContractModel):
-    contract: Literal["ai_daily_context"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    scan_db_path: AbsolutePath
-    scan_run_id: PositiveInt
-    include_content: bool
 
 
 class StageMetric(ContractModel):
@@ -875,37 +616,6 @@ class ContextDecision(ContractModel):
     output_chars: NonNegativeInt
     truncated: bool
     error_code: Annotated[str, Field(max_length=1024)]
-
-
-class InspectRunResponse(ContractModel):
-    contract: Literal["ai_daily_context"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    scan_run_id: PositiveInt
-    context_run_id: PositiveInt | None
-    status: Literal["ok", "error"]
-    run_status: Literal[
-        "running",
-        "success",
-        "partial",
-        "error",
-        "abandoned",
-    ] | None
-    summary: ContextSummary
-    stage_metrics: Annotated[list[StageMetric], Field(max_length=32)]
-    extension_metrics: Annotated[list[ExtensionMetric], Field(max_length=256)]
-    files: Annotated[list[FileAudit], Field(max_length=1_000_000)]
-    decisions: Annotated[list[ContextDecision], Field(max_length=1_000_000)]
-    warnings: Annotated[list[Diagnostic], Field(max_length=100_000)]
-    error: Diagnostic | None
-
-    @model_validator(mode="after")
-    def validate_status(self) -> "InspectRunResponse":
-        if self.status == "ok" and (self.run_status is None or self.error):
-            raise ValueError("successful inspection requires run status and no error")
-        if self.status == "error" and self.error is None:
-            raise ValueError("failed inspection requires a diagnostic")
-        return self
 
 
 # ---------------------------------------------------------------------------
@@ -1078,105 +788,6 @@ class PdfClassificationAuditV1(ContractModel):
                     "observable run pages cannot be smaller than result pages"
                 )
         return self
-
-
-# ---------------------------------------------------------------------------
-# ai_daily_pdf_classifier_v1 wire（spec Part 7.1）：独立于共享 worker v1
-# ---------------------------------------------------------------------------
-
-PythonOperationErrorCode = Literal[
-    "INVALID_REQUEST",
-    "PARSER_START_FAILED",
-    "PARSER_TIMEOUT",
-    "PARSER_INVALID_PAYLOAD",
-    "PARSER_FAILED",
-    "SOURCE_VERSION_CHANGED",
-    "INTERNAL_ERROR",
-]
-PythonOperationStage = Literal["request", "parse", "process"]
-PdfClassifierStatus = Literal[
-    "text_in_parse_window",
-    "no_text_in_parse_window",
-    "unknown",
-    "error",
-]
-
-
-class PythonOperationDiagnosticV1(ContractModel):
-    error_code: PythonOperationErrorCode
-    message: Annotated[str, Field(min_length=1, max_length=4096)]
-    retryable: bool
-    stage: PythonOperationStage
-    file_path: AbsolutePath | None
-    backend: Annotated[str | None, Field(min_length=1, max_length=1024)] = None
-
-
-class PdfClassifierRequestV1(ContractModel):
-    contract: Literal["ai_daily_pdf_classifier"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    file_path: AbsolutePath
-    source_version: SourceVersion
-    max_pages: Annotated[int, Field(ge=1, le=10_000)]
-    policy_version: Literal["pdf_text_presence_v1"]
-
-
-class PdfClassifierResultV1(ContractModel):
-    status: PdfClassifierStatus
-    page_count: NonNegativeInt | None
-    result_examined_pages: NonNegativeInt | None
-    diagnostic: PythonOperationDiagnosticV1 | None
-
-    @model_validator(mode="after")
-    def validate_status_invariants(self) -> "PdfClassifierResultV1":
-        if self.status in {"text_in_parse_window", "no_text_in_parse_window"}:
-            if self.diagnostic is not None:
-                raise ValueError("text/no-text result must not carry a diagnostic")
-            if self.page_count is None or self.result_examined_pages is None:
-                raise ValueError("text/no-text result requires page counts")
-            if self.page_count == 0 or self.result_examined_pages == 0:
-                raise ValueError("text/no-text result page counts must be positive")
-            if self.result_examined_pages > self.page_count:
-                raise ValueError("result examined pages cannot exceed page_count")
-        else:
-            if self.diagnostic is None:
-                raise ValueError("unknown/error result requires a diagnostic")
-            if self.diagnostic.retryable != (self.status == "unknown"):
-                raise ValueError("unknown must be retryable and error must not be")
-        return self
-
-
-class PdfClassifierResponseV1(ContractModel):
-    contract: Literal["ai_daily_pdf_classifier"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    status: Literal["ok", "error"]
-    result: PdfClassifierResultV1 | None
-    error: PythonOperationDiagnosticV1 | None
-
-    @model_validator(mode="after")
-    def validate_status_invariants(self) -> "PdfClassifierResponseV1":
-        if self.status == "ok":
-            if self.result is None or self.error is not None:
-                raise ValueError("ok classifier response requires a result and no error")
-        else:
-            if self.result is not None or self.error is None:
-                raise ValueError("error classifier response requires an error and no result")
-        return self
-
-
-class ClassifierVersionResponseV1(ContractModel):
-    contract: Literal["ai_daily_pdf_classifier"]
-    protocol_version: Literal[1]
-    classifier_contract_version: Literal["ai_daily_pdf_classifier_v1"]
-    classifier_build: Sha256Hex
-    policy_version: Literal["pdf_text_presence_v1"]
-    python_implementation: NonEmpty1024
-    python_version: NonEmpty1024
-    unicode_data_version: NonEmpty1024
-    pypdfium2_version: NonEmpty1024
-    pdfium_version: NonEmpty1024
-    target_triple: NonEmpty1024
 
 
 def _validate_v2_parse_provenance(
@@ -1381,96 +992,36 @@ class ExecutionMetricsV2(ContractModel):
             )
         return self
 
-    def is_error_sentinel(self) -> bool:
-        """Inspect v2 `status=error` 的固定 sentinel（spec Part 5.3）。"""
-        numerics = [
-            self.discovery_observed_file_count,
-            self.source_guard_content_hash_file_count,
-            self.source_guard_unavailable_count,
-            self.source_guard_bytes_read,
-            self.candidate_file_count,
-            self.admitted_file_count,
-            self.classification_slot_count,
-            self.confirmed_run_inspected_pages_total,
-            self.unobserved_classification_attempt_count,
-            self.nominal_charged_pages_total,
-            self.extraction_slot_count,
-            self.pdfplumber_invocations,
-            self.parse_cache_lookup_count,
-            self.classification_cache_lookup_count,
-            self.stage_deadline_exhausted_count,
-            self.session_restart_count,
-            self.session_fallback_count,
-            self.classify_attempt_count,
-            self.parse_attempt_count,
-            self.reserved_chars,
-            self.rendered_chars,
-            self.worker_handshake_ms,
-            self.discovery_ms,
-            self.snapshot_lookup_ms,
-            self.current_run_audit_write_ms,
-            self.terminal_precommit_ms,
-            self.deadline_precommit_elapsed_ms,
-            self.envelope_rebuild_ms,
-            self.terminal_rows_written,
-        ]
-        return (
-            not self.snapshot_hit
-            and all(value == 0 for value in numerics)
-            and self.parse_cache_all_hit is None
-            and self.classification_cache_all_hit is None
-            and self.peak_worker_rss_bytes is None
-        )
-
-
-class InspectRunResponseV2(ContractModel):
+class ScannerEvidence(ContractModel):
     contract: Literal["ai_daily_context"]
     protocol_version: Literal[1]
-    response_version: Literal[2]
     request_id: RequestId
     scan_run_id: PositiveInt
     context_run_id: PositiveInt | None
-    status: Literal["ok", "error"]
     run_status: Literal[
         "running",
         "success",
         "partial",
         "error",
         "abandoned",
-    ] | None
+    ]
     summary: ContextSummary
     stage_metrics: Annotated[list[StageMetric], Field(max_length=32)]
     extension_metrics: Annotated[list[ExtensionMetric], Field(max_length=256)]
     files: Annotated[list[FileAuditV2], Field(max_length=1_000_000)]
     decisions: Annotated[list[ContextDecision], Field(max_length=1_000_000)]
     warnings: Annotated[list[Diagnostic], Field(max_length=100_000)]
-    error: Diagnostic | None
     artifact_id: PositiveInt | None
     reused_from_context_run_id: PositiveInt | None
     reuse_kind: ReuseKind
     execution_metrics: ExecutionMetricsV2
 
     @model_validator(mode="after")
-    def validate_status_and_reuse(self) -> "InspectRunResponseV2":
-        if self.status == "ok":
-            if self.run_status is None or self.error:
-                raise ValueError("successful inspection requires run status and no error")
-            if self.run_status in {"success", "partial"} and self.artifact_id is None:
-                raise ValueError("successful inspect v2 run requires artifact_id")
-            if self.run_status == "error" and self.artifact_id is not None:
-                raise ValueError("error run inspect v2 response must have a null artifact_id")
-        if self.status == "error":
-            if self.error is None:
-                raise ValueError("failed inspection requires a diagnostic")
-            if (
-                self.artifact_id is not None
-                or self.reused_from_context_run_id is not None
-                or self.reuse_kind != "none"
-                or self.files
-                or self.decisions
-                or not self.execution_metrics.is_error_sentinel()
-            ):
-                raise ValueError("error inspection must carry the empty sentinel shape")
+    def validate_status_and_reuse(self) -> "ScannerEvidence":
+        if self.run_status in {"success", "partial"} and self.artifact_id is None:
+            raise ValueError("successful scanner evidence requires artifact_id")
+        if self.run_status == "error" and self.artifact_id is not None:
+            raise ValueError("error scanner evidence must have a null artifact_id")
         if self.reuse_kind == "context_snapshot" and self.reused_from_context_run_id is None:
             raise ValueError("context_snapshot reuse requires reused_from_context_run_id")
         if self.reuse_kind == "context_snapshot" and not self.execution_metrics.snapshot_hit:
@@ -1494,15 +1045,8 @@ SCHEMA_MODELS: dict[str, type[ContractModel]] = {
     "diagnostic-v1.schema.json": Diagnostic,
     "doctor-request-v1.schema.json": DoctorRequest,
     "doctor-response-v1.schema.json": DoctorResponse,
-    "inspect-run-request-v1.schema.json": InspectRunRequest,
-    "inspect-run-response-v1.schema.json": InspectRunResponse,
-    "scanner-profile-normalized-v1.schema.json": NormalizedScannerSettings,
-    "scanner-profile-request-v1.schema.json": ScannerSettings,
-    "transport-error-v1.schema.json": TransportErrorResponse,
-    "worker-diagnostic-v1.schema.json": WorkerDiagnosticV1,
-    "worker-parse-request-v1.schema.json": WorkerParseRequest,
-    "worker-parse-response-v1.schema.json": WorkerParseResponse,
-    "worker-version-response-v1.schema.json": WorkerVersionResponse,
+    "normalized-scanner-settings.schema.json": NormalizedScannerSettings,
+    "scanner-settings.schema.json": ScannerSettings,
 }
 
 
@@ -1540,40 +1084,6 @@ def validate_contract_payload(
         if parsed.request_id != request.request_id:
             raise ValueError("context response request_id mismatch")
 
-    if isinstance(parsed, WorkerParseResponse) and isinstance(
-        request,
-        WorkerParseRequest,
-    ):
-        echoed = (
-            parsed.request_id == request.request_id
-            and parsed.file_path == request.file_path
-            and parsed.file_type == request.file_type
-            and parsed.parser_backend == request.backend
-            and parsed.observed_source_version == request.expected_source_version
-        )
-        if not echoed:
-            raise ValueError("worker response does not echo its request")
-        handshake = related.get("handshake")
-        if isinstance(handshake, WorkerVersionResponse):
-            identity = (
-                parsed.worker_contract_version == handshake.worker_contract_version
-                and parsed.worker_version == handshake.worker_version
-                and parsed.worker_build == handshake.worker_build
-            )
-            expected_kind = (
-                "office"
-                if request.backend
-                in {"rust_office_oxide_v2", "rust_xlsx_bounded_v2"}
-                else "python_document"
-            )
-            supported = (
-                handshake.worker_kind == expected_kind
-                and request.backend in handshake.supported_backends
-                and request.file_type in handshake.supported_extensions
-            )
-            if not identity or not supported:
-                raise ValueError("worker response identity changed after handshake")
-
     return parsed
 
 
@@ -1583,7 +1093,6 @@ __all__ = [
     "ContextEnvelope",
     "ContextProfile",
     "ContextSummary",
-    "ClassifierVersionResponseV1",
     "Diagnostic",
     "DoctorCheck",
     "DoctorRequest",
@@ -1591,24 +1100,10 @@ __all__ = [
     "EngineStatus",
     "ExecutionMetricsV2",
     "FileAuditV2",
-    "InspectRunRequest",
-    "InspectRunResponse",
-    "InspectRunResponseV2",
+    "ScannerEvidence",
     "NormalizedScannerSettings",
     "PdfClassificationAuditV1",
-    "PdfClassifierRequestV1",
-    "PdfClassifierResponseV1",
-    "PdfClassifierResultV1",
-    "PythonOperationDiagnosticV1",
     "ScannerSettings",
-    "TransportErrorResponse",
-    "WORKER_DIAGNOSTIC_V1_ERROR_CODES",
-    "WORKER_DIAGNOSTIC_V1_STAGES",
-    "WorkerDiagnosticV1",
-    "WorkerParseRequest",
-    "WorkerParseResponse",
-    "WorkerParserLimits",
-    "WorkerVersionResponse",
     "build_rust_core_crashed_envelope",
     "validate_contract_payload",
 ]

@@ -22,36 +22,16 @@
       "schema": "doctor-response-v1.schema.json"
     },
     {
-      "file": "inspect-run-request.json",
-      "schema": "inspect-run-request-v1.schema.json"
+      "file": "normalized-settings-daily.json",
+      "schema": "normalized-scanner-settings.schema.json"
     },
     {
-      "file": "inspect-run-response-error.json",
-      "schema": "inspect-run-response-v1.schema.json"
+      "file": "normalized-settings-monthly.json",
+      "schema": "normalized-scanner-settings.schema.json"
     },
     {
-      "file": "inspect-run-response-ok.json",
-      "schema": "inspect-run-response-v1.schema.json"
-    },
-    {
-      "file": "office-worker-version-response.json",
-      "schema": "worker-version-response-v1.schema.json"
-    },
-    {
-      "file": "profile-daily.json",
-      "schema": "scanner-profile-normalized-v1.schema.json"
-    },
-    {
-      "file": "profile-monthly.json",
-      "schema": "scanner-profile-normalized-v1.schema.json"
-    },
-    {
-      "file": "profile-weekly.json",
-      "schema": "scanner-profile-normalized-v1.schema.json"
-    },
-    {
-      "file": "python-worker-version-response.json",
-      "schema": "worker-version-response-v1.schema.json"
+      "file": "normalized-settings-weekly.json",
+      "schema": "normalized-scanner-settings.schema.json"
     },
     {
       "file": "request-windows-unc.json",
@@ -76,50 +56,6 @@
     {
       "file": "response-partial.json",
       "schema": "context-envelope-v1.schema.json"
-    },
-    {
-      "file": "transport-error.json",
-      "schema": "transport-error-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-long-path-request.json",
-      "schema": "worker-parse-request-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-long-path-response-ok.json",
-      "schema": "worker-parse-response-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-office-request.json",
-      "schema": "worker-parse-request-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-office-response-ok.json",
-      "schema": "worker-parse-response-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-pdf-request.json",
-      "schema": "worker-parse-request-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-pdf-response-ok.json",
-      "schema": "worker-parse-response-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-sharepoint-request.json",
-      "schema": "worker-parse-request-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-sharepoint-response-error.json",
-      "schema": "worker-parse-response-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-xlsx-request.json",
-      "schema": "worker-parse-request-v1.schema.json"
-    },
-    {
-      "file": "worker-parse-xlsx-response-ok.json",
-      "schema": "worker-parse-response-v1.schema.json"
     }
   ]
 }

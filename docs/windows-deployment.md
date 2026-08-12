@@ -1,224 +1,163 @@
-# Windows x64 deployment and rollback
+# Windows x64 native release, deployment, and rollback
 
-## Trust boundary
+## Scope and authority
 
-The production runtime is a Python application shell with a Rust
-scanner/context core. A release archive is untrusted data until a trusted copy
-of `scripts\verify_windows_package.ps1` validates it. The trusted verifier must
-come from the source checkout, a previously verified installation, or an
-independently authenticated distribution. Never execute the verifier,
-installer, Python, or PowerShell files from an unverified archive.
+Only Windows x64 and exact CPython 3.13.13 are supported. Repository tools can
+build and verify a release bundle, make a read-only SQLite backup, and update a
+side-by-side release pointer. They do not authorize or automatically perform a
+production install, process stop, configuration switch, database archival, or
+deployment. Each production mutation requires a separate explicit approval.
 
-The only supported Python runtime is CPython 3.13.13. The root
-`.python-version` file is the shared version source for development, release
-packaging, and deployment.
+The runtime chain is:
 
-V1 provides integrity and corruption detection, not publisher authentication.
-`manifest.json`, `SHA256SUMS`, and binary handshakes cannot prove who produced a
-remote artifact. Do not auto-download or treat a remote artifact as trusted
-until an independent anchor such as Authenticode or GitHub artifact
-attestation/provenance is tied to the expected repository and tag.
+```text
+CLI → ReportRunner → NativeScanner → PyO3 Scanner
+→ scanner_core → worker v2 pools
+```
 
-## Build and package
+Only Office/PDF workers are child processes. The scanner itself runs in the
+Python process.
 
-Use a clean Windows x64 checkout and PowerShell:
+## Build and verify a release bundle
+
+Use a clean Windows checkout and the repository `.venv`:
 
 ```powershell
 .\.venv\Scripts\python.exe -m pytest tests -v
-cargo fmt --manifest-path rust/Cargo.toml --all --check
+cargo fmt --manifest-path rust/Cargo.toml --all -- --check
 cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked -- -D warnings
 cargo test --manifest-path rust/Cargo.toml --workspace --locked
-cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 
 New-Item -ItemType Directory -Path .\dist -Force | Out-Null
-.\scripts\package_windows.ps1 `
-  -OutputPath .\dist\ai-daily-report-windows-x64.zip `
-  -ReleaseVersion "2026.07.16"
+.\scripts\build_windows_release.ps1 `
+  -OutputDirectory .\dist\ai-daily-report-2026.08.12 `
+  -ReleaseVersion 2026.08.12
 ```
 
-The Windows release workflow also creates a separate production-only virtual
-environment and installs it with
-`python -m pip install --requirement requirements.lock`. From that same clean
-environment they validate the shared worker-v2 `hello`
-identities, run `doctor --strict`, and execute the full fixed-corpus gate. This
-chain is separate from the uv-managed test environment so dev dependencies
-cannot mask a missing production requirement.
+`build_windows_release.ps1` performs a locked release build, creates exactly
+one non-abi3 `cp313-win_amd64` wheel with pinned maturin, installs it into a
+disposable CPython 3.13.13 venv, imports it, and proves a wrong version is
+rejected. It then builds an allowlisted bundle containing:
 
-The archive root is `ai-daily-report-windows-x64/` and contains exactly:
+- the native wheel, including its repaired runtime DLLs;
+- `bin/ai-daily-office-parser.exe`;
+- the Python application, templates, example config, exact dependency lock,
+  and deployment helpers;
+- `manifest.json` with Git commit, target, Python/wheel identity, native and
+  Office-worker build identities, Cargo.lock hash, and per-file size/SHA-256.
 
-- `ai-daily-scanner.exe` and `ai-daily-office-parser.exe` at their fixed Rust
-  release paths;
-- `main.py`, every production Python source file, templates,
-  `.python-version`, `requirements.lock`, and `config/settings.example.yaml`;
-- the deploy, verify, install, run, and rollback PowerShell scripts;
-- `manifest.json` and `SHA256SUMS`.
-
-It excludes local settings, `.secrets.yaml`, data, logs, `.venv`, build
-intermediates, tests, and Cargo sources. Binaries and `rust/target` are never
-committed to Git.
-
-`manifest.json` records the Git commit, target triple, release version, Rust
-engine version/build, contract versions, Cargo.lock SHA-256, and an
-ordinal-sorted case-sensitive allowlist of every payload path, byte size, and
-SHA-256. The manifest excludes itself and `SHA256SUMS`; `SHA256SUMS` covers the
-manifest and every allowlisted payload and excludes only itself.
-
-## Verify before extraction or execution
+Verify an existing bundle without executing its application code:
 
 ```powershell
-.\scripts\verify_windows_package.ps1 `
-  -ArchivePath .\dist\ai-daily-report-windows-x64.zip
+.\.venv\Scripts\python.exe scripts\windows_release.py verify-bundle `
+  --bundle-dir .\dist\ai-daily-report-2026.08.12
 ```
 
-The verifier first checks every ZIP name without extracting. It rejects an
-unexpected root, missing or extra entry, duplicate or case-colliding name,
-absolute/drive/UNC path, `..` traversal, alternate data stream name, directory
-entry, symlink/reparse entry, and a non-canonical separator. It then extracts
-into a GUID staging directory, verifies the exact allowlist, sizes and all
-hashes, and only afterward runs the Rust scanner and Office-worker version
-handshakes. Target/build/contract mismatch fails validation.
+The manifest detects missing, extra, changed, duplicate, or unsafe payload
+paths. Hashes detect corruption; they do not authenticate a remote publisher.
 
-The archive entry set must equal exactly `{manifest.json, SHA256SUMS} +
-manifest.files`. A Python file, template, lock file, PowerShell script, Rust
-binary, manifest path, or extra entry tamper fails before package code runs.
+## Side-by-side layout
 
-## Prepare shared state and install
-
-Choose an absolute install root. Create the shared configuration once; future
-installs and rollbacks reuse it byte-for-byte.
-
-```powershell
-$installRoot = "D:\ai-daily-report"
-New-Item -ItemType Directory `
-  -Path "$installRoot\shared\config" -Force | Out-Null
-Copy-Item -LiteralPath .\config\settings.example.yaml `
-  -Destination "$installRoot\shared\config\settings.windows.yaml"
-
-# Edit the shared file. paths.work_dir must be an absolute approved directory.
-# Inject DEEPSEEK_API_KEY or OPENAI_API_KEY into the process/credential system.
-
-.\scripts\install_windows_release.ps1 `
-  -ArchivePath .\dist\ai-daily-report-windows-x64.zip `
-  -InstallRoot $installRoot
-```
-
-The installer uses the trusted checkout verifier, moves the verified package
-into a new `releases\<version>` directory, creates that release's `.venv`,
-installs `requirements.lock`, and runs `doctor --strict`. Only after those
-checks pass does it atomically replace `current.json`. It never overwrites an
-existing release, local settings, secrets, report data, scan data, or logs.
-
-Installed layout:
+An authorized deployment should keep releases immutable and state shared:
 
 ```text
 <install-root>/
   current.json
-  releases/
-    <version-a>/
-    <version-b>/
-  shared/
-    config/settings.windows.yaml
-    data/reports/
-    data/db/reports.sqlite3
-    data/db/scan_index_v2.sqlite3
-    logs/
-  run_current_release.ps1
-  rollback_windows_release.ps1
+  releases/<release-version>/
+  shared/config/
+  shared/data/reports/
+  shared/data/db/reports.sqlite3
+  shared/data/db/<legacy-scanner-db>.sqlite3
+  shared/data/db/scan_index_v3.sqlite3
+  shared/logs/
 ```
 
-Keep at least the previous verified release. Do not place mutable config, data,
-or logs below a version directory.
+The application release contains the wheel and Office worker. The active
+release uses its own CPython 3.13.13 venv and must pass native import, worker
+hello, `doctor --strict`, and a daily `--no-save` smoke against a synthetic
+test directory before pointer activation.
 
-## Launcher path contract
+Mutable config, report SQLite, scanner SQLite, Markdown, and logs never live
+inside a release directory. New and old releases must not share a scanner
+database across the schema reset.
 
-`run_current_release.ps1` schema-validates `current.json`, proves the selected
-relative path stays below `releases/`, rejects a reparse release directory,
-sets the selected release as the process working directory, and directly
-invokes `.venv\Scripts\python.exe` without another command shell.
+## Scanner database cutover
 
-It sets all six required absolute variables:
+The current scanner schema is fresh-only `user_version=3`:
 
-| Variable | Required value |
-|---|---|
-| `DAILY_REPORT_INSTALL_ROOT` | absolute installation root |
-| `DAILY_REPORT_CONFIG_DIR` | `<install-root>\shared\config` |
-| `DAILY_REPORT_DATA_DIR` | `<install-root>\shared\data` |
-| `DAILY_REPORT_REPORTS_DIR` | `<install-root>\shared\data\reports` |
-| `DAILY_REPORT_DB_DIR` | `<install-root>\shared\data\db` |
-| `DAILY_REPORT_LOG_DIR` | `<install-root>\shared\logs` |
+- a missing file is created as v3;
+- an existing v3 file is opened;
+- any other version fails with `SCANNER_DB_SCHEMA_MISMATCH` and is not changed.
 
-The presence of `DAILY_REPORT_INSTALL_ROOT` enables installed mode. All six
-values must be existing absolute directories. `Config` rejects missing,
-relative, version-local, or `shared/`-escaping paths and resolves them once.
-The Rust request receives absolute scanner, Office worker, Python worker,
-module root, and `scan_index_v2.sqlite3` paths. `logger.setup_logger()` uses the
-resolved shared log directory. Strict doctor reports the configuration source
-and every effective runtime directory and treats containment drift as an error.
+Before an authorized cutover:
 
-Source-checkout development without `DAILY_REPORT_INSTALL_ROOT` retains
-repository-relative data/report/database/log behavior.
+1. Stop current report processes.
+2. Run `PRAGMA integrity_check` through the archival helper.
+3. Use the SQLite backup API to create a timestamped read-only archive and
+   hash manifest.
+4. Keep the original scanner database and report database untouched.
+5. Point the new release at a new `scan_index_v3.sqlite3` path.
 
-Run from any directory:
+The repository helper for step 2–3 is:
 
 ```powershell
-& "D:\ai-daily-report\run_current_release.ps1" doctor --strict
-& "D:\ai-daily-report\run_current_release.ps1" list
+.\scripts\archive_scanner_database.ps1 `
+  -SourceDatabase C:\ai-daily-report\shared\data\db\<legacy-scanner-db>.sqlite3 `
+  -ArchiveDirectory C:\ai-daily-report\scanner-db-archives
 ```
 
-## Upgrade and rollback
+This is a production read and archive write, so run it only after explicit
+authorization and only against the resolved target paths. It never migrates,
+deletes, or modifies the source database.
 
-Install the next archive with the same trusted bootstrap and install root. The
-installer validates the new release in its own directory before switching the
-pointer. Shared configuration and data are not copied or rewritten.
+## Pointer switch and rollback
+
+Pointer mutation is deliberately gated by `-Apply`:
 
 ```powershell
-.\scripts\install_windows_release.ps1 `
-  -ArchivePath .\dist\ai-daily-report-windows-x64-next.zip `
-  -InstallRoot "D:\ai-daily-report"
-
-& "D:\ai-daily-report\run_current_release.ps1" doctor --strict
+.\scripts\update_release_pointer.ps1 `
+  -Mode Switch `
+  -PointerPath C:\ai-daily-report\current.json `
+  -ReleaseVersion 2026.08.12 `
+  -ScannerDatabasePath shared/data/db/scan_index_v3.sqlite3 `
+  -Apply
 ```
 
-The scanner database schema upgrade from v1 to v2 is one-way. An
-`upgrade-db` request with `apply=false` is a read-only audit only; it does not
-authorize a later write. An `apply=true` request requires separate explicit
-authorization and a new request ID. Neither mode may be run against the
-configured production database as part of release preparation or verification
-without that authorization.
+The tool atomically records both `current` and `previous`, including each
+release's scanner DB pointer. It rejects paths outside `shared/data/db`.
 
-The upgrade tool does not create or validate a backup. Before `apply=true`, the
-operator must preserve a recoverable pre-upgrade database copy, including the
-database plus its WAL/shm sidecars, or use a deployment snapshot that captures
-the same state. A rollback across this schema boundary must restore that
-pre-upgrade copy before starting the old release. Restoring it discards runs
-created after the upgrade; pointing an old release at the v2 database instead
-fails closed as `TooNew`.
+Rollback procedure:
 
-Rollback validates the previous release manifest and payload with the active
-trusted verifier, runs the previous `.venv` strict doctor against the same
-shared state, and atomically switches `current.json` only after both succeed:
+1. Stop new report processes.
+2. Verify the previous immutable release and its exact Python runtime.
+3. Confirm its old scanner database still exists and was never modified.
+4. Atomically swap the pointer.
+5. Run previous-release `doctor --strict` and a synthetic smoke.
 
 ```powershell
-& "D:\ai-daily-report\rollback_windows_release.ps1"
-& "D:\ai-daily-report\run_current_release.ps1" doctor --strict
+.\scripts\update_release_pointer.ps1 `
+  -Mode Rollback `
+  -PointerPath C:\ai-daily-report\current.json `
+  -Apply
 ```
 
-Rust v2 owns `shared\data\db\scan_index_v2.sqlite3`; the retired scanner DB is
-not destructively downgraded. Outside a schema upgrade, source-checkout rollback
-is a Git revert and rebuild and installed rollback is the side-by-side pointer
-operation. Remote tags, artifacts, attestations, releases, or branch protection
-are external state and require separate explicit authorization to change.
+The new v3 database remains for diagnosis. It is never converted backward.
+Report SQLite, report Markdown, local configuration, and secrets are not
+copied or rewritten by pointer changes.
 
-## Release workflow evidence
+## Deployment success gates
 
-`.github/workflows/windows-release.yml` builds the locked Windows workspace,
-repeats the clean production-lock/worker-handshake/strict-doctor/fixed-corpus
-chain, runs package structural/tamper tests, installs two locally identified
-packages under a GUID synthetic root, runs zero-network smoke commands from an
-unrelated cwd, switches A to B, rolls back B to A, verifies shared config/data
-hashes, and ensures logs plus report/scan databases stay under `shared/`. The
-workflow sets an LLM hard prohibition and never copies developer credentials or
-business files.
+An authorized deployment is complete only when all of these pass on the
+selected release:
 
-Linux is not a supported source or release target and has no automated
-compatibility workflow, installed-mode guarantee, or process-tree timeout claim.
+- bundle manifest and all SHA-256 values;
+- CPython 3.13.13 native import and build identity;
+- Office and Python worker-v2 hello/capability checks;
+- `doctor --strict` against the selected new v3 database path;
+- daily `--no-save` smoke on a synthetic directory;
+- no scanner child process;
+- report SQLite and Markdown behavior unchanged.
+
+Pushes, tags, remote artifacts, production installs, process control, pointer
+changes, and real database operations are separate external actions and are
+never implied by a local build or test request.

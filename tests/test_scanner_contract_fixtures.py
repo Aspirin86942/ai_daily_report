@@ -1,8 +1,7 @@
-"""Windows-first scanner v1 合同资产的冻结测试。"""
+"""Windows-first scanner 合同资产测试。"""
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -23,15 +22,8 @@ SCHEMA_FILES = {
     "diagnostic-v1.schema.json",
     "doctor-request-v1.schema.json",
     "doctor-response-v1.schema.json",
-    "inspect-run-request-v1.schema.json",
-    "inspect-run-response-v1.schema.json",
-    "scanner-profile-normalized-v1.schema.json",
-    "scanner-profile-request-v1.schema.json",
-    "transport-error-v1.schema.json",
-    "worker-diagnostic-v1.schema.json",
-    "worker-parse-request-v1.schema.json",
-    "worker-parse-response-v1.schema.json",
-    "worker-version-response-v1.schema.json",
+    "normalized-scanner-settings.schema.json",
+    "scanner-settings.schema.json",
 }
 
 REQUIRED_VALID_FIXTURES = {
@@ -40,31 +32,15 @@ REQUIRED_VALID_FIXTURES = {
     "doctor-response-error.json",
     "doctor-response-ok.json",
     "doctor-response-partial.json",
-    "inspect-run-request.json",
-    "inspect-run-response-error.json",
-    "inspect-run-response-ok.json",
-    "office-worker-version-response.json",
-    "profile-daily.json",
-    "profile-monthly.json",
-    "profile-weekly.json",
-    "python-worker-version-response.json",
+    "normalized-settings-daily.json",
+    "normalized-settings-monthly.json",
+    "normalized-settings-weekly.json",
     "request-windows-unc.json",
     "request-v2.json",
     "request.json",
     "response-error.json",
     "response-ok.json",
     "response-partial.json",
-    "transport-error.json",
-    "worker-parse-long-path-request.json",
-    "worker-parse-long-path-response-ok.json",
-    "worker-parse-office-request.json",
-    "worker-parse-office-response-ok.json",
-    "worker-parse-pdf-request.json",
-    "worker-parse-pdf-response-ok.json",
-    "worker-parse-sharepoint-request.json",
-    "worker-parse-sharepoint-response-error.json",
-    "worker-parse-xlsx-request.json",
-    "worker-parse-xlsx-response-ok.json",
 }
 
 REQUIRED_INVALID_CLASSES = {
@@ -76,12 +52,9 @@ REQUIRED_INVALID_CLASSES = {
     "optionality",
     "path",
     "request_id",
-    "route",
-    "source_version",
     "status_invariant",
     "type",
     "unknown_field",
-    "worker_identity",
 }
 
 REQUIRED_INVALID_CASES = {
@@ -108,11 +81,6 @@ REQUIRED_INVALID_CASES = {
     "doctor_invalid_check_status",
     "doctor_ok_with_error",
     "doctor_partial_without_warning",
-    "inspect_error_without_error",
-    "inspect_invalid_decision_action",
-    "inspect_ok_with_error",
-    "inspect_ok_without_run_status",
-    "inspect_relative_db_path",
     "normalized_context_threshold_order",
     "profile_array_over_limit",
     "profile_char_budget_over_limit",
@@ -126,23 +94,6 @@ REQUIRED_INVALID_CASES = {
     "profile_string_over_limit",
     "profile_timeout_over_limit",
     "profile_unknown_infrastructure_leaf",
-    "transport_wrong_request_error",
-    "worker_parse_backend_limits_mismatch",
-    "worker_parse_error_with_content",
-    "worker_parse_error_without_error",
-    "worker_parse_invalid_lane",
-    "worker_parse_ok_with_error",
-    "worker_parse_pdf_wrong_lane",
-    "worker_parse_relative_file_path",
-    "worker_parse_xlsx_wrong_backend",
-    "worker_parse_xlsx_wrong_lane",
-    "worker_response_backend_echo_mismatch",
-    "worker_response_file_type_mismatch",
-    "worker_response_handshake_build_mismatch",
-    "worker_response_path_mismatch",
-    "worker_response_request_id_mismatch",
-    "worker_response_source_version_mismatch",
-    "worker_version_invalid_kind",
 }
 
 REQUIRED_SEMANTIC_CASES = {
@@ -151,13 +102,6 @@ REQUIRED_SEMANTIC_CASES = {
     "context_summary_count_invariant",
     "normalized_set_array_not_sorted",
     "profile_integer_float",
-    "worker_response_backend_echo_mismatch",
-    "worker_response_file_type_mismatch",
-    "worker_response_handshake_build_mismatch",
-    "worker_response_path_mismatch",
-    "worker_response_request_id_mismatch",
-    "worker_response_source_version_mismatch",
-    "worker_version_backends_not_sorted",
 }
 
 
@@ -241,7 +185,7 @@ def test_invalid_fixture_corpus_covers_every_contract_rule_class() -> None:
             assert related_payloads
         for related in related_payloads:
             assert set(related) == {"role", "schema", "payload"}
-            assert related["role"] in {"request", "handshake"}
+            assert related["role"] == "request"
             assert related["schema"] in SCHEMA_FILES
             assert isinstance(related["payload"], dict)
 
@@ -360,13 +304,9 @@ def test_contract_fixture_corpus_is_synthetic_and_non_secret() -> None:
     tracked_contract_docs = (
         PROJECT_ROOT
         / "docs"
-        / "superpowers"
-        / "plans"
-        / "2026-07-15-windows-first-rust-scanner-core.md",
-        PROJECT_ROOT
-        / "docs"
         / "adr"
         / "0002-windows-first-rust-scanner-core.md",
+        PROJECT_ROOT / "docs" / "windows-deployment.md",
         CONTRACT_DIR / "scanner-context-v1.md",
     )
     assert all(
@@ -391,29 +331,8 @@ def test_contract_fixture_corpus_is_synthetic_and_non_secret() -> None:
     assert isinstance(unc_request, dict)
     assert unc_request["work_dir"].startswith("\\\\fixture-server\\")
 
-    long_path_request = _load_json(
-        FIXTURE_DIR / "worker-parse-long-path-request.json"
-    )
-    assert isinstance(long_path_request, dict)
-    assert long_path_request["file_path"].startswith("\\\\?\\C:\\")
-
-    xlsx_response = _load_json(
-        FIXTURE_DIR / "worker-parse-xlsx-response-ok.json"
-    )
-    inspect_response = _load_json(
-        FIXTURE_DIR / "inspect-run-response-ok.json"
-    )
-    assert isinstance(xlsx_response, dict)
-    assert isinstance(inspect_response, dict)
-    expected_hash = hashlib.sha256(
-        xlsx_response["content"].encode("utf-8")
-    ).hexdigest()
-    assert inspect_response["files"][0]["content_sha256"] == expected_hash
-    assert "content" not in inspect_response["files"][0]
-
-
 def test_frozen_defaults_match_current_python_contract() -> None:
-    """示例配置必须继续提供冻结的显式 Rust profile 叶子。"""
+    """示例配置必须继续提供明确的 scanner settings。"""
     example = yaml.safe_load(
         (PROJECT_ROOT / "config" / "settings.example.yaml").read_text(
             encoding="utf-8"

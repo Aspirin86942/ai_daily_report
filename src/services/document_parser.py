@@ -12,7 +12,7 @@ from typing import Any
 
 from ..workers.contracts import WorkerParsePayload
 
-OFFICE_PARSER_BACKEND = "office_v1"
+OFFICE_PARSER_BACKEND = "python_office_v2"
 PDF_TEXT_PARSER_BACKEND = "python_pdf_text_v2"
 NOT_PARSED_PARSER_BACKEND = "not_parsed"
 

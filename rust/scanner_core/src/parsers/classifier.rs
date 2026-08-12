@@ -1,7 +1,7 @@
 //! Local PDF classifier port（spec Part 7.1）。
 //!
 //! 生产实现通过 Python worker-v2 pool 调用；测试
-//! adapter 返回内存结果。trait 返回 typed ``PdfClassifierResultV1``（含
+//! adapter 返回内存结果。trait 返回 typed ``ClassifyResult``（含
 //! text/no-text/unknown/error 四态），``Err(ParseFailure)`` 只表示进程/传输
 //! 层失败（timeout/crash/坏响应/外层 error），由调度器映射为 ``unknown``。
 
@@ -10,33 +10,47 @@ use std::time::Duration;
 
 use ai_daily_scanner_contract::{
     ClassificationTransport, Diagnostic, DiagnosticStage, ErrorCode, Nullable,
-    PdfClassifierRequestV1, PdfClassifierResultV1,
 };
+use ai_daily_worker_contract::{ClassifyRequest, ClassifyResult};
 
 use super::{contract_failure, current_source};
 use crate::fallback::{FailureClass, ParseFailure};
 
 pub const CLASSIFIER_CAPTURE_LIMIT: usize = 1024 * 1024;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifyOperation {
+    pub request_id: String,
+    pub payload: ClassifyRequest,
+}
+
+impl std::ops::Deref for ClassifyOperation {
+    type Target = ClassifyRequest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.payload
+    }
+}
+
 /// 本地可替换 PDF 分类 adapter。生产使用 worker-v2 pool，测试使用内存结果。
 pub trait PdfClassifierPort: Send + Sync {
     fn classify_pdf(
         &self,
-        request: &PdfClassifierRequestV1,
+        request: &ClassifyOperation,
         timeout: Duration,
     ) -> PdfClassifierExecution;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PdfClassifierExecution {
-    pub outcome: Result<PdfClassifierResultV1, ParseFailure>,
+    pub outcome: Result<ClassifyResult, ParseFailure>,
     pub transport: ClassificationTransport,
     pub attempt_count: u64,
     pub duration_ms: u64,
 }
 
 impl PdfClassifierExecution {
-    pub fn test_execution(outcome: Result<PdfClassifierResultV1, ParseFailure>) -> Self {
+    pub fn test_execution(outcome: Result<ClassifyResult, ParseFailure>) -> Self {
         Self {
             outcome,
             transport: ClassificationTransport::Session,
@@ -61,7 +75,7 @@ impl ClassifierPort {
 impl PdfClassifierPort for ClassifierPort {
     fn classify_pdf(
         &self,
-        request: &PdfClassifierRequestV1,
+        request: &ClassifyOperation,
         timeout: Duration,
     ) -> PdfClassifierExecution {
         match self.session.classify_pdf(request, timeout) {
@@ -97,8 +111,8 @@ impl PdfClassifierPort for ClassifierPort {
 }
 
 fn validate_classifier_result_for_request(
-    request: &PdfClassifierRequestV1,
-    result: &PdfClassifierResultV1,
+    request: &ClassifyOperation,
+    result: &ClassifyResult,
 ) -> Result<(), ParseFailure> {
     result
         .validate_for_max_pages(request.max_pages)
@@ -114,7 +128,7 @@ fn validate_classifier_result_for_request(
 }
 
 pub(crate) fn validate_classifier_source_before(
-    request: &PdfClassifierRequestV1,
+    request: &ClassifyOperation,
 ) -> Result<(), ParseFailure> {
     let (source_version, _) = current_source(&request.file_path).map_err(|_| {
         classifier_source_failure(
@@ -132,7 +146,7 @@ pub(crate) fn validate_classifier_source_before(
 }
 
 pub(crate) fn validate_classifier_source_after(
-    request: &PdfClassifierRequestV1,
+    request: &ClassifyOperation,
 ) -> Result<(), ParseFailure> {
     let (source_version, _) = current_source(&request.file_path).map_err(|_| {
         classifier_source_failure(
@@ -149,7 +163,7 @@ pub(crate) fn validate_classifier_source_after(
     Ok(())
 }
 
-fn classifier_source_failure(request: &PdfClassifierRequestV1, message: &str) -> ParseFailure {
+fn classifier_source_failure(request: &ClassifyOperation, message: &str) -> ParseFailure {
     // spec Part 3.2 matrix: classifier 后验 source-version 不一致 →
     // SOURCE_VERSION_CHANGED, retryable=true（结果丢弃，可重建后重试）。
     ParseFailure {

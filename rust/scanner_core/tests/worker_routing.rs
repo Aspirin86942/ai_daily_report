@@ -3,14 +3,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
-use ai_daily_scanner_contract::{
-    ErrorCode, ReportMode, ScannerSettings, WorkerKind, WorkerVersionResponse,
-};
+use ai_daily_scanner_contract::{ErrorCode, ReportMode, ScannerSettings};
 use ai_daily_scanner_core::classifier::ParserRoute;
 use ai_daily_scanner_core::config::normalize_scanner_settings;
 use ai_daily_scanner_core::fallback::FailureClass;
 use ai_daily_scanner_core::parsers::{register_worker, register_worker_pair, WorkerCommand};
 use ai_daily_scanner_core::planner::{plan_candidates, PlanAction};
+use ai_daily_worker_contract::WorkerKind;
 
 #[test]
 fn office_and_python_worker_handshakes_overlap() {
@@ -23,7 +22,7 @@ fn office_and_python_worker_handshakes_overlap() {
     let office_marker = directory.path().join("office.started");
     let python_marker = directory.path().join("python.started");
     let command = |kind: WorkerKind, own: &Path, peer: &Path| {
-        let identity = identity(kind);
+        let (required_backends, required_extensions) = capabilities(kind);
         WorkerCommand {
             program: python.clone(),
             base_args: vec![
@@ -38,8 +37,8 @@ fn office_and_python_worker_handshakes_overlap() {
             ],
             current_dir: Some(directory.path().to_path_buf()),
             expected_kind: kind,
-            required_backends: identity.supported_backends,
-            required_extensions: identity.supported_extensions,
+            required_backends,
+            required_extensions,
         }
     };
     let office = command(WorkerKind::Office, &office_marker, &python_marker);
@@ -118,8 +117,8 @@ fn missing_office_and_python_workers_are_environment_unavailable() {
     }
 }
 
-fn identity(kind: WorkerKind) -> WorkerVersionResponse {
-    let (backends, extensions) = match kind {
+fn capabilities(kind: WorkerKind) -> (Vec<String>, Vec<String>) {
+    match kind {
         WorkerKind::Office => (
             vec![
                 "rust_office_oxide_v2".to_string(),
@@ -147,16 +146,6 @@ fn identity(kind: WorkerKind) -> WorkerVersionResponse {
                 ".xlsx".to_string(),
             ],
         ),
-    };
-    WorkerVersionResponse {
-        contract: "ai_daily_worker".to_string(),
-        protocol_version: 1,
-        worker_kind: kind,
-        worker_contract_version: "ai_daily_worker_v1".to_string(),
-        worker_version: "0.1.0".to_string(),
-        worker_build: "fake-build".to_string(),
-        supported_backends: backends,
-        supported_extensions: extensions,
     }
 }
 
@@ -303,7 +292,7 @@ response = {
     "warnings": [],
     "error": error,
     "duration_ms": 1,
-    "worker_contract_version": "ai_daily_worker_v1",
+    "worker_contract_version": "ai_daily_worker_v2",
     "worker_version": "0.1.0",
     "worker_build": "changed-build" if mode == "wrong_build" else "fake-build",
     "observed_source_version": request["expected_source_version"],

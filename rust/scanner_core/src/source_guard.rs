@@ -1,7 +1,7 @@
 //! SourceGuardV2: engine-owned content identity for cache and snapshot.
 //!
-//! The legacy worker v1 wire keeps `source_version = mtime_ns:size` frozen, but
-//! that guess collides on same-size, timestamp-preserving replacements. The v2
+//! Worker requests carry `source_version = mtime_ns:size`, but that value
+//! collides on same-size, timestamp-preserving replacements. The v2
 //! guard instead binds every cache/snapshot identity to filesystem identity
 //! (file id + change time on Windows, inode + ctime on Unix) or, when the
 //! metadata identity cannot be formed, to a full-content SHA-256. It never uses
