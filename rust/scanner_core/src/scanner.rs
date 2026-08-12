@@ -6,6 +6,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -20,7 +21,9 @@ use thiserror::Error;
 static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 use crate::inspect::assemble_inspect_v2;
+use crate::parsers::{RegisteredWorker, WorkerCommand};
 use crate::run::{build_context_command, doctor_command, CommandOutput, EngineShellError};
+use crate::session::{SessionParams, WorkerPool};
 use crate::store::ScannerStore;
 
 /// One context build and the complete evidence committed for that run.
@@ -54,6 +57,8 @@ pub enum ScannerError {
     InvalidConfiguration(String),
     #[error("scanner operation failed: {0}")]
     Operation(#[from] EngineShellError),
+    #[error("native scanner initialization failed: {0}")]
+    Initialization(crate::store::StoreError),
     #[error("another build_context call is already active")]
     Busy,
 }
@@ -82,18 +87,87 @@ impl<T> ScannerOperation<T> {
 /// Configuration is still carried by the frozen request while the legacy CLI
 /// adapter exists.  A later native-only step moves stable runtime configuration
 /// into `Scanner::open` without changing this seam again for callers.
-#[derive(Debug)]
 pub struct Scanner {
     config: ScannerConfig,
     build_lock: Mutex<()>,
+    resources: Mutex<ScannerResources>,
+}
+
+pub(crate) struct ScannerResources {
+    pub(crate) store: ScannerStore,
+    pub(crate) worker_pools: ScannerWorkerPools,
+}
+
+#[derive(Default)]
+pub(crate) struct ScannerWorkerPools {
+    office: Option<Arc<WorkerPool>>,
+    python_document: Option<Arc<WorkerPool>>,
+}
+
+impl ScannerWorkerPools {
+    pub(crate) fn resolve(
+        &mut self,
+        office_command: WorkerCommand,
+        office_worker: RegisteredWorker,
+        python_command: WorkerCommand,
+        python_worker: RegisteredWorker,
+        params: SessionParams,
+    ) -> (Arc<WorkerPool>, Arc<WorkerPool>) {
+        let office_hello = crate::parsers::worker_hello_from_registered(&office_worker);
+        let python_hello = crate::parsers::worker_hello_from_registered(&python_worker);
+        let office = resolve_pool(
+            &mut self.office,
+            office_command,
+            office_hello,
+            office_worker,
+            params,
+        );
+        let python_document = resolve_pool(
+            &mut self.python_document,
+            python_command,
+            python_hello,
+            python_worker,
+            params,
+        );
+        (office, python_document)
+    }
+}
+
+fn resolve_pool(
+    slot: &mut Option<Arc<WorkerPool>>,
+    command: WorkerCommand,
+    hello: ai_daily_worker_contract::WorkerHello,
+    worker: RegisteredWorker,
+    params: SessionParams,
+) -> Arc<WorkerPool> {
+    if let Some(pool) = slot {
+        if pool.matches(&command, &hello, &worker, params) {
+            return Arc::clone(pool);
+        }
+    }
+    let pool = WorkerPool::new(
+        command,
+        hello,
+        worker,
+        params,
+        crate::process::WorkerRssTracker::default(),
+    );
+    *slot = Some(Arc::clone(&pool));
+    pool
 }
 
 impl Scanner {
     pub fn open(config: ScannerConfig) -> Result<Self, ScannerError> {
         validate_config(&config)?;
+        let store = ScannerStore::open(Path::new(&config.scan_db_path))
+            .map_err(ScannerError::Initialization)?;
         Ok(Self {
             config,
             build_lock: Mutex::new(()),
+            resources: Mutex::new(ScannerResources {
+                store,
+                worker_pools: ScannerWorkerPools::default(),
+            }),
         })
     }
 
@@ -111,10 +185,18 @@ impl Scanner {
     ) -> Result<ScannerOperation<ContextResult>, ScannerError> {
         let _guard = self.build_lock.try_lock().map_err(|_| ScannerError::Busy)?;
         let wire_request = self.build_request(request, request_id)?;
+        let mut resources = self
+            .resources
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let operation: ScannerOperation<ContextEnvelope> =
-            ScannerOperation::from_command(build_context_command(&wire_request)?)?;
+            ScannerOperation::from_command(build_context_command(&wire_request, &mut resources)?)?;
         let evidence = match operation.value.scan_run_id.0 {
-            Some(scan_run_id) => Some(load_run_evidence(&wire_request, scan_run_id)?),
+            Some(scan_run_id) => Some(load_run_evidence(
+                &mut resources.store,
+                &wire_request,
+                scan_run_id,
+            )?),
             None => None,
         };
         Ok(ScannerOperation {
@@ -236,6 +318,7 @@ fn new_request_id() -> String {
 }
 
 fn load_run_evidence(
+    store: &mut ScannerStore,
     request: &BuildContextRequest,
     scan_run_id: u64,
 ) -> Result<InspectRunResponseV2, EngineShellError> {
@@ -247,8 +330,6 @@ fn load_run_evidence(
         scan_run_id,
         include_content: false,
     };
-    let mut store = ScannerStore::open_existing(Path::new(&request.scan_db_path))
-        .map_err(|error| EngineShellError::Evidence(error.to_string()))?;
     let snapshot = store
         .inspect_run(scan_run_id, false)
         .map_err(|error| EngineShellError::Evidence(error.error.to_string()))?;

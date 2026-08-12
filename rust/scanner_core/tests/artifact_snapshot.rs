@@ -70,7 +70,6 @@ fn workers(office_build: &str, python_build: &str) -> WorkerIdentities {
         python_version: Some("1.0".to_string()),
         python_build: Some(python_build.to_string()),
         classifier_build: Some(python_build.to_string()),
-        python_session_contract: Some("ai_daily_python_session_v1".to_string()),
     }
 }
 
@@ -279,48 +278,6 @@ fn snapshot_key_changes_when_classifier_identity_changes() {
 }
 
 #[test]
-fn snapshot_key_records_real_session_capability_and_one_shot_absence() {
-    let profile = v2_profile(ReportMode::Daily);
-    let request = request(ReportMode::Daily, REQUEST_ID_A);
-    let session_workers = workers("office-a", "python-a");
-    let session = snapshot_key_parts(
-        &request,
-        &[],
-        &[],
-        &profile,
-        ENGINE_BUILD_A,
-        &session_workers,
-        &classifier("classifier-a"),
-    )
-    .expect("session snapshot key");
-    let session_json: serde_json::Value =
-        serde_json::from_str(&session.canonical_json).expect("canonical session JSON");
-    assert_eq!(session_json["session"]["capability"], "session");
-    assert_eq!(
-        session_json["session"]["contract"],
-        "ai_daily_python_session_v1"
-    );
-
-    let mut one_shot_workers = session_workers;
-    one_shot_workers.python_session_contract = None;
-    let one_shot = snapshot_key_parts(
-        &request,
-        &[],
-        &[],
-        &profile,
-        ENGINE_BUILD_A,
-        &one_shot_workers,
-        &classifier("classifier-a"),
-    )
-    .expect("one-shot snapshot key");
-    let one_shot_json: serde_json::Value =
-        serde_json::from_str(&one_shot.canonical_json).expect("canonical one-shot JSON");
-    assert_eq!(one_shot_json["session"]["capability"], "one_shot");
-    assert!(one_shot_json["session"]["contract"].is_null());
-    assert_ne!(session.sha256, one_shot.sha256);
-}
-
-#[test]
 fn snapshot_key_omits_request_id() {
     let profile = v2_profile(ReportMode::Daily);
     let request_a = request(ReportMode::Daily, REQUEST_ID_A);
@@ -441,7 +398,7 @@ fn file_row(identity: &str) -> ArtifactFileRow {
         source_guard_sha256: Some("0".repeat(64)),
         parse_profile_hash: "1".repeat(64),
         parse_status: ParseStatus::Success,
-        parser_backend: "rust_xlsx_bounded_v1".to_string(),
+        parser_backend: "rust_xlsx_bounded_v2".to_string(),
         worker_lane: "rust_core".to_string(),
         truncated: false,
         content_sha256: "2".repeat(64),
@@ -917,7 +874,7 @@ fn snapshot_file_row() -> ArtifactFileRow {
         source_guard_sha256: Some("0".repeat(64)),
         parse_profile_hash: "1".repeat(64),
         parse_status: ParseStatus::Success,
-        parser_backend: "light_text_v1".to_string(),
+        parser_backend: "light_text_v2".to_string(),
         worker_lane: "rust_core".to_string(),
         truncated: false,
         content_sha256: ai_daily_scanner_core::artifact::sha256_hex(FINAL_CONTEXT.as_bytes()),
@@ -1012,7 +969,7 @@ fn snapshot_file_result(parse_duration_ms: u64, snapshot: bool) -> FileResultRec
         cache_status,
         cache_miss_reason,
         parse_status: ParseStatus::Success,
-        parser_backend: "light_text_v1".to_string(),
+        parser_backend: "light_text_v2".to_string(),
         worker_lane: AuditWorkerLane::RustCore,
         truncated: false,
         content_sha256: ai_daily_scanner_core::artifact::sha256_hex(FINAL_CONTEXT.as_bytes()),

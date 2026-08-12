@@ -4,6 +4,10 @@ use ai_daily_scanner_contract::{
     WorkerDiagnosticV1Stage, WorkerKind, WorkerLane, WorkerParseRequest, WorkerParseResponse,
     WorkerParserLimits, WorkerStatus, WorkerVersionResponse,
 };
+use ai_daily_worker_contract::{
+    WorkerHello, WorkerKind as WorkerKindV2, WorkerOperation, CONTRACT as WORKER_CONTRACT,
+    CONTRACT_VERSION as WORKER_CONTRACT_VERSION_V2, PROTOCOL_VERSION as WORKER_PROTOCOL_VERSION,
+};
 use quick_xml::events::{BytesRef, BytesStart, BytesText, Event};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -13,9 +17,22 @@ use std::path::PathBuf;
 use std::time::{Instant, UNIX_EPOCH};
 use zip::read::ZipArchive;
 
-pub const RUST_OFFICE_BACKEND: &str = "rust_office_oxide_v1";
-pub const RUST_XLSX_BOUNDED_BACKEND: &str = "rust_xlsx_bounded_v1";
+pub const RUST_OFFICE_BACKEND: &str = "rust_office_oxide_v2";
+pub const RUST_XLSX_BOUNDED_BACKEND: &str = "rust_xlsx_bounded_v2";
 pub const WORKER_CONTRACT_VERSION: &str = "ai_daily_worker_v1";
+
+pub fn worker_hello() -> WorkerHello {
+    WorkerHello {
+        contract: WORKER_CONTRACT.to_string(),
+        protocol_version: WORKER_PROTOCOL_VERSION,
+        frame: "hello".to_string(),
+        worker_contract_version: WORKER_CONTRACT_VERSION_V2.to_string(),
+        worker_kind: WorkerKindV2::Office,
+        worker_version: env!("CARGO_PKG_VERSION").to_string(),
+        worker_build: env!("AI_DAILY_OFFICE_WORKER_BUILD").to_string(),
+        supported_operations: vec![WorkerOperation::OfficeParse],
+    }
+}
 
 pub fn worker_version_response() -> WorkerVersionResponse {
     WorkerVersionResponse {
@@ -160,7 +177,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
             started_at,
         );
     }
-    if request.backend.lane() != WorkerLane::RustOfficeProcess {
+    if request.backend.lane() != WorkerLane::RustOfficeProcessV2 {
         return worker_error_response(
             request,
             &version,
@@ -272,7 +289,7 @@ pub fn parse_worker_request(request: &WorkerParseRequest) -> WorkerParseResponse
         file_type: request.file_type.clone(),
         content: context.content,
         parser_backend: request.backend,
-        worker_lane: WorkerLane::RustOfficeProcess,
+        worker_lane: WorkerLane::RustOfficeProcessV2,
         truncated: context.truncated,
         warnings: Vec::new(),
         error: Nullable(None),
@@ -292,7 +309,7 @@ fn parse_strict_office_context(request: &WorkerParseRequest) -> (FileContextOut,
         limits,
         parser_backend: request.backend.as_str().to_string(),
     };
-    if request.backend == WorkerBackend::RustXlsxBoundedV1 {
+    if request.backend == WorkerBackend::RustXlsxBoundedV2 {
         let max_chars = positive_limit(&office_request.limits, "document_excerpt_max_chars", 6000);
         return match parse_bounded_xlsx_inner(&office_request, max_chars) {
             Ok((content, truncated)) => (
@@ -427,7 +444,7 @@ fn worker_error_response(
         file_type: request.file_type.clone(),
         content: String::new(),
         parser_backend: request.backend,
-        worker_lane: WorkerLane::RustOfficeProcess,
+        worker_lane: WorkerLane::RustOfficeProcessV2,
         truncated: false,
         warnings: Vec::new(),
         error: Nullable(Some(WorkerDiagnosticV1 {

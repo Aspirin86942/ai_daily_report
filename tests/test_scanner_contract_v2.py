@@ -103,7 +103,7 @@ def test_version_v2_exposes_new_capabilities() -> None:
             ],
             "inspect_response_versions": [1, 2],
             "classifier_contract_versions": ["ai_daily_pdf_classifier_v1"],
-            "session_contract_versions": ["ai_daily_python_session_v1"],
+            "session_contract_versions": ["ai_daily_worker_v2"],
             "maintenance_contract_versions": ["ai_daily_scanner_maintenance_v1"],
             "upgrade_contract_versions": ["ai_daily_scanner_upgrade_v1"],
             "source_guard_policy": "source_guard_v2",
@@ -167,8 +167,8 @@ def _worker_parse_response_payload(error_code: str, *, stage: str) -> dict:
         "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
         "file_type": ".doc",
         "content": "",
-        "parser_backend": "python_sharepoint_text_v1",
-        "worker_lane": "python_document_process",
+        "parser_backend": "python_sharepoint_text_v2",
+        "worker_lane": "python_document_process_v2",
         "truncated": False,
         "warnings": [],
         "error": {
@@ -177,7 +177,7 @@ def _worker_parse_response_payload(error_code: str, *, stage: str) -> dict:
             "retryable": False,
             "stage": stage,
             "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
-            "backend": "python_sharepoint_text_v1",
+            "backend": "python_sharepoint_text_v2",
         },
         "duration_ms": 3,
         "worker_contract_version": "ai_daily_worker_v1",
@@ -206,7 +206,7 @@ def test_worker_parse_response_round_trips_frozen_error_code() -> None:
     assert response.error.stage == "parse"
     assert response.error.retryable is False
     assert response.error.file_path == "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc"
-    assert response.error.backend == "python_sharepoint_text_v1"
+    assert response.error.backend == "python_sharepoint_text_v2"
 
 
 def test_transport_error_rejects_scanner_side_code() -> None:
@@ -711,8 +711,8 @@ def _file_audit_v2_payload() -> dict:
         "source_guard_kind": "content_sha256_v1",
         "source_guard_sha256": "a" * 64,
         "parse_status": "error",
-        "parser_backend": "pdf_text_v1",
-        "worker_lane": "python_document_process",
+        "parser_backend": "python_pdf_text_v2",
+        "worker_lane": "python_document_process_v2",
         "parse_cache_status": "miss",
         "cache_miss_reason": "new_file",
         "truncated": False,
@@ -935,7 +935,7 @@ def test_file_audit_v2_backend_lane_and_miss_reason_matrix_is_enforced() -> None
     metadata = dict(valid_miss)
     metadata.update(
         parse_status="success",
-        parser_backend="pdf_metadata_v1",
+        parser_backend="pdf_metadata_v2",
         worker_lane="rust_core",
         parse_cache_status="not_applicable",
         cache_miss_reason="",
@@ -954,8 +954,8 @@ def test_file_audit_v2_backend_lane_and_miss_reason_matrix_is_enforced() -> None
 
     no_text_with_body_parser = dict(metadata)
     no_text_with_body_parser.update(
-        parser_backend="pdf_text_v1",
-        worker_lane="python_document_process",
+        parser_backend="python_pdf_text_v2",
+        worker_lane="python_document_process_v2",
     )
     with pytest.raises(ValueError, match="metadata"):
         FileAuditV2.model_validate(no_text_with_body_parser)
@@ -963,8 +963,8 @@ def test_file_audit_v2_backend_lane_and_miss_reason_matrix_is_enforced() -> None
     not_parsed_with_body_parser = dict(metadata)
     not_parsed_with_body_parser.update(
         parse_status="not_parsed",
-        parser_backend="pdf_text_v1",
-        worker_lane="python_document_process",
+        parser_backend="python_pdf_text_v2",
+        worker_lane="python_document_process_v2",
         pdf_classification=None,
     )
     with pytest.raises(ValueError, match="not_parsed"):
@@ -991,8 +991,8 @@ def test_file_audit_v2_backend_lane_and_miss_reason_matrix_is_enforced() -> None
 
     unknown_with_body_parser = dict(classifier_unknown)
     unknown_with_body_parser.update(
-        parser_backend="pdf_text_v1",
-        worker_lane="python_document_process",
+        parser_backend="python_pdf_text_v2",
+        worker_lane="python_document_process_v2",
     )
     with pytest.raises(ValueError, match="classifier failure"):
         FileAuditV2.model_validate(unknown_with_body_parser)

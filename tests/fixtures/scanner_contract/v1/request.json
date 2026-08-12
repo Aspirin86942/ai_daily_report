@@ -39,16 +39,16 @@
     },
     "total_max_chars": 50000,
     "parser_profile_version": "v1",
-    "office_parser_backend": "rust_office_oxide_v1",
-    "pdf_parser_backend": "pdf_text_v1",
+    "office_parser_backend": "rust_office_oxide_v2",
+    "pdf_parser_backend": "python_pdf_text_v2",
     "office_fallback_policy_version": "hybrid_v1",
     "office_parser_fallback_enabled": true,
     "office_fallback_after_timeout": false,
     "office_legacy_extensions_enabled": false,
     "pptx_include_notes": true,
     "office_parser_fallback_order": [
-      "python_office_v1",
-      "python_sharepoint_text_v1"
+      "python_office_v2",
+      "python_sharepoint_text_v2"
     ],
     "direct_text_max_bytes": 262144,
     "direct_text_read_bytes": 262144,

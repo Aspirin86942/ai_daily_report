@@ -223,7 +223,7 @@ fn create_kill_on_close_job() -> Result<OwnedHandle, ProcessError> {
     }
 }
 
-/// Long-lived worker containment handle (spec Part 7.3). Each session/one-shot
+/// Long-lived worker containment handle. Each worker-v2 session
 /// child gets its own kill-on-close Job Object, so terminating one request's
 /// process tree can never kill a sibling session in the same pool.
 pub(crate) struct SessionJob(OwnedHandle);

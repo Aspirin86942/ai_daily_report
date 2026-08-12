@@ -41,12 +41,12 @@ scanner:
   excluded_dirs: []
   discovery_timeout_seconds: 30
   # Rust core owns parser routing; these values participate in cache identity.
-  office_parser_backend: "rust_office_oxide_v1"
+  office_parser_backend: "rust_office_oxide_v2"
   rust_office_parser_bin: "rust/target/release/ai-daily-office-parser"
   office_parser_fallback_enabled: true
   office_parser_fallback_order:
-    - "python_office_v1"
-    - "python_sharepoint_text_v1"
+    - "python_office_v2"
+    - "python_sharepoint_text_v2"
   office_fallback_after_timeout: false
   office_fallback_policy_version: "hybrid_v1"
   # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.

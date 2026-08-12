@@ -6,8 +6,8 @@
   "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
   "file_type": ".doc",
   "content": "",
-  "parser_backend": "python_sharepoint_text_v1",
-  "worker_lane": "python_document_process",
+  "parser_backend": "python_sharepoint_text_v2",
+  "worker_lane": "python_document_process_v2",
   "truncated": false,
   "warnings": [],
   "error": {
@@ -16,7 +16,7 @@
     "retryable": true,
     "stage": "parse",
     "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
-    "backend": "python_sharepoint_text_v1"
+    "backend": "python_sharepoint_text_v2"
   },
   "duration_ms": 3,
   "worker_contract_version": "ai_daily_worker_v1",

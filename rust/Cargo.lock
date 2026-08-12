@@ -25,6 +25,7 @@ version = "0.1.0"
 dependencies = [
  "ai-daily-discovery",
  "ai-daily-scanner-contract",
+ "ai-daily-worker-contract",
  "office_oxide",
  "quick-xml",
  "serde",
@@ -48,6 +49,7 @@ version = "0.1.0"
 dependencies = [
  "ai-daily-discovery",
  "ai-daily-scanner-contract",
+ "ai-daily-worker-contract",
  "chrono",
  "rayon",
  "rusqlite",
@@ -68,6 +70,15 @@ dependencies = [
  "pyo3",
  "pythonize",
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "ai-daily-worker-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

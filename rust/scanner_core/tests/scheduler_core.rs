@@ -683,7 +683,7 @@ fn evidence(
         extension: extension.to_string(),
         size_bytes: Some(content.len() as u64),
         content: content.to_string(),
-        parser_backend: "light_text_v1".to_string(),
+        parser_backend: "light_text_v2".to_string(),
         worker_lane: AuditWorkerLane::RustCore,
         cache_status: CacheStatus::Miss,
         parse_status: ParseStatus::Success,
@@ -730,8 +730,8 @@ fn compressor_still_renders_golden_keep_compress_metadata_error() {
     let mut compressed = evidence("notes/large.md", ".md", &"A".repeat(120));
     compressed.size_bytes = Some(100_000);
     let mut metadata = evidence("book.xlsx", ".xlsx", "sensitive body");
-    metadata.parser_backend = "rust_xlsx_bounded_v1".to_string();
-    metadata.worker_lane = AuditWorkerLane::RustOfficeProcess;
+    metadata.parser_backend = "rust_xlsx_bounded_v2".to_string();
+    metadata.worker_lane = AuditWorkerLane::RustOfficeProcessV2;
     metadata.size_bytes = Some(10_485_761);
 
     let result = build_context(
@@ -836,7 +836,7 @@ impl TestCache {
         CacheEntry {
             content: content.to_string(),
             content_sha256: ai_daily_scanner_core::store::sha256_hex(content.as_bytes()),
-            parser_backend: "light_text_v1".to_string(),
+            parser_backend: "light_text_v2".to_string(),
             worker_lane: "rust_core".to_string(),
             truncated: false,
             worker_contract_version: "ai_daily_worker_v1".to_string(),
@@ -945,7 +945,7 @@ impl ParserPort for TestParser {
             .unwrap_or_else(|| ParseResult {
                 file_identity: request.file.file_identity.clone(),
                 content: String::new(),
-                parser_backend: "light_text_v1".to_string(),
+                parser_backend: "light_text_v2".to_string(),
                 worker_lane: "rust_core".to_string(),
                 truncated: false,
                 content_sha256: ai_daily_scanner_core::store::sha256_hex(b""),
@@ -976,7 +976,7 @@ fn success_parse(identity: &str, path: &str, content: &str) -> ParseResult {
     ParseResult {
         file_identity: identity.to_string(),
         content: content.to_string(),
-        parser_backend: "light_text_v1".to_string(),
+        parser_backend: "light_text_v2".to_string(),
         worker_lane: "rust_core".to_string(),
         truncated: false,
         content_sha256: ai_daily_scanner_core::store::sha256_hex(content.as_bytes()),
@@ -1054,7 +1054,7 @@ impl PdfClassifierPort for ConcurrencyClassifier {
         std::thread::sleep(Duration::from_millis(30));
         self.active
             .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        PdfClassifierExecution::test_oneshot(Ok(no_text_result(&request.file_path)))
+        PdfClassifierExecution::test_execution(Ok(no_text_result(&request.file_path)))
     }
 }
 
@@ -1095,7 +1095,7 @@ impl PdfClassifierPort for TestClassifier {
         request: &PdfClassifierRequestV1,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
-        PdfClassifierExecution::test_oneshot(
+        PdfClassifierExecution::test_execution(
             self.results
                 .get(&request.file_path)
                 .cloned()
@@ -2009,8 +2009,8 @@ fn retry_metrics_count_only_actual_classifier_and_pdf_parse_attempts() {
     let mut profile = v2_profile(ReportMode::Daily);
     profile.parse.pdf.max_pages = 2;
     let mut parsed = success_parse("fixture:retry.pdf", "", "pdf evidence");
-    parsed.parser_backend = "pdf_text_v1".to_string();
-    parsed.worker_lane = "python_document_process".to_string();
+    parsed.parser_backend = "python_pdf_text_v2".to_string();
+    parsed.worker_lane = "python_document_process_v2".to_string();
     parsed.parse_transport = ParseTransport::Session;
     parsed.parse_attempt_count = 2;
     let clock = FakeClock::new();
@@ -2049,7 +2049,7 @@ fn post_parse_source_change_discards_content_but_keeps_execution_provenance() {
     let profile = v2_profile(ReportMode::Daily);
     let file = discovered("changed.md", ".md", 128);
     let mut parsed = success_parse(&file.file_identity, &file.path, "discard me");
-    parsed.parser_backend = "light_text_v1".to_string();
+    parsed.parser_backend = "light_text_v2".to_string();
     parsed.worker_lane = "rust_core".to_string();
     parsed.parse_transport = ParseTransport::RustInProcess;
     parsed.parse_attempt_count = 2;
@@ -2097,7 +2097,7 @@ fn post_parse_source_change_discards_content_but_keeps_execution_provenance() {
         result.error.as_ref().map(|error| error.error_code),
         Some(ErrorCode::SourceVersionChanged)
     );
-    assert_eq!(result.parser_backend, "light_text_v1");
+    assert_eq!(result.parser_backend, "light_text_v2");
     assert_eq!(result.worker_lane, AuditWorkerLane::RustCore);
     assert_eq!(result.parse_transport, ParseTransport::RustInProcess);
     assert_eq!(result.parse_attempt_count, 2);
@@ -2204,7 +2204,7 @@ impl PdfClassifierPort for ClockAdvancingClassifier {
         let mut now = self.clock.lock().unwrap();
         *now += 4_000;
         drop(now);
-        PdfClassifierExecution::test_oneshot(Ok(text_result(&request.file_path)))
+        PdfClassifierExecution::test_execution(Ok(text_result(&request.file_path)))
     }
 }
 

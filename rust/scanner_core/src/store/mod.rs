@@ -6360,7 +6360,7 @@ mod tests {
             cache_status: CacheStatus::Miss,
             cache_miss_reason: CacheMissReason::NewFile,
             parse_status: ParseStatus::Success,
-            parser_backend: "light_text_v1".to_string(),
+            parser_backend: "light_text_v2".to_string(),
             worker_lane: AuditWorkerLane::RustCore,
             truncated: false,
             content_sha256: sha256_hex(content.as_bytes()),
@@ -6451,7 +6451,7 @@ mod tests {
             parse_profile_hash: profile_hash.to_string(),
             content: content.to_string(),
             content_sha256: sha256_hex(content.as_bytes()),
-            parser_backend: "light_text_v1".to_string(),
+            parser_backend: "light_text_v2".to_string(),
             worker_lane: "rust_core".to_string(),
             truncated: false,
             worker_contract_version: "ai_daily_context_v1".to_string(),
@@ -7144,7 +7144,7 @@ mod tests {
             retryable: false,
             stage: DiagnosticStage::Parse,
             file_path: Nullable(Some("C:\\fixture\\evidence.txt".to_string())),
-            backend: Nullable(Some("light_text_v1".to_string())),
+            backend: Nullable(Some("light_text_v2".to_string())),
         };
         let summary = ContextSummary {
             source_file_count: 1,
@@ -7210,7 +7210,7 @@ mod tests {
                 cache_status: CacheStatus::Miss,
                 cache_miss_reason: CacheMissReason::NewFile,
                 parse_status: ParseStatus::Error,
-                parser_backend: "light_text_v1".to_string(),
+                parser_backend: "light_text_v2".to_string(),
                 worker_lane: AuditWorkerLane::RustCore,
                 truncated: false,
                 content_sha256: sha256_hex(b""),
@@ -7233,7 +7233,7 @@ mod tests {
                     retryable: false,
                     stage: DiagnosticStage::Parse,
                     file_path: Nullable(Some("C:\\fixture\\evidence.txt".to_string())),
-                    backend: Nullable(Some("light_text_v1".to_string())),
+                    backend: Nullable(Some("light_text_v2".to_string())),
                 },
             }],
             stage_metrics: vec![
@@ -8146,7 +8146,7 @@ mod tests {
             retryable: false,
             stage: DiagnosticStage::Parse,
             file_path: Nullable(Some("C:\\fixture\\evidence.txt".to_string())),
-            backend: Nullable(Some("light_text_v1".to_string())),
+            backend: Nullable(Some("light_text_v2".to_string())),
         };
         let mut batch = error_batch(&active);
         batch.inventory.push(inventory_record("file-a", source));
@@ -8158,7 +8158,7 @@ mod tests {
             cache_status: CacheStatus::Miss,
             cache_miss_reason: CacheMissReason::NewFile,
             parse_status: ParseStatus::Error,
-            parser_backend: "light_text_v1".to_string(),
+            parser_backend: "light_text_v2".to_string(),
             worker_lane: AuditWorkerLane::RustCore,
             truncated: false,
             content_sha256: sha256_hex(b""),
@@ -9133,7 +9133,7 @@ mod tests {
                     worker_version, worker_build, cached_at_ms
                  ) VALUES (
                     'C:\\work\\a.txt', 'mtime_ns=1:size=5', ?1, 'hello', ?2,
-                    'pdf_text_v1', 'python_document_process', 0,
+                    'python_pdf_text_v2', 'python_document_process_v2', 0,
                     'ai_daily_worker_v1', '1.0', 'legacy-build', 1
                  )",
                 params!["0".repeat(64), "1".repeat(64)],

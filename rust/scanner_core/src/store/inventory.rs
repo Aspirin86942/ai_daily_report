@@ -542,7 +542,7 @@ fn parse_cache_status_text(record: &FileResultRecord) -> &'static str {
         // spec Part 5.2: a no-text PDF metadata-only draft never ran a body
         // parser, so its v2 parse provenance is not_applicable (not a miss,
         // and the cache_miss_reason stays empty per Part 4).
-        (ParseStatus::Success, CacheStatus::Miss) if record.parser_backend == "pdf_metadata_v1" => {
+        (ParseStatus::Success, CacheStatus::Miss) if record.parser_backend == "pdf_metadata_v2" => {
             "not_applicable"
         }
         (ParseStatus::Success, CacheStatus::Miss) => "miss",
@@ -615,8 +615,8 @@ pub(crate) fn parse_status_text(value: ParseStatus) -> &'static str {
 pub(crate) fn worker_lane_text(value: AuditWorkerLane) -> &'static str {
     match value {
         AuditWorkerLane::RustCore => "rust_core",
-        AuditWorkerLane::RustOfficeProcess => "rust_office_process",
-        AuditWorkerLane::PythonDocumentProcess => "python_document_process",
+        AuditWorkerLane::RustOfficeProcessV2 => "rust_office_process_v2",
+        AuditWorkerLane::PythonDocumentProcessV2 => "python_document_process_v2",
         AuditWorkerLane::NotParsed => "not_parsed",
     }
 }
@@ -634,7 +634,7 @@ mod tests {
             cache_status: CacheStatus::Miss,
             cache_miss_reason: CacheMissReason::NewFile,
             parse_status: ParseStatus::Success,
-            parser_backend: "light_text_v1".to_string(),
+            parser_backend: "light_text_v2".to_string(),
             worker_lane: AuditWorkerLane::RustCore,
             truncated: false,
             content_sha256: "b".repeat(64),

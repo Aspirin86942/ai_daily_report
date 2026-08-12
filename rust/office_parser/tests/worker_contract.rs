@@ -19,8 +19,8 @@ fn strict_worker_request_parses_bounded_xlsx() {
 
     assert_eq!(response.status, WorkerStatus::Ok);
     assert_eq!(response.error, Nullable(None));
-    assert_eq!(response.parser_backend, WorkerBackend::RustXlsxBoundedV1);
-    assert_eq!(response.worker_lane, WorkerLane::RustOfficeProcess);
+    assert_eq!(response.parser_backend, WorkerBackend::RustXlsxBoundedV2);
+    assert_eq!(response.worker_lane, WorkerLane::RustOfficeProcessV2);
     assert!(response.content.contains("XLSX strict worker"));
     assert_eq!(response.observed_source_version, source_version(&path));
 }
@@ -35,7 +35,7 @@ fn strict_worker_request_parses_valid_docx_and_pptx() {
         let request = request_for_route(
             &path,
             extension,
-            WorkerBackend::RustOfficeOxideV1,
+            WorkerBackend::RustOfficeOxideV2,
             source_version(&path),
             1_000_000,
         );
@@ -46,12 +46,12 @@ fn strict_worker_request_parses_valid_docx_and_pptx() {
         assert_eq!(response.error, Nullable(None), "{extension}");
         assert_eq!(
             response.parser_backend,
-            WorkerBackend::RustOfficeOxideV1,
+            WorkerBackend::RustOfficeOxideV2,
             "{extension}"
         );
         assert_eq!(
             response.worker_lane,
-            WorkerLane::RustOfficeProcess,
+            WorkerLane::RustOfficeProcessV2,
             "{extension}"
         );
         assert!(response.content.contains(expected_text), "{extension}");
@@ -78,8 +78,8 @@ fn corrupt_xlsx_is_a_non_retryable_structured_failure() {
 fn corrupt_docx_and_pptx_are_non_retryable_structured_failures() {
     let directory = tempdir().expect("temporary root should exist");
     for (extension, backend) in [
-        (".docx", WorkerBackend::RustOfficeOxideV1),
-        (".pptx", WorkerBackend::RustOfficeOxideV1),
+        (".docx", WorkerBackend::RustOfficeOxideV2),
+        (".pptx", WorkerBackend::RustOfficeOxideV2),
     ] {
         let path = directory.path().join(format!("corrupt{extension}"));
         fs::write(&path, b"not a zip").expect("corrupt fixture should be written");
@@ -136,7 +136,7 @@ fn request_for(
     request_for_route(
         path,
         ".xlsx",
-        WorkerBackend::RustXlsxBoundedV1,
+        WorkerBackend::RustXlsxBoundedV2,
         expected_source_version,
         max_file_size_bytes,
     )

@@ -95,7 +95,7 @@ fn insert_common_rows(connection: &rusqlite::Connection) {
                 parser_backend, worker_lane, truncated, worker_contract_version,
                 worker_version, worker_build, cached_at_ms
              ) VALUES ('C:\\work\\a.txt', 'mtime_ns=1:size=5', ?1, 'hello', ?2,
-                       'rust_xlsx_bounded_v1', 'rust_core', 0,
+                       'rust_xlsx_bounded_v2', 'rust_core', 0,
                        'ai_daily_worker_v1', '1.0', 'legacy-build', 1)",
             rusqlite::params!["0".repeat(64), "1".repeat(64)],
         )
@@ -110,7 +110,7 @@ fn insert_common_rows(connection: &rusqlite::Connection) {
                 error_code, error_message, error_retryable, error_stage, error_file_path,
                 error_backend
              ) VALUES (1, 'C:\\work\\a.txt', 'a.txt', 'mtime_ns=1:size=5', ?1,
-                       'fresh', '', 'success', 'rust_xlsx_bounded_v1', 'rust_core',
+                       'fresh', '', 'success', 'rust_xlsx_bounded_v2', 'rust_core',
                        0, ?2, 0, 0, 1, '', '', '', NULL, NULL, NULL, NULL, NULL, NULL)",
             rusqlite::params!["5".repeat(64), "6".repeat(64)],
         )

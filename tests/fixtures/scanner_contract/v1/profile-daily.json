@@ -35,18 +35,18 @@
   "parse": {
     "aggregate_max_chars": 50000,
     "text": {
-      "backend": "light_text_v1",
+      "backend": "light_text_v2",
       "read_head_bytes": 262144,
       "read_tail_bytes": 262144,
       "max_chars": 6000,
       "excerpt_max_chars": 6000
     },
     "office": {
-      "primary_backend": "rust_office_oxide_v1",
+      "primary_backend": "rust_office_oxide_v2",
       "fallback_enabled": true,
       "fallback_order": [
-        "python_office_v1",
-        "python_sharepoint_text_v1"
+        "python_office_v2",
+        "python_sharepoint_text_v2"
       ],
       "fallback_after_timeout": false,
       "fallback_policy_version": "hybrid_v1",
@@ -63,7 +63,7 @@
       "document_excerpt_max_chars": 6000
     },
     "pdf": {
-      "backend": "pdf_text_v1",
+      "backend": "python_pdf_text_v2",
       "max_pages": 5,
       "excerpt_max_chars": 6000
     }

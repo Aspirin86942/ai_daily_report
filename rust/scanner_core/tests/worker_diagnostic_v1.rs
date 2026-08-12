@@ -20,7 +20,7 @@ fn frozen_worker_diagnostic_translates_to_scanner_diagnostic() {
         file_path: Nullable(Some(
             "C:\\scanner-fixtures\\工作 目录\\slow.pdf".to_string(),
         )),
-        backend: Nullable(Some("pdf_text_v1".to_string())),
+        backend: Nullable(Some("python_pdf_text_v2".to_string())),
     };
 
     let translated = worker_diagnostic_to_scanner(&worker);
@@ -37,7 +37,7 @@ fn frozen_worker_diagnostic_translates_to_scanner_diagnostic() {
     );
     assert_eq!(
         translated.backend,
-        Nullable(Some("pdf_text_v1".to_string()))
+        Nullable(Some("python_pdf_text_v2".to_string()))
     );
 }
 

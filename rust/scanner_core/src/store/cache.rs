@@ -559,12 +559,12 @@ fn resolve_cache_lookup(
 /// policy 时 fail closed 为 profile route invariant（返回 None）。
 pub(crate) fn recompute_rank(parser_backend: &str) -> Option<i64> {
     match parser_backend {
-        "light_text_v1" => Some(1),
-        "rust_xlsx_bounded_v1" => Some(2),
-        "rust_office_oxide_v1" => Some(2),
-        "python_sharepoint_text_v1" => Some(3),
-        "python_office_v1" => Some(4),
-        "pdf_text_v1" => Some(10),
+        "light_text_v2" => Some(1),
+        "rust_xlsx_bounded_v2" => Some(2),
+        "rust_office_oxide_v2" => Some(2),
+        "python_sharepoint_text_v2" => Some(3),
+        "python_office_v2" => Some(4),
+        "python_pdf_text_v2" => Some(10),
         _ => None,
     }
 }
@@ -744,12 +744,12 @@ fn evict_parse_cache_with_check(
                  FROM parse_cache
                  ORDER BY generation_rank ASC,
                           CASE parser_backend
-                              WHEN 'light_text_v1' THEN 1
-                              WHEN 'rust_xlsx_bounded_v1' THEN 2
-                              WHEN 'rust_office_oxide_v1' THEN 2
-                              WHEN 'python_sharepoint_text_v1' THEN 3
-                              WHEN 'python_office_v1' THEN 4
-                              WHEN 'pdf_text_v1' THEN 10
+                              WHEN 'light_text_v2' THEN 1
+                              WHEN 'rust_xlsx_bounded_v2' THEN 2
+                              WHEN 'rust_office_oxide_v2' THEN 2
+                              WHEN 'python_sharepoint_text_v2' THEN 3
+                              WHEN 'python_office_v2' THEN 4
+                              WHEN 'python_pdf_text_v2' THEN 10
                               ELSE 99
                           END ASC,
                           last_accessed_bucket ASC,
@@ -1613,7 +1613,7 @@ mod tests {
             parse_profile_hash: profile_hash.to_string(),
             content: format!("content-{identity}"),
             content_sha256: sha256_hex(format!("content-{identity}").as_bytes()),
-            parser_backend: "light_text_v1".to_string(),
+            parser_backend: "light_text_v2".to_string(),
             worker_lane: "rust_core".to_string(),
             truncated: false,
             worker_contract_version: "ai_daily_context_v1".to_string(),

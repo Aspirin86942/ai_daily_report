@@ -4,7 +4,7 @@
   "request_id": "31111111-3111-4111-8111-311111111111",
   "file_path": "C:\\scanner-fixtures\\工作 目录\\sample.docx",
   "file_type": ".docx",
-  "backend": "rust_office_oxide_v1",
+  "backend": "rust_office_oxide_v2",
   "remaining_timeout_ms": 30000,
   "max_file_size_bytes": 52428800,
   "parser_limits": {

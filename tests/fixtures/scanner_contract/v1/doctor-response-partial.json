@@ -24,7 +24,7 @@
       "retryable": true,
       "stage": "doctor",
       "file_path": null,
-      "backend": "rust_office_oxide_v1"
+      "backend": "rust_office_oxide_v2"
     }
   ],
   "error": null

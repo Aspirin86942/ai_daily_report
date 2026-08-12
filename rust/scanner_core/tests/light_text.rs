@@ -16,7 +16,7 @@ fn head_read_trims_only_an_incomplete_utf8_tail() {
         .expect("split UTF-8 tail should be trimmed");
 
     assert!(parsed.truncated);
-    assert_eq!(parsed.parser_backend, "light_text_v1");
+    assert_eq!(parsed.parser_backend, "light_text_v2");
     assert!(parsed.content.contains("excerpt_source: head"));
     assert!(parsed.content.ends_with("ab"));
     assert!(!parsed.content.contains('\u{fffd}'));
@@ -201,7 +201,7 @@ fn output_budget_and_large_file_guard_are_enforced_before_parse() {
 
 fn text_profile(read_head_bytes: u64, read_tail_bytes: u64, max_chars: u64) -> TextParseProfile {
     TextParseProfile {
-        backend: "light_text_v1".to_string(),
+        backend: "light_text_v2".to_string(),
         read_head_bytes,
         read_tail_bytes,
         max_chars,

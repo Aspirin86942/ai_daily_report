@@ -11,7 +11,7 @@ except ImportError:  # Keep hashing available without third-party imports.
         from _hashlib import openssl_sha256 as _sha256
 
 
-WORKER_CONTRACT_VERSION = "ai_daily_worker_v1"
+WORKER_CONTRACT_VERSION = "ai_daily_worker_v2"
 PYTHON_WORKER_VERSION = "0.1.0"
 PYTHON_WORKER_BUILD_INPUTS = (
     "requirements.lock",
@@ -24,9 +24,15 @@ PYTHON_WORKER_BUILD_INPUTS = (
     "src/workers/pdf_classifier_identity.py",
     "src/workers/python_worker_identity.py",
 )
-PYTHON_OFFICE_BACKEND = "python_office_v1"
-PYTHON_SHAREPOINT_TEXT_BACKEND = "python_sharepoint_text_v1"
-PDF_TEXT_BACKEND = "pdf_text_v1"
+PYTHON_OFFICE_BACKEND = "python_office_v2"
+PYTHON_SHAREPOINT_TEXT_BACKEND = "python_sharepoint_text_v2"
+PDF_TEXT_BACKEND = "python_pdf_text_v2"
+WORKER_OPERATIONS = [
+    "pdf_classify",
+    "pdf_parse",
+    "python_office_parse",
+    "python_sharepoint_parse",
+]
 
 
 def _compute_python_worker_build() -> str:
@@ -48,7 +54,7 @@ PYTHON_WORKER_BUILD = _compute_python_worker_build()
 
 
 def python_worker_version_payload() -> dict[str, object]:
-    """Return the strict identity without importing Pydantic or parser modules."""
+    """Return the identity embedded in the existing typed parse result."""
     return {
         "contract": "ai_daily_worker",
         "protocol_version": 1,
@@ -57,8 +63,8 @@ def python_worker_version_payload() -> dict[str, object]:
         "worker_version": PYTHON_WORKER_VERSION,
         "worker_build": PYTHON_WORKER_BUILD,
         "supported_backends": [
-            PDF_TEXT_BACKEND,
             PYTHON_OFFICE_BACKEND,
+            PDF_TEXT_BACKEND,
             PYTHON_SHAREPOINT_TEXT_BACKEND,
         ],
         "supported_extensions": [
@@ -73,18 +79,15 @@ def python_worker_version_payload() -> dict[str, object]:
     }
 
 
-_PYTHON_WORKER_VERSION_JSON = (
-    b'{"contract":"ai_daily_worker","protocol_version":1,'
-    b'"worker_kind":"python_document",'
-    b'"worker_contract_version":"ai_daily_worker_v1",'
-    b'"worker_version":"0.1.0","worker_build":"'
-    + PYTHON_WORKER_BUILD.encode("ascii", errors="strict")
-    + b'","supported_backends":["pdf_text_v1","python_office_v1",'
-    b'"python_sharepoint_text_v1"],"supported_extensions":'
-    b'[".doc",".docx",".pdf",".ppt",".pptx",".xls",".xlsx"]}'
-)
-
-
-def python_worker_version_json() -> bytes:
-    """Return the strict version response without importing JSON machinery."""
-    return _PYTHON_WORKER_VERSION_JSON
+def python_worker_hello_payload() -> dict[str, object]:
+    """Return the worker-v2 hello without importing parser dependencies."""
+    return {
+        "contract": "ai_daily_worker",
+        "protocol_version": 2,
+        "frame": "hello",
+        "worker_contract_version": WORKER_CONTRACT_VERSION,
+        "worker_kind": "python_document",
+        "worker_version": PYTHON_WORKER_VERSION,
+        "worker_build": PYTHON_WORKER_BUILD,
+        "supported_operations": WORKER_OPERATIONS,
+    }

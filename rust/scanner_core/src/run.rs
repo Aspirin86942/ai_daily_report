@@ -25,18 +25,16 @@ use thiserror::Error;
 use crate::artifact::{
     snapshot_key_parts, ArtifactDecisionRow, ArtifactDraft, ArtifactFileRow, ClassifierIdentity,
     PdfClassificationProvenanceV1, SemanticSummary, CLASSIFIER_CONTRACT_VERSION,
-    SESSION_CONTRACT_VERSION,
 };
 use crate::config::{normalize_scanner_profile_for_request, normalize_scanner_profile_v2};
 use crate::context_audit::{context_profile_hash, rejected_profile_hash, InspectAuditError};
 use crate::parsers::classifier::ClassifierPort;
 use crate::parsers::{
-    document, office, preflight_python_capabilities_observed, register_worker,
-    register_worker_pair_observed, RegisteredWorker, WorkerCommand, WorkerRegistry,
-    WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
+    document, office, register_worker, register_worker_pair_observed, RegisteredWorker,
+    WorkerCommand, WORKER_CONTRACT_VERSION, WORKER_HANDSHAKE_TIMEOUT,
 };
 use crate::process::WorkerRssTracker;
-use crate::scanner::{ScanRequest, Scanner, ScannerConfig};
+use crate::scanner::{ScanRequest, Scanner, ScannerConfig, ScannerResources, ScannerWorkerPools};
 use crate::scheduler::{
     BudgetedContextScheduler, BudgetedScanOutcome, Clock, RealClock, RealGuardVerifier,
     RunDeadlines, ScheduledRunInput, TerminalIntent, WorkerIdentities,
@@ -271,7 +269,7 @@ pub(crate) fn doctor_command(request: &DoctorRequest) -> Result<CommandOutput, E
         &mut first_error,
         "office_worker_handshake",
         office::worker_command(&request.adapters),
-        "rust_office_oxide_v1",
+        "rust_office_oxide_v2",
     );
 
     record_handshake(
@@ -279,7 +277,7 @@ pub(crate) fn doctor_command(request: &DoctorRequest) -> Result<CommandOutput, E
         &mut first_error,
         "python_worker_handshake",
         document::worker_command(&request.adapters),
-        "python_office_v1",
+        "python_office_v2",
     );
 
     let version = version_response();
@@ -545,6 +543,7 @@ fn inspect_error_output(
 
 pub(crate) fn build_context_command(
     request: &BuildContextRequest,
+    resources: &mut ScannerResources,
 ) -> Result<CommandOutput, EngineShellError> {
     let started_at = Instant::now();
     let version = version_response();
@@ -620,19 +619,10 @@ pub(crate) fn build_context_command(
             );
         }
     };
-    let mut store = match ScannerStore::open(Path::new(&request.scan_db_path)) {
-        Ok(store) => store,
-        Err(error) => {
-            return build_error_output(
-                request,
-                &version,
-                error.diagnostic(DiagnosticStage::Cache),
-                Vec::new(),
-                empty_summary(),
-                None,
-            );
-        }
-    };
+    let ScannerResources {
+        store,
+        worker_pools,
+    } = resources;
     let now_ms = match current_time_millis() {
         Ok(value) => value,
         Err(error) => {
@@ -696,7 +686,8 @@ pub(crate) fn build_context_command(
         &profile,
         &v2_profile,
         &work_dir,
-        &mut store,
+        store,
+        worker_pools,
         &active,
         &mut heartbeat,
         started_at,
@@ -712,6 +703,7 @@ fn execute_active_build(
     v2_profile: &ai_daily_scanner_contract::NormalizedScannerProfileV2,
     work_dir: &Path,
     store: &mut ScannerStore,
+    worker_pools: &mut ScannerWorkerPools,
     active: &ActiveRun,
     heartbeat: &mut LeaseHeartbeat,
     started_at: Instant,
@@ -724,15 +716,8 @@ fn execute_active_build(
     let handshake_started = Instant::now();
     let office_command = office::worker_command(&request.adapters);
     let python_command = document::worker_command(&request.adapters);
-    // spec Part 7.1：office v1 version、python v1 version、classifier-version、
-    // session-version 在一个 bounded parallel preflight batch 中启动，全部结束
-    // 后再做交叉 build/contract 校验；不得四次串行 spawn 拉高 warm path。
-    let profile_allows_pdf = profile
-        .discovery
-        .allowed_extensions
-        .iter()
-        .any(|extension| extension == ".pdf")
-        && profile.parse.pdf.backend == "pdf_text_v1";
+    // One bounded parallel hello batch validates both worker-v2 implementations.
+    // The long-lived pools start lazily when an operation is actually dispatched.
     let remaining_handshake_ms = timing.remaining_work_ms();
     if remaining_handshake_ms == 0 {
         return finish_active_error(
@@ -751,77 +736,16 @@ fn execute_active_build(
     }
     let handshake_timeout =
         WORKER_HANDSHAKE_TIMEOUT.min(Duration::from_millis(remaining_handshake_ms.max(1)));
-    let (office_python_pair, capability_pair) = std::thread::scope(|scope| {
-        let office_python = scope.spawn(|| {
-            register_worker_pair_observed(
-                &office_command,
-                &python_command,
-                handshake_timeout,
-                &rss_tracker,
-            )
-        });
-        let capabilities = if profile_allows_pdf {
-            let pair = preflight_python_capabilities_observed(
-                &python_command,
-                handshake_timeout,
-                &rss_tracker,
-            );
-            (Some(pair.0), Some(pair.1))
-        } else {
-            (None, None)
-        };
-        let office_python = match office_python.join() {
-            Ok(pair) => pair,
-            Err(_) => (
-                Err(crate::fallback::ParseFailure {
-                    class: crate::fallback::FailureClass::ContractFailure,
-                    diagnostic: diagnostic(
-                        ErrorCode::WorkerHandshakeFailed,
-                        "office/python handshake thread failed".to_string(),
-                        false,
-                        DiagnosticStage::Process,
-                    ),
-                }),
-                Err(crate::fallback::ParseFailure {
-                    class: crate::fallback::FailureClass::ContractFailure,
-                    diagnostic: diagnostic(
-                        ErrorCode::WorkerHandshakeFailed,
-                        "office/python handshake thread failed".to_string(),
-                        false,
-                        DiagnosticStage::Process,
-                    ),
-                }),
-            ),
-        };
-        (office_python, capabilities)
-    });
+    let office_python_pair = register_worker_pair_observed(
+        &office_command,
+        &python_command,
+        handshake_timeout,
+        &rss_tracker,
+    );
     let worker_handshake_ms = elapsed_ms(handshake_started);
     let (office_result, python_result) = office_python_pair;
-    let (classifier_result, session_result) = capability_pair;
-    let (office_worker, office_error) = split_handshake(office_result, "rust_office_oxide_v1");
-    let (python_worker, python_error) = split_handshake(python_result, "python_office_v1");
-    // 逻辑校验顺序固定：只有 python v1 version 成功后才接受 classifier/session
-    // 结果（spec Part 7.1）。profile 允许 PDF 时 classifier-version 缺失即
-    // preflight fail closed；session capability absent 走 v1 one-shot 不报错。
-    let mut classifier_worker: Option<crate::parsers::RegisteredClassifier> = None;
-    let mut session_worker: Option<crate::parsers::RegisteredSession> = None;
-    let mut capability_errors: Vec<Diagnostic> = Vec::new();
-    if python_worker.is_some() {
-        if let Some(result) = classifier_result {
-            match result {
-                Ok(classifier) => classifier_worker = Some(classifier),
-                Err(failure) => capability_errors.push(failure.diagnostic),
-            }
-        }
-        // spec Part 7.1：session capability absent（严格 exit-2 transport）→ 整轮
-        // v1 one-shot，不计 degradation；其他 handshake failure 才计入错误。
-        if let Some(result) = session_result {
-            match result {
-                Ok(session) => session_worker = session,
-                Err(failure) => capability_errors.push(failure.diagnostic),
-            }
-        }
-    }
+    let (office_worker, office_error) = split_handshake(office_result, "rust_office_oxide_v2");
+    let (python_worker, python_error) = split_handshake(python_result, "python_office_v2");
     let office_fingerprint = office_worker.as_ref().map(worker_fingerprint);
     let python_fingerprint = python_worker.as_ref().map(worker_fingerprint);
     let fingerprint_now_ms = match current_time_millis() {
@@ -856,7 +780,6 @@ fn execute_active_build(
     }
     let mut handshake_errors: Vec<Diagnostic> =
         [office_error, python_error].into_iter().flatten().collect();
-    handshake_errors.extend(capability_errors);
     if !handshake_errors.is_empty() {
         let error = handshake_errors.remove(0);
         return finish_active_error(
@@ -892,38 +815,6 @@ fn execute_active_build(
             &rss_tracker,
             timing,
         );
-    };
-    if let Some(session) = &session_worker {
-        let classifier_build_matches = classifier_worker.as_ref().is_some_and(|classifier| {
-            session.identity.classifier_build == classifier.identity.classifier_build
-        });
-        if session.identity.worker_build != python_worker.identity.worker_build
-            || !classifier_build_matches
-        {
-            return finish_active_error(
-                request,
-                version,
-                store,
-                active,
-                heartbeat,
-                Vec::new(),
-                diagnostic(
-                    ErrorCode::WorkerHandshakeFailed,
-                    "session capability build does not match python/classifier preflight"
-                        .to_string(),
-                    false,
-                    DiagnosticStage::Process,
-                ),
-                elapsed_summary(started_at),
-                worker_handshake_ms,
-                &rss_tracker,
-                timing,
-            );
-        }
-    }
-    let registry = WorkerRegistry {
-        office: Some(office_worker.clone()),
-        python_document: Some(python_worker.clone()),
     };
     let route_stacks =
         match route_stack_fingerprints(version, profile, &office_worker, &python_worker) {
@@ -1004,20 +895,16 @@ fn execute_active_build(
     let discovery_duration_ms = elapsed_ms(discovery_started);
 
     // ---- assemble + execute the deep-module scheduler ----
-    let classifier_command = document::worker_command(&request.adapters);
-    let session_pool = session_worker.clone().map(|registered| {
-        crate::session::PythonSessionPool::new(
-            registered,
-            python_worker.clone(),
-            crate::session::SessionParams::from_profile_v2(v2_profile),
-            rss_tracker.clone(),
-        )
-    });
-    let classifier_port = match &session_pool {
-        Some(session) => ClassifierPort::with_session(classifier_command, session.clone()),
-        None => ClassifierPort::with_rss_tracker(classifier_command, rss_tracker.clone()),
-    };
-    let parser_port = ProductionParser::new(profile, registry, session_pool.clone());
+    let params = crate::session::SessionParams::from_profile_v2(v2_profile);
+    let (office_pool, python_pool) = worker_pools.resolve(
+        office_command,
+        office_worker.clone(),
+        python_command.clone(),
+        python_worker.clone(),
+        params,
+    );
+    let classifier_port = ClassifierPort::new(python_pool.clone());
+    let parser_port = ProductionParser::new(profile, python_pool.clone(), office_pool.clone());
     let cache_port = StoreCachePort::new(
         PathBuf::from(&request.scan_db_path),
         route_stacks,
@@ -1096,15 +983,10 @@ fn execute_active_build(
         python_contract: Some(python_worker.identity.worker_contract_version.clone()),
         python_version: Some(python_worker.identity.worker_version.clone()),
         python_build: Some(python_worker.identity.worker_build.clone()),
-        // carry：真实 `classifier-version` build（非 python-worker-build 占位）。
-        // PDF 被 profile 允许时 classifier-version 已由 preflight fail-closed
+        // carry：worker-v2 hello 的真实 build identity。
+        // PDF 被 profile 允许时 hello 已由 preflight fail-closed
         // 保证存在；未允许时没有分类动作，classifier build 保持 None。
-        classifier_build: classifier_worker
-            .as_ref()
-            .map(|classifier| classifier.identity.classifier_build.clone()),
-        python_session_contract: session_worker
-            .as_ref()
-            .map(|session| session.identity.session_contract_version.clone()),
+        classifier_build: Some(python_worker.identity.worker_build.clone()),
     };
 
     // Persistence boundary 2: the complete discovery inventory is committed in
@@ -1408,8 +1290,12 @@ fn execute_active_build(
             );
         }
     };
-    let session_stats = session_pool.as_ref().map(|session| session.stats());
-    let peak_worker_rss_bytes = rss_tracker.peak_worker_rss_bytes();
+    let session_stats =
+        crate::session::SessionPoolStats::combine(office_pool.stats(), python_pool.stats());
+    let peak_worker_rss_bytes = combine_peak_rss(
+        rss_tracker.peak_worker_rss_bytes(),
+        session_stats.peak_worker_rss_bytes,
+    );
     apply_worker_rss_observation(&mut outcome, peak_worker_rss_bytes);
 
     // ---- terminal finalization (the ONLY linearization point) ----
@@ -1512,7 +1398,7 @@ fn execute_active_build(
         snapshot_hit: None,
         execution_metrics: Some(assemble_scheduler_execution_metrics(
             &outcome.execution_metrics,
-            session_stats.as_ref(),
+            Some(&session_stats),
             peak_worker_rss_bytes,
             worker_handshake_ms,
             discovery_duration_ms,
@@ -1592,6 +1478,13 @@ fn apply_worker_rss_observation(
         severity: DiagnosticSeverity::Warning,
         diagnostic: worker_rss_unavailable_diagnostic(),
     });
+}
+
+fn combine_peak_rss(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        _ => None,
+    }
 }
 
 fn worker_rss_unavailable_diagnostic() -> Diagnostic {
@@ -1816,7 +1709,7 @@ fn assemble_scheduler_execution_metrics(
         classification_cache_all_hit: Nullable(metrics.classification_cache_all_hit),
         stage_deadline_exhausted_count: metrics.stage_deadline_exhausted_count,
         session_restart_count: session.map_or(0, |stats| stats.session_restart_count),
-        session_fallback_count: session.map_or(0, |stats| stats.session_fallback_count),
+        session_fallback_count: 0,
         classify_attempt_count: metrics.classify_attempt_count,
         parse_attempt_count: metrics.parse_attempt_count,
         reserved_chars: metrics.reserved_chars,
@@ -2432,8 +2325,8 @@ fn snapshot_classification_audit(
 fn snapshot_worker_lane(lane: &str) -> AuditWorkerLane {
     match lane {
         "rust_core" => AuditWorkerLane::RustCore,
-        "rust_office_process" => AuditWorkerLane::RustOfficeProcess,
-        "python_document_process" => AuditWorkerLane::PythonDocumentProcess,
+        "rust_office_process_v2" => AuditWorkerLane::RustOfficeProcessV2,
+        "python_document_process_v2" => AuditWorkerLane::PythonDocumentProcessV2,
         _ => AuditWorkerLane::NotParsed,
     }
 }
@@ -3192,7 +3085,7 @@ pub fn version_response_v2() -> VersionResponseV2 {
         ],
         inspect_response_versions: vec![1, 2],
         classifier_contract_versions: vec![CLASSIFIER_CONTRACT_VERSION.to_string()],
-        session_contract_versions: vec![SESSION_CONTRACT_VERSION.to_string()],
+        session_contract_versions: vec![WORKER_CONTRACT_VERSION.to_string()],
         maintenance_contract_versions: vec!["ai_daily_scanner_maintenance_v1".to_string()],
         upgrade_contract_versions: vec!["ai_daily_scanner_upgrade_v1".to_string()],
         source_guard_policy: "source_guard_v2".to_string(),
@@ -3505,7 +3398,7 @@ mod tests {
                 source_guard_sha256: file.source_guard_sha256.clone(),
                 parse_profile_hash: "a".repeat(64),
                 parse_status: ParseStatus::Success,
-                parser_backend: "light_text_v1".to_string(),
+                parser_backend: "light_text_v2".to_string(),
                 worker_lane: "rust_core".to_string(),
                 truncated: false,
                 content_sha256: crate::artifact::sha256_hex(b"fixture"),

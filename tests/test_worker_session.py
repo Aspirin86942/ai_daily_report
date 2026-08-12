@@ -1,8 +1,4 @@
-"""Python 流式 worker session（ai_daily_python_session_v1）的进程合同。
-
-覆盖 spec Part 7：hello 首帧、逐请求响应配对、classify_pdf_v1 / parse_v1
-两种 operation、错配/坏 payload 杀会话而不静默复用。
-"""
+"""统一 worker v2 长驻进程合同。"""
 
 from __future__ import annotations
 
@@ -15,8 +11,6 @@ from pathlib import Path
 import pytest
 
 from src.models.scanner_contract import (
-    ClassifierVersionResponseV1,
-    PythonSessionVersionResponseV1,
     WorkerParseRequest,
 )
 
@@ -79,7 +73,7 @@ def _session_version_payload() -> dict[str, object]:
             sys.executable,
             "-m",
             "src.workers.document_parser_worker",
-            "session-version",
+            "hello",
         ],
         cwd=PROJECT_ROOT,
         input=b"",
@@ -90,13 +84,10 @@ def _session_version_payload() -> dict[str, object]:
         "utf-8", errors="replace"
     )
     payload = json.loads(completed.stdout.decode("utf-8", errors="strict"))
-    return PythonSessionVersionResponseV1.model_validate(payload).model_dump(mode="json")
+    return payload
 
 
-@pytest.mark.parametrize("operation", ["classifier-version", "session-version"])
-def test_capability_preflight_does_not_import_heavy_pdf_runtime(
-    operation: str,
-) -> None:
+def test_worker_hello_does_not_import_heavy_pdf_runtime() -> None:
     """Snapshot warm preflight must not load PDFium or the Pydantic model graph."""
     completed = subprocess.run(
         [
@@ -106,7 +97,7 @@ def test_capability_preflight_does_not_import_heavy_pdf_runtime(
             "importtime",
             "-m",
             "src.workers.document_parser_worker",
-            operation,
+            "hello",
         ],
         cwd=PROJECT_ROOT,
         input=b"",
@@ -124,10 +115,10 @@ def _classify_request(tmp_path: Path, request_id: str) -> dict[str, object]:
     if not pdf.is_file():
         pytest.skip("text pdf fixture is not built")
     return {
-        "contract": "ai_daily_python_session",
-        "protocol_version": 1,
+        "contract": "ai_daily_worker",
+        "protocol_version": 2,
         "request_id": request_id,
-        "operation": "classify_pdf_v1",
+        "operation": "pdf_classify",
         "payload": {
             "contract": "ai_daily_pdf_classifier",
             "protocol_version": 1,
@@ -151,7 +142,7 @@ def _parse_request(tmp_path: Path, request_id: str) -> dict[str, object]:
         "request_id": request_id,
         "file_path": str(pdf),
         "file_type": ".pdf",
-        "backend": "pdf_text_v1",
+        "backend": "python_pdf_text_v2",
         "remaining_timeout_ms": 30_000,
         "max_file_size_bytes": 1_000_000,
         "parser_limits": {
@@ -163,43 +154,28 @@ def _parse_request(tmp_path: Path, request_id: str) -> dict[str, object]:
     }
     WorkerParseRequest.model_validate(request)
     return {
-        "contract": "ai_daily_python_session",
-        "protocol_version": 1,
+        "contract": "ai_daily_worker",
+        "protocol_version": 2,
         "request_id": request_id,
-        "operation": "parse_v1",
+        "operation": "pdf_parse",
         "payload": request,
     }
 
 
-def test_session_version_is_strict_and_matches_classifier_build() -> None:
+def test_worker_hello_is_strict_and_complete() -> None:
     if not TEXT_PDF.is_file():
         pytest.skip("text pdf fixture is not built")
     version = _session_version_payload()
-    assert version["contract"] == "ai_daily_python_session"
-    assert version["protocol_version"] == 1
-    assert version["session_contract_version"] == "ai_daily_python_session_v1"
-    assert version["supported_operations"] == ["classify_pdf_v1", "parse_v1"]
+    assert version["contract"] == "ai_daily_worker"
+    assert version["protocol_version"] == 2
+    assert version["worker_contract_version"] == "ai_daily_worker_v2"
+    assert version["supported_operations"] == [
+        "pdf_classify",
+        "pdf_parse",
+        "python_office_parse",
+        "python_sharepoint_parse",
+    ]
     assert len(version["worker_build"]) == 64
-    assert len(version["classifier_build"]) == 64
-
-    classifier_completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "src.workers.document_parser_worker",
-            "classifier-version",
-        ],
-        cwd=PROJECT_ROOT,
-        input=b"",
-        capture_output=True,
-        check=False,
-    )
-    assert classifier_completed.returncode == 0
-    classifier = ClassifierVersionResponseV1.model_validate_json(
-        classifier_completed.stdout
-    )
-    assert version["classifier_build"] == classifier.classifier_build
-
 
 def test_session_hello_then_classify_request_response_pairing(tmp_path: Path) -> None:
     if not TEXT_PDF.is_file():
@@ -208,14 +184,13 @@ def test_session_hello_then_classify_request_response_pairing(tmp_path: Path) ->
     try:
         hello = _readline(process)
         assert hello["frame"] == "hello"
-        assert hello["session_contract_version"] == "ai_daily_python_session_v1"
-        assert hello["supported_operations"] == ["classify_pdf_v1", "parse_v1"]
+        assert hello["worker_contract_version"] == "ai_daily_worker_v2"
 
         request = _classify_request(tmp_path, "61111111-6111-4111-8111-611111111111")
         _write_request(process, request)
         response = _readline(process)
         assert response["request_id"] == request["request_id"]
-        assert response["operation"] == "classify_pdf_v1"
+        assert response["operation"] == "pdf_classify"
         assert response["status"] == "ok"
         assert response["error"] is None
         result = response["result"]
@@ -243,7 +218,7 @@ def test_session_source_version_change_is_outer_retryable_error(tmp_path: Path) 
 
         response = _readline(process)
         assert response["request_id"] == request["request_id"]
-        assert response["operation"] == "classify_pdf_v1"
+        assert response["operation"] == "pdf_classify"
         assert response["status"] == "error"
         assert response["result"] is None
         assert response["error"]["error_code"] == "SOURCE_VERSION_CHANGED"
@@ -271,13 +246,13 @@ def test_session_parse_request_pairs_request_id(tmp_path: Path) -> None:
         _write_request(process, request)
         response = _readline(process)
         assert response["request_id"] == request_id
-        assert response["operation"] == "parse_v1"
+        assert response["operation"] == "pdf_parse"
         assert response["status"] == "ok"
         assert response["error"] is None
         result = response["result"]
         assert result["contract"] == "ai_daily_worker"
         assert result["request_id"] == request_id
-        assert result["parser_backend"] == "pdf_text_v1"
+        assert result["parser_backend"] == "python_pdf_text_v2"
         assert result["observed_source_version"] == request["payload"]["expected_source_version"]
     finally:
         process.stdin.close()
@@ -296,10 +271,10 @@ def test_session_kills_on_contract_mismatch(tmp_path: Path) -> None:
         _write_request(
             process,
             {
-                "contract": "ai_daily_worker",
-                "protocol_version": 1,
+            "contract": "wrong",
+            "protocol_version": 2,
                 "request_id": "63333333-6333-4333-8333-633333333333",
-                "operation": "parse_v1",
+            "operation": "pdf_parse",
                 "payload": {},
             },
         )
@@ -378,8 +353,7 @@ def test_session_hello_build_matches_preflight_session_version(tmp_path: Path) -
     process = _spawn_session()
     try:
         hello = _readline(process)
-        assert hello["worker_build"] == version["worker_build"]
-        assert hello["classifier_build"] == version["classifier_build"]
+        assert hello == version
     finally:
         process.stdin.close()
         process.wait(timeout=10)

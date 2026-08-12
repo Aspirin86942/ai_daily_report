@@ -152,7 +152,7 @@ class RawScannerProfileV1(ContractModel):
     office_legacy_extensions_enabled: bool | None = None
     pptx_include_notes: bool | None = None
     office_parser_fallback_order: Annotated[
-        list[Literal["python_office_v1", "python_sharepoint_text_v1"]],
+        list[Literal["python_office_v2", "python_sharepoint_text_v2"]],
         Field(max_length=2),
     ] | None = None
     direct_text_max_bytes: ReadBudget | None = None
@@ -231,7 +231,7 @@ class RawScannerProfileV2(ContractModel):
     office_legacy_extensions_enabled: bool | None = None
     pptx_include_notes: bool | None = None
     office_parser_fallback_order: Annotated[
-        list[Literal["python_office_v1", "python_sharepoint_text_v1"]],
+        list[Literal["python_office_v2", "python_sharepoint_text_v2"]],
         Field(max_length=2),
     ] | None = None
     direct_text_max_bytes: ReadBudget | None = None
@@ -326,7 +326,7 @@ class ExecutionProfile(ContractModel):
 
 
 class TextParseProfile(ContractModel):
-    backend: Literal["light_text_v1"]
+    backend: Literal["light_text_v2"]
     read_head_bytes: ReadBudget
     read_tail_bytes: ReadBudget
     max_chars: CharBudget
@@ -337,7 +337,7 @@ class OfficeParseProfile(ContractModel):
     primary_backend: NonEmpty1024
     fallback_enabled: bool
     fallback_order: Annotated[
-        list[Literal["python_office_v1", "python_sharepoint_text_v1"]],
+        list[Literal["python_office_v2", "python_sharepoint_text_v2"]],
         Field(max_length=2),
     ]
     fallback_after_timeout: bool
@@ -917,30 +917,30 @@ WorkerParserLimits = Annotated[
 ]
 
 WORKER_ROUTES: dict[str, tuple[set[str], str, str]] = {
-    "rust_office_oxide_v1": (
+    "rust_office_oxide_v2": (
         {".docx", ".pptx"},
-        "rust_office_process",
+        "rust_office_process_v2",
         "office",
     ),
-    "rust_xlsx_bounded_v1": ({".xlsx"}, "rust_office_process", "office"),
-    "python_office_v1": (
+    "rust_xlsx_bounded_v2": ({".xlsx"}, "rust_office_process_v2", "office"),
+    "python_office_v2": (
         {".docx", ".pptx", ".xls", ".xlsx"},
-        "python_document_process",
+        "python_document_process_v2",
         "office",
     ),
-    "pdf_text_v1": ({".pdf"}, "python_document_process", "pdf"),
-    "python_sharepoint_text_v1": (
+    "python_pdf_text_v2": ({".pdf"}, "python_document_process_v2", "pdf"),
+    "python_sharepoint_text_v2": (
         {".doc", ".ppt"},
-        "python_document_process",
+        "python_document_process_v2",
         "sharepoint_text",
     ),
 }
 WorkerBackend = Literal[
-    "rust_office_oxide_v1",
-    "rust_xlsx_bounded_v1",
-    "python_office_v1",
-    "pdf_text_v1",
-    "python_sharepoint_text_v1",
+    "rust_office_oxide_v2",
+    "rust_xlsx_bounded_v2",
+    "python_office_v2",
+    "python_pdf_text_v2",
+    "python_sharepoint_text_v2",
 ]
 
 
@@ -975,7 +975,7 @@ class WorkerParseResponse(ContractModel):
     file_type: Extension
     content: str
     parser_backend: WorkerBackend
-    worker_lane: Literal["rust_office_process", "python_document_process"]
+    worker_lane: Literal["rust_office_process_v2", "python_document_process_v2"]
     truncated: bool
     warnings: Annotated[list[WorkerDiagnosticV1], Field(max_length=256)]
     error: WorkerDiagnosticV1 | None
@@ -1029,8 +1029,8 @@ class FileAudit(ContractModel):
     parser_backend: NonEmpty4096
     worker_lane: Literal[
         "rust_core",
-        "rust_office_process",
-        "python_document_process",
+        "rust_office_process_v2",
+        "python_document_process_v2",
         "not_parsed",
     ]
     cache_status: Literal["fresh", "miss"]
@@ -1139,12 +1139,12 @@ _CLASSIFICATION_CACHE_MISS_REASONS_V2 = frozenset(
     }
 )
 _BODY_PARSER_LANES = {
-    "light_text_v1": "rust_core",
-    "rust_office_oxide_v1": "rust_office_process",
-    "rust_xlsx_bounded_v1": "rust_office_process",
-    "pdf_text_v1": "python_document_process",
-    "python_office_v1": "python_document_process",
-    "python_sharepoint_text_v1": "python_document_process",
+    "light_text_v2": "rust_core",
+    "rust_office_oxide_v2": "rust_office_process_v2",
+    "rust_xlsx_bounded_v2": "rust_office_process_v2",
+    "python_pdf_text_v2": "python_document_process_v2",
+    "python_office_v2": "python_document_process_v2",
+    "python_sharepoint_text_v2": "python_document_process_v2",
 }
 
 
@@ -1184,7 +1184,7 @@ class VersionResponseV2(ContractModel):
     ]
     inspect_response_versions: list[Literal[1, 2]]
     classifier_contract_versions: list[Literal["ai_daily_pdf_classifier_v1"]]
-    session_contract_versions: list[Literal["ai_daily_python_session_v1"]]
+    session_contract_versions: list[Literal["ai_daily_worker_v2"]]
     maintenance_contract_versions: list[Literal["ai_daily_scanner_maintenance_v1"]]
     upgrade_contract_versions: list[Literal["ai_daily_scanner_upgrade_v1"]]
     source_guard_policy: Literal["source_guard_v2"]
@@ -1428,60 +1428,6 @@ class ClassifierVersionResponseV1(ContractModel):
     target_triple: NonEmpty1024
 
 
-# ---------------------------------------------------------------------------
-# ai_daily_python_session_v1 wire（spec Part 7.1/7.2）：长驻流式 PDF session
-# ---------------------------------------------------------------------------
-
-SessionOperation = Literal["classify_pdf_v1", "parse_v1"]
-
-
-class PythonSessionVersionResponseV1(ContractModel):
-    contract: Literal["ai_daily_python_session"]
-    protocol_version: Literal[1]
-    session_contract_version: Literal["ai_daily_python_session_v1"]
-    worker_build: Sha256Hex
-    classifier_build: Sha256Hex
-    supported_operations: Annotated[list[SessionOperation], Field(max_length=16)]
-
-
-class PythonSessionHelloV1(ContractModel):
-    contract: Literal["ai_daily_python_session"]
-    protocol_version: Literal[1]
-    frame: Literal["hello"]
-    session_contract_version: Literal["ai_daily_python_session_v1"]
-    worker_build: Sha256Hex
-    classifier_build: Sha256Hex
-    supported_operations: Annotated[list[SessionOperation], Field(max_length=16)]
-
-
-class PythonSessionRequestV1(ContractModel):
-    contract: Literal["ai_daily_python_session"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    operation: SessionOperation
-    payload: dict[str, object]
-
-
-class PythonSessionResponseV1(ContractModel):
-    contract: Literal["ai_daily_python_session"]
-    protocol_version: Literal[1]
-    request_id: RequestId
-    operation: SessionOperation
-    status: Literal["ok", "error"]
-    result: PdfClassifierResultV1 | WorkerParseResponse | None
-    error: PythonOperationDiagnosticV1 | None
-
-    @model_validator(mode="after")
-    def validate_status_invariants(self) -> "PythonSessionResponseV1":
-        if self.status == "ok":
-            if self.result is None or self.error is not None:
-                raise ValueError("ok session response requires a result and no error")
-        else:
-            if self.result is not None or self.error is None:
-                raise ValueError("error session response requires an error and no result")
-        return self
-
-
 def _validate_v2_parse_provenance(
     *,
     parse_status: str,
@@ -1490,7 +1436,7 @@ def _validate_v2_parse_provenance(
     parse_cache_status: str,
     classification_status: str | None,
 ) -> None:
-    metadata = parser_backend == "pdf_metadata_v1" and worker_lane == "rust_core"
+    metadata = parser_backend == "pdf_metadata_v2" and worker_lane == "rust_core"
     not_parsed = parser_backend == "not_parsed" and worker_lane == "not_parsed"
     body_parser = _BODY_PARSER_LANES.get(parser_backend) == worker_lane
     if not (metadata or not_parsed or body_parser):
@@ -1522,7 +1468,7 @@ def _validate_v2_parse_provenance(
             )
     if metadata and classification_status != "no_text_in_parse_window":
         raise ValueError(
-            "pdf_metadata_v1 is only valid for no-text classification provenance"
+            "pdf_metadata_v2 is only valid for no-text classification provenance"
         )
 
     if parse_cache_status in {"fresh", "miss"}:
@@ -1536,7 +1482,7 @@ def _validate_v2_parse_provenance(
     elif parse_status == "success":
         if not metadata:
             raise ValueError(
-                "not_applicable Success requires pdf_metadata_v1/rust_core"
+                "not_applicable Success requires pdf_metadata_v2/rust_core"
             )
     elif not not_parsed:
         raise ValueError(
@@ -1554,8 +1500,8 @@ class FileAuditV2(ContractModel):
     parser_backend: NonEmpty4096
     worker_lane: Literal[
         "rust_core",
-        "rust_office_process",
-        "python_document_process",
+        "rust_office_process_v2",
+        "python_document_process_v2",
         "not_parsed",
     ]
     parse_cache_status: ParseCacheStatus
@@ -1982,7 +1928,7 @@ def validate_contract_payload(
             expected_kind = (
                 "office"
                 if request.backend
-                in {"rust_office_oxide_v1", "rust_xlsx_bounded_v1"}
+                in {"rust_office_oxide_v2", "rust_xlsx_bounded_v2"}
                 else "python_document"
             )
             supported = (
@@ -2026,10 +1972,6 @@ __all__ = [
     "PdfClassifierResponseV1",
     "PdfClassifierResultV1",
     "PythonOperationDiagnosticV1",
-    "PythonSessionHelloV1",
-    "PythonSessionRequestV1",
-    "PythonSessionResponseV1",
-    "PythonSessionVersionResponseV1",
     "RawScannerProfileV1",
     "RawScannerProfileV2",
     "ScannerProfile",

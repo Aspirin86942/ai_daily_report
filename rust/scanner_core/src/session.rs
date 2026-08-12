@@ -1,7 +1,7 @@
-//! Long-lived streaming Python worker session（spec Part 7）。
+//! Long-lived streaming worker pool for crash-isolated parsers.
 //!
-//! `ai_daily_python_session_v1` 是独立于共享 `ai_daily_worker_v1` 的 NDJSON
-//! 流式契约：首帧 hello，每行一个请求 envelope、每行一个 typed response，
+//! `ai_daily_worker_v2` 是 Office/PDF worker 共用的 NDJSON 流式契约：首帧
+//! hello，每行一个 request/response envelope，
 //! 单 in-flight、逐请求 deadline。每个 session child 拥有独立 Windows Job
 //! Object（见 [`crate::windows_job::SessionJob`]），杀一个超时请求不会连带
 //! 杀掉 pool 中其他 session。生命周期计数唯一为 `max_requests_per_session`；
@@ -17,19 +17,20 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ai_daily_scanner_contract::{
-    NormalizedScannerProfileV2, PdfClassifierRequestV1, PdfClassifierResultV1,
-    PythonOperationDiagnosticV1, PythonSessionHelloV1, PythonSessionOperation,
-    PythonSessionRequestV1, PythonSessionResponseStatus, PythonSessionResponseV1,
-    PythonSessionResultV1, PythonSessionVersionResponseV1, Validate, WorkerParseRequest,
-    WorkerParseResponse,
+    NormalizedScannerProfileV2, PdfClassifierRequestV1, PdfClassifierResultV1, Validate,
+    WorkerBackend, WorkerParseRequest, WorkerParseResponse,
+};
+use ai_daily_worker_contract::{
+    WorkerDiagnostic, WorkerHello, WorkerOperation, WorkerRequest, WorkerResponse,
+    WorkerResponseStatus, CONTRACT, CONTRACT_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::fallback::ParseFailure;
-use crate::parsers::{OneShotExecution, RegisteredSession, RegisteredWorker, WorkerCommand};
+use crate::parsers::{RegisteredWorker, WorkerCommand};
 use crate::process::WorkerRssTracker;
 
-pub const SESSION_CONTRACT_VERSION: &str = "ai_daily_python_session_v1";
-pub const SESSION_PROTOCOL_VERSION: u64 = 1;
+pub const SESSION_CONTRACT_VERSION: &str = CONTRACT_VERSION;
+pub const SESSION_PROTOCOL_VERSION: u64 = PROTOCOL_VERSION;
 
 /// spec Part 7.2：hello/request/classification response 每 frame 1 MiB。
 pub const SESSION_HELLO_FRAME_LIMIT: usize = 1024 * 1024;
@@ -93,7 +94,7 @@ impl SessionParams {
 pub enum SessionError {
     /// 子进程无法启动（或 Windows Job Object containment 失败）。
     StartFailed,
-    /// 请求超过了 effective deadline；对应文件记 Timeout，不再 one-shot 重试。
+    /// 请求超过了 effective deadline；对应文件记 Timeout，不再重试。
     Timeout,
     /// 进程崩溃/被外部杀死。
     Crashed,
@@ -104,7 +105,7 @@ pub enum SessionError {
     /// 读取线程 I/O 失败。
     IoFailed,
     /// outer `status=error`：worker 拒绝请求，携带可审计 diagnostic。
-    Rejected(PythonOperationDiagnosticV1),
+    Rejected(Box<WorkerDiagnostic>),
     /// hello 的 build 与 preflight 不一致。
     BuildMismatch,
     /// 收到的 frame 超过该 operation 的 capture limit。
@@ -116,9 +117,7 @@ impl SessionError {
         matches!(self, SessionError::Timeout)
     }
 
-    /// spec Part 7.3：session start/EOF/protocol corruption/crash 重建并重试当前
-    /// operation 最多 1 次；第二次仍失败时，仅对 retryable 且非 timeout 的
-    /// transport failure 允许 one-shot 1 次。
+    /// session start/EOF/crash 最多重建一次；协议损坏和超时直接失败。
     pub fn is_retryable_transport(&self) -> bool {
         match self {
             SessionError::StartFailed | SessionError::Crashed | SessionError::Eof => true,
@@ -164,28 +163,20 @@ impl SessionError {
                 false,
             ),
             SessionError::Rejected(diagnostic) => (
-                match diagnostic.error_code {
-                    ai_daily_scanner_contract::PythonOperationErrorCode::InvalidRequest => {
-                        ai_daily_scanner_contract::ErrorCode::InvalidRequest
-                    }
-                    ai_daily_scanner_contract::PythonOperationErrorCode::ParserStartFailed => {
+                match diagnostic.error_code.as_str() {
+                    "INVALID_REQUEST" => ai_daily_scanner_contract::ErrorCode::InvalidRequest,
+                    "PARSER_START_FAILED" => {
                         ai_daily_scanner_contract::ErrorCode::ParserStartFailed
                     }
-                    ai_daily_scanner_contract::PythonOperationErrorCode::ParserTimeout => {
-                        ai_daily_scanner_contract::ErrorCode::ParserTimeout
-                    }
-                    ai_daily_scanner_contract::PythonOperationErrorCode::ParserInvalidPayload => {
+                    "PARSER_TIMEOUT" => ai_daily_scanner_contract::ErrorCode::ParserTimeout,
+                    "PARSER_INVALID_PAYLOAD" => {
                         ai_daily_scanner_contract::ErrorCode::ParserInvalidPayload
                     }
-                    ai_daily_scanner_contract::PythonOperationErrorCode::ParserFailed => {
-                        ai_daily_scanner_contract::ErrorCode::ParserFailed
-                    }
-                    ai_daily_scanner_contract::PythonOperationErrorCode::SourceVersionChanged => {
+                    "SOURCE_VERSION_CHANGED" => {
                         ai_daily_scanner_contract::ErrorCode::SourceVersionChanged
                     }
-                    ai_daily_scanner_contract::PythonOperationErrorCode::InternalError => {
-                        ai_daily_scanner_contract::ErrorCode::InternalError
-                    }
+                    "INTERNAL_ERROR" => ai_daily_scanner_contract::ErrorCode::InternalError,
+                    _ => ai_daily_scanner_contract::ErrorCode::ParserFailed,
                 },
                 diagnostic.message.clone(),
                 diagnostic.retryable,
@@ -219,32 +210,24 @@ impl SessionError {
     }
 }
 
-/// spec Part 7.3 retry 决策。`session_attempt` 是当前 logical operation 在
-/// session 上已进行的次数（0-based），不含 one-shot。
+/// Worker v2 transport retry decision for one logical operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryAction {
-    /// 重建 session 后重试当前 logical operation。
     RetrySession,
-    /// 仅对 retryable 且非 timeout 的 transport failure 允许 one-shot 1 次。
-    OneShot,
-    /// 不再重试（timeout 或确定性失败；timeout 永远不 one-shot 重试）。
     GiveUp,
 }
 
 pub fn retry_action(error: &SessionError, session_attempt: u32) -> RetryAction {
     match error {
         SessionError::Timeout => RetryAction::GiveUp,
-        SessionError::Rejected(diagnostic)
-            if diagnostic.error_code
-                == ai_daily_scanner_contract::PythonOperationErrorCode::SourceVersionChanged =>
-        {
+        SessionError::Rejected(diagnostic) if diagnostic.error_code == "SOURCE_VERSION_CHANGED" => {
             // The request embeds the stale source version. Rebuilding a
             // session and replaying the same request cannot make it valid.
             RetryAction::GiveUp
         }
         SessionError::Rejected(diagnostic) if !diagnostic.retryable => RetryAction::GiveUp,
         _ if session_attempt == 0 => RetryAction::RetrySession,
-        _ if error.is_retryable_transport() => RetryAction::OneShot,
+        _ if error.is_retryable_transport() => RetryAction::GiveUp,
         _ => RetryAction::GiveUp,
     }
 }
@@ -502,19 +485,18 @@ fn drain_stderr(
 }
 
 /// 长驻 Python session 客户端。并发通过 session pool 获得，进程内不 multiplex。
-pub struct PythonSession {
+pub struct WorkerSession {
     child: Option<SessionChild>,
     params: SessionParams,
-    identity: PythonSessionVersionResponseV1,
+    identity: WorkerHello,
     requests_served: u64,
 }
 
-impl PythonSession {
-    /// 启动会话并严格校验首帧 hello；build 与 preflight `session-version` 完全
-    /// 一致（spec Part 7.1），否则视为 handshake failure。
+impl WorkerSession {
+    /// 启动会话并严格校验首帧 hello；build 必须与 preflight 完全一致。
     pub fn start(
         command: &WorkerCommand,
-        expected: &PythonSessionVersionResponseV1,
+        expected: &WorkerHello,
         params: SessionParams,
         timeout: Duration,
     ) -> Result<Self, SessionError> {
@@ -529,7 +511,7 @@ impl PythonSession {
 
     pub(crate) fn start_observed(
         command: &WorkerCommand,
-        expected: &PythonSessionVersionResponseV1,
+        expected: &WorkerHello,
         params: SessionParams,
         rss_tracker: &WorkerRssTracker,
         timeout: Duration,
@@ -542,9 +524,7 @@ impl PythonSession {
             requests_served: 0,
         };
         let hello = session.read_hello(timeout)?;
-        if hello.worker_build != expected.worker_build
-            || hello.classifier_build != expected.classifier_build
-        {
+        if hello != *expected {
             session.kill();
             return Err(SessionError::BuildMismatch);
         }
@@ -556,13 +536,13 @@ impl PythonSession {
         Ok(session)
     }
 
-    fn read_hello(&mut self, timeout: Duration) -> Result<PythonSessionHelloV1, SessionError> {
+    fn read_hello(&mut self, timeout: Duration) -> Result<WorkerHello, SessionError> {
         let child = self.child.as_ref().ok_or(SessionError::Eof)?;
         let line = child.read_line(timeout)?;
         if line.len() > SESSION_HELLO_FRAME_LIMIT {
             return Err(SessionError::FrameTooLarge);
         }
-        let hello: PythonSessionHelloV1 = serde_json::from_slice(&line).map_err(|_| {
+        let hello: WorkerHello = serde_json::from_slice(&line).map_err(|_| {
             SessionError::ProtocolCorruption(
                 "session hello is not one strict JSON frame".to_string(),
             )
@@ -575,7 +555,7 @@ impl PythonSession {
         Ok(hello)
     }
 
-    pub fn identity(&self) -> &PythonSessionVersionResponseV1 {
+    pub fn identity(&self) -> &WorkerHello {
         &self.identity
     }
 
@@ -624,11 +604,11 @@ impl PythonSession {
                 "classify request violates the strict contract: {message}"
             ))
         })?;
-        let envelope = PythonSessionRequestV1 {
-            contract: "ai_daily_python_session".to_string(),
+        let envelope = WorkerRequest {
+            contract: CONTRACT.to_string(),
             protocol_version: SESSION_PROTOCOL_VERSION,
             request_id: request.request_id.clone(),
-            operation: PythonSessionOperation::ClassifyPdfV1,
+            operation: WorkerOperation::PdfClassify,
             payload: serde_json::to_value(request).map_err(|_| SessionError::IoFailed)?,
         };
         let frame = serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?;
@@ -638,19 +618,21 @@ impl PythonSession {
         if line.len() > SESSION_CLASSIFY_FRAME_LIMIT {
             return Err(SessionError::FrameTooLarge);
         }
-        let response = self.parse_response(
-            line,
-            PythonSessionOperation::ClassifyPdfV1,
-            &request.request_id,
-        )?;
+        let response =
+            self.parse_response(line, WorkerOperation::PdfClassify, &request.request_id)?;
         self.mark_request_complete();
         match response {
-            PythonSessionResponseV1 {
-                status: PythonSessionResponseStatus::Ok,
-                result:
-                    ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(result))),
+            WorkerResponse {
+                status: WorkerResponseStatus::Ok,
+                result: Some(result),
                 ..
             } => {
+                let result: PdfClassifierResultV1 =
+                    serde_json::from_value(result).map_err(|_| {
+                        SessionError::ProtocolCorruption(
+                            "classify response result is not a classifier result".to_string(),
+                        )
+                    })?;
                 result
                     .validate_for_max_pages(request.max_pages)
                     .map_err(|message| {
@@ -660,23 +642,11 @@ impl PythonSession {
                     })?;
                 Ok(result)
             }
-            PythonSessionResponseV1 {
-                status: PythonSessionResponseStatus::Error,
-                error: ai_daily_scanner_contract::Nullable(Some(diagnostic)),
+            WorkerResponse {
+                status: WorkerResponseStatus::Error,
+                error: Some(diagnostic),
                 ..
-            } => Err(SessionError::Rejected(diagnostic)),
-            PythonSessionResponseV1 {
-                result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Parse(_))),
-                ..
-            } => Err(SessionError::ProtocolCorruption(
-                "classify response carried a parse result".to_string(),
-            )),
-            PythonSessionResponseV1 {
-                result: ai_daily_scanner_contract::Nullable(None),
-                ..
-            } => Err(SessionError::ProtocolCorruption(
-                "ok classify response is missing its typed result".to_string(),
-            )),
+            } => Err(SessionError::Rejected(Box::new(diagnostic))),
             _ => Err(SessionError::ProtocolCorruption(
                 "classify response violates the ok/error tagged union".to_string(),
             )),
@@ -693,11 +663,11 @@ impl PythonSession {
                 "parse request violates the strict contract: {message}"
             ))
         })?;
-        let envelope = PythonSessionRequestV1 {
-            contract: "ai_daily_python_session".to_string(),
+        let envelope = WorkerRequest {
+            contract: CONTRACT.to_string(),
             protocol_version: SESSION_PROTOCOL_VERSION,
             request_id: request.request_id.clone(),
-            operation: PythonSessionOperation::ParseV1,
+            operation: worker_operation(request.backend),
             payload: serde_json::to_value(request).map_err(|_| SessionError::IoFailed)?,
         };
         let frame = serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?;
@@ -710,15 +680,19 @@ impl PythonSession {
             return Err(SessionError::FrameTooLarge);
         }
         let response =
-            self.parse_response(line, PythonSessionOperation::ParseV1, &request.request_id)?;
+            self.parse_response(line, worker_operation(request.backend), &request.request_id)?;
         self.mark_request_complete();
         match response {
-            PythonSessionResponseV1 {
-                status: PythonSessionResponseStatus::Ok,
-                result:
-                    ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Parse(result))),
+            WorkerResponse {
+                status: WorkerResponseStatus::Ok,
+                result: Some(result),
                 ..
             } => {
+                let result: WorkerParseResponse = serde_json::from_value(result).map_err(|_| {
+                    SessionError::ProtocolCorruption(
+                        "parse response result is not a parse result".to_string(),
+                    )
+                })?;
                 if result.request_id != request.request_id
                     || result.contract != "ai_daily_worker"
                     || result.protocol_version != 1
@@ -727,26 +701,13 @@ impl PythonSession {
                         "session parse response identity does not match the request".to_string(),
                     ));
                 }
-                Ok(*result)
+                Ok(result)
             }
-            PythonSessionResponseV1 {
-                status: PythonSessionResponseStatus::Error,
-                error: ai_daily_scanner_contract::Nullable(Some(diagnostic)),
+            WorkerResponse {
+                status: WorkerResponseStatus::Error,
+                error: Some(diagnostic),
                 ..
-            } => Err(SessionError::Rejected(diagnostic)),
-            PythonSessionResponseV1 {
-                result:
-                    ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(_))),
-                ..
-            } => Err(SessionError::ProtocolCorruption(
-                "parse response carried a classify result".to_string(),
-            )),
-            PythonSessionResponseV1 {
-                result: ai_daily_scanner_contract::Nullable(None),
-                ..
-            } => Err(SessionError::ProtocolCorruption(
-                "ok parse response is missing its typed result".to_string(),
-            )),
+            } => Err(SessionError::Rejected(Box::new(diagnostic))),
             _ => Err(SessionError::ProtocolCorruption(
                 "parse response violates the ok/error tagged union".to_string(),
             )),
@@ -773,10 +734,10 @@ impl PythonSession {
     fn parse_response(
         &self,
         line: Vec<u8>,
-        expected_operation: PythonSessionOperation,
+        expected_operation: WorkerOperation,
         expected_request_id: &str,
-    ) -> Result<PythonSessionResponseV1, SessionError> {
-        let response: PythonSessionResponseV1 = serde_json::from_slice(&line).map_err(|_| {
+    ) -> Result<WorkerResponse, SessionError> {
+        let response: WorkerResponse = serde_json::from_slice(&line).map_err(|_| {
             SessionError::ProtocolCorruption(
                 "session stdout is not one strict JSON response".to_string(),
             )
@@ -786,7 +747,7 @@ impl PythonSession {
                 "session response violates the strict contract: {message}"
             ))
         })?;
-        if response.contract != "ai_daily_python_session"
+        if response.contract != CONTRACT
             || response.protocol_version != SESSION_PROTOCOL_VERSION
             || response.operation != expected_operation
             || response.request_id != expected_request_id
@@ -802,7 +763,7 @@ impl PythonSession {
 
 /// 便捷 wrapper：返回 typed classify 结果或 session 层失败（spec Part 7.2）。
 pub fn session_classify(
-    session: &mut PythonSession,
+    session: &mut WorkerSession,
     request: &PdfClassifierRequestV1,
     timeout: Duration,
 ) -> Result<PdfClassifierResultV1, SessionError> {
@@ -811,24 +772,34 @@ pub fn session_classify(
 
 /// 便捷 wrapper：返回 typed parse 结果或 session 层失败（spec Part 7.2）。
 pub fn session_parse(
-    session: &mut PythonSession,
+    session: &mut WorkerSession,
     request: &WorkerParseRequest,
     timeout: Duration,
 ) -> Result<WorkerParseResponse, SessionError> {
     session.dispatch_parse(request, timeout)
 }
 
+fn worker_operation(backend: WorkerBackend) -> WorkerOperation {
+    match backend {
+        WorkerBackend::RustOfficeOxideV2 | WorkerBackend::RustXlsxBoundedV2 => {
+            WorkerOperation::OfficeParse
+        }
+        WorkerBackend::PythonPdfTextV2 => WorkerOperation::PdfParse,
+        WorkerBackend::PythonOfficeV2 => WorkerOperation::PythonOfficeParse,
+        WorkerBackend::PythonSharepointTextV2 => WorkerOperation::PythonSharepointParse,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PythonSessionTransport {
+pub enum WorkerTransport {
     Session,
-    OneShot,
     NotApplicable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionOperationOutcome<T> {
     pub value: T,
-    pub transport: PythonSessionTransport,
+    pub transport: WorkerTransport,
     pub attempt_count: u64,
     pub duration_ms: u64,
 }
@@ -836,7 +807,7 @@ pub struct SessionOperationOutcome<T> {
 #[derive(Debug)]
 pub struct SessionOperationFailure {
     pub failure: ParseFailure,
-    pub transport: PythonSessionTransport,
+    pub transport: WorkerTransport,
     pub attempt_count: u64,
     pub duration_ms: u64,
 }
@@ -847,16 +818,28 @@ pub struct SessionOperationFailure {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionPoolStats {
     pub session_restart_count: u64,
-    pub session_fallback_count: u64,
     /// `Some(0)` means no session child was started; `None` means Windows Job
     /// accounting was attempted and failed for at least one child.
     pub peak_worker_rss_bytes: Option<u64>,
 }
 
+impl SessionPoolStats {
+    pub fn combine(left: Self, right: Self) -> Self {
+        Self {
+            session_restart_count: left
+                .session_restart_count
+                .saturating_add(right.session_restart_count),
+            peak_worker_rss_bytes: match (left.peak_worker_rss_bytes, right.peak_worker_rss_bytes) {
+                (Some(left), Some(right)) => Some(left.max(right)),
+                _ => None,
+            },
+        }
+    }
+}
+
 #[derive(Default)]
 struct PoolCounters {
     session_restart_count: AtomicU64,
-    session_fallback_count: AtomicU64,
     peak_worker_rss_bytes: AtomicU64,
     rss_observation_attempted: AtomicBool,
     rss_observation_failed: AtomicBool,
@@ -880,7 +863,6 @@ impl PoolCounters {
         let failed = self.rss_observation_failed.load(Ordering::Relaxed);
         SessionPoolStats {
             session_restart_count: self.session_restart_count.load(Ordering::Relaxed),
-            session_fallback_count: self.session_fallback_count.load(Ordering::Relaxed),
             peak_worker_rss_bytes: if failed {
                 None
             } else if attempted {
@@ -894,7 +876,7 @@ impl PoolCounters {
 
 #[derive(Default)]
 struct SessionSlot {
-    session: Option<PythonSession>,
+    session: Option<WorkerSession>,
     /// A prior generation was retired or failed and the next successful start
     /// must be counted as one actual replacement.
     replacement_pending: bool,
@@ -904,9 +886,9 @@ struct SessionSlot {
 /// A slot is checked out for one complete logical operation, preserving the
 /// frozen single-in-flight session contract while classifier/parser waves may
 /// run concurrently across different slots.
-pub struct PythonSessionPool {
+pub struct WorkerPool {
     command: WorkerCommand,
-    expected: PythonSessionVersionResponseV1,
+    expected: WorkerHello,
     python_worker: RegisteredWorker,
     params: SessionParams,
     slots: Vec<Mutex<SessionSlot>>,
@@ -916,17 +898,18 @@ pub struct PythonSessionPool {
     rss_tracker: WorkerRssTracker,
 }
 
-impl PythonSessionPool {
+impl WorkerPool {
     pub fn new(
-        registered: RegisteredSession,
+        command: WorkerCommand,
+        expected: WorkerHello,
         python_worker: RegisteredWorker,
         params: SessionParams,
         rss_tracker: WorkerRssTracker,
     ) -> Arc<Self> {
         let concurrency = params.concurrency.max(1);
         Arc::new(Self {
-            command: registered.command,
-            expected: registered.identity,
+            command,
+            expected,
             python_worker,
             params,
             slots: (0..concurrency)
@@ -948,6 +931,19 @@ impl PythonSessionPool {
         self.counters.snapshot()
     }
 
+    pub(crate) fn matches(
+        &self,
+        command: &WorkerCommand,
+        expected: &WorkerHello,
+        worker: &RegisteredWorker,
+        params: SessionParams,
+    ) -> bool {
+        self.command == *command
+            && self.expected == *expected
+            && self.python_worker == *worker
+            && self.params == params
+    }
+
     fn observe_rss(&self, value: Option<u64>) {
         self.counters.observe_rss(value);
         self.rss_tracker.observe_started_child(value);
@@ -962,24 +958,15 @@ impl PythonSessionPool {
         {
             return Err(SessionOperationFailure {
                 failure,
-                transport: PythonSessionTransport::NotApplicable,
+                transport: WorkerTransport::NotApplicable,
                 attempt_count: 0,
                 duration_ms: 0,
             });
         }
-        let result = self.execute_operation(
-            &request.file_path,
-            timeout,
-            |session, remaining| session_classify(session, request, remaining),
-            |remaining| {
-                crate::parsers::classifier::classify_pdf_oneshot_observed(
-                    &self.command,
-                    request,
-                    remaining,
-                    Some(&self.rss_tracker),
-                )
-            },
-        )?;
+        let result =
+            self.execute_operation(&request.file_path, timeout, |session, remaining| {
+                session_classify(session, request, remaining)
+            })?;
         if let Err(failure) = crate::parsers::classifier::validate_classifier_source_after(request)
         {
             return Err(SessionOperationFailure {
@@ -1001,28 +988,17 @@ impl PythonSessionPool {
         {
             return Err(SessionOperationFailure {
                 failure,
-                transport: PythonSessionTransport::NotApplicable,
+                transport: WorkerTransport::NotApplicable,
                 attempt_count: 0,
                 duration_ms: 0,
             });
         }
-        let response = self.execute_operation(
-            &request.file_path,
-            timeout,
-            |session, remaining| {
+        let response =
+            self.execute_operation(&request.file_path, timeout, |session, remaining| {
                 let mut attempt_request = request.clone();
                 attempt_request.remaining_timeout_ms = duration_ms(remaining);
                 session_parse(session, &attempt_request, remaining)
-            },
-            |remaining| {
-                let mut attempt_request = request.clone();
-                attempt_request.remaining_timeout_ms = duration_ms(remaining);
-                crate::parsers::execute_worker_request_observed(
-                    &self.python_worker,
-                    &attempt_request,
-                )
-            },
-        )?;
+            })?;
         let value = match crate::parsers::validate_session_worker_response(
             &self.python_worker,
             request,
@@ -1041,16 +1017,48 @@ impl PythonSessionPool {
         Ok(SessionOperationOutcome { value, ..response })
     }
 
-    fn execute_operation<T, SessionCall, OneShotCall>(
+    pub fn parse_worker(
+        &self,
+        request: &WorkerParseRequest,
+        timeout: Duration,
+    ) -> Result<SessionOperationOutcome<WorkerParseResponse>, SessionOperationFailure> {
+        if let Err(failure) = crate::parsers::validate_worker_request(&self.python_worker, request)
+        {
+            return Err(SessionOperationFailure {
+                failure,
+                transport: WorkerTransport::NotApplicable,
+                attempt_count: 0,
+                duration_ms: 0,
+            });
+        }
+        let response =
+            self.execute_operation(&request.file_path, timeout, |session, remaining| {
+                let mut attempt_request = request.clone();
+                attempt_request.remaining_timeout_ms = duration_ms(remaining);
+                session_parse(session, &attempt_request, remaining)
+            })?;
+        let value = crate::parsers::validate_session_worker_response(
+            &self.python_worker,
+            request,
+            response.value,
+        )
+        .map_err(|failure| SessionOperationFailure {
+            failure,
+            transport: response.transport,
+            attempt_count: response.attempt_count,
+            duration_ms: response.duration_ms,
+        })?;
+        Ok(SessionOperationOutcome { value, ..response })
+    }
+
+    fn execute_operation<T, SessionCall>(
         &self,
         file_path: &str,
         timeout: Duration,
         mut session_call: SessionCall,
-        one_shot_call: OneShotCall,
     ) -> Result<SessionOperationOutcome<T>, SessionOperationFailure>
     where
-        SessionCall: FnMut(&mut PythonSession, Duration) -> Result<T, SessionError>,
-        OneShotCall: FnOnce(Duration) -> OneShotExecution<T>,
+        SessionCall: FnMut(&mut WorkerSession, Duration) -> Result<T, SessionError>,
     {
         let deadline_origin = Instant::now();
         let permit = self.checkout();
@@ -1058,7 +1066,6 @@ impl PythonSessionPool {
         let mut transport_failure_index = 0_u32;
         let mut session_attempt_count = 0_u64;
         let mut session_duration_ms = 0_u64;
-        let mut one_shot_call = Some(one_shot_call);
 
         loop {
             let remaining = timeout.saturating_sub(deadline_origin.elapsed());
@@ -1079,7 +1086,7 @@ impl PythonSessionPool {
             if slot
                 .session
                 .as_ref()
-                .is_some_and(PythonSession::recycle_due)
+                .is_some_and(WorkerSession::recycle_due)
             {
                 if let Some(session) = slot.session.as_mut() {
                     self.observe_rss(session.peak_rss_bytes());
@@ -1090,7 +1097,7 @@ impl PythonSessionPool {
             }
 
             if slot.session.is_none() {
-                match PythonSession::start_observed(
+                match WorkerSession::start_observed(
                     &self.command,
                     &self.expected,
                     self.params,
@@ -1116,27 +1123,6 @@ impl PythonSessionPool {
                             RetryAction::RetrySession => {
                                 transport_failure_index += 1;
                                 continue;
-                            }
-                            RetryAction::OneShot => {
-                                let remaining = timeout.saturating_sub(deadline_origin.elapsed());
-                                if remaining.is_zero() {
-                                    return Err(operation_failure(
-                                        SessionError::Timeout.diagnostic(Some(file_path)),
-                                        transport_for_attempts(session_attempt_count, 0),
-                                        session_attempt_count,
-                                        session_duration_ms,
-                                    ));
-                                }
-                                let one_shot = one_shot_call
-                                    .take()
-                                    .expect("one-shot fallback is attempted at most once")(
-                                    remaining,
-                                );
-                                return self.finish_one_shot_fallback(
-                                    session_attempt_count,
-                                    session_duration_ms,
-                                    one_shot,
-                                );
                             }
                             RetryAction::GiveUp => {
                                 return Err(operation_failure(
@@ -1180,7 +1166,7 @@ impl PythonSessionPool {
                     }
                     return Ok(SessionOperationOutcome {
                         value: result,
-                        transport: PythonSessionTransport::Session,
+                        transport: WorkerTransport::Session,
                         attempt_count: session_attempt_count,
                         duration_ms: session_duration_ms,
                     });
@@ -1196,31 +1182,10 @@ impl PythonSessionPool {
                         RetryAction::RetrySession => {
                             transport_failure_index += 1;
                         }
-                        RetryAction::OneShot => {
-                            let remaining = timeout.saturating_sub(deadline_origin.elapsed());
-                            if remaining.is_zero() {
-                                return Err(operation_failure(
-                                    SessionError::Timeout.diagnostic(Some(file_path)),
-                                    PythonSessionTransport::Session,
-                                    session_attempt_count,
-                                    session_duration_ms,
-                                ));
-                            }
-                            let one_shot = one_shot_call
-                                .take()
-                                .expect("one-shot fallback is attempted at most once")(
-                                remaining
-                            );
-                            return self.finish_one_shot_fallback(
-                                session_attempt_count,
-                                session_duration_ms,
-                                one_shot,
-                            );
-                        }
                         RetryAction::GiveUp => {
                             return Err(operation_failure(
                                 error.diagnostic(Some(file_path)),
-                                PythonSessionTransport::Session,
+                                WorkerTransport::Session,
                                 session_attempt_count,
                                 session_duration_ms,
                             ));
@@ -1228,36 +1193,6 @@ impl PythonSessionPool {
                     }
                 }
             }
-        }
-    }
-
-    fn finish_one_shot_fallback<T>(
-        &self,
-        session_attempt_count: u64,
-        session_duration_ms: u64,
-        one_shot: OneShotExecution<T>,
-    ) -> Result<SessionOperationOutcome<T>, SessionOperationFailure> {
-        if one_shot.attempt_count > 0 {
-            self.counters
-                .session_fallback_count
-                .fetch_add(1, Ordering::Relaxed);
-        }
-        let attempt_count = session_attempt_count.saturating_add(one_shot.attempt_count);
-        let duration_ms = session_duration_ms.saturating_add(one_shot.duration_ms);
-        let transport = transport_for_attempts(session_attempt_count, one_shot.attempt_count);
-        match one_shot.outcome {
-            Ok(value) => Ok(SessionOperationOutcome {
-                value,
-                transport,
-                attempt_count,
-                duration_ms,
-            }),
-            Err(failure) => Err(SessionOperationFailure {
-                failure,
-                transport,
-                attempt_count,
-                duration_ms,
-            }),
         }
     }
 
@@ -1277,7 +1212,7 @@ impl PythonSessionPool {
 
 fn operation_failure(
     failure: ParseFailure,
-    transport: PythonSessionTransport,
+    transport: WorkerTransport,
     attempt_count: u64,
     duration_ms: u64,
 ) -> SessionOperationFailure {
@@ -1291,14 +1226,12 @@ fn operation_failure(
 
 fn transport_for_attempts(
     session_attempt_count: u64,
-    one_shot_attempt_count: u64,
-) -> PythonSessionTransport {
-    if one_shot_attempt_count > 0 {
-        PythonSessionTransport::OneShot
-    } else if session_attempt_count > 0 {
-        PythonSessionTransport::Session
+    _legacy_attempt_count: u64,
+) -> WorkerTransport {
+    if session_attempt_count > 0 {
+        WorkerTransport::Session
     } else {
-        PythonSessionTransport::NotApplicable
+        WorkerTransport::NotApplicable
     }
 }
 
@@ -1307,7 +1240,7 @@ fn observed_duration_ms(duration: Duration) -> u64 {
 }
 
 struct SlotPermit<'a> {
-    pool: &'a PythonSessionPool,
+    pool: &'a WorkerPool,
     index: usize,
 }
 
@@ -1329,7 +1262,7 @@ fn duration_ms(duration: Duration) -> u64 {
     duration.as_millis().max(1).min(u64::MAX as u128) as u64
 }
 
-/// 构造一次 ``classify_pdf_v1`` 的 strict request（与 one-shot 逐字段相同）。
+/// 构造一次严格的 PDF classify domain request。
 pub fn build_classify_request(
     request_id: String,
     file_path: &Path,
@@ -1344,323 +1277,5 @@ pub fn build_classify_request(
         source_version: source_version.to_string(),
         max_pages,
         policy_version: "pdf_text_presence_v1".to_string(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn session_params_defaults_follow_spec() {
-        let params = SessionParams::default();
-        assert_eq!(params.concurrency, 4);
-        assert_eq!(params.max_requests_per_session, 128);
-        assert_eq!(params.idle_ttl, Duration::from_secs(30));
-        assert_eq!(params.rss_limit_bytes, 512 * 1024 * 1024);
-        assert_eq!(SessionParams::with_default_concurrency(8).concurrency, 4);
-        assert_eq!(SessionParams::with_default_concurrency(2).concurrency, 2);
-        assert_eq!(SessionParams::with_default_concurrency(0).concurrency, 1);
-    }
-
-    #[test]
-    fn retry_policy_matches_spec_7_3() {
-        let timeout = SessionError::Timeout;
-        assert_eq!(retry_action(&timeout, 0), RetryAction::GiveUp);
-        assert_eq!(retry_action(&timeout, 1), RetryAction::GiveUp);
-
-        let deterministic = SessionError::Rejected(PythonOperationDiagnosticV1 {
-            error_code: ai_daily_scanner_contract::PythonOperationErrorCode::ParserFailed,
-            message: "corrupt pdf".to_string(),
-            retryable: false,
-            stage: ai_daily_scanner_contract::PythonOperationStage::Parse,
-            file_path: ai_daily_scanner_contract::Nullable(None),
-            backend: ai_daily_scanner_contract::Nullable(None),
-        });
-        assert_eq!(retry_action(&deterministic, 0), RetryAction::GiveUp);
-
-        let retryable = SessionError::Rejected(PythonOperationDiagnosticV1 {
-            error_code: ai_daily_scanner_contract::PythonOperationErrorCode::ParserStartFailed,
-            message: "transient io".to_string(),
-            retryable: true,
-            stage: ai_daily_scanner_contract::PythonOperationStage::Process,
-            file_path: ai_daily_scanner_contract::Nullable(None),
-            backend: ai_daily_scanner_contract::Nullable(None),
-        });
-        assert_eq!(retry_action(&retryable, 0), RetryAction::RetrySession);
-        assert_eq!(retry_action(&retryable, 1), RetryAction::OneShot);
-
-        let source_changed = SessionError::Rejected(PythonOperationDiagnosticV1 {
-            error_code: ai_daily_scanner_contract::PythonOperationErrorCode::SourceVersionChanged,
-            message: "source changed".to_string(),
-            retryable: true,
-            stage: ai_daily_scanner_contract::PythonOperationStage::Parse,
-            file_path: ai_daily_scanner_contract::Nullable(None),
-            backend: ai_daily_scanner_contract::Nullable(None),
-        });
-        assert_eq!(retry_action(&source_changed, 0), RetryAction::GiveUp);
-        assert_eq!(retry_action(&source_changed, 1), RetryAction::GiveUp);
-
-        // EOF/start/crash: rebuild once, then one-shot if retryable.
-        assert_eq!(
-            retry_action(&SessionError::Eof, 0),
-            RetryAction::RetrySession
-        );
-        assert_eq!(retry_action(&SessionError::Eof, 1), RetryAction::OneShot);
-        assert_eq!(
-            retry_action(&SessionError::StartFailed, 0),
-            RetryAction::RetrySession
-        );
-        assert_eq!(
-            retry_action(&SessionError::Crashed, 0),
-            RetryAction::RetrySession
-        );
-
-        // Protocol corruption is never silently retried as one-shot.
-        assert_eq!(
-            retry_action(&SessionError::ProtocolCorruption("x".to_string()), 0),
-            RetryAction::RetrySession
-        );
-        assert_eq!(
-            retry_action(&SessionError::ProtocolCorruption("x".to_string()), 1),
-            RetryAction::GiveUp
-        );
-    }
-
-    #[test]
-    fn start_failures_and_unstarted_oneshot_do_not_fabricate_attempts() {
-        let directory = tempfile::tempdir().expect("temporary session root");
-        let command = WorkerCommand {
-            program: directory.path().join("missing-worker.exe"),
-            base_args: Vec::new(),
-            current_dir: None,
-            expected_kind: ai_daily_scanner_contract::WorkerKind::PythonDocument,
-            required_backends: vec!["pdf_text_v1".to_string()],
-            required_extensions: vec![".pdf".to_string()],
-        };
-        let worker_build = "a".repeat(64);
-        let classifier_build = "b".repeat(64);
-        let registered = RegisteredSession {
-            command: command.clone(),
-            identity: PythonSessionVersionResponseV1 {
-                contract: "ai_daily_python_session".to_string(),
-                protocol_version: 1,
-                session_contract_version: SESSION_CONTRACT_VERSION.to_string(),
-                worker_build: worker_build.clone(),
-                classifier_build,
-                supported_operations: vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()],
-            },
-        };
-        let python_worker = RegisteredWorker {
-            command,
-            identity: ai_daily_scanner_contract::WorkerVersionResponse {
-                contract: "ai_daily_worker".to_string(),
-                protocol_version: 1,
-                worker_kind: ai_daily_scanner_contract::WorkerKind::PythonDocument,
-                worker_contract_version: "ai_daily_worker_v1".to_string(),
-                worker_version: "0.1.0".to_string(),
-                worker_build,
-                supported_backends: vec!["pdf_text_v1".to_string()],
-                supported_extensions: vec![".pdf".to_string()],
-            },
-            rss_tracker: None,
-        };
-        let pool = PythonSessionPool::new(
-            registered,
-            python_worker,
-            SessionParams {
-                concurrency: 1,
-                ..SessionParams::default()
-            },
-            WorkerRssTracker::default(),
-        );
-        let fallback_failure = SessionError::StartFailed.diagnostic(Some("C:\\fixture.pdf"));
-
-        let failure = pool
-            .execute_operation(
-                "C:\\fixture.pdf",
-                Duration::from_secs(1),
-                |_, _| Ok(()),
-                |_| OneShotExecution {
-                    outcome: Err(fallback_failure),
-                    attempt_count: 0,
-                    duration_ms: 0,
-                },
-            )
-            .expect_err("both transports fail before a logical operation starts");
-
-        assert_eq!(failure.transport, PythonSessionTransport::NotApplicable);
-        assert_eq!(failure.attempt_count, 0);
-        assert_eq!(failure.duration_ms, 0);
-        assert_eq!(pool.stats().session_restart_count, 0);
-        assert_eq!(pool.stats().session_fallback_count, 0);
-    }
-
-    #[test]
-    fn stderr_budget_is_per_request_and_reports_the_first_overflow() {
-        let budget = StderrBudget::default();
-        assert!(!budget.observe(SESSION_STDERR_LIMIT));
-        assert!(budget.observe(1));
-        assert!(budget.overflowed());
-        assert!(!budget.observe(1));
-
-        budget.reset();
-        assert!(!budget.overflowed());
-        assert!(!budget.observe(SESSION_STDERR_LIMIT));
-    }
-
-    #[test]
-    fn hello_stderr_overflow_is_reported_without_pipe_deadlock() {
-        let python = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join(if cfg!(windows) {
-                ".venv/Scripts/python.exe"
-            } else {
-                ".venv/bin/python"
-            });
-        if !python.is_file() {
-            return;
-        }
-        let worker_build = "a".repeat(64);
-        let classifier_build = "b".repeat(64);
-        let script = format!(
-            "import json,sys,time; sys.stderr.write('x'*{}); sys.stderr.flush(); time.sleep(0.1); print(json.dumps({{'contract':'ai_daily_python_session','protocol_version':1,'frame':'hello','session_contract_version':'ai_daily_python_session_v1','worker_build':'{}','classifier_build':'{}','supported_operations':['classify_pdf_v1','parse_v1']}}), flush=True); time.sleep(30)",
-            SESSION_STDERR_LIMIT + 1,
-            worker_build,
-            classifier_build,
-        );
-        let command = WorkerCommand {
-            program: python,
-            base_args: vec!["-c".into(), script.into()],
-            current_dir: None,
-            expected_kind: ai_daily_scanner_contract::WorkerKind::PythonDocument,
-            required_backends: Vec::new(),
-            required_extensions: Vec::new(),
-        };
-        let expected = PythonSessionVersionResponseV1 {
-            contract: "ai_daily_python_session".to_string(),
-            protocol_version: 1,
-            session_contract_version: SESSION_CONTRACT_VERSION.to_string(),
-            worker_build,
-            classifier_build,
-            supported_operations: vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()],
-        };
-        let started = Instant::now();
-
-        let error = match PythonSession::start(
-            &command,
-            &expected,
-            SessionParams::default(),
-            Duration::from_secs(10),
-        ) {
-            Ok(_) => panic!("stderr overflow must terminate the session handshake"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(error, SessionError::ProtocolCorruption(_)));
-        assert!(started.elapsed() < Duration::from_secs(5));
-    }
-
-    #[test]
-    fn read_line_bounded_enforces_cap_and_newline() {
-        let mut data: &[u8] = b"line1\nline2";
-        let mut reader = BufReader::new(&mut data);
-        let line = read_line_bounded(&mut reader, 1024).expect("first line");
-        assert_eq!(line.unwrap(), b"line1\n");
-        let line = read_line_bounded(&mut reader, 1024).expect("last line without newline");
-        assert_eq!(line.unwrap(), b"line2");
-
-        let mut too_long: &[u8] = b"0123456789";
-        let mut reader = BufReader::new(&mut too_long);
-        assert_eq!(
-            read_line_bounded(&mut reader, 4),
-            Err(SessionError::FrameTooLarge)
-        );
-    }
-
-    #[test]
-    fn session_error_maps_to_scanner_diagnostic() {
-        let failure = SessionError::Timeout.diagnostic(Some("C:\\x.pdf"));
-        assert_eq!(
-            failure.diagnostic.error_code,
-            ai_daily_scanner_contract::ErrorCode::ParserTimeout
-        );
-        assert!(!failure.diagnostic.retryable);
-        assert_eq!(failure.diagnostic.file_path.0.as_deref(), Some("C:\\x.pdf"));
-    }
-
-    fn empty_session() -> PythonSession {
-        PythonSession {
-            child: None,
-            params: SessionParams::default(),
-            identity: PythonSessionVersionResponseV1 {
-                contract: "ai_daily_python_session".to_string(),
-                protocol_version: 1,
-                session_contract_version: "ai_daily_python_session_v1".to_string(),
-                worker_build: "a".repeat(64),
-                classifier_build: "b".repeat(64),
-                supported_operations: vec!["classify_pdf_v1".to_string(), "parse_v1".to_string()],
-            },
-            requests_served: 0,
-        }
-    }
-
-    #[test]
-    fn parse_response_accepts_matching_request_id() {
-        let session = empty_session();
-        let request_id = "11111111-1111-4111-8111-111111111111".to_string();
-        let response = PythonSessionResponseV1 {
-            contract: "ai_daily_python_session".to_string(),
-            protocol_version: 1,
-            request_id: request_id.clone(),
-            operation: PythonSessionOperation::ClassifyPdfV1,
-            status: PythonSessionResponseStatus::Ok,
-            result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(
-                PdfClassifierResultV1 {
-                    status: ai_daily_scanner_contract::PdfClassifierResultStatus::TextInParseWindow,
-                    page_count: ai_daily_scanner_contract::Nullable(Some(1)),
-                    result_examined_pages: ai_daily_scanner_contract::Nullable(Some(1)),
-                    diagnostic: ai_daily_scanner_contract::Nullable(None),
-                },
-            ))),
-            error: ai_daily_scanner_contract::Nullable(None),
-        };
-        let line = serde_json::to_vec(&response).expect("response serializes");
-        let parsed = session
-            .parse_response(line, PythonSessionOperation::ClassifyPdfV1, &request_id)
-            .expect("matching request_id must be accepted");
-        assert_eq!(parsed.request_id, request_id);
-    }
-
-    #[test]
-    fn parse_response_rejects_mismatched_request_id() {
-        // spec Part 7.2：错配 request_id 视为 protocol corruption，不得静默接受。
-        let session = empty_session();
-        let response = PythonSessionResponseV1 {
-            contract: "ai_daily_python_session".to_string(),
-            protocol_version: 1,
-            request_id: "22222222-2222-4222-8222-222222222222".to_string(),
-            operation: PythonSessionOperation::ClassifyPdfV1,
-            status: PythonSessionResponseStatus::Ok,
-            result: ai_daily_scanner_contract::Nullable(Some(PythonSessionResultV1::Classify(
-                PdfClassifierResultV1 {
-                    status: ai_daily_scanner_contract::PdfClassifierResultStatus::TextInParseWindow,
-                    page_count: ai_daily_scanner_contract::Nullable(Some(1)),
-                    result_examined_pages: ai_daily_scanner_contract::Nullable(Some(1)),
-                    diagnostic: ai_daily_scanner_contract::Nullable(None),
-                },
-            ))),
-            error: ai_daily_scanner_contract::Nullable(None),
-        };
-        let line = serde_json::to_vec(&response).expect("response serializes");
-        let error = session
-            .parse_response(
-                line,
-                PythonSessionOperation::ClassifyPdfV1,
-                "11111111-1111-4111-8111-111111111111",
-            )
-            .expect_err("mismatched request_id must be protocol corruption");
-        assert!(matches!(error, SessionError::ProtocolCorruption(_)));
     }
 }

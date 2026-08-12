@@ -1,9 +1,10 @@
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Write};
 
-use ai_daily_office_parser::{parse_worker_request, worker_version_response};
-use ai_daily_scanner_contract::{
-    Nullable, TransportErrorResponse, Validate, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
-    WorkerDiagnosticV1Stage, WorkerParseRequest, WorkerStatus,
+use ai_daily_office_parser::{parse_worker_request, worker_hello};
+use ai_daily_scanner_contract::{Validate, WorkerParseRequest};
+use ai_daily_worker_contract::{
+    WorkerDiagnostic, WorkerOperation, WorkerRequest, WorkerResponse, WorkerResponseStatus,
+    CONTRACT, PROTOCOL_VERSION,
 };
 use serde::Serialize;
 
@@ -13,57 +14,87 @@ fn main() {
 
 fn dispatch() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if args == ["version"] {
-        return emit(&worker_version_response()).map_or(1, |()| 0);
+    if args == ["hello"] {
+        return emit(&worker_hello()).map_or(1, |()| 0);
     }
-    if args == ["parse"] {
-        return strict_worker_parse();
+    if args == ["session"] {
+        return worker_session();
     }
-    eprintln!("usage: ai-daily-office-parser <version|parse>");
+    eprintln!("usage: ai-daily-office-parser <hello|session>");
     1
 }
 
-fn strict_worker_parse() -> i32 {
-    let mut input = Vec::new();
-    let request = match io::stdin()
-        .read_to_end(&mut input)
-        .map_err(|error| error.to_string())
-        .and_then(|_| {
-            serde_json::from_slice::<WorkerParseRequest>(&input).map_err(|e| e.to_string())
-        })
-        .and_then(|request| request.validate().map(|()| request))
-    {
-        Ok(request) => request,
-        Err(_) => {
-            let _ = emit(&invalid_request_response());
-            return 2;
-        }
-    };
-    let response = parse_worker_request(&request);
-    let exit_code = if response.status == WorkerStatus::Ok {
-        0
-    } else {
-        1
-    };
-    if emit(&response).is_err() {
+fn worker_session() -> i32 {
+    if emit(&worker_hello()).is_err() {
         return 1;
     }
-    exit_code
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        let request = match line
+            .map_err(|error| error.to_string())
+            .and_then(|line| {
+                serde_json::from_str::<WorkerRequest>(&line).map_err(|e| e.to_string())
+            })
+            .and_then(|request| request.validate().map(|()| request))
+        {
+            Ok(request) => request,
+            Err(_) => return 2,
+        };
+        if request.operation != WorkerOperation::OfficeParse {
+            if emit(&session_error(&request, "UNSUPPORTED_OPERATION", false)).is_err() {
+                return 1;
+            }
+            continue;
+        }
+        let parse_request =
+            match serde_json::from_value::<WorkerParseRequest>(request.payload.clone())
+                .map_err(|error| error.to_string())
+                .and_then(|request| request.validate().map(|()| request))
+            {
+                Ok(parse_request) if parse_request.request_id == request.request_id => {
+                    parse_request
+                }
+                _ => {
+                    if emit(&session_error(&request, "INVALID_REQUEST", false)).is_err() {
+                        return 1;
+                    }
+                    return 2;
+                }
+            };
+        let parsed = parse_worker_request(&parse_request);
+        let result = serde_json::to_value(parsed).expect("parse response must serialize");
+        let response = WorkerResponse {
+            contract: CONTRACT.to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            request_id: request.request_id,
+            operation: request.operation,
+            status: WorkerResponseStatus::Ok,
+            result: Some(result),
+            error: None,
+        };
+        if emit(&response).is_err() {
+            return 1;
+        }
+    }
+    0
 }
 
-fn invalid_request_response() -> TransportErrorResponse {
-    TransportErrorResponse {
-        contract: "ai_daily_transport".to_string(),
-        protocol_version: 1,
-        status: "error".to_string(),
-        error: WorkerDiagnosticV1 {
-            error_code: WorkerDiagnosticV1ErrorCode::InvalidRequest,
-            message: "stdin is not a valid worker request".to_string(),
-            retryable: false,
-            stage: WorkerDiagnosticV1Stage::Request,
-            file_path: Nullable(None),
-            backend: Nullable(None),
-        },
+fn session_error(request: &WorkerRequest, error_code: &str, retryable: bool) -> WorkerResponse {
+    WorkerResponse {
+        contract: CONTRACT.to_string(),
+        protocol_version: PROTOCOL_VERSION,
+        request_id: request.request_id.clone(),
+        operation: request.operation,
+        status: WorkerResponseStatus::Error,
+        result: None,
+        error: Some(WorkerDiagnostic {
+            error_code: error_code.to_string(),
+            message: "worker request was rejected".to_string(),
+            retryable,
+            stage: "request".to_string(),
+            file_path: None,
+            backend: None,
+        }),
     }
 }
 
@@ -72,5 +103,6 @@ fn emit<T: Serialize>(payload: &T) -> Result<(), serde_json::Error> {
     let mut locked = stdout.lock();
     serde_json::to_writer(&mut locked, payload)?;
     let _ = locked.write_all(b"\n");
+    let _ = locked.flush();
     Ok(())
 }

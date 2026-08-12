@@ -212,9 +212,6 @@ pub struct WorkerIdentities {
     pub python_version: Option<String>,
     pub python_build: Option<String>,
     pub classifier_build: Option<String>,
-    /// Present only when `session-version` advertised the frozen streaming
-    /// capability for this run; absence means one-shot from the first file.
-    pub python_session_contract: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,8 +1258,8 @@ fn route_timeout_ms(route: RouteKind, profile: &NormalizedScannerProfileV2) -> u
 fn parse_worker_lane(lane: &str) -> AuditWorkerLane {
     match lane {
         "rust_core" => AuditWorkerLane::RustCore,
-        "rust_office_process" => AuditWorkerLane::RustOfficeProcess,
-        "python_document_process" => AuditWorkerLane::PythonDocumentProcess,
+        "rust_office_process_v2" => AuditWorkerLane::RustOfficeProcessV2,
+        "python_document_process_v2" => AuditWorkerLane::PythonDocumentProcessV2,
         _ => AuditWorkerLane::NotParsed,
     }
 }
@@ -1679,7 +1676,7 @@ impl BudgetedContextScheduler {
                                 retryable: true,
                                 stage: DiagnosticStage::Cache,
                                 file_path: Nullable(Some(task.file.path.clone())),
-                                backend: Nullable(Some("pdf_text_v1".to_string())),
+                                backend: Nullable(Some("python_pdf_text_v2".to_string())),
                             });
                         }
                     }
@@ -2298,7 +2295,7 @@ fn file_evidence(
                         extension: file.extension.clone(),
                         size_bytes: Some(file.size_bytes),
                         content: String::new(),
-                        parser_backend: "pdf_metadata_v1".to_string(),
+                        parser_backend: "pdf_metadata_v2".to_string(),
                         worker_lane: AuditWorkerLane::RustCore,
                         cache_status: CacheStatus::Miss,
                         parse_status: ParseStatus::Success,
@@ -2713,7 +2710,7 @@ fn build_file_results(
                     } else {
                         (
                             ParseStatus::Success,
-                            "pdf_metadata_v1".to_string(),
+                            "pdf_metadata_v2".to_string(),
                             AuditWorkerLane::RustCore,
                             None,
                             crate::store::sha256_hex(b""),

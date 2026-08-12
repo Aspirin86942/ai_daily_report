@@ -116,7 +116,7 @@ pub fn normalize_scanner_profile(
         parse: ParseProfile {
             aggregate_max_chars: raw.total_max_chars.unwrap_or(50_000),
             text: TextParseProfile {
-                backend: "light_text_v1".to_string(),
+                backend: "light_text_v2".to_string(),
                 read_head_bytes: raw.direct_text_read_bytes.unwrap_or(default_head_bytes),
                 read_tail_bytes: raw.log_tail_read_bytes.unwrap_or(262_144),
                 max_chars: text_max_chars,
@@ -126,12 +126,12 @@ pub fn normalize_scanner_profile(
                 primary_backend: raw
                     .office_parser_backend
                     .clone()
-                    .unwrap_or_else(|| "rust_office_oxide_v1".to_string()),
+                    .unwrap_or_else(|| "rust_office_oxide_v2".to_string()),
                 fallback_enabled: raw.office_parser_fallback_enabled.unwrap_or(true),
                 fallback_order: raw.office_parser_fallback_order.clone().unwrap_or_else(|| {
                     vec![
-                        FallbackBackend::PythonOfficeV1,
-                        FallbackBackend::PythonSharepointTextV1,
+                        FallbackBackend::PythonOfficeV2,
+                        FallbackBackend::PythonSharepointTextV2,
                     ]
                 }),
                 fallback_after_timeout: raw.office_fallback_after_timeout.unwrap_or(false),
@@ -155,7 +155,7 @@ pub fn normalize_scanner_profile(
                 backend: raw
                     .pdf_parser_backend
                     .clone()
-                    .unwrap_or_else(|| "pdf_text_v1".to_string()),
+                    .unwrap_or_else(|| "python_pdf_text_v2".to_string()),
                 max_pages: pdf_max_pages,
                 excerpt_max_chars: document_excerpt_max_chars,
             },
@@ -354,7 +354,7 @@ fn normalize_scanner_profile_v2_raw(
         parse: ParseProfile {
             aggregate_max_chars: raw.total_max_chars.unwrap_or(50_000),
             text: TextParseProfile {
-                backend: "light_text_v1".to_string(),
+                backend: "light_text_v2".to_string(),
                 read_head_bytes: raw.direct_text_read_bytes.unwrap_or(default_head_bytes),
                 read_tail_bytes: raw.log_tail_read_bytes.unwrap_or(262_144),
                 max_chars: text_max_chars,
@@ -364,12 +364,12 @@ fn normalize_scanner_profile_v2_raw(
                 primary_backend: raw
                     .office_parser_backend
                     .clone()
-                    .unwrap_or_else(|| "rust_office_oxide_v1".to_string()),
+                    .unwrap_or_else(|| "rust_office_oxide_v2".to_string()),
                 fallback_enabled: raw.office_parser_fallback_enabled.unwrap_or(true),
                 fallback_order: raw.office_parser_fallback_order.clone().unwrap_or_else(|| {
                     vec![
-                        FallbackBackend::PythonOfficeV1,
-                        FallbackBackend::PythonSharepointTextV1,
+                        FallbackBackend::PythonOfficeV2,
+                        FallbackBackend::PythonSharepointTextV2,
                     ]
                 }),
                 fallback_after_timeout: raw.office_fallback_after_timeout.unwrap_or(false),
@@ -393,7 +393,7 @@ fn normalize_scanner_profile_v2_raw(
                 backend: raw
                     .pdf_parser_backend
                     .clone()
-                    .unwrap_or_else(|| "pdf_text_v1".to_string()),
+                    .unwrap_or_else(|| "python_pdf_text_v2".to_string()),
                 max_pages: pdf_max_pages,
                 excerpt_max_chars: document_excerpt_max_chars,
             },

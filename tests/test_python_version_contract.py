@@ -30,5 +30,3 @@ def test_project_metadata_uses_the_exact_python_version() -> None:
     )
 
 # End of runtime contract assertions.
-
-\n

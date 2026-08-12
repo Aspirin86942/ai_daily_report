@@ -9,22 +9,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::classifier::ParserRoute;
+use crate::fallback::{FailureClass, ParseFailure};
+use crate::process::{run_process, ProcessError, ProcessSpec, WorkerRssTracker};
 use ai_daily_scanner_contract::{
     AdapterPaths, Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerProfileV1, Nullable,
     Validate, WorkerBackend, WorkerDiagnosticV1, WorkerDiagnosticV1ErrorCode,
     WorkerDiagnosticV1Stage, WorkerKind, WorkerParseRequest, WorkerParseResponse,
     WorkerParserLimits, WorkerStatus, WorkerVersionResponse,
 };
-use rayon::prelude::*;
 
-use crate::classifier::{ClassificationError, ParserRoute};
-use crate::fallback::{FailureClass, ParseFailure};
-use crate::planner::{PlanAction, PlannedFile};
-use crate::process::{
-    run_process, run_process_observed, ProcessError, ProcessSpec, WorkerRssTracker,
-};
-
-pub const WORKER_CONTRACT_VERSION: &str = "ai_daily_worker_v1";
+pub const WORKER_CONTRACT_VERSION: &str = ai_daily_worker_contract::CONTRACT_VERSION;
 pub const WORKER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_HANDSHAKE_CAPTURE_LIMIT: usize = 4 * 1024 * 1024;
 const MAX_JSON_BYTES_PER_SCALAR: u64 = 12;
@@ -102,10 +97,8 @@ pub struct WorkerCommand {
 impl WorkerCommand {
     fn args_for(&self, operation: &str) -> Vec<OsString> {
         let mut args = Vec::with_capacity(self.base_args.len() + 2);
-        if matches!(
-            operation,
-            "version" | "classifier-version" | "session-version"
-        ) && self.expected_kind == WorkerKind::PythonDocument
+        if matches!(operation, "hello")
+            && self.expected_kind == WorkerKind::PythonDocument
             && !self.base_args.iter().any(|value| value == "-S")
         {
             args.push(OsString::from("-S"));
@@ -123,364 +116,10 @@ pub struct RegisteredWorker {
     pub rss_tracker: Option<WorkerRssTracker>,
 }
 
-/// PDF classifier capability（spec Part 7.1）：`classifier-version` one-shot 握手。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegisteredClassifier {
-    pub command: WorkerCommand,
-    pub identity: ai_daily_scanner_contract::ClassifierVersionResponseV1,
-}
-
-/// 长驻流式 session 能力（spec Part 7.1）：`session-version` 握手。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RegisteredSession {
-    pub command: WorkerCommand,
-    pub identity: ai_daily_scanner_contract::PythonSessionVersionResponseV1,
-}
-
-/// Python-only capability 聚合（classifier/session）。capability absent 时
-/// session 为 `None`，整轮使用 v1 one-shot，不计 degradation。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct PythonCapabilities {
-    pub classifier: Option<RegisteredClassifier>,
-    pub session: Option<RegisteredSession>,
-}
-
-impl PythonCapabilities {
-    pub fn classifier_build(&self) -> Option<&str> {
-        self.classifier
-            .as_ref()
-            .map(|classifier| classifier.identity.classifier_build.as_str())
-    }
-
-    pub fn session_contract_version(&self) -> Option<&str> {
-        self.session
-            .as_ref()
-            .map(|session| session.identity.session_contract_version.as_str())
-    }
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkerRegistry {
     pub office: Option<RegisteredWorker>,
     pub python_document: Option<RegisteredWorker>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParsedPayload {
-    LightText(light_text::ParsedLightText),
-    Worker(Box<WorkerParseResponse>),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ScheduledFileParse {
-    pub file: ai_daily_discovery::DiscoveredFileOut,
-    pub payload: Option<ParsedPayload>,
-    pub primary_failure: Option<ParseFailure>,
-    pub error: Option<ParseFailure>,
-    pub fallback_backend: Option<WorkerBackend>,
-    pub parser_backend: Option<String>,
-    pub worker_lane: Option<String>,
-    pub primary_duration_ms: u64,
-    pub fallback_duration_ms: u64,
-    pub total_duration_ms: u64,
-    /// Actual body-parser attempts started for this file. Pre-parser source or
-    /// route failures are 0; an Office primary+fallback execution is 2.
-    pub attempt_count: u64,
-    pub partial: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct OneShotExecution<T> {
-    pub outcome: Result<T, ParseFailure>,
-    pub attempt_count: u64,
-    pub duration_ms: u64,
-}
-
-#[derive(Debug, Clone)]
-pub struct ParserScheduler {
-    profile: NormalizedScannerProfileV1,
-    workers: WorkerRegistry,
-}
-
-impl ParserScheduler {
-    pub fn preflight(
-        profile: &NormalizedScannerProfileV1,
-        adapters: &AdapterPaths,
-    ) -> Result<Self, ParseFailure> {
-        let workers = preflight_workers(profile, adapters, WORKER_HANDSHAKE_TIMEOUT)?;
-        Ok(Self {
-            profile: profile.clone(),
-            workers,
-        })
-    }
-
-    pub fn from_registry(profile: &NormalizedScannerProfileV1, workers: WorkerRegistry) -> Self {
-        Self {
-            profile: profile.clone(),
-            workers,
-        }
-    }
-
-    pub fn workers(&self) -> &WorkerRegistry {
-        &self.workers
-    }
-
-    pub fn parse_planned_files(
-        &self,
-        files: &[PlannedFile],
-    ) -> Result<Vec<ScheduledFileParse>, ParseFailure> {
-        if files.is_empty() {
-            return Ok(Vec::new());
-        }
-        if files.len() == 1 || self.profile.execution.max_workers == 1 {
-            return Ok(files
-                .iter()
-                .map(|planned| self.parse_one(planned))
-                .collect());
-        }
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.profile.execution.max_workers as usize)
-            .build()
-            .map_err(|_| ParseFailure {
-                class: FailureClass::EnvironmentUnavailable,
-                diagnostic: Diagnostic {
-                    error_code: ErrorCode::InternalError,
-                    message: "parser worker pool could not be created".to_string(),
-                    retryable: true,
-                    stage: DiagnosticStage::Process,
-                    file_path: Nullable(None),
-                    backend: Nullable(None),
-                },
-            })?;
-        Ok(pool.install(|| {
-            files
-                .par_iter()
-                .map(|planned| self.parse_one(planned))
-                .collect()
-        }))
-    }
-
-    fn parse_one(&self, planned: &PlannedFile) -> ScheduledFileParse {
-        let file = planned.file.clone();
-        match planned.action {
-            PlanAction::Reject(reason) => ScheduledFileParse::failed(
-                file,
-                classification_failure(reason, &planned.file),
-                None,
-                None,
-                0,
-                0,
-            ),
-            PlanAction::Parse(ParserRoute::LightText) => {
-                let started = std::time::Instant::now();
-                let path = PathBuf::from(&file.path);
-                let observed_before = match observe_source_version(&path) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        return ScheduledFileParse::failed(
-                            file.clone(),
-                            error,
-                            Some("light_text_v1".to_string()),
-                            Some("rust_core".to_string()),
-                            elapsed_ms(started),
-                            0,
-                        );
-                    }
-                };
-                if observed_before != file.source_version {
-                    return ScheduledFileParse::failed(
-                        file.clone(),
-                        source_changed_failure(&file),
-                        Some("light_text_v1".to_string()),
-                        Some("rust_core".to_string()),
-                        elapsed_ms(started),
-                        0,
-                    );
-                }
-                match light_text::parse_light_text(
-                    &path,
-                    &file.extension,
-                    &self.profile.parse.text,
-                    self.profile.execution.max_file_size_bytes,
-                ) {
-                    Ok(parsed) => {
-                        if observe_source_version(&path).as_deref() != Ok(observed_before.as_str())
-                        {
-                            return ScheduledFileParse::failed(
-                                file.clone(),
-                                source_changed_failure(&file),
-                                Some("light_text_v1".to_string()),
-                                Some("rust_core".to_string()),
-                                elapsed_ms(started),
-                                1,
-                            );
-                        }
-                        ScheduledFileParse::success(
-                            file,
-                            "light_text_v1".to_string(),
-                            "rust_core".to_string(),
-                            ParsedPayload::LightText(parsed),
-                            elapsed_ms(started),
-                            1,
-                        )
-                    }
-                    Err(error) => ScheduledFileParse::failed(
-                        file.clone(),
-                        light_text_failure(error, &file),
-                        Some("light_text_v1".to_string()),
-                        Some("rust_core".to_string()),
-                        elapsed_ms(started),
-                        1,
-                    ),
-                }
-            }
-            PlanAction::Parse(route @ (ParserRoute::RustOffice | ParserRoute::RustXlsx)) => {
-                let Some(worker) = self.workers.office.as_ref() else {
-                    return ScheduledFileParse::failed(
-                        file.clone(),
-                        missing_preflight_failure(&file, route.backend()),
-                        Some(route.backend().to_string()),
-                        Some(route.worker_lane().to_string()),
-                        0,
-                        0,
-                    );
-                };
-                let request = worker_request(&file, route, planned.timeout_ms, &self.profile);
-                let execution = office::parse_with_fallback(
-                    worker,
-                    self.workers.python_document.as_ref(),
-                    &request,
-                    &self.profile.parse.office,
-                );
-                let actual_backend = execution.response.as_ref().map_or_else(
-                    || {
-                        execution
-                            .last_started_backend
-                            .unwrap_or(request.backend)
-                            .as_str()
-                            .to_string()
-                    },
-                    |response| response.parser_backend.as_str().to_string(),
-                );
-                let actual_lane = execution.response.as_ref().map_or_else(
-                    || {
-                        execution
-                            .last_started_backend
-                            .unwrap_or(request.backend)
-                            .lane()
-                    },
-                    |response| response.worker_lane,
-                );
-                let primary_duration_ms = execution.primary_duration_ms;
-                let fallback_duration_ms = execution.fallback_duration_ms;
-                let attempt_count = execution.attempt_count;
-                ScheduledFileParse {
-                    file,
-                    payload: execution
-                        .response
-                        .map(|response| ParsedPayload::Worker(Box::new(response))),
-                    primary_failure: execution.primary_failure,
-                    error: execution.final_failure,
-                    fallback_backend: execution.fallback_backend,
-                    parser_backend: Some(actual_backend),
-                    worker_lane: Some(worker_lane_name(actual_lane).to_string()),
-                    primary_duration_ms,
-                    fallback_duration_ms,
-                    total_duration_ms: primary_duration_ms.saturating_add(fallback_duration_ms),
-                    attempt_count,
-                    partial: execution.partial,
-                }
-            }
-            PlanAction::Parse(
-                route @ (ParserRoute::Pdf
-                | ParserRoute::PythonOffice
-                | ParserRoute::PythonSharepointText),
-            ) => {
-                let Some(worker) = self.workers.python_document.as_ref() else {
-                    return ScheduledFileParse::failed(
-                        file.clone(),
-                        missing_preflight_failure(&file, route.backend()),
-                        Some(route.backend().to_string()),
-                        Some(route.worker_lane().to_string()),
-                        0,
-                        0,
-                    );
-                };
-                let request = worker_request(&file, route, planned.timeout_ms, &self.profile);
-                let execution = document::parse_observed(worker, &request);
-                let duration_ms = execution.duration_ms;
-                let attempt_count = execution.attempt_count;
-                match execution.outcome {
-                    Ok(response) => ScheduledFileParse::success(
-                        file,
-                        response.parser_backend.as_str().to_string(),
-                        worker_lane_name(response.worker_lane).to_string(),
-                        ParsedPayload::Worker(Box::new(response)),
-                        duration_ms,
-                        attempt_count,
-                    ),
-                    Err(error) => ScheduledFileParse::failed(
-                        file,
-                        error,
-                        Some(route.backend().to_string()),
-                        Some(route.worker_lane().to_string()),
-                        duration_ms,
-                        attempt_count,
-                    ),
-                }
-            }
-        }
-    }
-}
-
-impl ScheduledFileParse {
-    fn success(
-        file: ai_daily_discovery::DiscoveredFileOut,
-        parser_backend: String,
-        worker_lane: String,
-        payload: ParsedPayload,
-        duration_ms: u64,
-        attempt_count: u64,
-    ) -> Self {
-        Self {
-            file,
-            payload: Some(payload),
-            primary_failure: None,
-            error: None,
-            fallback_backend: None,
-            parser_backend: Some(parser_backend),
-            worker_lane: Some(worker_lane),
-            primary_duration_ms: duration_ms,
-            fallback_duration_ms: 0,
-            total_duration_ms: duration_ms,
-            attempt_count,
-            partial: false,
-        }
-    }
-
-    fn failed(
-        file: ai_daily_discovery::DiscoveredFileOut,
-        error: ParseFailure,
-        parser_backend: Option<String>,
-        worker_lane: Option<String>,
-        duration_ms: u64,
-        attempt_count: u64,
-    ) -> Self {
-        Self {
-            file,
-            payload: None,
-            primary_failure: None,
-            error: Some(error),
-            fallback_backend: None,
-            parser_backend,
-            worker_lane,
-            primary_duration_ms: duration_ms,
-            fallback_duration_ms: 0,
-            total_duration_ms: duration_ms,
-            attempt_count,
-            partial: true,
-        }
-    }
 }
 
 pub fn preflight_workers(
@@ -608,7 +247,7 @@ fn register_worker_inner(
 ) -> Result<RegisteredWorker, ParseFailure> {
     let spec = ProcessSpec {
         program: command.program.clone(),
-        args: command.args_for("version"),
+        args: command.args_for("hello"),
         current_dir: command.current_dir.clone(),
         stdin: Vec::new(),
         timeout,
@@ -625,16 +264,17 @@ fn register_worker_inner(
             DiagnosticStage::Process,
         ));
     }
-    let identity: WorkerVersionResponse = serde_json::from_slice(&output.stdout).map_err(|_| {
-        contract_failure(
-            ErrorCode::WorkerHandshakeFailed,
-            "worker version stdout is not one strict JSON response",
-            None,
-            None,
-            DiagnosticStage::Process,
-        )
-    })?;
-    identity.validate().map_err(|_| {
+    let hello: ai_daily_worker_contract::WorkerHello = serde_json::from_slice(&output.stdout)
+        .map_err(|_| {
+            contract_failure(
+                ErrorCode::WorkerHandshakeFailed,
+                "worker version stdout is not one strict JSON response",
+                None,
+                None,
+                DiagnosticStage::Process,
+            )
+        })?;
+    hello.validate().map_err(|_| {
         contract_failure(
             ErrorCode::WorkerHandshakeFailed,
             "worker version response violates the strict contract",
@@ -643,11 +283,10 @@ fn register_worker_inner(
             DiagnosticStage::Process,
         )
     })?;
-    if identity.worker_kind != command.expected_kind
-        || identity.worker_contract_version != WORKER_CONTRACT_VERSION
-        || identity.worker_version != env!("CARGO_PKG_VERSION")
-        || !contains_every(&identity.supported_backends, &command.required_backends)
-        || !contains_every(&identity.supported_extensions, &command.required_extensions)
+    if hello.worker_kind != worker_kind_v2(command.expected_kind)
+        || hello.worker_contract_version != WORKER_CONTRACT_VERSION
+        || hello.worker_version != env!("CARGO_PKG_VERSION")
+        || !supports_required_operations(&hello, command)
     {
         return Err(contract_failure(
             ErrorCode::WorkerVersionMismatch,
@@ -657,6 +296,16 @@ fn register_worker_inner(
             DiagnosticStage::Process,
         ));
     }
+    let identity = WorkerVersionResponse {
+        contract: "ai_daily_worker".to_string(),
+        protocol_version: 1,
+        worker_kind: command.expected_kind,
+        worker_contract_version: hello.worker_contract_version,
+        worker_version: hello.worker_version,
+        worker_build: hello.worker_build,
+        supported_backends: command.required_backends.clone(),
+        supported_extensions: command.required_extensions.clone(),
+    };
     Ok(RegisteredWorker {
         command: command.clone(),
         identity,
@@ -664,318 +313,7 @@ fn register_worker_inner(
     })
 }
 
-/// `classifier-version` 握手（spec Part 7.1）。profile 允许 PDF 时该命令缺失或
-/// 不匹配必须 preflight fail closed，不允许绕过分类直接批量提取。
-pub fn register_classifier_version(
-    command: &WorkerCommand,
-    timeout: Duration,
-) -> Result<RegisteredClassifier, ParseFailure> {
-    register_classifier_version_inner(command, timeout, None)
-}
-
-fn register_classifier_version_inner(
-    command: &WorkerCommand,
-    timeout: Duration,
-    rss_tracker: Option<&WorkerRssTracker>,
-) -> Result<RegisteredClassifier, ParseFailure> {
-    let spec = ProcessSpec {
-        program: command.program.clone(),
-        args: command.args_for("classifier-version"),
-        current_dir: command.current_dir.clone(),
-        stdin: Vec::new(),
-        timeout,
-        capture_limit: WORKER_HANDSHAKE_CAPTURE_LIMIT,
-        rss_tracker: rss_tracker.cloned(),
-    };
-    let output = run_process(&spec).map_err(|error| process_failure(error, None, None, true))?;
-    if output.exit_code != 0 {
-        return Err(contract_failure(
-            ErrorCode::WorkerHandshakeFailed,
-            "classifier version command returned nonzero",
-            None,
-            None,
-            DiagnosticStage::Process,
-        ));
-    }
-    let identity: ai_daily_scanner_contract::ClassifierVersionResponseV1 =
-        serde_json::from_slice(&output.stdout).map_err(|_| {
-            contract_failure(
-                ErrorCode::WorkerHandshakeFailed,
-                "classifier version stdout is not one strict JSON response",
-                None,
-                None,
-                DiagnosticStage::Process,
-            )
-        })?;
-    identity.validate().map_err(|_| {
-        contract_failure(
-            ErrorCode::WorkerHandshakeFailed,
-            "classifier version response violates the strict contract",
-            None,
-            None,
-            DiagnosticStage::Process,
-        )
-    })?;
-    if identity.classifier_build.len() != 64 {
-        return Err(contract_failure(
-            ErrorCode::WorkerHandshakeFailed,
-            "classifier version build is not a canonical SHA-256",
-            None,
-            None,
-            DiagnosticStage::Process,
-        ));
-    }
-    Ok(RegisteredClassifier {
-        command: command.clone(),
-        identity,
-    })
-}
-
-/// `session-version` 握手（spec Part 7.1）。旧 worker 返回 exit 2 + 严格
-/// `ai_daily_transport` INVALID_REQUEST 单帧时视为 capability absent
-/// （`Ok(None)`），整轮 v1 one-shot；其他非零/额外 stdout/坏 JSON/build 与
-/// v1 version 不一致均为 handshake failure，不静默降级。
-pub fn register_session_version(
-    command: &WorkerCommand,
-    timeout: Duration,
-) -> Result<Option<RegisteredSession>, ParseFailure> {
-    register_session_version_inner(command, timeout, None)
-}
-
-fn register_session_version_inner(
-    command: &WorkerCommand,
-    timeout: Duration,
-    rss_tracker: Option<&WorkerRssTracker>,
-) -> Result<Option<RegisteredSession>, ParseFailure> {
-    let spec = ProcessSpec {
-        program: command.program.clone(),
-        args: command.args_for("session-version"),
-        current_dir: command.current_dir.clone(),
-        stdin: Vec::new(),
-        timeout,
-        capture_limit: WORKER_HANDSHAKE_CAPTURE_LIMIT,
-        rss_tracker: rss_tracker.cloned(),
-    };
-    let output = run_process(&spec).map_err(|error| process_failure(error, None, None, true))?;
-    if output.exit_code == 2 {
-        // Capability absent: a strict single transport frame is the only
-        // acceptable exit-2 outcome. Anything extra is a handshake failure.
-        if let Ok(transport) = serde_json::from_slice::<
-            ai_daily_scanner_contract::TransportErrorResponse,
-        >(&output.stdout)
-        {
-            if transport.validate().is_ok()
-                && transport.error.error_code
-                    == ai_daily_scanner_contract::WorkerDiagnosticV1ErrorCode::InvalidRequest
-            {
-                return Ok(None);
-            }
-        }
-        return Err(contract_failure(
-            ErrorCode::WorkerHandshakeFailed,
-            "session-version returned exit 2 without a strict INVALID_REQUEST transport frame",
-            None,
-            None,
-            DiagnosticStage::Process,
-        ));
-    }
-    if output.exit_code != 0 {
-        return Err(contract_failure(
-            ErrorCode::WorkerHandshakeFailed,
-            "session version command returned nonzero",
-            None,
-            None,
-            DiagnosticStage::Process,
-        ));
-    }
-    let identity: ai_daily_scanner_contract::PythonSessionVersionResponseV1 =
-        serde_json::from_slice(&output.stdout).map_err(|_| {
-            contract_failure(
-                ErrorCode::WorkerHandshakeFailed,
-                "session version stdout is not one strict JSON response",
-                None,
-                None,
-                DiagnosticStage::Process,
-            )
-        })?;
-    identity.validate().map_err(|_| {
-        contract_failure(
-            ErrorCode::WorkerHandshakeFailed,
-            "session version response violates the strict contract",
-            None,
-            None,
-            DiagnosticStage::Process,
-        )
-    })?;
-    Ok(Some(RegisteredSession {
-        command: command.clone(),
-        identity,
-    }))
-}
-
-/// 并行启动 `classifier-version` 与 `session-version`（spec Part 7.1 的
-/// bounded parallel preflight batch；逻辑校验顺序由调用方保证——仅 python v1
-/// version 成功后接受这两个结果）。
-pub fn preflight_python_capabilities(
-    python_command: &WorkerCommand,
-    timeout: Duration,
-) -> (
-    Result<RegisteredClassifier, ParseFailure>,
-    Result<Option<RegisteredSession>, ParseFailure>,
-) {
-    preflight_python_capabilities_inner(python_command, timeout, None)
-}
-
-pub(crate) fn preflight_python_capabilities_observed(
-    python_command: &WorkerCommand,
-    timeout: Duration,
-    rss_tracker: &WorkerRssTracker,
-) -> (
-    Result<RegisteredClassifier, ParseFailure>,
-    Result<Option<RegisteredSession>, ParseFailure>,
-) {
-    preflight_python_capabilities_inner(python_command, timeout, Some(rss_tracker))
-}
-
-fn preflight_python_capabilities_inner(
-    python_command: &WorkerCommand,
-    timeout: Duration,
-    rss_tracker: Option<&WorkerRssTracker>,
-) -> (
-    Result<RegisteredClassifier, ParseFailure>,
-    Result<Option<RegisteredSession>, ParseFailure>,
-) {
-    std::thread::scope(|scope| {
-        let classifier_task =
-            scope.spawn(|| register_classifier_version_inner(python_command, timeout, rss_tracker));
-        let session_result = register_session_version_inner(python_command, timeout, rss_tracker);
-        let classifier_result = classifier_task.join().unwrap_or_else(|_| {
-            Err(contract_failure(
-                ErrorCode::WorkerHandshakeFailed,
-                "classifier handshake thread failed",
-                None,
-                None,
-                DiagnosticStage::Process,
-            ))
-        });
-        (classifier_result, session_result)
-    })
-}
-
-pub fn execute_worker_request(
-    worker: &RegisteredWorker,
-    request: &WorkerParseRequest,
-) -> Result<WorkerParseResponse, ParseFailure> {
-    execute_worker_request_observed(worker, request).outcome
-}
-
-pub(crate) fn execute_worker_request_observed(
-    worker: &RegisteredWorker,
-    request: &WorkerParseRequest,
-) -> OneShotExecution<WorkerParseResponse> {
-    let prepared = (|| {
-        validate_worker_request(worker, request)?;
-        let stdin = serde_json::to_vec(request).map_err(|_| {
-            contract_failure(
-                ErrorCode::ParserInvalidPayload,
-                "worker request could not be serialized",
-                Some(&request.file_path),
-                Some(request.backend.as_str()),
-                DiagnosticStage::Parse,
-            )
-        })?;
-        let capture_limit = worker_response_capture_limit(request)?;
-        Ok::<_, ParseFailure>((stdin, capture_limit))
-    })();
-    let (stdin, capture_limit) = match prepared {
-        Ok(prepared) => prepared,
-        Err(failure) => {
-            return OneShotExecution {
-                outcome: Err(failure),
-                attempt_count: 0,
-                duration_ms: 0,
-            };
-        }
-    };
-    let spec = ProcessSpec {
-        program: worker.command.program.clone(),
-        args: worker.command.args_for("parse"),
-        current_dir: worker.command.current_dir.clone(),
-        stdin,
-        timeout: Duration::from_millis(request.remaining_timeout_ms),
-        capture_limit,
-        rss_tracker: worker.rss_tracker.clone(),
-    };
-    let started = std::time::Instant::now();
-    let output = match run_process_observed(&spec) {
-        Ok(output) => output,
-        Err(process) => {
-            return OneShotExecution {
-                outcome: Err(process_failure(
-                    process.error,
-                    Some(&request.file_path),
-                    Some(request.backend.as_str()),
-                    false,
-                )),
-                attempt_count: u64::from(process.child_started),
-                duration_ms: if process.child_started {
-                    elapsed_ms(started)
-                } else {
-                    0
-                },
-            };
-        }
-    };
-    let outcome = (|| {
-        if output.exit_code > 2 {
-            return Err(parser_failure(
-                FailureClass::RecoverableParserFailure,
-                ErrorCode::ParserFailed,
-                "worker process crashed before completing its response",
-                true,
-                request,
-            ));
-        }
-        if output.exit_code == 2 {
-            return Err(contract_failure(
-                ErrorCode::ParserInvalidPayload,
-                "worker rejected a validated parse request",
-                Some(&request.file_path),
-                Some(request.backend.as_str()),
-                DiagnosticStage::Parse,
-            ));
-        }
-        let response: WorkerParseResponse =
-            serde_json::from_slice(&output.stdout).map_err(|_| {
-                contract_failure(
-                    ErrorCode::ParserInvalidPayload,
-                    "worker stdout is not one strict JSON response",
-                    Some(&request.file_path),
-                    Some(request.backend.as_str()),
-                    DiagnosticStage::Parse,
-                )
-            })?;
-        response.validate().map_err(|_| {
-            contract_failure(
-                ErrorCode::ParserInvalidPayload,
-                "worker response violates the strict contract",
-                Some(&request.file_path),
-                Some(request.backend.as_str()),
-                DiagnosticStage::Parse,
-            )
-        })?;
-        finish_worker_response(worker, request, response, output.exit_code)
-    })();
-    OneShotExecution {
-        outcome,
-        attempt_count: 1,
-        duration_ms: elapsed_ms(started),
-    }
-}
-
-/// Shared pre-dispatch validation for one-shot and session transports. Worker
-/// v1 capability and legacy source-version checks remain identical across both
-/// process seams.
+/// Shared pre-dispatch validation for worker-v2 sessions.
 pub(crate) fn validate_worker_request(
     worker: &RegisteredWorker,
     request: &WorkerParseRequest,
@@ -990,13 +328,13 @@ pub(crate) fn validate_worker_request(
         )
     })?;
     if !worker
-        .identity
-        .supported_backends
+        .command
+        .required_backends
         .iter()
         .any(|backend| backend == request.backend.as_str())
         || !worker
-            .identity
-            .supported_extensions
+            .command
+            .required_extensions
             .iter()
             .any(|extension| extension == &request.file_type)
     {
@@ -1011,8 +349,58 @@ pub(crate) fn validate_worker_request(
     validate_worker_source_before(request)
 }
 
-/// Validates a nested worker-v1 response returned through the session and then
-/// applies the same source, identity, and domain-error mapping as one-shot.
+fn worker_kind_v2(kind: WorkerKind) -> ai_daily_worker_contract::WorkerKind {
+    match kind {
+        WorkerKind::Office => ai_daily_worker_contract::WorkerKind::Office,
+        WorkerKind::PythonDocument => ai_daily_worker_contract::WorkerKind::PythonDocument,
+    }
+}
+
+fn supports_required_operations(
+    identity: &ai_daily_worker_contract::WorkerHello,
+    command: &WorkerCommand,
+) -> bool {
+    use ai_daily_worker_contract::WorkerOperation;
+    let required: &[WorkerOperation] = match command.expected_kind {
+        WorkerKind::Office => &[WorkerOperation::OfficeParse],
+        WorkerKind::PythonDocument => &[
+            WorkerOperation::PdfClassify,
+            WorkerOperation::PdfParse,
+            WorkerOperation::PythonOfficeParse,
+            WorkerOperation::PythonSharepointParse,
+        ],
+    };
+    required
+        .iter()
+        .all(|operation| identity.supported_operations.contains(operation))
+}
+
+pub fn worker_hello_from_registered(
+    worker: &RegisteredWorker,
+) -> ai_daily_worker_contract::WorkerHello {
+    let supported_operations = match worker.command.expected_kind {
+        WorkerKind::Office => vec![ai_daily_worker_contract::WorkerOperation::OfficeParse],
+        WorkerKind::PythonDocument => vec![
+            ai_daily_worker_contract::WorkerOperation::PdfClassify,
+            ai_daily_worker_contract::WorkerOperation::PdfParse,
+            ai_daily_worker_contract::WorkerOperation::PythonOfficeParse,
+            ai_daily_worker_contract::WorkerOperation::PythonSharepointParse,
+        ],
+    };
+    ai_daily_worker_contract::WorkerHello {
+        contract: ai_daily_worker_contract::CONTRACT.to_string(),
+        protocol_version: ai_daily_worker_contract::PROTOCOL_VERSION,
+        frame: "hello".to_string(),
+        worker_contract_version: worker.identity.worker_contract_version.clone(),
+        worker_kind: worker_kind_v2(worker.command.expected_kind),
+        worker_version: worker.identity.worker_version.clone(),
+        worker_build: worker.identity.worker_build.clone(),
+        supported_operations,
+    }
+}
+
+/// Validates a worker-v2 session response and applies source, identity, and
+/// domain-error mapping.
 pub(crate) fn validate_session_worker_response(
     worker: &RegisteredWorker,
     request: &WorkerParseRequest,
@@ -1334,7 +722,7 @@ fn validate_worker_source_after(
     Ok(())
 }
 
-fn current_source(file_path: &str) -> Result<(String, u64), ()> {
+pub(crate) fn current_source(file_path: &str) -> Result<(String, u64), ()> {
     let metadata = std::fs::metadata(file_path).map_err(|_| ())?;
     let modified = metadata.modified().map_err(|_| ())?;
     let duration = modified.duration_since(UNIX_EPOCH).map_err(|_| ())?;
@@ -1364,12 +752,6 @@ fn contract_failure(
     }
 }
 
-fn contains_every(actual: &[String], required: &[String]) -> bool {
-    required
-        .iter()
-        .all(|required_item| actual.iter().any(|item| item == required_item))
-}
-
 pub(crate) fn worker_request(
     file: &ai_daily_discovery::DiscoveredFileOut,
     route: ParserRoute,
@@ -1377,11 +759,11 @@ pub(crate) fn worker_request(
     profile: &NormalizedScannerProfileV1,
 ) -> WorkerParseRequest {
     let backend = match route {
-        ParserRoute::RustOffice => WorkerBackend::RustOfficeOxideV1,
-        ParserRoute::RustXlsx => WorkerBackend::RustXlsxBoundedV1,
-        ParserRoute::Pdf => WorkerBackend::PdfTextV1,
-        ParserRoute::PythonOffice => WorkerBackend::PythonOfficeV1,
-        ParserRoute::PythonSharepointText => WorkerBackend::PythonSharepointTextV1,
+        ParserRoute::RustOffice => WorkerBackend::RustOfficeOxideV2,
+        ParserRoute::RustXlsx => WorkerBackend::RustXlsxBoundedV2,
+        ParserRoute::Pdf => WorkerBackend::PythonPdfTextV2,
+        ParserRoute::PythonOffice => WorkerBackend::PythonOfficeV2,
+        ParserRoute::PythonSharepointText => WorkerBackend::PythonSharepointTextV2,
         ParserRoute::LightText => unreachable!("light text does not use a worker request"),
     };
     let parser_limits = match route {
@@ -1419,141 +801,6 @@ pub(crate) fn worker_request(
     }
 }
 
-fn classification_failure(
-    reason: ClassificationError,
-    file: &ai_daily_discovery::DiscoveredFileOut,
-) -> ParseFailure {
-    let (code, message) = match reason {
-        ClassificationError::FileTooLarge => (
-            ErrorCode::FileTooLarge,
-            "file exceeds the configured size limit",
-        ),
-        ClassificationError::UnsupportedExtension => {
-            (ErrorCode::ParserFailed, "file extension is unsupported")
-        }
-        ClassificationError::UnsupportedBackend => (
-            ErrorCode::ParserFailed,
-            "configured parser backend is unsupported",
-        ),
-        ClassificationError::LegacyExtensionDisabled => (
-            ErrorCode::ParserFailed,
-            "legacy Office extension is disabled",
-        ),
-    };
-    ParseFailure {
-        class: FailureClass::Deterministic,
-        diagnostic: Diagnostic {
-            error_code: code,
-            message: message.to_string(),
-            retryable: false,
-            stage: DiagnosticStage::Parse,
-            file_path: Nullable(Some(file.path.clone())),
-            backend: Nullable(None),
-        },
-    }
-}
-
-fn light_text_failure(
-    error: light_text::LightTextError,
-    file: &ai_daily_discovery::DiscoveredFileOut,
-) -> ParseFailure {
-    let (class, code, retryable) = match error {
-        light_text::LightTextError::FileTooLarge => {
-            (FailureClass::Deterministic, ErrorCode::FileTooLarge, false)
-        }
-        light_text::LightTextError::ReadFailed | light_text::LightTextError::MetadataFailed => (
-            FailureClass::EnvironmentUnavailable,
-            ErrorCode::ParserFailed,
-            true,
-        ),
-        _ => (FailureClass::Deterministic, ErrorCode::ParserFailed, false),
-    };
-    ParseFailure {
-        class,
-        diagnostic: Diagnostic {
-            error_code: code,
-            message: error.to_string(),
-            retryable,
-            stage: DiagnosticStage::Parse,
-            file_path: Nullable(Some(file.path.clone())),
-            backend: Nullable(Some("light_text_v1".to_string())),
-        },
-    }
-}
-
-fn observe_source_version(path: &std::path::Path) -> Result<String, ParseFailure> {
-    let metadata = std::fs::metadata(path).map_err(|_| ParseFailure {
-        class: FailureClass::EnvironmentUnavailable,
-        diagnostic: Diagnostic {
-            error_code: ErrorCode::ParserFailed,
-            message: "file metadata is unavailable".to_string(),
-            retryable: true,
-            stage: DiagnosticStage::Parse,
-            file_path: Nullable(Some(path.to_string_lossy().into_owned())),
-            backend: Nullable(Some("light_text_v1".to_string())),
-        },
-    })?;
-    let modified = metadata.modified().map_err(|_| ParseFailure {
-        class: FailureClass::EnvironmentUnavailable,
-        diagnostic: Diagnostic {
-            error_code: ErrorCode::ParserFailed,
-            message: "file source version is unavailable".to_string(),
-            retryable: true,
-            stage: DiagnosticStage::Parse,
-            file_path: Nullable(Some(path.to_string_lossy().into_owned())),
-            backend: Nullable(Some("light_text_v1".to_string())),
-        },
-    })?;
-    let duration = modified
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| ParseFailure {
-            class: FailureClass::Deterministic,
-            diagnostic: Diagnostic {
-                error_code: ErrorCode::ParserFailed,
-                message: "file modified time precedes the Unix epoch".to_string(),
-                retryable: false,
-                stage: DiagnosticStage::Parse,
-                file_path: Nullable(Some(path.to_string_lossy().into_owned())),
-                backend: Nullable(Some("light_text_v1".to_string())),
-            },
-        })?;
-    Ok(ai_daily_discovery::build_source_version(
-        duration.as_nanos(),
-        metadata.len(),
-    ))
-}
-
-fn source_changed_failure(file: &ai_daily_discovery::DiscoveredFileOut) -> ParseFailure {
-    ParseFailure {
-        class: FailureClass::Deterministic,
-        diagnostic: Diagnostic {
-            error_code: ErrorCode::SourceVersionChanged,
-            message: "file source version changed before or during parsing".to_string(),
-            retryable: false,
-            stage: DiagnosticStage::Parse,
-            file_path: Nullable(Some(file.path.clone())),
-            backend: Nullable(Some("light_text_v1".to_string())),
-        },
-    }
-}
-
-fn missing_preflight_failure(
-    file: &ai_daily_discovery::DiscoveredFileOut,
-    backend: &str,
-) -> ParseFailure {
-    ParseFailure {
-        class: FailureClass::ContractFailure,
-        diagnostic: Diagnostic {
-            error_code: ErrorCode::WorkerHandshakeFailed,
-            message: "route-relevant worker was not registered before parsing".to_string(),
-            retryable: false,
-            stage: DiagnosticStage::Process,
-            file_path: Nullable(Some(file.path.clone())),
-            backend: Nullable(Some(backend.to_string())),
-        },
-    }
-}
-
 fn next_request_id() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     let counter = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
@@ -1584,17 +831,6 @@ fn next_request_id() -> String {
     )
 }
 
-fn worker_lane_name(lane: ai_daily_scanner_contract::WorkerLane) -> &'static str {
-    match lane {
-        ai_daily_scanner_contract::WorkerLane::RustOfficeProcess => "rust_office_process",
-        ai_daily_scanner_contract::WorkerLane::PythonDocumentProcess => "python_document_process",
-    }
-}
-
-fn elapsed_ms(started: std::time::Instant) -> u64 {
-    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RequiredWorkerSet {
     office: bool,
@@ -1610,13 +846,13 @@ fn required_worker_set(profile: &NormalizedScannerProfileV1) -> RequiredWorkerSe
             .any(|value| value == extension)
     };
     let modern_office = [".docx", ".pptx", ".xlsx"].into_iter().any(allows);
-    let rust_primary = profile.parse.office.primary_backend == "rust_office_oxide_v1";
-    let python_primary = profile.parse.office.primary_backend == "python_office_v1";
+    let rust_primary = profile.parse.office.primary_backend == "rust_office_oxide_v2";
+    let python_primary = profile.parse.office.primary_backend == "python_office_v2";
     let modern_python_fallback =
         rust_primary
             && profile.parse.office.fallback_enabled
             && profile.parse.office.fallback_order.iter().any(|backend| {
-                *backend == ai_daily_scanner_contract::FallbackBackend::PythonOfficeV1
+                *backend == ai_daily_scanner_contract::FallbackBackend::PythonOfficeV2
             });
     let legacy_document = allows(".xls")
         || (profile.parse.office.legacy_extensions_enabled && (allows(".doc") || allows(".ppt")));
@@ -1652,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    fn python_capability_handshakes_skip_site_startup() {
+    fn python_hello_skips_site_startup_but_session_uses_runtime_environment() {
         let command = WorkerCommand {
             program: PathBuf::from("python"),
             base_args: vec![
@@ -1665,12 +901,10 @@ mod tests {
             required_extensions: Vec::new(),
         };
 
-        for operation in ["version", "classifier-version", "session-version"] {
-            assert_eq!(
-                command.args_for(operation).first(),
-                Some(&OsString::from("-S"))
-            );
-        }
+        assert_eq!(
+            command.args_for("hello").first(),
+            Some(&OsString::from("-S"))
+        );
         assert_ne!(
             command.args_for("session").first(),
             Some(&OsString::from("-S"))

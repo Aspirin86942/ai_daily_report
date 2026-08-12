@@ -97,8 +97,8 @@ These values were checked against `config/settings.example.yaml`,
 |---|---|
 | Discovery | extensions `.xlsx,.xls,.pptx,.pdf,.txt,.md,.docx,.csv,.json,.log`; ignores `~$*,*.tmp`; no excluded dirs |
 | Execution | workers `4`; max file `50 MiB`; discovery/file timeout `30/30 s`; `.pdf/.xlsx/.xls` timeout `45/60/60 s`; aggregate chars `50000` |
-| Routing | profile `v1`; text `light_text_v1`; Office `rust_office_oxide_v1`; PDF `pdf_text_v1` |
-| Fallback | enabled; order `python_office_v1,python_sharepoint_text_v1`; after-timeout `false`; legacy extensions `false`; policy `hybrid_v1` |
+| Routing | profile `v1`; text `light_text_v2`; Office `rust_office_oxide_v2`; PDF `python_pdf_text_v2` |
+| Fallback | enabled; order `python_office_v2,python_sharepoint_text_v2`; after-timeout `false`; legacy extensions `false`; policy `hybrid_v1` |
 | Shared text | head/tail reads `262144/262144` bytes |
 | Regular parse | text/excerpt `6000`; PDF pages `5`; Excel sheets/rows/cols `5/50/20`; DOCX paragraphs/tables/table rows/table cols `200/20/50/12`; PPTX slides `50`; notes `true`; document excerpt `6000` |
 | Summary parse | text/excerpt `2000`; PDF pages `2`; Excel `2/10/12`; DOCX `80/8/20/8`; PPTX slides `15`; notes `true`; document excerpt `2000` |
@@ -222,20 +222,20 @@ expected_source_version
 
 The tagged limits are:
 
-- `OfficeLimits` for `rust_office_oxide_v1`, `rust_xlsx_bounded_v1`, and
-  `python_office_v1`;
-- `PdfLimits` for `pdf_text_v1`;
-- `SharePointTextLimits` for `python_sharepoint_text_v1`.
+- `OfficeLimits` for `rust_office_oxide_v2`, `rust_xlsx_bounded_v2`, and
+  `python_office_v2`;
+- `PdfLimits` for `python_pdf_text_v2`;
+- `SharePointTextLimits` for `python_sharepoint_text_v2`.
 
 The valid backend/type/lane combinations are strict:
 
 | Backend | File types | Worker lane |
 |---|---|---|
-| `rust_xlsx_bounded_v1` | `.xlsx` | `rust_office_process` |
-| `rust_office_oxide_v1` | `.docx`, `.pptx` | `rust_office_process` |
-| `python_office_v1` | `.xls` and permitted modern Office fallback | `python_document_process` |
-| `pdf_text_v1` | `.pdf` | `python_document_process` |
-| `python_sharepoint_text_v1` | `.doc`, `.ppt` | `python_document_process` |
+| `rust_xlsx_bounded_v2` | `.xlsx` | `rust_office_process_v2` |
+| `rust_office_oxide_v2` | `.docx`, `.pptx` | `rust_office_process_v2` |
+| `python_office_v2` | `.xls` and permitted modern Office fallback | `python_document_process_v2` |
+| `python_pdf_text_v2` | `.pdf` | `python_document_process_v2` |
+| `python_sharepoint_text_v2` | `.doc`, `.ppt` | `python_document_process_v2` |
 
 The permitted modern Python Office fallback types are `.xlsx`, `.docx`, and
 `.pptx`. A worker never receives a pre-read text payload.
@@ -243,8 +243,8 @@ The permitted modern Python Office fallback types are `.xlsx`, `.docx`, and
 Worker success requires `error=null`, exact request id/path/type/backend,
 preflight-matching worker build, matching source version, and a response before
 the remaining deadline. `parser_backend` equals the requested backend.
-`worker_lane` is `rust_office_process` for the Office binary and
-`python_document_process` for the Python worker. `rust_core` is valid only in
+`worker_lane` is `rust_office_process_v2` for the Office binary and
+`python_document_process_v2` for the Python worker. `rust_core` is valid only in
 scan audit rows and never in a worker response. Worker error requires empty
 content and one diagnostic. A source version change is never cached.
 

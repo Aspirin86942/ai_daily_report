@@ -139,6 +139,7 @@ def test_rust_workspace_keeps_discovery_as_a_library_only() -> None:
         "scanner_native",
         "scanner_contract",
         "scanner_core",
+        "worker_contract",
     }
 
     active_files = (

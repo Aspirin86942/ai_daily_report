@@ -168,7 +168,7 @@ def parse_worker_request(
         file_type=request.file_type,
         content=payload.content,
         parser_backend=request.backend,
-        worker_lane="python_document_process",
+        worker_lane="python_document_process_v2",
         truncated=payload.truncated,
         warnings=[],
         error=None,
@@ -364,7 +364,7 @@ def _error_response(
         file_type=request.file_type,
         content="",
         parser_backend=request.backend,
-        worker_lane="python_document_process",
+        worker_lane="python_document_process_v2",
         truncated=False,
         warnings=[],
         error=WorkerDiagnosticV1(

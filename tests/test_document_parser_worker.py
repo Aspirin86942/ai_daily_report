@@ -98,13 +98,13 @@ def test_python_office_worker_parses_modern_office_fixtures(
         presentation.save(sample)
 
     response = parse_worker_request(
-        _request(sample, file_type, "python_office_v1", _office_limits())
+        _request(sample, file_type, "python_office_v2", _office_limits())
     )
 
     assert response.status == "ok"
     assert response.error is None
-    assert response.parser_backend == "python_office_v1"
-    assert response.worker_lane == "python_document_process"
+    assert response.parser_backend == "python_office_v2"
+    assert response.worker_lane == "python_document_process_v2"
     assert "worker content" in response.content
     assert response.observed_source_version == _source_version(sample)
 
@@ -115,12 +115,12 @@ def test_pdf_worker_parses_a_bounded_text_layer(tmp_path: Path) -> None:
     limits = PdfLimits(kind="pdf", max_pages=2, excerpt_max_chars=4000)
 
     response = parse_worker_request(
-        _request(sample, ".pdf", "pdf_text_v1", limits)
+        _request(sample, ".pdf", "python_pdf_text_v2", limits)
     )
 
     assert response.status == "ok"
     assert response.error is None
-    assert response.parser_backend == "pdf_text_v1"
+    assert response.parser_backend == "python_pdf_text_v2"
     assert "PDF worker text" in response.content
 
 
@@ -136,7 +136,7 @@ def test_worker_size_guard_runs_before_document_parser(tmp_path: Path) -> None:
         _request(
             sample,
             ".pdf",
-            "pdf_text_v1",
+            "python_pdf_text_v2",
             limits,
             max_file_size_bytes=9,
         ),
@@ -160,7 +160,7 @@ def test_worker_rejects_changed_source_before_parser(tmp_path: Path) -> None:
         _request(
             sample,
             ".pdf",
-            "pdf_text_v1",
+            "python_pdf_text_v2",
             limits,
             expected_source_version="mtime_ns=1:size=7",
         ),
@@ -184,7 +184,7 @@ def test_worker_diagnostic_does_not_expose_parser_exception_text(
         raise RuntimeError("SECRET_CELL_VALUE must not cross the worker contract")
 
     response = parse_worker_request(
-        _request(sample, ".pdf", "pdf_text_v1", limits),
+        _request(sample, ".pdf", "python_pdf_text_v2", limits),
         document_parser=secret_parser,
     )
 
@@ -200,19 +200,19 @@ def test_worker_diagnostic_does_not_expose_parser_exception_text(
         (
             "legacy_sample.xls",
             ".xls",
-            "python_office_v1",
+            "python_office_v2",
             "Legacy XLS worker content",
         ),
         (
             "legacy_sample.doc",
             ".doc",
-            "python_sharepoint_text_v1",
+            "python_sharepoint_text_v2",
             "Legacy DOC worker content",
         ),
         (
             "legacy_sample.ppt",
             ".ppt",
-            "python_sharepoint_text_v1",
+            "python_sharepoint_text_v2",
             "Legacy PPT worker content",
         ),
     ],
@@ -238,7 +238,7 @@ def test_strict_python_worker_parses_real_legacy_office_fixtures(
     assert response.status == "ok"
     assert response.error is None
     assert response.parser_backend == backend
-    assert response.worker_lane == "python_document_process"
+    assert response.worker_lane == "python_document_process_v2"
     assert expected_text in response.content
     if file_type == ".xls":
         assert "| Name | Value |" in response.content
@@ -260,7 +260,7 @@ def test_legacy_xls_adapter_keeps_table_preview_capability(tmp_path: Path) -> No
 
     assert isinstance(payload, WorkerParsePayload)
     assert payload.error is None
-    assert payload.parser_backend == "python_office_v1"
+    assert payload.parser_backend == "python_office_v2"
     assert payload.content == "## Sheet\n\nlegacy xls"
     assert payload.truncated is True
 
@@ -276,7 +276,7 @@ def test_strict_xls_worker_enforces_sheet_row_and_column_budgets() -> None:
     )
 
     response = parse_worker_request(
-        _request(sample, ".xls", "python_office_v1", limits)
+        _request(sample, ".xls", "python_office_v2", limits)
     )
 
     assert response.status == "ok"
@@ -309,7 +309,7 @@ def test_legacy_sharepoint_adapter_keeps_text_capability(
 
     assert isinstance(payload, WorkerParsePayload)
     assert payload.error is None
-    assert payload.parser_backend == "python_sharepoint_text_v1"
+    assert payload.parser_backend == "python_sharepoint_text_v2"
     assert payload.content == "legacy share"
     assert payload.truncated is True
 

@@ -87,10 +87,17 @@ impl PyScanner {
 }
 
 fn scanner_error(error: ScannerError) -> PyErr {
-    let (error_code, retryable) = match error {
-        ScannerError::InvalidConfiguration(_) => ("INVALID_REQUEST", false),
-        ScannerError::Busy => ("SCANNER_BUSY", true),
-        ScannerError::Operation(_) => ("NATIVE_SCANNER_FAILED", false),
+    let (error_code, retryable) = match &error {
+        ScannerError::InvalidConfiguration(_) => ("INVALID_REQUEST".to_string(), false),
+        ScannerError::Busy => ("SCANNER_BUSY".to_string(), true),
+        ScannerError::Operation(_) => ("NATIVE_SCANNER_FAILED".to_string(), false),
+        ScannerError::Initialization(store_error) => (
+            serde_json::to_value(store_error.error_code())
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| "NATIVE_SCANNER_FAILED".to_string()),
+            store_error.retryable(),
+        ),
     };
     NativeScannerError::new_err((error_code, error.to_string(), retryable))
 }

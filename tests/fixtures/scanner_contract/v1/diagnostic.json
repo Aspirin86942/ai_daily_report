@@ -4,5 +4,5 @@
   "retryable": true,
   "stage": "parse",
   "file_path": "C:\\scanner-fixtures\\工作 目录\\slow.xlsx",
-  "backend": "rust_xlsx_bounded_v1"
+  "backend": "rust_xlsx_bounded_v2"
 }

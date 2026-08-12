@@ -13,7 +13,7 @@ from typing import Any
 from ..workers.contracts import WorkerParsePayload
 
 OFFICE_PARSER_BACKEND = "office_v1"
-PDF_TEXT_PARSER_BACKEND = "pdf_text_v1"
+PDF_TEXT_PARSER_BACKEND = "python_pdf_text_v2"
 NOT_PARSED_PARSER_BACKEND = "not_parsed"
 
 DEFAULT_DOCUMENT_EXCERPT_MAX_CHARS = 6000

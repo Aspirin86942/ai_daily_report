@@ -34,14 +34,14 @@ fn every_v1_leaf_parses_under_v2_and_preserves_value() {
         "file_timeout_by_extension": {".pdf": 60, ".xlsx": 60},
         "total_max_chars": 50000,
         "parser_profile_version": "v1",
-        "office_parser_backend": "rust_office_oxide_v1",
-        "pdf_parser_backend": "pdf_text_v1",
+        "office_parser_backend": "rust_office_oxide_v2",
+        "pdf_parser_backend": "python_pdf_text_v2",
         "office_fallback_policy_version": "hybrid_v1",
         "office_parser_fallback_enabled": true,
         "office_fallback_after_timeout": true,
         "office_legacy_extensions_enabled": true,
         "pptx_include_notes": true,
-        "office_parser_fallback_order": ["python_office_v1"],
+        "office_parser_fallback_order": ["python_office_v2"],
         "direct_text_max_bytes": 262144,
         "direct_text_read_bytes": 131072,
         "log_tail_read_bytes": 131072,
@@ -86,7 +86,7 @@ fn every_v1_leaf_parses_under_v2_and_preserves_value() {
     assert_eq!(v2.summary_pdf_max_pages, Some(2));
     assert_eq!(
         v2.office_parser_fallback_order.as_deref(),
-        Some(&[ai_daily_scanner_contract::FallbackBackend::PythonOfficeV1][..])
+        Some(&[ai_daily_scanner_contract::FallbackBackend::PythonOfficeV2][..])
     );
 }
 
@@ -643,8 +643,8 @@ fn file_audit_v2_final_diagnostic_nullability_is_enforced() {
         "source_version": "mtime_ns=1:size=1",
         "source_guard_kind": "content_sha256_v1",
         "source_guard_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        "parser_backend": "pdf_text_v1",
-        "worker_lane": "python_document_process",
+        "parser_backend": "python_pdf_text_v2",
+        "worker_lane": "python_document_process_v2",
         "parse_cache_status": "miss",
         "cache_miss_reason": "new_file",
         "truncated": false,
@@ -746,8 +746,8 @@ fn classification_and_parse_execution_matrices_reject_impossible_provenance() {
         "source_guard_kind": "content_sha256_v1",
         "source_guard_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "parse_status": "success",
-        "parser_backend": "pdf_text_v1",
-        "worker_lane": "python_document_process",
+        "parser_backend": "python_pdf_text_v2",
+        "worker_lane": "python_document_process_v2",
         "parse_cache_status": "fresh",
         "cache_miss_reason": "",
         "truncated": false,
@@ -831,8 +831,8 @@ fn v2_audit_page_miss_reason_and_backend_lane_matrices_are_strict() {
         "source_guard_kind": "content_sha256_v1",
         "source_guard_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "parse_status": "error",
-        "parser_backend": "pdf_text_v1",
-        "worker_lane": "python_document_process",
+        "parser_backend": "python_pdf_text_v2",
+        "worker_lane": "python_document_process_v2",
         "parse_cache_status": "miss",
         "cache_miss_reason": "new_file",
         "truncated": false,
@@ -888,7 +888,7 @@ fn v2_audit_page_miss_reason_and_backend_lane_matrices_are_strict() {
         "source_guard_kind": "content_sha256_v1",
         "source_guard_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "parse_status": "success",
-        "parser_backend": "pdf_metadata_v1",
+        "parser_backend": "pdf_metadata_v2",
         "worker_lane": "rust_core",
         "parse_cache_status": "not_applicable",
         "cache_miss_reason": "",
@@ -925,11 +925,11 @@ fn v2_audit_page_miss_reason_and_backend_lane_matrices_are_strict() {
     let mut no_text_body = metadata.as_object().unwrap().clone();
     no_text_body.insert(
         "parser_backend".to_string(),
-        serde_json::Value::String("pdf_text_v1".to_string()),
+        serde_json::Value::String("python_pdf_text_v2".to_string()),
     );
     no_text_body.insert(
         "worker_lane".to_string(),
-        serde_json::Value::String("python_document_process".to_string()),
+        serde_json::Value::String("python_document_process_v2".to_string()),
     );
     let parsed: ai_daily_scanner_contract::FileAuditV2 =
         serde_json::from_value(serde_json::Value::Object(no_text_body))

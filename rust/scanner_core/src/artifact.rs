@@ -29,8 +29,6 @@ pub const SNAPSHOT_KEY_VERSION: &str = "snapshot_key_v1";
 pub const SNAPSHOT_KEY_DOMAIN: &[u8] = b"snapshot-key-v1\0";
 /// Frozen classifier contract version entering the snapshot key.
 pub const CLASSIFIER_CONTRACT_VERSION: &str = "ai_daily_pdf_classifier_v1";
-/// Frozen Python session contract version used as the session marker.
-pub const SESSION_CONTRACT_VERSION: &str = "ai_daily_python_session_v1";
 
 /// Immutable semantic summary persisted with the artifact (spec Part 5.1):
 /// counts + input/output/reserved/rendered chars. No timings, no request_id.
@@ -210,7 +208,6 @@ struct SnapshotKeyPayload<'a> {
     report_mode: ReportMode,
     engine_build: &'a str,
     workers: WorkerCanonical<'a>,
-    session: SessionCanonical<'a>,
     classifier: ClassifierCanonical<'a>,
 }
 
@@ -222,14 +219,6 @@ struct WorkerCanonical<'a> {
     python_contract: Option<&'a str>,
     python_version: Option<&'a str>,
     python_build: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct SessionCanonical<'a> {
-    capability: &'static str,
-    contract: Option<&'a str>,
-    version: Option<&'a str>,
-    build: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -258,22 +247,6 @@ pub fn snapshot_key_parts(
         .ok_or_else(|| "logical request is not a JSON object".to_string())?
         .remove("request_id");
 
-    let session = if worker_ids.python_session_contract.is_some() {
-        SessionCanonical {
-            capability: "session",
-            contract: worker_ids.python_session_contract.as_deref(),
-            version: worker_ids.python_version.as_deref(),
-            build: worker_ids.python_build.as_deref(),
-        }
-    } else {
-        SessionCanonical {
-            capability: "one_shot",
-            contract: None,
-            version: None,
-            build: None,
-        }
-    };
-
     let payload = SnapshotKeyPayload {
         snapshot_key_version: SNAPSHOT_KEY_VERSION,
         logical_request: request_value,
@@ -290,7 +263,6 @@ pub fn snapshot_key_parts(
             python_version: worker_ids.python_version.as_deref(),
             python_build: worker_ids.python_build.as_deref(),
         },
-        session,
         classifier: ClassifierCanonical {
             contract: &classifier_ids.contract,
             build: &classifier_ids.build,

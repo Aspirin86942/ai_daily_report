@@ -295,8 +295,8 @@
           "type": "string",
           "enum": [
             "rust_core",
-            "rust_office_process",
-            "python_document_process",
+            "rust_office_process_v2",
+            "python_document_process_v2",
             "not_parsed"
           ]
         },

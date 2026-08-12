@@ -6,8 +6,8 @@
   "worker_version": "0.1.0",
   "worker_build": "fixture-office-worker-build-v1",
   "supported_backends": [
-    "rust_office_oxide_v1",
-    "rust_xlsx_bounded_v1"
+    "rust_office_oxide_v2",
+    "rust_xlsx_bounded_v2"
   ],
   "supported_extensions": [
     ".docx",

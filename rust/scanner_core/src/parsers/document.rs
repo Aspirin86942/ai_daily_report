@@ -1,13 +1,9 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use ai_daily_scanner_contract::{
-    AdapterPaths, WorkerKind, WorkerParseRequest, WorkerParseResponse,
-};
+use ai_daily_scanner_contract::{AdapterPaths, WorkerKind};
 
-use crate::fallback::ParseFailure;
-
-use super::{execute_worker_request_observed, OneShotExecution, RegisteredWorker, WorkerCommand};
+use super::WorkerCommand;
 
 pub fn worker_command(adapters: &AdapterPaths) -> WorkerCommand {
     WorkerCommand {
@@ -19,9 +15,9 @@ pub fn worker_command(adapters: &AdapterPaths) -> WorkerCommand {
         current_dir: Some(PathBuf::from(&adapters.python_module_root)),
         expected_kind: WorkerKind::PythonDocument,
         required_backends: vec![
-            "pdf_text_v1".to_string(),
-            "python_office_v1".to_string(),
-            "python_sharepoint_text_v1".to_string(),
+            "python_pdf_text_v2".to_string(),
+            "python_office_v2".to_string(),
+            "python_sharepoint_text_v2".to_string(),
         ],
         required_extensions: vec![
             ".doc".to_string(),
@@ -33,18 +29,4 @@ pub fn worker_command(adapters: &AdapterPaths) -> WorkerCommand {
             ".xlsx".to_string(),
         ],
     }
-}
-
-pub fn parse(
-    worker: &RegisteredWorker,
-    request: &WorkerParseRequest,
-) -> Result<WorkerParseResponse, ParseFailure> {
-    parse_observed(worker, request).outcome
-}
-
-pub(crate) fn parse_observed(
-    worker: &RegisteredWorker,
-    request: &WorkerParseRequest,
-) -> OneShotExecution<WorkerParseResponse> {
-    execute_worker_request_observed(worker, request)
 }

@@ -39,7 +39,7 @@ New-Item -ItemType Directory -Path .\dist -Force | Out-Null
 The Windows release workflow also creates a separate production-only virtual
 environment and installs it with
 `python -m pip install --requirement requirements.lock`. From that same clean
-environment they validate the Python worker `version` and `session-version`
+environment they validate the shared worker-v2 `hello`
 identities, run `doctor --strict`, and execute the full fixed-corpus gate. This
 chain is separate from the uv-managed test environment so dev dependencies
 cannot mask a missing production requirement.

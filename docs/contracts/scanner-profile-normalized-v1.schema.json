@@ -244,7 +244,7 @@
       ],
       "properties": {
         "backend": {
-          "const": "light_text_v1"
+          "const": "light_text_v2"
         },
         "read_head_bytes": {
           "$ref": "#/$defs/readBudget"
@@ -295,8 +295,8 @@
           "items": {
             "type": "string",
             "enum": [
-              "python_office_v1",
-              "python_sharepoint_text_v1"
+              "python_office_v2",
+              "python_sharepoint_text_v2"
             ]
           }
         },

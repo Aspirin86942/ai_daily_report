@@ -50,7 +50,7 @@ mod tests {
 
     fn profile(fallback_after_timeout: bool) -> OfficeParseProfile {
         OfficeParseProfile {
-            primary_backend: "rust_office_oxide_v1".to_string(),
+            primary_backend: "rust_office_oxide_v2".to_string(),
             fallback_enabled: true,
             fallback_order: Vec::new(),
             fallback_after_timeout,

@@ -52,18 +52,18 @@
     "parser_backend": {
       "type": "string",
       "enum": [
-        "rust_office_oxide_v1",
-        "rust_xlsx_bounded_v1",
-        "python_office_v1",
-        "pdf_text_v1",
-        "python_sharepoint_text_v1"
+        "rust_office_oxide_v2",
+        "rust_xlsx_bounded_v2",
+        "python_office_v2",
+        "python_pdf_text_v2",
+        "python_sharepoint_text_v2"
       ]
     },
     "worker_lane": {
       "type": "string",
       "enum": [
-        "rust_office_process",
-        "python_document_process"
+        "rust_office_process_v2",
+        "python_document_process_v2"
       ]
     },
     "truncated": {
@@ -143,7 +143,7 @@
       "if": {
         "properties": {
           "parser_backend": {
-            "const": "rust_office_oxide_v1"
+            "const": "rust_office_oxide_v2"
           }
         }
       },
@@ -156,7 +156,7 @@
             ]
           },
           "worker_lane": {
-            "const": "rust_office_process"
+            "const": "rust_office_process_v2"
           }
         }
       }
@@ -165,7 +165,7 @@
       "if": {
         "properties": {
           "parser_backend": {
-            "const": "rust_xlsx_bounded_v1"
+            "const": "rust_xlsx_bounded_v2"
           }
         }
       },
@@ -175,7 +175,7 @@
             "const": ".xlsx"
           },
           "worker_lane": {
-            "const": "rust_office_process"
+            "const": "rust_office_process_v2"
           }
         }
       }
@@ -184,7 +184,7 @@
       "if": {
         "properties": {
           "parser_backend": {
-            "const": "python_office_v1"
+            "const": "python_office_v2"
           }
         }
       },
@@ -199,7 +199,7 @@
             ]
           },
           "worker_lane": {
-            "const": "python_document_process"
+            "const": "python_document_process_v2"
           }
         }
       }
@@ -208,7 +208,7 @@
       "if": {
         "properties": {
           "parser_backend": {
-            "const": "pdf_text_v1"
+            "const": "python_pdf_text_v2"
           }
         }
       },
@@ -218,7 +218,7 @@
             "const": ".pdf"
           },
           "worker_lane": {
-            "const": "python_document_process"
+            "const": "python_document_process_v2"
           }
         }
       }
@@ -227,7 +227,7 @@
       "if": {
         "properties": {
           "parser_backend": {
-            "const": "python_sharepoint_text_v1"
+            "const": "python_sharepoint_text_v2"
           }
         }
       },
@@ -240,7 +240,7 @@
             ]
           },
           "worker_lane": {
-            "const": "python_document_process"
+            "const": "python_document_process_v2"
           }
         }
       }

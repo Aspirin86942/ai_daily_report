@@ -237,10 +237,10 @@ pub enum CompressionProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FallbackBackend {
-    #[serde(rename = "python_office_v1")]
-    PythonOfficeV1,
-    #[serde(rename = "python_sharepoint_text_v1")]
-    PythonSharepointTextV1,
+    #[serde(rename = "python_office_v2")]
+    PythonOfficeV2,
+    #[serde(rename = "python_sharepoint_text_v2")]
+    PythonSharepointTextV2,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1306,7 +1306,7 @@ pub struct TextParseProfile {
 
 impl Validate for TextParseProfile {
     fn validate(&self) -> Result<(), String> {
-        require_const(&self.backend, "light_text_v1", "text.backend")?;
+        require_const(&self.backend, "light_text_v2", "text.backend")?;
         require_range(self.read_head_bytes, 1, 67_108_864, "read_head_bytes")?;
         require_range(self.read_tail_bytes, 1, 67_108_864, "read_tail_bytes")?;
         require_range(self.max_chars, 1, 10_000_000, "text.max_chars")?;
@@ -2212,58 +2212,58 @@ impl Validate for WorkerVersionResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WorkerBackend {
-    #[serde(rename = "rust_office_oxide_v1")]
-    RustOfficeOxideV1,
-    #[serde(rename = "rust_xlsx_bounded_v1")]
-    RustXlsxBoundedV1,
-    #[serde(rename = "python_office_v1")]
-    PythonOfficeV1,
-    #[serde(rename = "pdf_text_v1")]
-    PdfTextV1,
-    #[serde(rename = "python_sharepoint_text_v1")]
-    PythonSharepointTextV1,
+    #[serde(rename = "rust_office_oxide_v2")]
+    RustOfficeOxideV2,
+    #[serde(rename = "rust_xlsx_bounded_v2")]
+    RustXlsxBoundedV2,
+    #[serde(rename = "python_office_v2")]
+    PythonOfficeV2,
+    #[serde(rename = "python_pdf_text_v2")]
+    PythonPdfTextV2,
+    #[serde(rename = "python_sharepoint_text_v2")]
+    PythonSharepointTextV2,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerLane {
-    RustOfficeProcess,
-    PythonDocumentProcess,
+    RustOfficeProcessV2,
+    PythonDocumentProcessV2,
 }
 
 impl WorkerBackend {
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::RustOfficeOxideV1 => "rust_office_oxide_v1",
-            Self::RustXlsxBoundedV1 => "rust_xlsx_bounded_v1",
-            Self::PythonOfficeV1 => "python_office_v1",
-            Self::PdfTextV1 => "pdf_text_v1",
-            Self::PythonSharepointTextV1 => "python_sharepoint_text_v1",
+            Self::RustOfficeOxideV2 => "rust_office_oxide_v2",
+            Self::RustXlsxBoundedV2 => "rust_xlsx_bounded_v2",
+            Self::PythonOfficeV2 => "python_office_v2",
+            Self::PythonPdfTextV2 => "python_pdf_text_v2",
+            Self::PythonSharepointTextV2 => "python_sharepoint_text_v2",
         }
     }
 
     pub fn supports(self, extension: &str) -> bool {
         match self {
-            Self::RustOfficeOxideV1 => matches!(extension, ".docx" | ".pptx"),
-            Self::RustXlsxBoundedV1 => extension == ".xlsx",
-            Self::PythonOfficeV1 => matches!(extension, ".docx" | ".pptx" | ".xls" | ".xlsx"),
-            Self::PdfTextV1 => extension == ".pdf",
-            Self::PythonSharepointTextV1 => matches!(extension, ".doc" | ".ppt"),
+            Self::RustOfficeOxideV2 => matches!(extension, ".docx" | ".pptx"),
+            Self::RustXlsxBoundedV2 => extension == ".xlsx",
+            Self::PythonOfficeV2 => matches!(extension, ".docx" | ".pptx" | ".xls" | ".xlsx"),
+            Self::PythonPdfTextV2 => extension == ".pdf",
+            Self::PythonSharepointTextV2 => matches!(extension, ".doc" | ".ppt"),
         }
     }
 
     pub const fn lane(self) -> WorkerLane {
         match self {
-            Self::RustOfficeOxideV1 | Self::RustXlsxBoundedV1 => WorkerLane::RustOfficeProcess,
-            _ => WorkerLane::PythonDocumentProcess,
+            Self::RustOfficeOxideV2 | Self::RustXlsxBoundedV2 => WorkerLane::RustOfficeProcessV2,
+            _ => WorkerLane::PythonDocumentProcessV2,
         }
     }
 
     pub const fn limit_kind(self) -> &'static str {
         match self {
-            Self::RustOfficeOxideV1 | Self::RustXlsxBoundedV1 | Self::PythonOfficeV1 => "office",
-            Self::PdfTextV1 => "pdf",
-            Self::PythonSharepointTextV1 => "sharepoint_text",
+            Self::RustOfficeOxideV2 | Self::RustXlsxBoundedV2 | Self::PythonOfficeV2 => "office",
+            Self::PythonPdfTextV2 => "pdf",
+            Self::PythonSharepointTextV2 => "sharepoint_text",
         }
     }
 }
@@ -2551,8 +2551,8 @@ pub enum ParseStatus {
 #[serde(rename_all = "snake_case")]
 pub enum AuditWorkerLane {
     RustCore,
-    RustOfficeProcess,
-    PythonDocumentProcess,
+    RustOfficeProcessV2,
+    PythonDocumentProcessV2,
     NotParsed,
 }
 
@@ -2863,7 +2863,7 @@ impl Validate for VersionResponseV2 {
                 == ["scanner_profile_v1", "scanner_profile_v2"]
             && self.inspect_response_versions == [1_u64, 2_u64]
             && self.classifier_contract_versions == ["ai_daily_pdf_classifier_v1"]
-            && self.session_contract_versions == ["ai_daily_python_session_v1"]
+            && self.session_contract_versions == ["ai_daily_worker_v2"]
             && self.maintenance_contract_versions == ["ai_daily_scanner_maintenance_v1"]
             && self.upgrade_contract_versions == ["ai_daily_scanner_upgrade_v1"]
             && self.source_guard_policy == "source_guard_v2"
@@ -3391,162 +3391,6 @@ impl Validate for ClassifierVersionResponseV1 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// ai_daily_python_session_v1 wire（spec Part 7）：长驻流式 PDF session
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PythonSessionOperation {
-    ClassifyPdfV1,
-    ParseV1,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PythonSessionResponseStatus {
-    Ok,
-    Error,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PythonSessionVersionResponseV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub session_contract_version: String,
-    pub worker_build: String,
-    pub classifier_build: String,
-    pub supported_operations: Vec<String>,
-}
-
-impl Validate for PythonSessionVersionResponseV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_python_session", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_const(
-            &self.session_contract_version,
-            "ai_daily_python_session_v1",
-            "session_contract_version",
-        )?;
-        require_sha256_hex(&self.worker_build, "worker_build")?;
-        require_sha256_hex(&self.classifier_build, "classifier_build")?;
-        if self.supported_operations != ["classify_pdf_v1", "parse_v1"] {
-            return Err(
-                "session supported_operations must be the frozen canonical set".to_string(),
-            );
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PythonSessionHelloV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub frame: String,
-    pub session_contract_version: String,
-    pub worker_build: String,
-    pub classifier_build: String,
-    pub supported_operations: Vec<String>,
-}
-
-impl Validate for PythonSessionHelloV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_python_session", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_const(&self.frame, "hello", "frame")?;
-        require_const(
-            &self.session_contract_version,
-            "ai_daily_python_session_v1",
-            "session_contract_version",
-        )?;
-        require_sha256_hex(&self.worker_build, "worker_build")?;
-        require_sha256_hex(&self.classifier_build, "classifier_build")?;
-        if self.supported_operations != ["classify_pdf_v1", "parse_v1"] {
-            return Err(
-                "session hello supported_operations must be the frozen canonical set".to_string(),
-            );
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PythonSessionRequestV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub operation: PythonSessionOperation,
-    pub payload: serde_json::Value,
-}
-
-impl Validate for PythonSessionRequestV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_python_session", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(untagged)]
-pub enum PythonSessionResultV1 {
-    Classify(PdfClassifierResultV1),
-    Parse(Box<WorkerParseResponse>),
-}
-
-impl Validate for PythonSessionResultV1 {
-    fn validate(&self) -> Result<(), String> {
-        match self {
-            Self::Classify(result) => result.validate(),
-            Self::Parse(response) => response.validate(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PythonSessionResponseV1 {
-    pub contract: String,
-    pub protocol_version: u64,
-    pub request_id: String,
-    pub operation: PythonSessionOperation,
-    pub status: PythonSessionResponseStatus,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub result: Nullable<PythonSessionResultV1>,
-    #[serde(deserialize_with = "deserialize_required_nullable")]
-    pub error: Nullable<PythonOperationDiagnosticV1>,
-}
-
-impl Validate for PythonSessionResponseV1 {
-    fn validate(&self) -> Result<(), String> {
-        require_const(&self.contract, "ai_daily_python_session", "contract")?;
-        require_range(self.protocol_version, 1, 1, "protocol_version")?;
-        require_request_id(&self.request_id)?;
-        match self.status {
-            PythonSessionResponseStatus::Ok => {
-                if self.result.0.is_none() || self.error.0.is_some() {
-                    return Err("ok session response requires a result and no error".to_string());
-                }
-                self.result.0.as_ref().expect("checked above").validate()?;
-            }
-            PythonSessionResponseStatus::Error => {
-                if self.result.0.is_some() || self.error.0.is_none() {
-                    return Err(
-                        "error session response requires an error and no result".to_string()
-                    );
-                }
-                self.error.0.as_ref().expect("checked above").validate()?;
-            }
-        }
-        Ok(())
-    }
-}
-
 /// Shared full-v2 parser provenance matrix used by the wire validator and the
 /// store's pre-persistence seam. Keeping it here prevents the two gates from
 /// accepting different backend/lane combinations.
@@ -3557,18 +3401,21 @@ pub fn validate_v2_parse_provenance(
     parse_cache_status: ParseCacheStatus,
     classification_status: Option<PdfClassificationStatus>,
 ) -> Result<(), String> {
-    let metadata = parser_backend == "pdf_metadata_v1" && worker_lane == AuditWorkerLane::RustCore;
+    let metadata = parser_backend == "pdf_metadata_v2" && worker_lane == AuditWorkerLane::RustCore;
     let not_parsed = parser_backend == "not_parsed" && worker_lane == AuditWorkerLane::NotParsed;
     let body_parser = matches!(
         (parser_backend, worker_lane),
-        ("light_text_v1", AuditWorkerLane::RustCore)
-            | ("rust_office_oxide_v1", AuditWorkerLane::RustOfficeProcess)
-            | ("rust_xlsx_bounded_v1", AuditWorkerLane::RustOfficeProcess)
-            | ("pdf_text_v1", AuditWorkerLane::PythonDocumentProcess)
-            | ("python_office_v1", AuditWorkerLane::PythonDocumentProcess)
+        ("light_text_v2", AuditWorkerLane::RustCore)
+            | ("rust_office_oxide_v2", AuditWorkerLane::RustOfficeProcessV2)
+            | ("rust_xlsx_bounded_v2", AuditWorkerLane::RustOfficeProcessV2)
             | (
-                "python_sharepoint_text_v1",
-                AuditWorkerLane::PythonDocumentProcess
+                "python_pdf_text_v2",
+                AuditWorkerLane::PythonDocumentProcessV2
+            )
+            | ("python_office_v2", AuditWorkerLane::PythonDocumentProcessV2)
+            | (
+                "python_sharepoint_text_v2",
+                AuditWorkerLane::PythonDocumentProcessV2
             )
     );
     if !(metadata || not_parsed || body_parser) {
@@ -3612,7 +3459,7 @@ pub fn validate_v2_parse_provenance(
     }
     if metadata && classification_status != Some(PdfClassificationStatus::NoTextInParseWindow) {
         return Err(
-            "pdf_metadata_v1 is only valid for no-text classification provenance".to_string(),
+            "pdf_metadata_v2 is only valid for no-text classification provenance".to_string(),
         );
     }
 
@@ -3626,7 +3473,7 @@ pub fn validate_v2_parse_provenance(
             _ => Err("snapshot parse status does not match its semantic provenance".to_string()),
         },
         ParseCacheStatus::NotApplicable if parse_status == ParseStatus::Success && !metadata => {
-            Err("not_applicable Success requires pdf_metadata_v1/rust_core".to_string())
+            Err("not_applicable Success requires pdf_metadata_v2/rust_core".to_string())
         }
         ParseCacheStatus::NotApplicable if parse_status != ParseStatus::Success && !not_parsed => {
             Err("not_applicable NotParsed/Error/Timeout requires not_parsed provenance".to_string())
@@ -4478,8 +4325,8 @@ pub fn validate_contract_payload(
         }
         if let Some(ContractPayload::WorkerVersionResponse(handshake)) = &handshake {
             let expected_kind = match request.backend.lane() {
-                WorkerLane::RustOfficeProcess => WorkerKind::Office,
-                WorkerLane::PythonDocumentProcess => WorkerKind::PythonDocument,
+                WorkerLane::RustOfficeProcessV2 => WorkerKind::Office,
+                WorkerLane::PythonDocumentProcessV2 => WorkerKind::PythonDocument,
             };
             if response.worker_contract_version != handshake.worker_contract_version
                 || response.worker_version != handshake.worker_version
@@ -4658,8 +4505,8 @@ mod tests {
             "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
             "file_type": ".doc",
             "content": "",
-            "parser_backend": "python_sharepoint_text_v1",
-            "worker_lane": "python_document_process",
+            "parser_backend": "python_sharepoint_text_v2",
+            "worker_lane": "python_document_process_v2",
             "truncated": false,
             "warnings": [],
             "error": {
@@ -4668,7 +4515,7 @@ mod tests {
                 "retryable": true,
                 "stage": "parse",
                 "file_path": "C:\\scanner-fixtures\\工作 目录\\legacy-export.doc",
-                "backend": "python_sharepoint_text_v1"
+                "backend": "python_sharepoint_text_v2"
             },
             "duration_ms": 3,
             "worker_contract_version": "ai_daily_worker_v1",

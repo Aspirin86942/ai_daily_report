@@ -66,7 +66,7 @@ def _files() -> list[FileAuditV2]:
             source_guard_kind="content_sha256_v1",
             source_guard_sha256="c" * 64,
             parse_status="success",
-            parser_backend="light_text_v1",
+            parser_backend="light_text_v2",
             worker_lane="rust_core",
             parse_cache_status="fresh",
             cache_miss_reason="",
@@ -88,8 +88,8 @@ def _files() -> list[FileAuditV2]:
             source_guard_kind="content_sha256_v1",
             source_guard_sha256="d" * 64,
             parse_status="error",
-            parser_backend="pdf_text_v1",
-            worker_lane="python_document_process",
+            parser_backend="python_pdf_text_v2",
+            worker_lane="python_document_process_v2",
             parse_cache_status="miss",
             cache_miss_reason="new_file",
             truncated=True,
@@ -234,18 +234,18 @@ def test_backend_summary_keeps_parser_and_worker_lane_dimensions_separate():
     summary = build_parser_backend_summary(_files())
 
     assert summary["backend_counts"] == {
-        "light_text_v1": 1,
-        "pdf_text_v1": 1,
+        "light_text_v2": 1,
+        "python_pdf_text_v2": 1,
     }
     assert summary["worker_lane_counts"] == {
-        "python_document_process": 1,
+        "python_document_process_v2": 1,
         "rust_core": 1,
     }
     assert summary["by_extension"][".pdf"]["backends"] == {
-        "pdf_text_v1": 1
+        "python_pdf_text_v2": 1
     }
     assert summary["by_extension"][".pdf"]["lanes"] == {
-        "python_document_process": 1
+        "python_document_process_v2": 1
     }
 
 

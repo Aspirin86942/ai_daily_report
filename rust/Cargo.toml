@@ -5,6 +5,7 @@ members = [
     "scanner_native",
     "scanner_contract",
     "scanner_core",
+    "worker_contract",
 ]
 resolver = "2"
 

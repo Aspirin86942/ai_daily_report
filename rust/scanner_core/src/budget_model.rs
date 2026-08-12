@@ -116,21 +116,21 @@ pub enum RouteKind {
 impl RouteKind {
     pub const fn backend(self) -> &'static str {
         match self {
-            Self::LightText => "light_text_v1",
-            Self::RustOffice => "rust_office_oxide_v1",
-            Self::RustXlsx => "rust_xlsx_bounded_v1",
-            Self::Pdf => "pdf_text_v1",
-            Self::PythonOffice => "python_office_v1",
-            Self::PythonSharepointText => "python_sharepoint_text_v1",
+            Self::LightText => "light_text_v2",
+            Self::RustOffice => "rust_office_oxide_v2",
+            Self::RustXlsx => "rust_xlsx_bounded_v2",
+            Self::Pdf => "python_pdf_text_v2",
+            Self::PythonOffice => "python_office_v2",
+            Self::PythonSharepointText => "python_sharepoint_text_v2",
         }
     }
 
     pub const fn worker_lane(self) -> &'static str {
         match self {
             Self::LightText => "rust_core",
-            Self::RustOffice | Self::RustXlsx => "rust_office_process",
+            Self::RustOffice | Self::RustXlsx => "rust_office_process_v2",
             Self::Pdf | Self::PythonOffice | Self::PythonSharepointText => {
-                "python_document_process"
+                "python_document_process_v2"
             }
         }
     }
@@ -428,11 +428,14 @@ mod tests {
 
     #[test]
     fn route_kind_backends_and_lanes_are_stable() {
-        assert_eq!(RouteKind::Pdf.backend(), "pdf_text_v1");
-        assert_eq!(RouteKind::RustOffice.worker_lane(), "rust_office_process");
+        assert_eq!(RouteKind::Pdf.backend(), "python_pdf_text_v2");
+        assert_eq!(
+            RouteKind::RustOffice.worker_lane(),
+            "rust_office_process_v2"
+        );
         assert_eq!(
             RouteKind::PythonSharepointText.backend(),
-            "python_sharepoint_text_v1"
+            "python_sharepoint_text_v2"
         );
     }
 }

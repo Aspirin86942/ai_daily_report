@@ -444,7 +444,7 @@ fn classify_candidate_v2(
             office_route(&profile.parse.office.primary_backend, RouteKind::RustOffice)
         }
         ".xls" => Some(RouteKind::PythonOffice),
-        ".pdf" if profile.parse.pdf.backend == "pdf_text_v1" => Some(RouteKind::Pdf),
+        ".pdf" if profile.parse.pdf.backend == "python_pdf_text_v2" => Some(RouteKind::Pdf),
         ".pdf" => None,
         ".doc" | ".ppt" if profile.parse.office.legacy_extensions_enabled => {
             Some(RouteKind::PythonSharepointText)
@@ -462,8 +462,8 @@ fn classify_candidate_v2(
 
 fn office_route(primary_backend: &str, rust_route: RouteKind) -> Option<RouteKind> {
     match primary_backend {
-        "rust_office_oxide_v1" => Some(rust_route),
-        "python_office_v1" => Some(RouteKind::PythonOffice),
+        "rust_office_oxide_v2" => Some(rust_route),
+        "python_office_v2" => Some(RouteKind::PythonOffice),
         _ => None,
     }
 }

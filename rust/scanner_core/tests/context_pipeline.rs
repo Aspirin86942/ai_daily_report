@@ -26,7 +26,7 @@ fn evidence(path: &str, extension: &str, content: &str) -> ContextFileEvidence {
         extension: extension.to_string(),
         size_bytes: Some(content.len() as u64),
         content: content.to_string(),
-        parser_backend: "light_text_v1".to_string(),
+        parser_backend: "light_text_v2".to_string(),
         worker_lane: AuditWorkerLane::RustCore,
         cache_status: CacheStatus::Miss,
         parse_status: ParseStatus::Success,
@@ -62,8 +62,8 @@ fn golden_keep_compress_metadata_only_and_error_actions_are_frozen() {
     let mut compressed = evidence("notes/large.md", ".md", &"A".repeat(120));
     compressed.size_bytes = Some(100_000);
     let mut metadata = evidence("book.xlsx", ".xlsx", "sensitive body");
-    metadata.parser_backend = "rust_xlsx_bounded_v1".to_string();
-    metadata.worker_lane = AuditWorkerLane::RustOfficeProcess;
+    metadata.parser_backend = "rust_xlsx_bounded_v2".to_string();
+    metadata.worker_lane = AuditWorkerLane::RustOfficeProcessV2;
     metadata.size_bytes = Some(10_485_761);
 
     let result = build_context(
@@ -144,11 +144,11 @@ fn cache_state_does_not_change_context_bytes() {
 #[test]
 fn golden_office_pdf_error_priority_and_path_tie_break_are_frozen() {
     let mut office = evidence("zeta/report.docx", ".docx", "office");
-    office.parser_backend = "rust_office_oxide_v1".to_string();
-    office.worker_lane = AuditWorkerLane::RustOfficeProcess;
+    office.parser_backend = "rust_office_oxide_v2".to_string();
+    office.worker_lane = AuditWorkerLane::RustOfficeProcessV2;
     let mut pdf = evidence("alpha/report.pdf", ".pdf", "pdf");
-    pdf.parser_backend = "pdf_text_v1".to_string();
-    pdf.worker_lane = AuditWorkerLane::PythonDocumentProcess;
+    pdf.parser_backend = "python_pdf_text_v2".to_string();
+    pdf.worker_lane = AuditWorkerLane::PythonDocumentProcessV2;
 
     let result = build_context(
         vec![

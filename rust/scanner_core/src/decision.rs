@@ -182,7 +182,7 @@ pub(crate) fn decide_files(
                 // never ran) keeps its frozen metadata_only action and
                 // `pdf_no_text_in_parse_window` reason; the size/content
                 // heuristics must not relabel it Keep/Compress.
-                if evidence.parser_backend == "pdf_metadata_v1"
+                if evidence.parser_backend == "pdf_metadata_v2"
                     && evidence.reason.as_deref() == Some("pdf_no_text_in_parse_window")
                 {
                     (
