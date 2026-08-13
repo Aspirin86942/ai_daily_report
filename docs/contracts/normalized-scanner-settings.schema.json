@@ -105,12 +105,8 @@
               "profile_name": {
                 "const": "daily_balanced_v1"
               },
-              "global_max_chars": {
-                "const": 50000
-              },
-              "per_file_max_chars": {
-                "const": 8000
-              }
+              "global_max_chars": { "const": 500000 },
+              "per_file_max_chars": { "const": 100000 }
             }
           }
         }
@@ -131,12 +127,8 @@
               "profile_name": {
                 "const": "weekly_balanced_v1"
               },
-              "global_max_chars": {
-                "const": 50000
-              },
-              "per_file_max_chars": {
-                "const": 5000
-              }
+              "global_max_chars": { "const": 500000 },
+              "per_file_max_chars": { "const": 100000 }
             }
           }
         }
@@ -157,12 +149,8 @@
               "profile_name": {
                 "const": "monthly_balanced_v1"
               },
-              "global_max_chars": {
-                "const": 60000
-              },
-              "per_file_max_chars": {
-                "const": 4000
-              }
+              "global_max_chars": { "const": 500000 },
+              "per_file_max_chars": { "const": 100000 }
             }
           }
         }

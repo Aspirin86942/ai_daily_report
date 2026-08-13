@@ -69,9 +69,9 @@ pub fn normalize_scanner_settings(
         )
     };
     let (profile_name, global_max_chars, per_file_max_chars) = match report_mode {
-        ReportMode::Daily => ("daily_balanced_v1", 50_000, 8_000),
-        ReportMode::Weekly => ("weekly_balanced_v1", 50_000, 5_000),
-        ReportMode::Monthly => ("monthly_balanced_v1", 60_000, 4_000),
+        ReportMode::Daily => ("daily_balanced_v1", 500_000, 100_000),
+        ReportMode::Weekly => ("weekly_balanced_v1", 500_000, 100_000),
+        ReportMode::Monthly => ("monthly_balanced_v1", 500_000, 100_000),
     };
     let max_file_size_bytes = raw
         .max_file_size_mb
@@ -116,7 +116,7 @@ pub fn normalize_scanner_settings(
             )?,
         },
         parse: ParseProfile {
-            aggregate_max_chars: raw.total_max_chars.unwrap_or(50_000),
+            aggregate_max_chars: raw.total_max_chars.unwrap_or(500_000),
             text: TextParseProfile {
                 backend: "light_text_v2".to_string(),
                 read_head_bytes: raw.direct_text_read_bytes.unwrap_or(default_head_bytes),

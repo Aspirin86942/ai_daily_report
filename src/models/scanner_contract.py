@@ -323,9 +323,9 @@ class NormalizedScannerSettings(ContractModel):
     @model_validator(mode="after")
     def validate_mode_context(self) -> "NormalizedScannerSettings":
         expected = {
-            "daily": ("daily_balanced_v1", 50_000, 8_000),
-            "weekly": ("weekly_balanced_v1", 50_000, 5_000),
-            "monthly": ("monthly_balanced_v1", 60_000, 4_000),
+            "daily": ("daily_balanced_v1", 500_000, 100_000),
+            "weekly": ("weekly_balanced_v1", 500_000, 100_000),
+            "monthly": ("monthly_balanced_v1", 500_000, 100_000),
         }[self.report_mode]
         actual = (
             self.context.profile_name,

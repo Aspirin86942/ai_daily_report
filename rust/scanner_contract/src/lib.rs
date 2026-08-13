@@ -969,9 +969,9 @@ impl Validate for NormalizedScannerSettings {
         self.parse.validate()?;
         self.context.validate()?;
         let expected = match self.report_mode {
-            ReportMode::Daily => ("daily_balanced_v1", 50_000, 8_000),
-            ReportMode::Weekly => ("weekly_balanced_v1", 50_000, 5_000),
-            ReportMode::Monthly => ("monthly_balanced_v1", 60_000, 4_000),
+            ReportMode::Daily => ("daily_balanced_v1", 500_000, 100_000),
+            ReportMode::Weekly => ("weekly_balanced_v1", 500_000, 100_000),
+            ReportMode::Monthly => ("monthly_balanced_v1", 500_000, 100_000),
         };
         let actual = (
             self.context.profile_name.as_str(),

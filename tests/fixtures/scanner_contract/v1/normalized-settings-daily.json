@@ -31,7 +31,7 @@
     }
   },
   "parse": {
-    "aggregate_max_chars": 50000,
+    "aggregate_max_chars": 500000,
     "text": {
       "backend": "light_text_v2",
       "read_head_bytes": 262144,
@@ -68,8 +68,8 @@
   },
   "context": {
     "profile_name": "daily_balanced_v1",
-    "global_max_chars": 50000,
-    "per_file_max_chars": 8000,
+    "global_max_chars": 500000,
+    "per_file_max_chars": 100000,
     "small_file_max_bytes": 65536,
     "medium_file_max_bytes": 1048576,
     "large_file_max_bytes": 10485760,
