@@ -175,18 +175,7 @@ class ReportRunner:
         if user_input is None:
             user_input = self.daily_input.read()
         if not user_input.strip():
-            return self._failure(
-                mode="daily",
-                source="scan",
-                period=period,
-                phase="request",
-                error_code=ErrorCode.EMPTY_DAILY_INPUT,
-                message="未输入工作内容",
-                retryable=False,
-                requested=request.save,
-                warnings=accepted.warnings,
-                evidence=accepted.evidence,
-            )
+            user_input = "（未提供用户口述，请依据今日文件证据生成日报）"
 
         generated = self._generate(
             DailyGenerationRequest(

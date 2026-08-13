@@ -238,7 +238,7 @@ def test_daily_scanner_error_fails_before_input_and_llm():
     assert daily_input.calls == 0
 
 
-def test_daily_empty_input_fails_before_llm():
+def test_daily_empty_input_uses_placeholder_and_calls_llm():
     model_port = RecordingModelPort()
     runner = _make_runner(
         model_port=model_port,
@@ -253,9 +253,9 @@ def test_daily_empty_input_fails_before_llm():
         )
     )
 
-    assert isinstance(outcome, ReportRunFailure)
-    assert outcome.error.error_code is ErrorCode.EMPTY_DAILY_INPUT
-    assert model_port.calls == []
+    assert isinstance(outcome, ReportRunSuccess)
+    assert len(model_port.calls) == 1
+    assert model_port.calls[0].user_input.strip() != ""
 
 
 def test_daily_full_path_writes_real_sqlite_and_markdown(tmp_path):
