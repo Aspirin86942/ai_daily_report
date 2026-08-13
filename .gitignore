@@ -58,3 +58,7 @@ scripts/corpus/
 # snapshot benchmark: scratch DBs/markers contain local paths; evidence is tracked
 .artifacts/snapshot-warm/*/
 .artifacts/snapshot-warm/*.marker.json
+
+# wheels: native scanner packaging build artifacts (evidence json is tracked)
+.artifacts/wheels/
+.artifacts/wheels-repaired/
