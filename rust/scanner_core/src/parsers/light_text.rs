@@ -85,6 +85,8 @@ pub fn parse_light_text(
     let (content, truncated, warning) = match normalized_type.as_str() {
         ".json" => build_json_content(&raw, max_output_chars),
         ".csv" => build_csv_content(&raw, max_output_chars),
+        // 日志是时间序，新信息在尾部——摘录取读窗的最后 max_chars 字符。
+        ".log" => build_log_content(&raw, max_output_chars),
         _ => build_text_content(&raw, "Text preview", max_output_chars, None),
     };
     Ok(ParsedLightText {
@@ -327,6 +329,61 @@ fn build_text_content(
     (content, truncated, warning)
 }
 
+/// `.log` 摘录：metadata 行保持在开头，正文取读窗的最后 `max_chars` 字符
+/// （日志为时间序，新信息在尾部）。
+fn build_log_content(raw: &RawExcerpt, max_chars: u64) -> (String, bool, Option<LightTextWarning>) {
+    let (content, truncated) = finalize_tail_content(
+        |truncated| {
+            let mut lines = metadata_lines("Log tail preview", raw.source, truncated);
+            lines.push(String::new());
+            lines.push(raw.text.clone());
+            lines.join("\n")
+        },
+        raw.truncated,
+        max_chars,
+    );
+    (content, truncated, None)
+}
+
+/// `finalize_content` 的尾部变体：正文取最后 `max_chars` 字符，metadata 行
+/// （正文前的第一个 `\n\n` 之前）始终保留。
+fn finalize_tail_content<F>(builder: F, read_truncated: bool, max_chars: u64) -> (String, bool)
+where
+    F: Fn(bool) -> String,
+{
+    let content = builder(read_truncated);
+    let (limited, output_truncated) = limit_tail_chars(&content, max_chars);
+    let final_truncated = read_truncated || output_truncated;
+    if final_truncated != read_truncated {
+        let rebuilt = builder(final_truncated);
+        let (limited, rebuilt_truncated) = limit_tail_chars(&rebuilt, max_chars);
+        return (limited, read_truncated || rebuilt_truncated);
+    }
+    (limited, final_truncated)
+}
+
+/// 保留 metadata 头，只对正文做后缀截断（Unicode scalar 安全）。
+fn limit_tail_chars(content: &str, max_chars: u64) -> (String, bool) {
+    let max_chars = usize::try_from(max_chars).unwrap_or(usize::MAX);
+    let total = content.chars().count();
+    if total <= max_chars {
+        return (content.to_string(), false);
+    }
+    let body_start = content
+        .match_indices("\n\n")
+        .next()
+        .map(|(index, _)| index + 2)
+        .unwrap_or(0);
+    let metadata = &content[..body_start.min(content.len())];
+    let body = &content[body_start.min(content.len())..];
+    let metadata_chars = metadata.chars().count();
+    let body_budget = max_chars.saturating_sub(metadata_chars);
+    let body_chars = body.chars().count();
+    let skip = body_chars.saturating_sub(body_budget);
+    let keep_from = body.char_indices().nth(skip).map(|(index, _)| index).unwrap_or(0);
+    (format!("{metadata}{}", &body[keep_from..]), true)
+}
+
 fn normalize_python_json_constants(input: &str) -> Cow<'_, str> {
     let bytes = input.as_bytes();
     let mut output = String::new();
@@ -530,6 +587,51 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn log_excerpt_keeps_the_recent_tail_lines() {
+        let directory = tempdir().expect("temporary root should exist");
+        let path = directory.path().join("app.log");
+        let lines: Vec<String> = (0..500).map(|i| format!("2026-08-11 {i:04} 日志行")).collect();
+        fs::write(&path, lines.join("\n")).expect("log fixture should be written");
+        let profile = TextParseProfile {
+            backend: "light_text_v2".to_string(),
+            read_head_bytes: 1_048_576,
+            read_tail_bytes: 1_048_576,
+            max_chars: 1_000,
+            excerpt_max_chars: 1_000,
+        };
+        let parsed = parse_light_text(&path, ".log", &profile, 16 * 1024 * 1024)
+            .expect("log should parse");
+
+        assert!(parsed.truncated);
+        assert!(parsed.content.contains("Log tail preview"));
+        assert!(parsed.content.contains("excerpt_source: tail"));
+        assert!(parsed.content.ends_with("2026-08-11 0499 日志行"));
+        assert!(parsed.content.chars().count() <= 1_000);
+    }
+
+    #[test]
+    fn text_excerpt_keeps_the_head_for_regular_files() {
+        let directory = tempdir().expect("temporary root should exist");
+        let path = directory.path().join("notes.md");
+        let lines: Vec<String> = (0..500).map(|i| format!("2026-08-11 {i:04} 日志行")).collect();
+        fs::write(&path, lines.join("\n")).expect("md fixture should be written");
+        let profile = TextParseProfile {
+            backend: "light_text_v2".to_string(),
+            read_head_bytes: 1_048_576,
+            read_tail_bytes: 1_048_576,
+            max_chars: 1_000,
+            excerpt_max_chars: 1_000,
+        };
+        let parsed = parse_light_text(&path, ".md", &profile, 16 * 1024 * 1024)
+            .expect("md should parse");
+
+        assert!(parsed.truncated);
+        assert!(parsed.content.contains("2026-08-11 0000 日志行"));
+        assert!(!parsed.content.contains("0499"));
+        assert!(parsed.content.chars().count() <= 1_000);
+    }
 
     #[test]
     fn bounded_read_uses_the_same_open_handle_as_its_metadata() {

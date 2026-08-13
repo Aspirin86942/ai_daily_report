@@ -12,10 +12,6 @@ from __future__ import annotations
 import unicodedata
 
 from .pdf_classifier_identity import (
-    CLASSIFIER_BUILD,
-    CLASSIFIER_BUILD_INPUTS,
-    CLASSIFIER_CONTRACT_VERSION,
-    CLASSIFIER_PROTOCOL_VERSION,
     POLICY_VERSION,
     classifier_version_json,
     classifier_version_payload,

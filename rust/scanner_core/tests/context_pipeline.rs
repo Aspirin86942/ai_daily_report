@@ -112,19 +112,20 @@ fn golden_keep_compress_metadata_only_and_error_actions_are_frozen() {
 
 #[test]
 fn golden_large_log_uses_the_recent_tail_once() {
-    let content = format!("{}RECENT_TAIL", "old-".repeat(80));
+    let content = format!("{}RECENT_TAIL", "old-".repeat(200));
     let result = build_context(
         vec![evidence("logs/app.log", ".log", &content)],
-        &profile(2_000, 48),
+        &profile(2_000, 300),
         ReportMode::Daily,
     )
     .expect("golden context");
 
     assert!(result.content.contains("RECENT_TAIL"));
-    assert!(!result.content.contains(&"old-".repeat(20)));
+    assert!(result.content.contains("省略头部"));
+    assert!(!result.content.contains(&"old-".repeat(60)));
     assert_eq!(result.decisions[0].decision.action, ContextAction::Compress);
     assert_eq!(result.decisions[0].decision.reason, "large_log_tail");
-    assert_eq!(result.decisions[0].decision.output_chars, 48);
+    assert!(result.decisions[0].decision.output_chars <= 300);
 }
 
 #[test]

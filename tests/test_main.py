@@ -1,6 +1,5 @@
 """main.py 薄入口的分派、退出码与 bootstrap 测试。"""
 
-from argparse import Namespace
 import os
 from pathlib import Path
 import subprocess

@@ -1,12 +1,12 @@
 {
   "schema": "corpus_gate_evidence_v1",
-  "generated_at_utc": "2026-08-09T19:04:38Z",
-  "manifest_hash": "e37a4838b84992a623b2128807ade133520a78df80bca0007873f03324a511a1",
+  "generated_at_utc": "2026-08-11T01:22:36Z",
+  "manifest_hash": "470839ca4d1411c907124569fec4930004b787a4e9beffa06028832dd85117fd",
   "build": {
-    "scanner_sha256": "80bd268a14f1ea839a75f9655e1a00b97c5cd8e86d83336f668bcb4aa4d26af8",
-    "office_worker_sha256": "5c1c914aa973f156139a5a23c0fa7cb40f840ee15246743e0f7a22e8153a7f1d",
+    "scanner_sha256": "5ea27b58dfcf438f4249e28716de272d0be13c68248e68f490ef67b99f246149",
+    "office_worker_sha256": "e460e81475b539159ea1c58ae03cb76f28ad7a2ef07c114756a1e44c3e06ec86",
     "engine_version": "0.1.0",
-    "engine_build": "sha256-source-v1:c3012d2d87e7bdc15d8dc77cc5d77d96c2de081139bab6ada79ae4dafac2342c",
+    "engine_build": "sha256-source-v1:9fb0841b4d048fdf6c8c5ce73b283d56541c42711cb0ded6585b83cd56e9c6b5",
     "target_triple": "x86_64-pc-windows-msvc"
   },
   "corpus": {
@@ -17,7 +17,7 @@
     {
       "combo": "empty_empty",
       "status": "ok",
-      "wall_ms": 1500.7603168487549,
+      "wall_ms": 4574.667692184448,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -26,7 +26,7 @@
         "omitted_file_count": 2,
         "error_file_count": 0,
         "input_chars": 2100306,
-        "output_chars": 1648
+        "output_chars": 1653
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -56,7 +56,7 @@
     {
       "combo": "empty_partial",
       "status": "ok",
-      "wall_ms": 1525.8252620697021,
+      "wall_ms": 3800.8275032043457,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -65,7 +65,7 @@
         "omitted_file_count": 2,
         "error_file_count": 0,
         "input_chars": 2100306,
-        "output_chars": 1648
+        "output_chars": 1653
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -95,7 +95,7 @@
     {
       "combo": "empty_full",
       "status": "ok",
-      "wall_ms": 1492.3961162567139,
+      "wall_ms": 2360.3737354278564,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -104,7 +104,7 @@
         "omitted_file_count": 2,
         "error_file_count": 0,
         "input_chars": 2100306,
-        "output_chars": 1648
+        "output_chars": 1653
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -134,7 +134,7 @@
     {
       "combo": "partial_empty",
       "status": "ok",
-      "wall_ms": 624.4890689849854,
+      "wall_ms": 3267.348289489746,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -143,7 +143,7 @@
         "omitted_file_count": 2,
         "error_file_count": 0,
         "input_chars": 2100306,
-        "output_chars": 1648
+        "output_chars": 1653
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -173,7 +173,7 @@
     {
       "combo": "partial_partial",
       "status": "ok",
-      "wall_ms": 520.3773975372314,
+      "wall_ms": 2047.203779220581,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -182,7 +182,7 @@
         "omitted_file_count": 2,
         "error_file_count": 0,
         "input_chars": 2100306,
-        "output_chars": 1648
+        "output_chars": 1653
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -212,7 +212,7 @@
     {
       "combo": "partial_full",
       "status": "ok",
-      "wall_ms": 121.96636199951172,
+      "wall_ms": 1351.6125679016113,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -221,7 +221,7 @@
         "omitted_file_count": 2,
         "error_file_count": 0,
         "input_chars": 2100306,
-        "output_chars": 1648
+        "output_chars": 1653
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -251,7 +251,7 @@
     {
       "combo": "full_empty",
       "status": "ok",
-      "wall_ms": 531.613826751709,
+      "wall_ms": 2560.476779937744,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -260,7 +260,7 @@
         "omitted_file_count": 2,
         "error_file_count": 0,
         "input_chars": 2100306,
-        "output_chars": 1648
+        "output_chars": 1653
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -290,7 +290,7 @@
     {
       "combo": "full_partial",
       "status": "ok",
-      "wall_ms": 481.54640197753906,
+      "wall_ms": 1823.373556137085,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -299,7 +299,7 @@
         "omitted_file_count": 2,
         "error_file_count": 0,
         "input_chars": 2100306,
-        "output_chars": 1648
+        "output_chars": 1653
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,
@@ -329,7 +329,7 @@
     {
       "combo": "full_full",
       "status": "ok",
-      "wall_ms": 207.05199241638184,
+      "wall_ms": 516.4628028869629,
       "semantic_counts": {
         "source_file_count": 6,
         "success_count": 4,
@@ -338,7 +338,7 @@
         "omitted_file_count": 2,
         "error_file_count": 0,
         "input_chars": 2100306,
-        "output_chars": 1648
+        "output_chars": 1653
       },
       "error_file_count": 0,
       "text_pdf_coverage": 1.0,

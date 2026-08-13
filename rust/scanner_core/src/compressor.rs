@@ -301,9 +301,9 @@ fn render_file_section(
         decision.action = ContextAction::Compress;
         decision.truncated = true;
         if evidence.extension == ".log" {
-            take_suffix_chars(&evidence.content, limit as usize)
+            take_log_tail(&evidence.content, limit as usize)
         } else {
-            take_prefix_chars(&evidence.content, limit as usize)
+            take_head_and_tail(&evidence.content, limit as usize)
         }
     } else {
         evidence.content.clone()
@@ -452,13 +452,61 @@ fn join_sections(sections: &[String]) -> String {
     format!("{}\n", body.trim_end())
 }
 
-fn take_prefix_chars(value: &str, count: usize) -> String {
-    value.chars().take(count).collect()
+const OMITTED_MARKER_RESERVE: usize = 64;
+const HEAD_RATIO_PER_MILLE: usize = 400;
+
+fn omitted_marker(prefix: &str, omitted: u64) -> String {
+    format!("…（已省略{prefix}约 {omitted} 字符）…")
 }
 
-fn take_suffix_chars(value: &str, count: usize) -> String {
-    let total = count_chars(value) as usize;
-    value.chars().skip(total.saturating_sub(count)).collect()
+fn newline_boundary_at_or_before(content: &str, position: usize) -> usize {
+    content
+        .chars()
+        .take(position)
+        .enumerate()
+        .filter(|(_, character)| *character == '\n')
+        .map(|(index, _)| index + 1)
+        .last()
+        .unwrap_or(position)
+}
+
+fn newline_boundary_at_or_after(content: &str, position: usize) -> usize {
+    match content.chars().enumerate().skip(position).find(|(_, character)| *character == '\n') {
+        Some((index, _)) => index + 1,
+        None => position,
+    }
+}
+
+/// 头+尾逐字保留：头 40% + 尾 60%，切点回退/前进到行边界（区域内无换行时
+/// 按字符截断），中缝插入省略标记。边界移动只会缩短头/尾，因此
+/// `count_chars(body) <= limit` 结构性成立（marker ≤ 64 预留）。
+fn take_head_and_tail(content: &str, limit: usize) -> String {
+    if limit < OMITTED_MARKER_RESERVE {
+        return content.chars().take(limit).collect();
+    }
+    let total = count_chars(content);
+    let available = limit.saturating_sub(OMITTED_MARKER_RESERVE).max(1);
+    let head_budget = available * HEAD_RATIO_PER_MILLE / 1000;
+    let tail_budget = available - head_budget;
+    let head_end = newline_boundary_at_or_before(content, head_budget);
+    let tail_start = newline_boundary_at_or_after(content, total as usize - tail_budget);
+    let head = content.chars().take(head_end).collect::<String>();
+    let tail = content.chars().skip(tail_start).collect::<String>();
+    let omitted = total - count_chars(&head) - count_chars(&tail);
+    format!("{head}{}{tail}", omitted_marker("中部", omitted))
+}
+
+/// `.log` 尾部优先：保留最后 `limit - 64` 字符（逐字后缀），前缀头部省略标记。
+fn take_log_tail(content: &str, limit: usize) -> String {
+    if limit < OMITTED_MARKER_RESERVE {
+        return content.chars().take(limit).collect();
+    }
+    let total = count_chars(content);
+    let available = limit.saturating_sub(OMITTED_MARKER_RESERVE).max(1);
+    let tail_start = (total as usize).saturating_sub(available);
+    let tail = content.chars().skip(tail_start).collect::<String>();
+    let omitted = total - count_chars(&tail);
+    format!("{}{tail}", omitted_marker("头部", omitted))
 }
 
 fn report_mode_text(report_mode: ReportMode) -> &'static str {
@@ -480,13 +528,125 @@ fn enum_text<T: serde::Serialize>(value: &T) -> String {
 mod tests {
     use super::*;
     use crate::budget_model::{max_omitted_row_chars, BUDGET_MODEL_MISMATCH_CODE};
-    use ai_daily_scanner_contract::CacheStatus;
-    use ai_daily_scanner_contract::ContextProfile;
+    use ai_daily_scanner_contract::{AuditWorkerLane, CacheStatus, ContextProfile, ParseStatus};
+
+    fn head_tail_evidence(path: &str, extension: &str, content: &str) -> ContextFileEvidence {
+        ContextFileEvidence {
+            file_identity: format!("fixture:{path}"),
+            absolute_path: format!("C:\\fixture\\{}", path.replace('/', "\\")),
+            relative_path: path.replace('/', "\\"),
+            extension: extension.to_string(),
+            size_bytes: Some(content.len() as u64),
+            content: content.to_string(),
+            parser_backend: "light_text_v1".to_string(),
+            worker_lane: AuditWorkerLane::RustCore,
+            cache_status: CacheStatus::Miss,
+            parse_status: ParseStatus::Success,
+            truncated: false,
+            error: None,
+            reason: None,
+        }
+    }
+
+    fn head_tail_profile(global_max_chars: u64, per_file_max_chars: u64) -> ContextProfile {
+        ContextProfile {
+            profile_name: "daily_balanced_v1".to_string(),
+            global_max_chars,
+            per_file_max_chars,
+            small_file_max_bytes: 65_536,
+            medium_file_max_bytes: 1_048_576,
+            large_file_max_bytes: 10_485_760,
+            priority_policy_version: "default_v1".to_string(),
+            compression_policy_version: "markdown_context_v1".to_string(),
+        }
+    }
 
     #[test]
-    fn character_helpers_preserve_unicode_boundaries() {
-        assert_eq!(take_prefix_chars("甲乙丙", 2), "甲乙");
-        assert_eq!(take_suffix_chars("甲乙丙", 2), "乙丙");
+    fn boundary_helpers_respect_unicode_char_positions() {
+        // 位置: 0甲 1\n 2乙 3丙 4\n 5丁
+        let content = "甲\n乙丙\n丁";
+        assert_eq!(newline_boundary_at_or_before(content, 6), 5);
+        assert_eq!(newline_boundary_at_or_before(content, 2), 2);
+        assert_eq!(newline_boundary_at_or_before(content, 0), 0);
+        assert_eq!(newline_boundary_at_or_after(content, 0), 2);
+        assert_eq!(newline_boundary_at_or_after(content, 3), 5);
+        assert_eq!(newline_boundary_at_or_after(content, 5), 5);
+    }
+
+    #[test]
+    fn head_tail_cuts_at_line_boundaries_and_counts_marker_chars() {
+        // 8 行 × 50 字符/行 + 7 个换行 = 407 字符
+        let content = (0..8)
+            .map(|i| format!("第{i}行") + &"字".repeat(47))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let limit = 300_usize;
+        let body = take_head_and_tail(&content, limit);
+
+        assert!(count_chars(&body) <= limit as u64);
+        // head = 第0行(50) + '\n' = 51 字符；tail = 第6行(50)+'\n'+第7行(50) = 101 字符
+        assert!(body.starts_with(&format!("第0行{}\n", "字".repeat(47))));
+        assert!(body.ends_with(&format!("第7行{}", "字".repeat(47))));
+        // 省略 407 - 51 - 101 = 255
+        assert!(body.contains("省略中部约 255 字符"));
+        // 头部必须结束于行边界（标记紧随换行）
+        let marker_index = body.find("…（已省略中部").expect("marker must exist");
+        assert!(body[..marker_index].ends_with('\n'));
+    }
+
+    #[test]
+    fn head_tail_keeps_partial_first_line_when_no_boundary_in_head_budget() {
+        let content = format!("{}尾行", "字".repeat(300)); // 302 字符，第一行无换行
+        let limit = 200_usize;
+        let body = take_head_and_tail(&content, limit);
+        assert!(count_chars(&body) <= limit as u64);
+        assert!(body.starts_with(&"字".repeat(54))); // head_budget = (200-64)*40% = 54
+        assert!(body.ends_with("尾行"));
+    }
+
+    #[test]
+    fn log_tail_keeps_recent_content_with_head_marker() {
+        let content = format!("{}{}RECENT_TAIL", "old-".repeat(199), "old"); // 810 字符（头部 799 + RECENT_TAIL 11）
+        let limit = 300_usize;
+        let body = take_log_tail(&content, limit);
+        assert!(count_chars(&body) <= limit as u64);
+        assert!(body.ends_with("RECENT_TAIL"));
+        assert!(body.contains("省略头部约 574 字符")); // 810 - 236 = 574
+        assert!(!body.contains(&"old-".repeat(60))); // 240 字符 > 236 尾部预算
+    }
+
+    #[test]
+    fn tiny_limit_degrades_to_plain_char_truncation() {
+        // limit < OMITTED_MARKER_RESERVE 时省略标记本身就可能超预算：
+        // 退化为纯字符截断，不插入标记，count_chars(body) <= limit 仍成立。
+        let content = "字".repeat(50);
+        for body in [
+            take_head_and_tail(&content, 20),
+            take_log_tail(&content, 20),
+        ] {
+            assert!(count_chars(&body) <= 20);
+            assert!(!body.contains("省略"));
+        }
+    }
+
+    #[test]
+    fn build_context_renders_head_and_tail_for_long_file() {
+        let content = (0..8)
+            .map(|i| format!("第{i}行") + &"字".repeat(47))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let result = build_context(
+            vec![head_tail_evidence("notes/long.md", ".md", &content)],
+            &head_tail_profile(100_000, 300),
+            ReportMode::Daily,
+        )
+        .expect("long file context");
+        assert_eq!(result.decisions[0].decision.action, ContextAction::Compress);
+        assert!(result.decisions[0].decision.truncated);
+        assert!(result.decisions[0].decision.output_chars <= 300);
+        assert!(result.content.contains("第0行"));
+        assert!(result.content.contains("第7行"));
+        assert!(result.content.contains("省略中部"));
     }
 
     #[test]
