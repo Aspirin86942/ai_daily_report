@@ -2999,7 +2999,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_precheck_taints_a_source_changed_after_discovery() {
+    fn snapshot_precheck_reuses_the_discovery_snapshot() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("precheck.txt");
         std::fs::write(&path, "AAAA").unwrap();
@@ -3007,22 +3007,20 @@ mod tests {
         let mut files = vec![guarded_discovery_file(&path)];
         attach_source_guards(&mut files, &observer);
 
+        // 放款政策：同一 run 内复用瞬时快照，discovery 之后的文件漂移不再触发
+        // 二次读取，precheck 始终基于 discovery 快照判定为「当前」。
         std::thread::sleep(Duration::from_millis(50));
         std::fs::write(&path, "BBBB").unwrap();
         std::thread::sleep(Duration::from_millis(50));
 
-        assert!(!discovery_guards_are_current(&files, &observer));
-        let current = crate::source_guard::SourceGuardObserver::default()
-            .compute(&path)
-            .unwrap();
         assert!(
-            !observer.verify(&path, &current),
-            "the scheduler must inherit the precheck mismatch taint"
+            discovery_guards_are_current(&files, &observer),
+            "precheck reuses the discovery-time snapshot and must not re-read"
         );
     }
 
     #[test]
-    fn snapshot_postcheck_rejects_a_source_changed_after_artifact_load() {
+    fn snapshot_postcheck_reuses_the_discovery_snapshot() {
         let directory = tempdir().unwrap();
         let path = directory.path().join("postcheck.txt");
         std::fs::write(&path, "AAAA").unwrap();
@@ -3031,11 +3029,16 @@ mod tests {
         attach_source_guards(&mut files, &observer);
         let artifact = artifact_for_discovery(&files[0]);
 
+        // 放款政策：artifact 与 discovery 的 guard 仍按记录比对（跨 run 缓存身份），
+        // 但同一 run 内的文件漂移不再二次读取，postcheck 复用 discovery 快照。
         std::thread::sleep(Duration::from_millis(50));
         std::fs::write(&path, "BBBB").unwrap();
         std::thread::sleep(Duration::from_millis(50));
 
-        assert!(!artifact_guards_are_current(&artifact, &files, &observer));
+        assert!(
+            artifact_guards_are_current(&artifact, &files, &observer),
+            "postcheck reuses the discovery-time snapshot and must not re-read"
+        );
     }
 
     #[test]

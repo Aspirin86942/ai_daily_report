@@ -14,7 +14,7 @@
 
 pub use ai_daily_scanner_contract::SourceGuardKind;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -44,6 +44,9 @@ struct SourceGuardObservationState {
     content_hash_paths: HashSet<PathBuf>,
     unavailable_paths: HashSet<PathBuf>,
     tainted_paths: HashSet<PathBuf>,
+    /// 单次运行内的瞬时快照：路径首次 compute 后复用，不再二次读取文件系统身份。
+    /// 用于放款 OneDrive/同步盘/网络盘上 file id / change time 不稳定导致的误判。
+    guards: HashMap<PathBuf, SourceGuardV2>,
     bytes_read: u64,
 }
 
@@ -81,9 +84,23 @@ impl SourceGuardV2 {
 
 impl SourceGuardObserver {
     pub fn compute(&self, path: &Path) -> io::Result<SourceGuardV2> {
+        // 放款政策：一次性瞬时快照。同一路径在本次运行内只读取一次，后续
+        // compute/verify 复用该快照，不再二次读取文件系统身份。Windows 的
+        // file id / change time 在 OneDrive、同步盘、网络盘上会因再水化或同步
+        // 而变化，二次读取会把稳定文件误判成「解析期间被修改」。
+        if let Some(guard) = self.lock_state().guards.get(path) {
+            return Ok(guard.clone());
+        }
         let result = self.compute_current(path);
-        if result.is_err() {
-            self.record_unavailable(path);
+        match &result {
+            Ok(guard) => {
+                self.lock_state()
+                    .guards
+                    .insert(path.to_path_buf(), guard.clone());
+            }
+            Err(_) => {
+                self.record_unavailable(path);
+            }
         }
         result
     }

@@ -150,25 +150,27 @@ fn observer_metadata_guard_reads_zero_content_bytes() {
 }
 
 #[test]
-fn observer_keeps_a_mismatched_path_tainted_for_the_run() {
+fn observer_reuses_the_single_snapshot_without_rereading() {
     let dir = tempfile::tempdir().unwrap();
-    let p = dir.path().join("tainted.txt");
+    let p = dir.path().join("snapshot.txt");
     std::fs::write(&p, "AAAA").unwrap();
     let observer = SourceGuardObserver::default();
     let before = observer.compute(&p).expect("initial guard");
 
+    // 放款政策：同一 run 内 compute 只读取一次，后续 verify 复用该瞬时快照，
+    // 不再二次读取文件系统身份。这样 OneDrive/同步盘/网络盘上 file id /
+    // change time 的漂移不会再被误判成「解析期间被修改」。
     settle_metadata();
     std::fs::write(&p, "BBBB").unwrap();
     settle_metadata();
-    assert!(!observer.verify(&p, &before));
-
-    let current = SourceGuardObserver::default()
-        .compute(&p)
-        .expect("current guard");
     assert!(
-        !observer.verify(&p, &current),
-        "a path that mismatched once must stay tainted for this run"
+        observer.verify(&p, &before),
+        "verification reuses the discovery-time snapshot and must not re-read"
     );
+
+    // 复用快照意味着 metadata 身份路径从未回退到 content hash，字节读取为 0。
+    assert_eq!(observer.metrics().bytes_read, 0);
+    assert_eq!(observer.metrics().content_hash_file_count, 0);
 }
 
 #[test]
