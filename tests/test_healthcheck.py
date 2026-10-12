@@ -20,6 +20,8 @@ def _write_templates(root: Path) -> None:
         "monthly_prompt.md",
         "weekly_template.md",
         "monthly_template.md",
+        "evidence_summary_prompt.md",
+        "evidence_report_template.md",
     ):
         (templates_dir / name).write_text(f"# {name}\n", encoding="utf-8")
 

@@ -152,6 +152,24 @@ def test_llm_config_exposes_base_url_leaf(tmp_path):
     assert cfg.llm_config["base_url"] == "https://api.deepseek-custom.example"
 
 
+def test_complete_scanner_section_replaces_old_lists_and_preserves_other_sections(tmp_path):
+    (tmp_path / "settings.yaml").write_text(
+        "paths:\n  work_dir: D:/audit/work\nscanner:\n  allowed_extensions: ['.json', '.log']\n"
+        "  ignored_patterns: ['*old*']\n  max_workers: 9\n", encoding="utf-8")
+    example_path = Path(__file__).parents[1] / "config/settings.example.yaml"
+    section = yaml.safe_load(example_path.read_text(encoding="utf-8"))["scanner"]
+    (tmp_path / "settings.windows.yaml").write_text(
+        yaml.safe_dump({"scanner": section}), encoding="utf-8")
+    config = object.__new__(Config)
+    config._settings = Config._build_settings(tmp_path, system_name="Windows")
+    effective = config.scanner_settings()
+    assert set(effective["allowed_extensions"]) == {".docx", ".xlsx", ".xls", ".pptx", ".pdf", ".txt", ".md", ".csv"}
+    assert len(effective["allowed_extensions"]) == 8
+    assert effective["ignored_patterns"] == section["ignored_patterns"]
+    assert effective["max_workers"] == 4
+    assert config.work_dir == Path("D:/audit/work")
+
+
 def test_llm_config_base_url_defaults_to_empty_string(tmp_path):
     """旧本机配置缺省 base_url 时，llm_config 应回退空串（客户端用默认）。"""
     config_dir = tmp_path / "config"

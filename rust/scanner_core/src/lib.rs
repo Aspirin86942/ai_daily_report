@@ -23,6 +23,7 @@ pub mod scheduler;
 pub mod scheduler_adapter;
 pub mod session;
 pub mod source_guard;
+pub mod sources;
 pub mod store;
 
 #[cfg(windows)]

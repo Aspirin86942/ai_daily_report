@@ -28,6 +28,7 @@ use crate::store::ScannerStore;
 pub struct ContextResult {
     pub envelope: ContextEnvelope,
     pub evidence: Option<ScannerEvidence>,
+    pub sources: Vec<crate::sources::ScanSource>,
 }
 
 /// Stable configuration owned by a scanner instance rather than every run.
@@ -45,6 +46,8 @@ pub struct ScanRequest {
     pub report_mode: ReportMode,
     pub start_date: String,
     pub end_date: String,
+    pub window_start_utc: Option<String>,
+    pub window_end_utc: Option<String>,
     pub compression_profile: Option<CompressionProfile>,
 }
 
@@ -78,6 +81,7 @@ pub struct Scanner {
 pub(crate) struct ScannerResources {
     pub(crate) store: ScannerStore,
     pub(crate) worker_pools: ScannerWorkerPools,
+    pub(crate) sources: Vec<crate::sources::ScanSource>,
 }
 
 #[derive(Default)]
@@ -162,6 +166,7 @@ impl Scanner {
             resources: Mutex::new(ScannerResources {
                 store,
                 worker_pools: ScannerWorkerPools::default(),
+                sources: Vec::new(),
             }),
         })
     }
@@ -197,6 +202,7 @@ impl Scanner {
             value: ContextResult {
                 envelope: operation.value,
                 evidence,
+                sources: std::mem::take(&mut resources.sources),
             },
             exit_code: operation.exit_code,
         })
@@ -232,6 +238,8 @@ impl Scanner {
             work_dir: self.config.work_dir.clone(),
             start_date: request.start_date.clone(),
             end_date: request.end_date.clone(),
+            window_start_utc: request.window_start_utc.clone(),
+            window_end_utc: request.window_end_utc.clone(),
             report_mode: request.report_mode,
             compression_profile: Nullable(request.compression_profile),
             scan_db_path: self.config.scan_db_path.clone(),
@@ -262,6 +270,8 @@ impl ScanRequest {
             report_mode: request.report_mode,
             start_date: request.start_date.clone(),
             end_date: request.end_date.clone(),
+            window_start_utc: request.window_start_utc.clone(),
+            window_end_utc: request.window_end_utc.clone(),
             compression_profile: request.compression_profile.0,
         }
     }

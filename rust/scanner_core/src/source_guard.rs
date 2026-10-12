@@ -18,6 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Instant;
 
 /// Domain separator for the canonical guard hash. Everything hashed after this
 /// separator is a fixed field order of the identity.
@@ -56,6 +57,8 @@ struct SourceGuardObservationState {
 #[derive(Debug, Clone, Default)]
 pub struct SourceGuardObserver {
     state: Arc<Mutex<SourceGuardObservationState>>,
+    strict_verification: bool,
+    hash_limits: Option<(u64, Instant)>,
 }
 
 impl SourceGuardV2 {
@@ -83,6 +86,22 @@ impl SourceGuardV2 {
 }
 
 impl SourceGuardObserver {
+    /// Evidence reports must re-observe the actual file before accepting cached
+    /// or newly parsed content. Legacy runs retain their original guard policy.
+    pub fn strict() -> Self {
+        Self {
+            strict_verification: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn strict_with_limits(max_bytes: u64, deadline: Instant) -> Self {
+        Self {
+            hash_limits: Some((max_bytes, deadline)),
+            ..Self::strict()
+        }
+    }
+
     pub fn compute(&self, path: &Path) -> io::Result<SourceGuardV2> {
         // 放款政策：一次性瞬时快照。同一路径在本次运行内只读取一次，后续
         // compute/verify 复用该快照，不再二次读取文件系统身份。Windows 的
@@ -109,7 +128,12 @@ impl SourceGuardObserver {
         if self.is_tainted(path) {
             return false;
         }
-        let matches = self.compute(path).is_ok_and(|actual| actual == *expected);
+        let actual = if self.strict_verification {
+            self.compute_current(path)
+        } else {
+            self.compute(path)
+        };
+        let matches = actual.is_ok_and(|actual| actual == *expected);
         if !matches {
             self.lock_state().tainted_paths.insert(path.to_path_buf());
         }
@@ -149,6 +173,15 @@ impl SourceGuardObserver {
     }
 
     fn observed_full_content_sha256(&self, path: &Path) -> Option<String> {
+        if let Some((max_bytes, deadline)) = self.hash_limits {
+            if Instant::now() >= deadline
+                || std::fs::metadata(path).ok()?.len() > max_bytes
+                || !ai_daily_discovery::local_candidate_is_readable(path, path.parent()?)
+            {
+                self.record_unavailable(path);
+                return None;
+            }
+        }
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(_) => {
@@ -170,10 +203,22 @@ impl SourceGuardObserver {
         let mut bytes_read = 0_u64;
         let mut buffer = [0u8; 64 * 1024];
         let hash = loop {
+            if self
+                .hash_limits
+                .is_some_and(|(_, deadline)| Instant::now() >= deadline)
+            {
+                break None;
+            }
             match reader.read(&mut buffer) {
                 Ok(0) => break Some(hex(&hasher.finalize())),
                 Ok(read) => {
                     bytes_read = bytes_read.saturating_add(read as u64);
+                    if self
+                        .hash_limits
+                        .is_some_and(|(max_bytes, _)| bytes_read > max_bytes)
+                    {
+                        break None;
+                    }
                     hasher.update(&buffer[..read]);
                 }
                 Err(_) => break None,
@@ -207,6 +252,29 @@ impl SourceGuardObserver {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod strict_report_tests {
+    use super::*;
+
+    #[test]
+    fn strict_verification_observes_replacement_with_preserved_mtime() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.md");
+        std::fs::write(&path, "first").unwrap();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let observer = SourceGuardObserver::strict();
+        let guard = observer.compute(&path).unwrap();
+        assert!(observer.verify(&path, &guard));
+        std::fs::write(&path, "other").unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(mtime))
+            .unwrap();
+        drop(file);
+        assert!(!observer.verify(&path, &guard));
+        assert!(observer.is_tainted(&path));
     }
 }
 

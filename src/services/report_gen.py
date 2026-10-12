@@ -5,9 +5,13 @@
 
 from pathlib import Path
 from datetime import datetime
+import html
+import re
 from jinja2 import Environment, FileSystemLoader
 
 from ..models.schemas import DailyReportData, WeeklyReportData, MonthlyReportData
+from ..models.evidence_report import EvidenceDailyReportData
+from zoneinfo import ZoneInfo
 from ..core.config import config
 from ..core.logger import setup_logger
 
@@ -31,8 +35,11 @@ class ReportGenerator:
         # 初始化 Jinja2 环境
         template_dir = Path(__file__).parent.parent.parent / "templates"
         self.env = Environment(loader=FileSystemLoader(str(template_dir)))
+        self.env.filters["shanghai_time"] = lambda value: datetime.fromisoformat(value).astimezone(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S +08:00")
+        self.env.filters["evidence_text"] = lambda value: re.sub(r"([\\`*_{}\[\]()#+!|>])", r"\\\1",
+            html.escape(str(value), quote=False).replace("\r", " ").replace("\n", " "))
 
-    def render_markdown(self, report: DailyReportData) -> str:
+    def render_markdown(self, report: DailyReportData | EvidenceDailyReportData) -> str:
         """渲染日报 Markdown
 
         Args:
@@ -41,6 +48,9 @@ class ReportGenerator:
         Returns:
             Markdown 文本
         """
+        if isinstance(report, EvidenceDailyReportData):
+            template = self.env.get_template("evidence_report_template.md")
+            return template.render(report=report).replace("\r\n", "\n").rstrip() + "\n"
         template = self.env.get_template("report_template.md")
         return template.render(report=report)
 

@@ -19,10 +19,51 @@ llm:
   base_url: "https://api.deepseek.com"
   temperature: 0.2
   # 保留足够 token 预算，避免日报生成被截断。
-  max_tokens: 8192
+  max_tokens: 2048
   max_retries: 3
+  # 单次实际请求的超时；SDK 自动重试关闭，由应用计数。
+  request_timeout_seconds: 120
+  response_format: "json_object"
+  max_request_utf8_bytes: 16000
+  max_sources_per_batch: 8
+  max_batches: 8
+  # 公司网关的模型能力经联调确认后填写；空值禁止发送业务正文。
+  context_window_tokens: null
+  verified_max_output_tokens: null
+
+report:
+  scope_id: "personal_work"
+  root_alias: "work"
+  timezone: "Asia/Shanghai"
+  default_target: "previous_calendar_day"
+  notes_dir: "data/report_notes"
+
+recovery:
+  missed_days_policy: "latest_due_day_with_gap_notice"
+  max_calls_per_run: 12
+  max_calls_per_calendar_day: 30
+  run_budget_seconds: 900
+  lock_wait_seconds: 5
+
+retention:
+  input_snapshot_days: 14
+  terminal_run_days: 30
+  snapshot_max_mib: 512
+
+schedule:
+  task_name: "AI Daily Report"
+  local_time: "09:00"
+  logon_catchup: true
+  wake_to_run: false
+  allow_on_battery: true
+  stop_on_battery: false
+  restart_count: 2
+  restart_interval_minutes: 15
+  execution_limit_minutes: 20
 
 scanner:
+  # 整节替换旧 scanner 配置，避免文件类型及排除列表被追加合并。
+  dynaconf_merge: false
   index_db_path: "data/db/scan_index_v3.sqlite3"
   office_worker_path: "rust/target/release/ai-daily-office-parser"
   allowed_extensions:
@@ -34,12 +75,16 @@ scanner:
     - ".md"
     - ".docx"
     - ".csv"
-    - ".json"
-    - ".log"
   ignored_patterns:
     - "~$*"
     - "*.tmp"
-  excluded_dirs: []
+    - ".env*"
+    - "*.key"
+    - "*.pem"
+  # 单一目录名排除所有层级的同名目录；路径按扫描根目录解释。
+  excluded_dirs: [".git", ".venv", ".uv", "node_modules", "target", "__pycache__"]
+  follow_symlinks: false
+  cloud_files_policy: "local_only"
   discovery_timeout_seconds: 30
   # Backend/routing/fallback order are compiled Rust policy.
   fallback_after_timeout: false

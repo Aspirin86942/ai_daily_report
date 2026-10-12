@@ -2,13 +2,15 @@
 
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import List, Optional, Tuple
 
 from ..core.config import config
 from ..core.logger import setup_logger
-from ..models.schemas import DailyReportData, MonthlyReportData, WeeklyReportData
+from ..models.schemas import DailyReport, DailyReportData, MonthlyReportData, WeeklyReportData, parse_daily_report
+from .report_migrations import execute_schema_script, migrate_evidence_schema, prepare_migration
 
 logger = setup_logger()
 
@@ -19,17 +21,28 @@ class SQLiteStore:
     This store is the single storage entry for report persistence.
     """
 
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Optional[Path] = None, *, report_lock_held: bool = False):
         if db_path is None:
             db_path = config.db_dir / "reports.sqlite3"
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_schema()
+        if report_lock_held:
+            self._init_schema()
+        else:
+            from .report_runner.locking import ReportLock
+            with ReportLock(self.db_path):
+                self._init_schema()
 
-    def _get_conn(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_conn(self):
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
-        return conn
+        conn.execute("PRAGMA foreign_keys=ON")
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     @staticmethod
     def _get_table_columns(conn: sqlite3.Connection, table_name: str) -> set[str]:
@@ -44,7 +57,7 @@ class SQLiteStore:
     def _migrate_weekly_schema(self, conn: sqlite3.Connection) -> None:
         # 周报已从 overview 四段结构升级为七段正文；这里原地迁移列结构，
         # 同时保留 raw_json 作为真实来源，避免历史数据在迁移阶段被强制重写。
-        conn.executescript(
+        execute_schema_script(conn,
             """
             ALTER TABLE weekly_reports RENAME TO weekly_reports_legacy;
 
@@ -124,7 +137,9 @@ class SQLiteStore:
 
     def _init_schema(self) -> None:
         with self._get_conn() as conn:
-            conn.executescript(
+            conn.execute("BEGIN IMMEDIATE")
+            prepare_migration(conn, self.db_path)
+            execute_schema_script(conn,
                 """
                 CREATE TABLE IF NOT EXISTS daily_reports (
                     date TEXT PRIMARY KEY,
@@ -165,12 +180,9 @@ class SQLiteStore:
                 CREATE INDEX IF NOT EXISTS idx_daily_reports_date ON daily_reports(date);
                 """
             )
-            conn.commit()
-
             weekly_columns = self._get_table_columns(conn, "weekly_reports")
             if self._is_legacy_weekly_schema(weekly_columns):
                 self._migrate_weekly_schema(conn)
-                conn.commit()
 
             # Verify schema is up-to-date to catch stale tables from prior versions
             cols = self._get_table_columns(conn, "daily_reports")
@@ -181,6 +193,7 @@ class SQLiteStore:
                     f"daily_reports schema is outdated (columns: {sorted(actual)}). "
                     "Create a backup of the existing SQLite database before you review the schema and rebuild the file if needed."
                 )
+            migrate_evidence_schema(conn)
 
     @staticmethod
     def _to_json(value) -> str:
@@ -194,8 +207,13 @@ class SQLiteStore:
             return default
 
     def save_report(self, report: DailyReportData) -> Path:
+        if not isinstance(report, DailyReportData):
+            raise ValueError("EVIDENCE_REPORT_REQUIRES_RUN_PUBLICATION")
         payload = report.model_dump()
         with self._get_conn() as conn:
+            existing = conn.execute("SELECT schema_version FROM daily_reports WHERE date=?", (report.date,)).fetchone()
+            if existing is not None and existing[0] != 1:
+                raise ValueError("EVIDENCE_REPORT_REQUIRES_RUN_PUBLICATION")
             conn.execute(
                 """
                 INSERT INTO daily_reports (
@@ -220,7 +238,7 @@ class SQLiteStore:
             conn.commit()
         return self.db_path
 
-    def get_report(self, report_date: str) -> Optional[DailyReportData]:
+    def get_report(self, report_date: str) -> Optional[DailyReport]:
         with self._get_conn() as conn:
             row = conn.execute(
                 "SELECT raw_json FROM daily_reports WHERE date = ?",
@@ -230,9 +248,12 @@ class SQLiteStore:
             return None
 
         try:
-            return DailyReportData(**json.loads(row["raw_json"]))
+            report = parse_daily_report(json.loads(row["raw_json"]))
+            if report.date != report_date:
+                raise ValueError("report date differs from storage key")
+            return report
         except Exception as exc:
-            logger.warning("Failed to parse daily report %s: %s", report_date, exc)
+            logger.warning("Invalid daily report date=%s error=%s", report_date, type(exc).__name__)
             return None
 
     def get_yesterday_plan(self, target_date: Optional[datetime] = None) -> str:
@@ -240,21 +261,21 @@ class SQLiteStore:
             target_date = datetime.now()
         yesterday = (target_date - timedelta(days=1)).strftime("%Y-%m-%d")
         report = self.get_report(yesterday)
-        return report.next_plan if report else ""
+        return report.next_plan if isinstance(report, DailyReportData) else ""
 
-    def get_month_reports(self, year_month: str) -> List[DailyReportData]:
+    def get_month_reports(self, year_month: str) -> List[DailyReport]:
         with self._get_conn() as conn:
             rows = conn.execute(
                 "SELECT raw_json FROM daily_reports WHERE date LIKE ? ORDER BY date",
                 (f"{year_month}-%",),
             ).fetchall()
 
-        reports: List[DailyReportData] = []
+        reports: List[DailyReport] = []
         for row in rows:
             try:
-                reports.append(DailyReportData(**json.loads(row["raw_json"])))
+                reports.append(parse_daily_report(json.loads(row["raw_json"])))
             except Exception as exc:
-                logger.warning("Failed to parse daily report row: %s", exc)
+                logger.warning("Invalid daily report row error=%s", type(exc).__name__)
         return reports
 
     def list_all_reports(self) -> List[str]:
@@ -268,7 +289,7 @@ class SQLiteStore:
         self,
         start_date: date,
         end_date: date,
-    ) -> Tuple[List[DailyReportData], List[str]]:
+    ) -> Tuple[List[DailyReport], List[str]]:
         with self._get_conn() as conn:
             rows = conn.execute(
                 """
@@ -279,32 +300,34 @@ class SQLiteStore:
                 """,
                 (start_date.isoformat(), end_date.isoformat()),
             ).fetchall()
+            activation = conn.execute("SELECT value FROM report_metadata WHERE key='first_target_date'").fetchone()
 
-        report_by_date: dict[str, DailyReportData] = {}
+        report_by_date: dict[str, DailyReport] = {}
         for row in rows:
             try:
-                parsed = DailyReportData(**json.loads(row["raw_json"]))
+                parsed = parse_daily_report(json.loads(row["raw_json"]))
+                if parsed.date != row["date"]:
+                    raise ValueError("report date differs from storage key")
                 report_by_date[row["date"]] = parsed
             except Exception as exc:
-                logger.warning("Failed to parse report %s: %s", row["date"], exc)
+                logger.warning("Invalid report date=%s error=%s", row["date"], type(exc).__name__)
 
-        reports: List[DailyReportData] = []
+        reports: List[DailyReport] = []
         missing_dates: List[str] = []
         current = start_date
         while current <= end_date:
-            if current.weekday() < 5:
-                date_str = current.isoformat()
-                if date_str in report_by_date:
-                    reports.append(report_by_date[date_str])
-                else:
-                    missing_dates.append(date_str)
+            date_str = current.isoformat()
+            if date_str in report_by_date:
+                reports.append(report_by_date[date_str])
+            elif (activation and date_str >= activation[0]) or (not activation and current.weekday() < 5):
+                missing_dates.append(date_str)
             current += timedelta(days=1)
 
         return reports, missing_dates
 
     def get_week_reports(
         self, year: int, week: int
-    ) -> Tuple[List[DailyReportData], List[str]]:
+    ) -> Tuple[List[DailyReport], List[str]]:
         monday = date.fromisocalendar(year, week, 1)
         sunday = date.fromisocalendar(year, week, 7)
         return self.get_reports_in_range(monday, sunday)

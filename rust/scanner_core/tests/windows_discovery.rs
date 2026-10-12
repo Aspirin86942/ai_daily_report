@@ -96,6 +96,9 @@ fn discovery_filters_and_preserves_bootstrap_identity_and_source_version() {
         work_dir: work_dir.clone(),
         start_date: today,
         end_date: today,
+        window_start_utc: None,
+        window_end_utc: None,
+        follow_symlinks: false,
         allowed_extensions: vec![".md".to_string(), ".txt".to_string()],
         ignored_patterns: vec!["~$*".to_string()],
         excluded_dirs: vec![PathBuf::from("Excluded")],
@@ -152,6 +155,9 @@ fn relative_exclusions_are_resolved_from_the_work_dir() {
         work_dir,
         start_date: today,
         end_date: today,
+        window_start_utc: None,
+        window_end_utc: None,
+        follow_symlinks: false,
         allowed_extensions: vec![".md".to_string()],
         ignored_patterns: Vec::new(),
         excluded_dirs: vec![PathBuf::from(unique_name)],
@@ -179,6 +185,9 @@ fn discovery_deduplicates_resolved_aliases() {
         work_dir,
         start_date: today,
         end_date: today,
+        window_start_utc: None,
+        window_end_utc: None,
+        follow_symlinks: false,
         allowed_extensions: vec![".md".to_string()],
         ignored_patterns: Vec::new(),
         excluded_dirs: Vec::new(),
@@ -189,7 +198,7 @@ fn discovery_deduplicates_resolved_aliases() {
     assert_eq!(discovery.files.len(), 1);
     assert!(discovery.files[0].path.ends_with("a-target.md"));
     assert_eq!(discovery.issues.len(), 1);
-    assert_eq!(discovery.issues[0].kind, DiscoveryIssueKind::Alias);
+    assert_eq!(discovery.issues[0].kind, DiscoveryIssueKind::LinkExcluded);
     assert!(discovery.issues[0]
         .path
         .as_deref()
@@ -290,6 +299,9 @@ fn windows_long_path_discovery_returns_paths_without_verbatim_prefix() {
         work_dir: verbatim_root.clone(),
         start_date: today,
         end_date: today,
+        window_start_utc: None,
+        window_end_utc: None,
+        follow_symlinks: false,
         allowed_extensions: vec![".txt".to_string()],
         ignored_patterns: Vec::new(),
         excluded_dirs: Vec::new(),

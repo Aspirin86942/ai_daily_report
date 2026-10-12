@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import importlib
+import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from .config import Config, UnknownScannerSettingsError, config
 from ..services.native_scanner import NativeScanner, NativeScannerError
@@ -18,6 +20,8 @@ TEMPLATE_FILES: tuple[str, ...] = (
     "monthly_prompt.md",
     "weekly_template.md",
     "monthly_template.md",
+    "evidence_summary_prompt.md",
+    "evidence_report_template.md",
 )
 
 REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
@@ -33,6 +37,7 @@ REQUIRED_DEPENDENCIES: list[tuple[str, str]] = [
     ("sharepoint-to-text", "sharepoint2text"),
     ("pdfplumber", "pdfplumber"),
     ("jinja2", "jinja2"),
+    ("tzdata", "tzdata"),
 ]
 
 STRICT_RUST_PACKAGE_CHECKS: tuple[str, ...] = (
@@ -136,6 +141,8 @@ def _resolve_provider_key(cfg: Any, provider: str) -> tuple[str, str]:
             getattr(cfg, "openai_api_key", "")
         ), "OPENAI_API_KEY"
     if provider == "deepseek":
+        if urlsplit(getattr(cfg, "llm_config", {}).get("base_url", "")).hostname == "ai-gateway.fsdev.cn":
+            return _normalize_optional_text(os.environ.get("DEEPSEEK_API_KEY", "")), "DEEPSEEK_API_KEY"
         return _normalize_optional_text(
             getattr(cfg, "deepseek_api_key", "")
         ), "DEEPSEEK_API_KEY"
@@ -167,6 +174,12 @@ def _append_runtime_config_checks(
     config_dir = Path(getattr(cfg, "config_dir", project_root / "config"))
     installed_mode = bool(getattr(cfg, "installed_mode", False))
     scanner_settings = cfg.scanner_settings()
+    if isinstance(cfg, Config):
+        # Accessing typed sections validates names and bounds without reading credentials.
+        for name in ("report_settings", "model_request_settings", "recovery_settings", "retention_settings", "schedule_settings"):
+            getattr(cfg, name)
+        if cfg.model_request_settings.context_window_tokens is None or cfg.model_request_settings.verified_max_output_tokens is None:
+            result.warnings.append("网关上下文长度或输出上限尚未确认，业务模型调用保持关闭")
     result.info["运行模式"] = "installed" if installed_mode else "source"
     if installed_mode:
         result.info["安装根目录"] = str(getattr(cfg, "install_root"))

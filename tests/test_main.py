@@ -174,10 +174,12 @@ def test_main_returns_one_for_unexpected_exception(monkeypatch):
 
     printed = _patch_console(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["main.py", "list"])
+    monkeypatch.setattr(sqlite_store_module, "SQLiteStore", lambda: object())
     monkeypatch.setattr(list_cli, "list_reports", fail)
 
     assert main.main() == 1
-    assert any("unexpected failure" in text for text in printed)
+    assert any("RuntimeError" in text for text in printed)
+    assert all("unexpected failure" not in text for text in printed)
 
 
 def test_main_returns_130_for_keyboard_interrupt(monkeypatch):
@@ -186,6 +188,7 @@ def test_main_returns_130_for_keyboard_interrupt(monkeypatch):
 
     printed = _patch_console(monkeypatch)
     monkeypatch.setattr(sys, "argv", ["main.py", "list"])
+    monkeypatch.setattr(sqlite_store_module, "SQLiteStore", lambda: object())
     monkeypatch.setattr(list_cli, "list_reports", interrupt)
 
     assert main.main() == 130
@@ -310,7 +313,10 @@ def test_cli_doctor_redacts_bootstrap_exception_text(tmp_path):
     assert fake_secret not in combined_output
 
 
-def test_cli_invalid_week_exits_nonzero():
+def test_cli_invalid_week_exits_nonzero(tmp_path):
+    env = os.environ.copy()
+    env["DAILY_REPORT_PATHS__DB_DIR"] = str(tmp_path / "db")
+    env["DAILY_REPORT_PATHS__REPORTS_DIR"] = str(tmp_path / "reports")
     completed = subprocess.run(
         [
             sys.executable,
@@ -323,6 +329,7 @@ def test_cli_invalid_week_exits_nonzero():
         capture_output=True,
         text=True,
         encoding="utf-8",
+        env=env,
         check=False,
     )
 

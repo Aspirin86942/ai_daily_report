@@ -2,6 +2,10 @@ from enum import Enum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .evidence_report import (
+    CoverageGap, EvidenceDailyReportData, EvidenceItem, EvidenceSummaryData, ReportSource,
+)
+
 
 class ReportMode(str, Enum):
     daily = "daily"
@@ -20,6 +24,16 @@ class DailyReportData(BaseModel):
     completed_work: str = Field(description="今日工作完成内容，使用自然段，不分条")
     work_summary: str = Field(description="今日工作小结，使用自然段")
     next_plan: str = Field(description="明日工作计划，使用自然段，不分条")
+
+
+DailyReport = DailyReportData | EvidenceDailyReportData
+
+
+def parse_daily_report(payload: dict) -> DailyReport:
+    """Read old diaries unchanged; unknown new schema versions fail validation."""
+    if payload.get("schema_version") == 2:
+        return EvidenceDailyReportData.model_validate(payload)
+    return DailyReportData.model_validate(payload)
 
 
 class WeeklyReportData(BaseModel):

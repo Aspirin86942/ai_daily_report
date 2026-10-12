@@ -7,15 +7,17 @@ import importlib.machinery
 import importlib.util
 import sys
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, Protocol
+from zoneinfo import ZoneInfo
 
 from ..models.scanner_contract import (
     ContextEnvelope,
     DoctorResponse,
     ScannerEvidence,
 )
+from ..models.scan_sources import ScanSource
 
 ReportMode = Literal["daily", "weekly", "monthly"]
 
@@ -26,22 +28,44 @@ class ScanRequest:
     start_date: date
     end_date: date
     compression_profile: str | None = None
+    window_start_utc: datetime | None = None
+    window_end_utc: datetime | None = None
 
     def to_native(self) -> dict[str, object]:
         if self.start_date > self.end_date:
             raise ValueError("start_date must be earlier than or equal to end_date")
-        return {
+        result: dict[str, object] = {
             "report_mode": self.report_mode,
             "start_date": self.start_date.isoformat(),
             "end_date": self.end_date.isoformat(),
             "compression_profile": self.compression_profile,
         }
+        if (self.window_start_utc is None) != (self.window_end_utc is None):
+            raise ValueError("UTC window boundaries must be supplied together")
+        if self.window_start_utc is not None and self.window_end_utc is not None:
+            if any(value.utcoffset() != timedelta(0) for value in (
+                self.window_start_utc, self.window_end_utc
+            )):
+                raise ValueError("scan window boundaries must be UTC-aware")
+            if self.window_start_utc >= self.window_end_utc:
+                raise ValueError("scan window must have positive duration")
+            zone = ZoneInfo("Asia/Shanghai")
+            expected_start = datetime.combine(self.start_date, datetime.min.time(), zone)
+            expected_end = datetime.combine(self.end_date + timedelta(days=1), datetime.min.time(), zone)
+            if self.window_start_utc != expected_start or self.window_end_utc != expected_end:
+                raise ValueError("scan window must match the displayed Shanghai date range")
+            result.update(
+                window_start_utc=self.window_start_utc.isoformat(),
+                window_end_utc=self.window_end_utc.isoformat(),
+            )
+        return result
 
 
 @dataclass(frozen=True, slots=True)
 class ScanResult:
     envelope: ContextEnvelope
     evidence: ScannerEvidence | None
+    sources: tuple[ScanSource, ...] = ()
 
     @classmethod
     def from_native(cls, value: object) -> "ScanResult":
@@ -65,7 +89,10 @@ class ScanResult:
                     "native result does not contain matching run evidence",
                     False,
                 )
-        return cls(envelope=envelope, evidence=evidence)
+        sources = tuple(ScanSource.model_validate(item) for item in value.get("sources", []))
+        if len({source.source_id for source in sources}) != len(sources):
+            raise ValueError("native scanner returned duplicate source identities")
+        return cls(envelope=envelope, evidence=evidence, sources=sources)
 
 
 class NativeScannerError(RuntimeError):
@@ -118,7 +145,11 @@ class NativeScanner:
     def build_context(self, request: ScanRequest) -> ScanResult:
         try:
             value = self._native_object().build_context(request.to_native())
-            return ScanResult.from_native(value)
+            result = ScanResult.from_native(value)
+            if (request.window_start_utc is not None and result.envelope.status != "error"
+                    and len(result.sources) != result.envelope.summary.source_file_count):
+                raise NativeScannerError("NATIVE_SOURCES_INCOMPLETE", "structured source count does not match discovery", False)
+            return result
         except NativeScannerError:
             raise
         except (TypeError, ValueError) as exc:

@@ -484,6 +484,7 @@ pub struct BudgetedScanOutcome {
     pub terminal_intent: TerminalIntent,
     pub inventory: Vec<InventoryRecord>,
     pub file_results: Vec<FileResultRecord>,
+    pub sources: Vec<crate::sources::ScanSource>,
     /// Committed successful parse-cache receipts (already written by the CachePort).
     pub parse_cache_receipts: Vec<CacheWriteRecord>,
     /// Committed successful classification-cache receipts.
@@ -609,6 +610,7 @@ impl BudgetedContextScheduler {
                 terminal_intent: TerminalIntent::Error,
                 inventory: Vec::new(),
                 file_results: Vec::new(),
+                sources: Vec::new(),
                 parse_cache_receipts: Vec::new(),
                 classification_cache_receipts: Vec::new(),
                 classifications: std::collections::BTreeMap::new(),
@@ -875,6 +877,7 @@ impl BudgetedContextScheduler {
             &parse_outputs,
         )?;
         let render_started = self.clock.now_ms();
+        let sources = crate::sources::collect_sources(&evidence, &input.discovery, &profile);
         let rendered = match build_context(evidence, &profile.context, profile.report_mode) {
             Ok(rendered) => rendered,
             Err(message) => {
@@ -1035,6 +1038,7 @@ impl BudgetedContextScheduler {
             terminal_intent,
             inventory,
             file_results,
+            sources,
             parse_cache_receipts: parse_outputs.parse_cache_receipts,
             classification_cache_receipts: parse_outputs.classification_cache_receipts,
             classifications,
@@ -2534,6 +2538,7 @@ fn internal_error_outcome(
         terminal_intent: TerminalIntent::Error,
         inventory: Vec::new(),
         file_results: Vec::new(),
+        sources: Vec::new(),
         parse_cache_receipts: parse_outputs.parse_cache_receipts,
         classification_cache_receipts: parse_outputs.classification_cache_receipts,
         classifications: std::collections::BTreeMap::new(),

@@ -105,8 +105,12 @@
               "profile_name": {
                 "const": "daily_balanced_v1"
               },
-              "global_max_chars": { "const": 500000 },
-              "per_file_max_chars": { "const": 100000 }
+              "global_max_chars": {
+                "const": 500000
+              },
+              "per_file_max_chars": {
+                "const": 100000
+              }
             }
           }
         }
@@ -127,8 +131,12 @@
               "profile_name": {
                 "const": "weekly_balanced_v1"
               },
-              "global_max_chars": { "const": 500000 },
-              "per_file_max_chars": { "const": 100000 }
+              "global_max_chars": {
+                "const": 500000
+              },
+              "per_file_max_chars": {
+                "const": 100000
+              }
             }
           }
         }
@@ -149,8 +157,12 @@
               "profile_name": {
                 "const": "monthly_balanced_v1"
               },
-              "global_max_chars": { "const": 500000 },
-              "per_file_max_chars": { "const": 100000 }
+              "global_max_chars": {
+                "const": 500000
+              },
+              "per_file_max_chars": {
+                "const": 100000
+              }
             }
           }
         }
@@ -191,7 +203,9 @@
       "required": [
         "allowed_extensions",
         "ignored_patterns",
-        "excluded_dirs"
+        "excluded_dirs",
+        "follow_symlinks",
+        "cloud_files_policy"
       ],
       "properties": {
         "allowed_extensions": {
@@ -202,6 +216,12 @@
         },
         "excluded_dirs": {
           "$ref": "#/$defs/stringArray"
+        },
+        "follow_symlinks": {
+          "type": "boolean"
+        },
+        "cloud_files_policy": {
+          "const": "local_only"
         }
       }
     },

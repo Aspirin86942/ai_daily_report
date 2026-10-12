@@ -56,6 +56,10 @@
     {
       "file": "response-partial.json",
       "schema": "context-envelope-v1.schema.json"
+    },
+    {
+      "file": "request-utc-window.json",
+      "schema": "build-context-request-v1.schema.json"
     }
   ]
 }

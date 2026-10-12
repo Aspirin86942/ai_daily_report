@@ -8,6 +8,15 @@ from typing import Any, Dict
 
 from dynaconf import Dynaconf
 
+from ..models.report_settings import (
+    ModelRequestSettings,
+    RecoverySettings,
+    ReportSettings,
+    RetentionSettings,
+    ScheduleSettings,
+    SettingsModel,
+)
+
 DEFAULT_OFFICE_WORKER_PATH = "rust/target/release/ai-daily-office-parser"
 DEFAULT_INDEX_DB_PATH = "data/db/scan_index_v3.sqlite3"
 
@@ -235,7 +244,50 @@ class Config:
             "base_url": str(
                 getattr(self._settings.llm, "base_url", "") or ""
             ).strip(),
+            **self.model_request_settings.model_dump(),
         }
+
+    def _report_section(self, name: str, model: type[SettingsModel]) -> SettingsModel:
+        section = getattr(self._settings, name, None)
+        if section is None:
+            values = {}
+        elif isinstance(section, Mapping):
+            values = dict(section)
+        elif hasattr(section, "to_dict"):
+            values = section.to_dict()
+        else:
+            values = vars(section)
+        return model.model_validate({str(key).lower(): value for key, value in values.items()})
+
+    @property
+    def report_settings(self) -> ReportSettings:
+        return self._report_section("report", ReportSettings)
+
+    @property
+    def recovery_settings(self) -> RecoverySettings:
+        return self._report_section("recovery", RecoverySettings)
+
+    @property
+    def retention_settings(self) -> RetentionSettings:
+        return self._report_section("retention", RetentionSettings)
+
+    @property
+    def schedule_settings(self) -> ScheduleSettings:
+        return self._report_section("schedule", ScheduleSettings)
+
+    @property
+    def model_request_settings(self) -> ModelRequestSettings:
+        section = getattr(self._settings, "llm", None)
+        if isinstance(section, Mapping):
+            values = {str(key).lower(): value for key, value in section.items()
+                      if str(key).lower() in ModelRequestSettings.model_fields}
+            return ModelRequestSettings.model_validate(values)
+        values = {
+            key: getattr(section, key)
+            for key in ModelRequestSettings.model_fields
+            if section is not None and hasattr(section, key)
+        }
+        return ModelRequestSettings.model_validate(values)
 
     def scanner_settings(self) -> Dict[str, Any]:
         """提取调用方显式配置的 scanner settings。"""

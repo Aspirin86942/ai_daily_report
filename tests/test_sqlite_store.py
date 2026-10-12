@@ -55,6 +55,9 @@ def test_sqlite_store_init_creates_tables(tmp_path):
         "raw_json",
         "created_at",
         "updated_at",
+        "schema_version",
+        "report_kind",
+        "current_run_id",
     }
     assert weekly_columns == {
         "week_label",

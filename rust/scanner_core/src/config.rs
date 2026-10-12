@@ -99,6 +99,11 @@ pub fn normalize_scanner_settings(
                 "ignored_patterns",
             )?,
             excluded_dirs: canonical_strings(raw.excluded_dirs.as_ref(), &[], "excluded_dirs")?,
+            follow_symlinks: raw.follow_symlinks.unwrap_or(false),
+            cloud_files_policy: raw
+                .cloud_files_policy
+                .clone()
+                .unwrap_or_else(|| "local_only".to_string()),
         },
         execution: ExecutionProfile {
             max_workers: raw.max_workers.unwrap_or(4),

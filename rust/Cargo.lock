@@ -16,7 +16,9 @@ dependencies = [
  "glob",
  "serde",
  "serde_json",
+ "tempfile",
  "walkdir",
+ "windows-sys",
 ]
 
 [[package]]
@@ -38,6 +40,7 @@ dependencies = [
 name = "ai-daily-scanner-contract"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "serde",
  "serde_json",
 ]

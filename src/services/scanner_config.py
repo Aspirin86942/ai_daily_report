@@ -10,6 +10,8 @@ SCANNER_SETTINGS_FIELDS = (
     "allowed_extensions",
     "ignored_patterns",
     "excluded_dirs",
+    "follow_symlinks",
+    "cloud_files_policy",
     "max_workers",
     "max_file_size_mb",
     "discovery_timeout_seconds",

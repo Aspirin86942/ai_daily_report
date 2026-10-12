@@ -36,6 +36,7 @@ REQUIRED_VALID_FIXTURES = {
     "normalized-settings-monthly.json",
     "normalized-settings-weekly.json",
     "request-windows-unc.json",
+    "request-utc-window.json",
     "request-v2.json",
     "request.json",
     "response-error.json",
@@ -97,6 +98,8 @@ REQUIRED_INVALID_CASES = {
 }
 
 REQUIRED_SEMANTIC_CASES = {
+    "utc_window_empty",
+    "utc_window_reversed",
     "build_request_reversed_date_range",
     "context_response_request_id_mismatch",
     "context_summary_count_invariant",
@@ -348,11 +351,11 @@ def test_frozen_defaults_match_current_python_contract() -> None:
         ".md",
         ".docx",
         ".csv",
-        ".json",
-        ".log",
     ]
-    assert scanner_cfg["ignored_patterns"] == ["~$*", "*.tmp"]
-    assert scanner_cfg["excluded_dirs"] == []
+    assert scanner_cfg["ignored_patterns"] == ["~$*", "*.tmp", ".env*", "*.key", "*.pem"]
+    assert scanner_cfg["excluded_dirs"] == [".git", ".venv", ".uv", "node_modules", "target", "__pycache__"]
+    assert scanner_cfg["follow_symlinks"] is False
+    assert scanner_cfg["cloud_files_policy"] == "local_only"
     assert {
         key: scanner_cfg[key]
         for key in (

@@ -328,6 +328,18 @@ pub struct ScannerSettings {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
+    pub follow_symlinks: Option<bool>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub cloud_files_policy: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
     pub max_workers: Option<u64>,
     #[serde(
         default,
@@ -594,6 +606,9 @@ impl Validate for ScannerSettings {
         if let Some(values) = &self.excluded_dirs {
             validate_strings(values, "excluded_dirs", false)?;
         }
+        if let Some(policy) = &self.cloud_files_policy {
+            require_const(policy, "local_only", "cloud_files_policy")?;
+        }
         macro_rules! range {
             ($field:ident, $min:expr, $max:expr) => {
                 if let Some(value) = self.$field {
@@ -722,10 +737,13 @@ pub struct DiscoveryProfile {
     pub allowed_extensions: Vec<String>,
     pub ignored_patterns: Vec<String>,
     pub excluded_dirs: Vec<String>,
+    pub follow_symlinks: bool,
+    pub cloud_files_policy: String,
 }
 
 impl Validate for DiscoveryProfile {
     fn validate(&self) -> Result<(), String> {
+        require_const(&self.cloud_files_policy, "local_only", "cloud_files_policy")?;
         validate_extensions(&self.allowed_extensions, "allowed_extensions", true)?;
         validate_strings(&self.ignored_patterns, "ignored_patterns", true)?;
         validate_strings(&self.excluded_dirs, "excluded_dirs", true)
@@ -1017,6 +1035,10 @@ pub struct BuildContextRequest {
     pub work_dir: String,
     pub start_date: String,
     pub end_date: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_start_utc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_end_utc: Option<String>,
     pub report_mode: ReportMode,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub compression_profile: Nullable<CompressionProfile>,
@@ -1033,6 +1055,45 @@ impl Validate for BuildContextRequest {
         require_absolute_path(&self.work_dir, "work_dir")?;
         require_date(&self.start_date, "start_date")?;
         require_date(&self.end_date, "end_date")?;
+        match (&self.window_start_utc, &self.window_end_utc) {
+            (None, None) => {}
+            (Some(start), Some(end)) => {
+                let parse = |value: &str| -> Result<chrono::DateTime<chrono::FixedOffset>, String> {
+                    // Match the strict Python contract (seconds and explicit UTC).
+                    let body = value
+                        .strip_suffix('Z')
+                        .or_else(|| value.strip_suffix("+00:00"));
+                    let valid_shape =
+                        body.is_some_and(|body| {
+                            let bytes = body.as_bytes();
+                            bytes.len() >= 19
+                                && bytes.iter().take(19).enumerate().all(
+                                    |(index, byte)| match index {
+                                        4 | 7 => *byte == b'-',
+                                        10 => *byte == b'T',
+                                        13 | 16 => *byte == b':',
+                                        _ => byte.is_ascii_digit(),
+                                    },
+                                )
+                                && &body[..4] != "0000"
+                                && &body[17..19] < "60"
+                                && (bytes.len() == 19
+                                    || ((21..=26).contains(&bytes.len())
+                                        && bytes[19] == b'.'
+                                        && bytes[20..].iter().all(u8::is_ascii_digit)))
+                        });
+                    if !valid_shape {
+                        return Err("scan window must use RFC 3339 UTC timestamps".to_string());
+                    }
+                    chrono::DateTime::parse_from_rfc3339(value)
+                        .map_err(|_| "scan window timestamp is invalid".to_string())
+                };
+                if parse(start)? >= parse(end)? {
+                    return Err("scan window must have positive duration".to_string());
+                }
+            }
+            _ => return Err("UTC window boundaries must be supplied together".to_string()),
+        }
         if self.start_date > self.end_date {
             return Err("start_date must not be after end_date".to_string());
         }

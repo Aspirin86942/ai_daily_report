@@ -218,6 +218,7 @@ pub(crate) fn build_context_command(
     resources: &mut ScannerResources,
 ) -> ScannerOperation<ContextEnvelope> {
     let started_at = Instant::now();
+    resources.sources.clear();
     let version = engine_identity();
     let work_dir = match validate_build_work_dir(&request.work_dir) {
         Ok(path) => path,
@@ -291,6 +292,7 @@ pub(crate) fn build_context_command(
     let ScannerResources {
         store,
         worker_pools,
+        sources,
     } = resources;
     let now_ms = match current_time_millis() {
         Ok(value) => value,
@@ -327,7 +329,7 @@ pub(crate) fn build_context_command(
     };
     // The only monotonic origin for this run is created immediately after the
     // begin_run COMMIT. Handshake/discovery time must consume this same budget.
-    let timing = match ActiveRunTiming::start(normalized_settings.total_deadline_ms) {
+    let mut timing = match ActiveRunTiming::start(normalized_settings.total_deadline_ms) {
         Ok(timing) => timing,
         Err(message) => {
             let abandon_error = current_time_millis()
@@ -352,6 +354,12 @@ pub(crate) fn build_context_command(
         }
     };
     let mut heartbeat = LeaseHeartbeat::start(PathBuf::from(&request.scan_db_path), active.clone());
+    if request.window_start_utc.is_some() {
+        timing.source_guards = SourceGuardObserver::strict_with_limits(
+            profile.execution.max_file_size_bytes,
+            Instant::now() + Duration::from_millis(timing.remaining_work_ms()),
+        );
+    }
     execute_active_build(
         request,
         &version,
@@ -364,6 +372,7 @@ pub(crate) fn build_context_command(
         &mut heartbeat,
         started_at,
         &timing,
+        sources,
     )
 }
 
@@ -380,6 +389,7 @@ fn execute_active_build(
     heartbeat: &mut LeaseHeartbeat,
     started_at: Instant,
     timing: &ActiveRunTiming,
+    sources: &mut Vec<crate::sources::ScanSource>,
 ) -> ScannerOperation<ContextEnvelope> {
     let rss_tracker = WorkerRssTracker::default();
     // ---- bounded parallel worker handshakes (spec Solution run.rs order) ----
@@ -882,7 +892,24 @@ fn execute_active_build(
         None
     };
     let snapshot_lookup_ms = elapsed_ms(snapshot_lookup_started);
+    let verified_hit = verified_hit.and_then(|(hit, artifact)| {
+        match crate::sources::snapshot_sources(store, &artifact, &discovery.files, profile) {
+            Some(structured) => {
+                *sources = structured;
+                Some((hit, artifact))
+            }
+            None if request.window_start_utc.is_none() => Some((hit, artifact)),
+            None => None,
+        }
+    });
     if let Some((hit, artifact)) = verified_hit {
+        crate::sources::fingerprint_sources(
+            sources,
+            work_dir,
+            &timing.source_guards,
+            profile.execution.max_file_size_bytes,
+            Instant::now() + Duration::from_millis(timing.remaining_work_ms()),
+        );
         return finalize_snapshot_hit(
             request,
             version,
@@ -976,6 +1003,14 @@ fn execute_active_build(
         session_stats.peak_worker_rss_bytes,
     );
     apply_worker_rss_observation(&mut outcome, peak_worker_rss_bytes);
+    *sources = std::mem::take(&mut outcome.sources);
+    crate::sources::fingerprint_sources(
+        sources,
+        work_dir,
+        &timing.source_guards,
+        profile.execution.max_file_size_bytes,
+        Instant::now() + Duration::from_millis(timing.remaining_work_ms()),
+    );
 
     // ---- terminal finalization (the ONLY linearization point) ----
     // spec Part 2.3: a committed Error run MUST carry a context_runs row
@@ -2212,6 +2247,16 @@ fn discover_with_timeout(
         work_dir: work_dir.to_path_buf(),
         start_date,
         end_date,
+        // Validated by BuildContextRequest before entering discovery.
+        window_start_utc: request
+            .window_start_utc
+            .as_ref()
+            .and_then(|value| value.parse().ok()),
+        window_end_utc: request
+            .window_end_utc
+            .as_ref()
+            .and_then(|value| value.parse().ok()),
+        follow_symlinks: profile.discovery.follow_symlinks,
         allowed_extensions: profile.discovery.allowed_extensions.clone(),
         ignored_patterns: profile.discovery.ignored_patterns.clone(),
         excluded_dirs: profile
@@ -3082,6 +3127,7 @@ mod tests {
             terminal_intent: TerminalIntent::Success,
             inventory: Vec::new(),
             file_results: Vec::new(),
+            sources: Vec::new(),
             parse_cache_receipts: Vec::new(),
             classification_cache_receipts: Vec::new(),
             classifications: std::collections::BTreeMap::new(),

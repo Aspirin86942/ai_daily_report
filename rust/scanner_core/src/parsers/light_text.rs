@@ -380,7 +380,11 @@ fn limit_tail_chars(content: &str, max_chars: u64) -> (String, bool) {
     let body_budget = max_chars.saturating_sub(metadata_chars);
     let body_chars = body.chars().count();
     let skip = body_chars.saturating_sub(body_budget);
-    let keep_from = body.char_indices().nth(skip).map(|(index, _)| index).unwrap_or(0);
+    let keep_from = body
+        .char_indices()
+        .nth(skip)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
     (format!("{metadata}{}", &body[keep_from..]), true)
 }
 
@@ -592,7 +596,9 @@ mod tests {
     fn log_excerpt_keeps_the_recent_tail_lines() {
         let directory = tempdir().expect("temporary root should exist");
         let path = directory.path().join("app.log");
-        let lines: Vec<String> = (0..500).map(|i| format!("2026-08-11 {i:04} 日志行")).collect();
+        let lines: Vec<String> = (0..500)
+            .map(|i| format!("2026-08-11 {i:04} 日志行"))
+            .collect();
         fs::write(&path, lines.join("\n")).expect("log fixture should be written");
         let profile = TextParseProfile {
             backend: "light_text_v2".to_string(),
@@ -601,8 +607,8 @@ mod tests {
             max_chars: 1_000,
             excerpt_max_chars: 1_000,
         };
-        let parsed = parse_light_text(&path, ".log", &profile, 16 * 1024 * 1024)
-            .expect("log should parse");
+        let parsed =
+            parse_light_text(&path, ".log", &profile, 16 * 1024 * 1024).expect("log should parse");
 
         assert!(parsed.truncated);
         assert!(parsed.content.contains("Log tail preview"));
@@ -615,7 +621,9 @@ mod tests {
     fn text_excerpt_keeps_the_head_for_regular_files() {
         let directory = tempdir().expect("temporary root should exist");
         let path = directory.path().join("notes.md");
-        let lines: Vec<String> = (0..500).map(|i| format!("2026-08-11 {i:04} 日志行")).collect();
+        let lines: Vec<String> = (0..500)
+            .map(|i| format!("2026-08-11 {i:04} 日志行"))
+            .collect();
         fs::write(&path, lines.join("\n")).expect("md fixture should be written");
         let profile = TextParseProfile {
             backend: "light_text_v2".to_string(),
@@ -624,8 +632,8 @@ mod tests {
             max_chars: 1_000,
             excerpt_max_chars: 1_000,
         };
-        let parsed = parse_light_text(&path, ".md", &profile, 16 * 1024 * 1024)
-            .expect("md should parse");
+        let parsed =
+            parse_light_text(&path, ".md", &profile, 16 * 1024 * 1024).expect("md should parse");
 
         assert!(parsed.truncated);
         assert!(parsed.content.contains("2026-08-11 0000 日志行"));

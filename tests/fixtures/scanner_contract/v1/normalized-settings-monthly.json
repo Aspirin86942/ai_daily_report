@@ -17,7 +17,9 @@
       "*.tmp",
       "~$*"
     ],
-    "excluded_dirs": []
+    "excluded_dirs": [],
+    "follow_symlinks": false,
+    "cloud_files_policy": "local_only"
   },
   "execution": {
     "max_workers": 4,

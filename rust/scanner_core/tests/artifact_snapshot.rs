@@ -25,6 +25,33 @@ fn raw_profile() -> serde_json::Value {
     serde_json::json!({})
 }
 
+#[test]
+fn snapshot_key_separates_absolute_windows_and_discovery_policies() {
+    let base = request(ReportMode::Daily, REQUEST_ID_A);
+    let mut changed = base.clone();
+    changed.window_start_utc = Some("2026-07-13T16:00:00Z".to_string());
+    changed.window_end_utc = Some("2026-07-15T16:00:00Z".to_string());
+    let mut profile = normalized_settings(ReportMode::Daily);
+    let worker_ids = workers("office", "python");
+    let classifier_id = classifier("python");
+    let key = |input: &BuildContextRequest, profile: &NormalizedScannerSettings| {
+        snapshot_key(
+            input,
+            &[],
+            &[],
+            profile,
+            ENGINE_BUILD_A,
+            &worker_ids,
+            &classifier_id,
+        )
+        .unwrap()
+    };
+    let initial = key(&base, &profile);
+    assert_ne!(initial, key(&changed, &profile));
+    profile.discovery.follow_symlinks = true;
+    assert_ne!(initial, key(&base, &profile));
+}
+
 fn normalized_settings(mode: ReportMode) -> NormalizedScannerSettings {
     let raw: ai_daily_scanner_contract::ScannerSettings =
         serde_json::from_value(raw_profile()).expect("minimal v2 raw profile");
@@ -424,6 +451,30 @@ fn decision_row(identity: &str) -> ArtifactDecisionRow {
         truncated: false,
         error_code: String::new(),
     }
+}
+
+#[test]
+fn eligible_draft_equality_ignores_relational_row_input_order() {
+    let sorted = ArtifactDraft::new(
+        true,
+        "same frozen context".to_string(),
+        semantic_summary(2),
+        vec![file_row("a.txt"), file_row("b.txt")],
+        vec![decision_row("a.txt"), decision_row("b.txt")],
+    )
+    .expect("sorted artifact");
+    let shuffled = ArtifactDraft::new(
+        true,
+        "same frozen context".to_string(),
+        semantic_summary(2),
+        vec![file_row("b.txt"), file_row("a.txt")],
+        vec![decision_row("a.txt"), decision_row("b.txt")],
+    )
+    .expect("shuffled artifact");
+    assert_eq!(sorted, shuffled);
+    let mut changed = shuffled;
+    changed.file_rows[0].content_sha256 = "f".repeat(64);
+    assert_ne!(sorted, changed, "content differences must remain visible");
 }
 
 #[test]

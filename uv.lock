@@ -20,6 +20,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "rich" },
     { name = "sharepoint-to-text" },
+    { name = "tzdata" },
 ]
 
 [package.dev-dependencies]
@@ -46,6 +47,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.0,<7" },
     { name = "rich", specifier = ">=13.0.0,<16" },
     { name = "sharepoint-to-text", specifier = ">=1.1,<2" },
+    { name = "tzdata", specifier = "==2026.3" },
 ]
 
 [package.metadata.requires-dev]

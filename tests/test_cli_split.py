@@ -64,6 +64,36 @@ def test_parser_preserves_daily_flags() -> None:
     assert args.date == "2026-02-05"
 
 
+def test_scheduled_start_logs_only_credential_presence_and_omits_report_body(monkeypatch, caplog):
+    from types import SimpleNamespace
+    from src.cli import daily
+    from src.models.report_settings import ReportSettings, ScheduleSettings
+    from src.services.report_runner import evidence_daily
+
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-credential-must-not-be-logged")
+    monkeypatch.setattr(daily, "config", SimpleNamespace(report_settings=ReportSettings(),
+        schedule_settings=ScheduleSettings(), llm_provider="deepseek"))
+    printed = []
+
+    class StubDailyService:
+        def __init__(self, _config):
+            pass
+
+        def run(self, context, **kwargs):
+            assert kwargs["scheduled"] is True
+            return SimpleNamespace(run_id=context.run_id, target_date=str(context.target_date),
+                quality="no_changes", model_calls=0, output_path=None, action="published",
+                markdown="PRIVATE_REPORT_BODY")
+
+    monkeypatch.setattr(evidence_daily, "EvidenceDailyService", StubDailyService)
+    console = SimpleNamespace(print=lambda *values: printed.extend(values))
+    assert generate_daily_report(build_parser().parse_args(["daily", "--scheduled"]), console=console)
+    assert "scheduled_start" in caplog.text and "credential_env_present=True" in caplog.text
+    combined = caplog.text + str(printed)
+    assert "synthetic-credential-must-not-be-logged" not in combined
+    assert "PRIVATE_REPORT_BODY" not in combined
+
+
 def test_list_reports_shows_empty_hint() -> None:
     printed: list[str] = []
     console = type(
@@ -206,6 +236,8 @@ def test_daily_handler_maps_namespace_to_request() -> None:
     assert request.user_input == "今天工作"
     assert request.save is False
     assert request.report_date_override == "2026-05-20"
+    assert request.context.target_date == date(2026, 5, 20)
+    assert any("--date" in text and "--target-date" in text for text in printed)
     assert any("日报预览" in text for text in printed)
 
 

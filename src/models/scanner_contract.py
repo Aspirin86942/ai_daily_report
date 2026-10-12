@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import date
+from datetime import date, datetime, timedelta
 from enum import Enum
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -133,6 +133,8 @@ class ScannerSettings(ContractModel):
     allowed_extensions: Annotated[list[Extension], Field(max_length=256)] | None = None
     ignored_patterns: Annotated[list[NonEmpty1024], Field(max_length=256)] | None = None
     excluded_dirs: Annotated[list[NonEmpty1024], Field(max_length=256)] | None = None
+    follow_symlinks: bool | None = None
+    cloud_files_policy: Literal["local_only"] | None = None
     max_workers: Annotated[int, Field(ge=1, le=64)] | None = None
     max_file_size_mb: Annotated[int, Field(ge=1, le=4096)] | None = None
     discovery_timeout_seconds: TimeoutSeconds | None = None
@@ -197,6 +199,8 @@ class DiscoveryProfile(ContractModel):
     allowed_extensions: Annotated[list[Extension], Field(max_length=256)]
     ignored_patterns: Annotated[list[NonEmpty1024], Field(max_length=256)]
     excluded_dirs: Annotated[list[NonEmpty1024], Field(max_length=256)]
+    follow_symlinks: bool
+    cloud_files_policy: Literal["local_only"]
 
     @model_validator(mode="after")
     def require_canonical_sets(self) -> "DiscoveryProfile":
@@ -344,6 +348,8 @@ class BuildContextRequest(ContractModel):
     work_dir: AbsolutePath
     start_date: DateString
     end_date: DateString
+    window_start_utc: str | None = None
+    window_end_utc: str | None = None
     report_mode: ReportMode
     compression_profile: Literal[
         "daily_balanced_v1",
@@ -356,6 +362,17 @@ class BuildContextRequest(ContractModel):
 
     @model_validator(mode="after")
     def validate_dates_and_profile(self) -> "BuildContextRequest":
+        if (self.window_start_utc is None) != (self.window_end_utc is None):
+            raise ValueError("UTC window boundaries must be supplied together")
+        if self.window_start_utc is not None and self.window_end_utc is not None:
+            values = [self.window_start_utc, self.window_end_utc]
+            if any(not re.fullmatch(
+                r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)", value
+            ) for value in values):
+                raise ValueError("scan window must use RFC 3339 UTC timestamps")
+            start, end = (datetime.fromisoformat(value) for value in values)
+            if start.utcoffset() != timedelta(0) or end.utcoffset() != timedelta(0) or start >= end:
+                raise ValueError("scan window must be UTC and have positive duration")
         if self.start_date > self.end_date:
             raise ValueError("start_date must not be after end_date")
         if self.compression_profile is not None:

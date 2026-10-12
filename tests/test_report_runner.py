@@ -185,7 +185,7 @@ def test_daily_success_publishes_sqlite_then_markdown():
 
     assert isinstance(outcome, ReportRunSuccess)
     assert outcome.status == "ok"
-    assert outcome.markdown == "markdown:2026-05-25"
+    assert outcome.markdown == "markdown:2026-05-24"
     assert outcome.publication.sqlite_state == "committed"
     assert outcome.publication.markdown_state == "written"
     assert events == [
@@ -240,9 +240,10 @@ def test_daily_scanner_error_fails_before_input_and_llm():
 
 def test_daily_empty_input_uses_placeholder_and_calls_llm():
     model_port = RecordingModelPort()
+    daily_input = FixedInputAdapter(value="   ")
     runner = _make_runner(
         model_port=model_port,
-        daily_input=FixedInputAdapter(value="   "),
+        daily_input=daily_input,
     )
 
     outcome = runner.run(
@@ -256,6 +257,7 @@ def test_daily_empty_input_uses_placeholder_and_calls_llm():
     assert isinstance(outcome, ReportRunSuccess)
     assert len(model_port.calls) == 1
     assert model_port.calls[0].user_input.strip() != ""
+    assert daily_input.calls == 0
 
 
 def test_daily_full_path_writes_real_sqlite_and_markdown(tmp_path):
@@ -265,7 +267,7 @@ def test_daily_full_path_writes_real_sqlite_and_markdown(tmp_path):
     store = SQLiteStore(db_path=tmp_path / "reports.sqlite3")
     store.save_report(
         DailyReportData(
-            date="2026-05-24",
+            date="2026-05-23",
             completed_work="昨日工作",
             work_summary="昨日小结",
             next_plan="昨日延续计划",
@@ -307,8 +309,8 @@ def test_daily_full_path_writes_real_sqlite_and_markdown(tmp_path):
     )
 
     assert isinstance(outcome, ReportRunSuccess)
-    assert store.get_report("2026-05-25") is not None
-    markdown_path = tmp_path / "reports" / "2026-05" / "2026-05-25.md"
+    assert store.get_report("2026-05-24") is not None
+    markdown_path = tmp_path / "reports" / "2026-05" / "2026-05-24.md"
     assert markdown_path.is_file()
     assert markdown_path.read_text(encoding="utf-8") == outcome.markdown
     assert outcome.publication.sqlite_state == "committed"
@@ -317,7 +319,7 @@ def test_daily_full_path_writes_real_sqlite_and_markdown(tmp_path):
     assert client.calls == 1
 
 
-def test_daily_date_override_keeps_scan_window(tmp_path):
+def test_daily_date_override_controls_scan_and_publication(tmp_path):
     from src.services.report_gen import ReportGenerator
     from src.services.sqlite_store import SQLiteStore
 
@@ -354,8 +356,8 @@ def test_daily_date_override_keeps_scan_window(tmp_path):
 
     assert isinstance(outcome, ReportRunSuccess)
     schedule = scanner.calls[0]
-    assert schedule.start_date == date(2026, 5, 24)
-    assert schedule.end_date == date(2026, 5, 25)
+    assert schedule.start_date == date(2026, 5, 20)
+    assert schedule.end_date == date(2026, 5, 20)
     assert outcome.report.date == "2026-05-20"
     assert store.get_report("2026-05-20") is not None
     assert (tmp_path / "reports" / "2026-05" / "2026-05-20.md").is_file()

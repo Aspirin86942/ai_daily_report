@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal, TypeAlias
 
 from ...utils.text_tools import get_month_date_range, parse_week_label
 from .requests import ReportSource
+from .context import utc_window
 
 ReportMode: TypeAlias = Literal["daily", "weekly", "monthly"]
 
@@ -20,16 +21,29 @@ class ResolvedPeriod:
     end_date: date
     display_label: str
     as_of_date: date
+    timezone: str = "Asia/Shanghai"
+
+    @property
+    def window_start_utc(self) -> datetime:
+        return utc_window(self.start_date, self.timezone)[0]
+
+    @property
+    def window_end_utc(self) -> datetime:
+        return utc_window(self.end_date, self.timezone)[1]
 
 
-def resolve_daily_period(as_of_date: date) -> ResolvedPeriod:
+def resolve_daily_period(
+    as_of_date: date, target_date: date | None = None, *, timezone: str = "Asia/Shanghai"
+) -> ResolvedPeriod:
+    target = target_date or as_of_date - timedelta(days=1)
     return ResolvedPeriod(
         mode="daily",
         source="scan",
-        start_date=as_of_date - timedelta(days=1),
-        end_date=as_of_date,
-        display_label=as_of_date.isoformat(),
+        start_date=target,
+        end_date=target,
+        display_label=target.isoformat(),
         as_of_date=as_of_date,
+        timezone=timezone,
     )
 
 

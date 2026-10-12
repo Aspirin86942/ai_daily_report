@@ -471,7 +471,12 @@ fn newline_boundary_at_or_before(content: &str, position: usize) -> usize {
 }
 
 fn newline_boundary_at_or_after(content: &str, position: usize) -> usize {
-    match content.chars().enumerate().skip(position).find(|(_, character)| *character == '\n') {
+    match content
+        .chars()
+        .enumerate()
+        .skip(position)
+        .find(|(_, character)| *character == '\n')
+    {
         Some((index, _)) => index + 1,
         None => position,
     }

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from typing import Literal, TypeAlias
+
+from .context import RunContext, parse_report_date
 
 ReportSource: TypeAlias = Literal["db", "scan"]
 
@@ -20,6 +22,23 @@ class DailyReportRunRequest:
     save: bool
     user_input: str | None = None
     report_date_override: str | None = None
+    context: RunContext | None = None
+
+    def __post_init__(self) -> None:
+        if self.report_date_override is not None:
+            target = parse_report_date(self.report_date_override)
+            if self.context is not None and self.context.target_date != target:
+                raise ValueError("date override does not match the frozen context")
+        if self.target_date >= self.as_of_date:
+            raise ValueError("target date must be a completed calendar day")
+
+    @property
+    def target_date(self) -> date:
+        if self.context is not None:
+            return self.context.target_date
+        if self.report_date_override is not None:
+            return parse_report_date(self.report_date_override)
+        return self.as_of_date - timedelta(days=1)
 
 
 @dataclass(frozen=True, slots=True)

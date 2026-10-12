@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Protocol, TypeAlias
 
 from ...models.schemas import (
+    DailyReport,
     DailyReportData,
     MonthlyReportData,
     WeeklyReportData,
@@ -21,7 +22,7 @@ class DailyGenerationRequest:
 
 @dataclass(frozen=True, slots=True)
 class WeeklyGenerationRequest:
-    reports: list[DailyReportData]
+    reports: list[DailyReport]
     file_context: str
     year: int
     week: int
@@ -31,7 +32,7 @@ class WeeklyGenerationRequest:
 
 @dataclass(frozen=True, slots=True)
 class MonthlyGenerationRequest:
-    reports: list[DailyReportData]
+    reports: list[DailyReport]
     file_context: str
     year_month: str
     missing_days: list[str]
@@ -58,7 +59,7 @@ class _LLMClientProtocol(Protocol):
     def generate_weekly_report(
         self,
         *,
-        reports: list[DailyReportData],
+        reports: list[DailyReport],
         file_context: str,
         year: int,
         week: int,
@@ -70,7 +71,7 @@ class _LLMClientProtocol(Protocol):
     def generate_monthly_report(
         self,
         *,
-        reports: list[DailyReportData],
+        reports: list[DailyReport],
         file_context: str,
         year_month: str,
         missing_days: list[str],

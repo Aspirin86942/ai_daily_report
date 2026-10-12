@@ -110,9 +110,38 @@ impl StoreError {
     }
 
     pub fn diagnostic(&self, stage: DiagnosticStage) -> Diagnostic {
+        let message = match self {
+            Self::CacheWrite { detail } => {
+                let reason = if detail
+                    .contains("UNIQUE constraint failed: context_artifacts.snapshot_key_sha256")
+                {
+                    "snapshot_key_unique"
+                } else if detail.contains("UNIQUE constraint failed") {
+                    "unique_constraint"
+                } else if detail.contains("FOREIGN KEY constraint failed") {
+                    "foreign_key_constraint"
+                } else if detail.contains("CHECK constraint failed") {
+                    "check_constraint"
+                } else if detail.contains("NOT NULL constraint failed") {
+                    "not_null_constraint"
+                } else if detail.contains("database is locked")
+                    || detail.contains("database is busy")
+                {
+                    "database_busy"
+                } else if detail.contains("database or disk is full") {
+                    "disk_full"
+                } else if detail.contains("Invalid column type") {
+                    "stored_column_type"
+                } else {
+                    "unclassified"
+                };
+                format!("scanner database transaction failed ({reason})")
+            }
+            _ => self.to_string(),
+        };
         Diagnostic {
             error_code: self.error_code(),
-            message: self.to_string(),
+            message,
             retryable: self.retryable(),
             stage,
             file_path: Nullable(None),
@@ -2436,7 +2465,14 @@ fn prepare_finalization_retention_plan(
         ensure_deadline()?;
         let mut statement = connection
             .prepare(
-                "SELECT scan_run_id, finished_at_ms, audit_size_bytes FROM scan_runs
+                // Abandoned runs never committed a terminal payload, so their
+                // nullable audit size is legitimately zero. They still count
+                // toward the terminal-row cap. Other terminal states must
+                // retain the committed size; do not hide corrupt NULL values.
+                "SELECT scan_run_id, finished_at_ms,
+                        CASE WHEN status='abandoned' THEN COALESCE(audit_size_bytes,0)
+                             ELSE audit_size_bytes END
+                 FROM scan_runs
                  WHERE status IN ('success', 'partial', 'error', 'abandoned')
                  ORDER BY finished_at_ms ASC, scan_run_id ASC",
             )
@@ -4435,6 +4471,32 @@ mod tests {
     };
     use std::sync::atomic::{AtomicUsize, Ordering};
 
+    #[test]
+    fn cache_failure_diagnostics_expose_only_fixed_reason_codes() {
+        for (detail, reason) in [
+            (
+                "Invalid column type Null at index: 2, name: PRIVATE_VALUE",
+                "stored_column_type",
+            ),
+            (
+                "UNIQUE constraint failed: context_artifacts.snapshot_key_sha256 PRIVATE_VALUE",
+                "snapshot_key_unique",
+            ),
+            ("PRIVATE_VALUE", "unclassified"),
+        ] {
+            let diagnostic = StoreError::CacheWrite {
+                detail: detail.to_string(),
+            }
+            .diagnostic(DiagnosticStage::Cache);
+            assert_eq!(diagnostic.error_code, ErrorCode::CacheWriteFailed);
+            assert_eq!(
+                diagnostic.message,
+                format!("scanner database transaction failed ({reason})")
+            );
+            assert!(!diagnostic.message.contains("PRIVATE_VALUE"));
+        }
+    }
+
     #[cfg(windows)]
     #[test]
     fn runtime_path_normalization_is_stable_across_file_creation() {
@@ -5374,6 +5436,62 @@ mod tests {
             .query_row("SELECT count(*) FROM engine_lease", [], |row| row.get(0))
             .unwrap();
         assert_eq!(lease_count, 0);
+    }
+
+    #[test]
+    fn new_run_finalizes_after_another_run_was_abandoned_without_audit_size() {
+        let mut harness = harness("00000000-0000-4000-8000-000000000312");
+        let old = started(
+            harness
+                .store
+                .begin_run(
+                    &harness.request.request_id,
+                    &harness.canonical,
+                    &harness.runtime,
+                    1_000,
+                )
+                .unwrap(),
+        );
+        harness.store.abandon_active_run(&old, 1_001).unwrap();
+        let audit_size: Option<i64> = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT audit_size_bytes FROM scan_runs WHERE scan_run_id=?1",
+                [old.scan_run_id() as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(audit_size, None);
+
+        let next_id = "00000000-0000-4000-8000-000000000313";
+        let canonical = canonical_for_request_id(&harness, next_id);
+        let active = started(
+            harness
+                .store
+                .begin_run(next_id, &canonical, &harness.runtime, 1_002)
+                .unwrap(),
+        );
+        let batch = error_batch(&active);
+        finalize_for_test(&mut harness.store, &active, &batch, 1_003).unwrap();
+        assert_eq!(
+            harness
+                .store
+                .load_terminal_envelope(active.scan_run_id())
+                .unwrap()
+                .envelope_json,
+            batch.envelope_json
+        );
+        let old_status: String = harness
+            .store
+            .connection
+            .query_row(
+                "SELECT status FROM scan_runs WHERE scan_run_id=?1",
+                [old.scan_run_id() as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_status, "abandoned");
     }
 
     #[test]

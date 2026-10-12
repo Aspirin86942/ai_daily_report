@@ -169,6 +169,12 @@
       "type": "integer",
       "minimum": 67108864,
       "maximum": 8589934592
+    },
+    "follow_symlinks": {
+      "type": "boolean"
+    },
+    "cloud_files_policy": {
+      "const": "local_only"
     }
   },
   "$defs": {

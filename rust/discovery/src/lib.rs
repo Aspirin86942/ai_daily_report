@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Local, NaiveDate, TimeZone, Utc};
 use glob::Pattern;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
@@ -8,11 +8,31 @@ use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
+mod access;
+use access::EntryAccess;
+
+/// Metadata-only recheck before opening an admitted source's data stream.
+pub fn local_candidate_is_readable(path: &Path, root: &Path) -> bool {
+    matches!(
+        access::inspect(path),
+        Ok(EntryAccess::Local | EntryAccess::LocalCloud)
+    ) && fs::canonicalize(root)
+        .ok()
+        .zip(fs::canonicalize(path).ok())
+        .is_some_and(|(root, path)| path.starts_with(root))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct DiscoveryRequest {
     pub work_dir: PathBuf,
     pub start_date: NaiveDate,
     pub end_date: NaiveDate,
+    #[serde(default)]
+    pub window_start_utc: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub window_end_utc: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub follow_symlinks: bool,
     pub allowed_extensions: Vec<String>,
     pub ignored_patterns: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_optional_path_list")]
@@ -49,6 +69,10 @@ pub enum DiscoveryIssueKind {
     SourceVersion,
     AbsolutePath,
     Alias,
+    LinkExcluded,
+    CloudUnavailable,
+    UnknownReparse,
+    OutsideRoot,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -69,22 +93,99 @@ pub fn discover_files_with_diagnostics(request: &DiscoveryRequest) -> io::Result
 }
 
 fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryReport> {
+    validate_window(request)?;
+    let root_access = access::inspect(&request.work_dir).map_err(|error| {
+        if error.kind() == io::ErrorKind::NotFound {
+            io::Error::new(
+                error.kind(),
+                format!("work_dir does not exist: {}", request.work_dir.display()),
+            )
+        } else {
+            error
+        }
+    })?;
+    match root_access {
+        EntryAccess::Local | EntryAccess::LocalCloud => {}
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "work_dir is unavailable locally or is a link/unknown reparse point",
+            ))
+        }
+    }
     validate_work_dir(&request.work_dir)?;
+    let resolved_root = fs::canonicalize(&request.work_dir)?;
 
     let ignored_patterns = compile_patterns(&request.ignored_patterns)?;
     let excluded_dirs = resolve_excluded_dirs(&request.excluded_dirs, Some(&request.work_dir));
     let mut files = Vec::new();
     let mut issues = Vec::new();
+    let access_issues = std::cell::RefCell::new(Vec::new());
 
+    let excluded_names: Vec<_> = request
+        .excluded_dirs
+        .iter()
+        .filter(|path| path.components().count() == 1)
+        .filter_map(|path| path.to_str().map(str::to_lowercase))
+        .collect();
     let walker = WalkDir::new(&request.work_dir)
-        .follow_links(false)
+        .follow_links(request.follow_symlinks)
         .into_iter()
         .filter_entry(|entry| {
-            if !entry.file_type().is_dir() {
+            if entry.depth() == 0 {
                 return true;
             }
             let entry_path = entry.path();
-            !is_excluded_dir(entry_path, &excluded_dirs)
+            if !entry.file_type().is_dir() && !entry.path_is_symlink() {
+                let name = entry.file_name().to_string_lossy().to_lowercase();
+                if !has_allowed_extension(&name, &request.allowed_extensions)
+                    || matches_ignored_pattern(&name, &ignored_patterns)
+                {
+                    return false;
+                }
+            }
+            if (entry.file_type().is_dir() || entry.path_is_symlink())
+                && (excluded_names.contains(&entry.file_name().to_string_lossy().to_lowercase())
+                    || is_excluded_dir(entry_path, &excluded_dirs))
+            {
+                return false;
+            }
+            let issue = match access::inspect(entry_path) {
+                Ok(EntryAccess::Local | EntryAccess::LocalCloud) => None,
+                Ok(EntryAccess::Link) if request.follow_symlinks => {
+                    match fs::canonicalize(entry_path) {
+                        Ok(target) if target.starts_with(&resolved_root) => None,
+                        _ => Some((
+                            DiscoveryIssueKind::OutsideRoot,
+                            "link target is outside work_dir",
+                        )),
+                    }
+                }
+                Ok(EntryAccess::Link) => {
+                    Some((DiscoveryIssueKind::LinkExcluded, "link traversal disabled"))
+                }
+                Ok(EntryAccess::CloudUnavailable) => Some((
+                    DiscoveryIssueKind::CloudUnavailable,
+                    "cloud content unavailable locally; no hydration attempted",
+                )),
+                Ok(EntryAccess::UnknownReparse) => Some((
+                    DiscoveryIssueKind::UnknownReparse,
+                    "unknown reparse tag excluded",
+                )),
+                Err(_) => Some((
+                    DiscoveryIssueKind::Metadata,
+                    "cannot inspect entry metadata",
+                )),
+            };
+            if let Some((kind, message)) = issue {
+                // Separate collection avoids borrowing the main diagnostics
+                // while the lazy walk iterator is active.
+                access_issues
+                    .borrow_mut()
+                    .push(path_issue(kind, entry_path, message.to_string()));
+                return false;
+            }
+            true
         });
 
     for entry_result in walker {
@@ -115,9 +216,8 @@ fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryRepo
             if !metadata.is_file() {
                 continue;
             }
-            if let Ok(modified_local) = metadata_modified_local(&metadata) {
-                let modified_naive = modified_local.naive_local();
-                if !is_within_date_range(modified_naive, request.start_date, request.end_date)? {
+            if let Ok(in_window) = metadata_in_window(&metadata, request) {
+                if !in_window {
                     continue;
                 }
             }
@@ -134,6 +234,14 @@ fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryRepo
                 continue;
             }
         };
+        if !resolved_path.starts_with(&resolved_root) {
+            issues.push(path_issue(
+                DiscoveryIssueKind::OutsideRoot,
+                entry.path(),
+                "resolved candidate is outside work_dir".to_string(),
+            ));
+            continue;
+        }
         let metadata = match read_candidate_metadata(&resolved_path, entry.path()) {
             Ok(value) => value,
             Err(issue) => {
@@ -159,7 +267,7 @@ fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryRepo
             }
         };
         let modified_naive = modified_local.naive_local();
-        if !is_within_date_range(modified_naive, request.start_date, request.end_date)? {
+        if !metadata_in_window(&metadata, request)? {
             continue;
         }
 
@@ -206,6 +314,7 @@ fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryRepo
         });
     }
 
+    issues.extend(access_issues.into_inner());
     files.sort_by(|left, right| left.path.cmp(&right.path));
     deduplicate_resolved_aliases(&mut files, &mut issues);
     issues.sort_by(|left, right| {
@@ -315,6 +424,30 @@ fn is_within_date_range(
     end_date: NaiveDate,
 ) -> io::Result<bool> {
     Ok(modified_at.date() >= start_date && modified_at.date() <= end_date)
+}
+
+fn validate_window(request: &DiscoveryRequest) -> io::Result<()> {
+    match (request.window_start_utc, request.window_end_utc) {
+        (None, None) if request.start_date <= request.end_date => Ok(()),
+        (Some(start), Some(end)) if start < end => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "invalid scan window",
+        )),
+    }
+}
+
+fn metadata_in_window(metadata: &Metadata, request: &DiscoveryRequest) -> io::Result<bool> {
+    if let (Some(start), Some(end)) = (request.window_start_utc, request.window_end_utc) {
+        let modified = DateTime::<Utc>::from(metadata.modified()?);
+        Ok(modified >= start && modified < end)
+    } else {
+        is_within_date_range(
+            metadata_modified_local(metadata)?.naive_local(),
+            request.start_date,
+            request.end_date,
+        )
+    }
 }
 
 fn absolute_discovered_path(path: &Path) -> io::Result<PathBuf> {
@@ -539,6 +672,9 @@ mod tests {
             work_dir: missing.clone(),
             start_date: today,
             end_date: today,
+            window_start_utc: None,
+            window_end_utc: None,
+            follow_symlinks: false,
             allowed_extensions: vec![".md".to_string()],
             ignored_patterns: vec![],
             excluded_dirs: vec![],
@@ -608,7 +744,7 @@ mod tests {
     fn discover_files_includes_file_symlink_and_emits_stable_contract() {
         let fixture = TempFixture::new("symlink_contract");
         let work_dir = fixture.path().join("work");
-        let target_dir = fixture.path().join("targets");
+        let target_dir = work_dir.join("targets");
         std::fs::create_dir(&work_dir).unwrap();
         std::fs::create_dir(&target_dir).unwrap();
 
@@ -624,6 +760,9 @@ mod tests {
             work_dir: work_dir.clone(),
             start_date: today,
             end_date: today,
+            window_start_utc: None,
+            window_end_utc: None,
+            follow_symlinks: true,
             allowed_extensions: vec![".md".to_string(), ".txt".to_string()],
             ignored_patterns: vec![],
             excluded_dirs: vec![],
@@ -660,7 +799,7 @@ mod tests {
     fn discover_files_keeps_symlink_path_when_target_suffix_differs() {
         let fixture = TempFixture::new("symlink_suffix_mismatch");
         let work_dir = fixture.path().join("work");
-        let target_dir = fixture.path().join("targets");
+        let target_dir = work_dir.join("targets");
         std::fs::create_dir(&work_dir).unwrap();
         std::fs::create_dir(&target_dir).unwrap();
 
@@ -674,6 +813,9 @@ mod tests {
             work_dir,
             start_date: today,
             end_date: today,
+            window_start_utc: None,
+            window_end_utc: None,
+            follow_symlinks: true,
             allowed_extensions: vec![".md".to_string()],
             ignored_patterns: vec![],
             excluded_dirs: vec![],

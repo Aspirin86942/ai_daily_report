@@ -3,7 +3,7 @@
 import calendar
 from datetime import date
 
-from ..models.schemas import DailyReportData
+from ..models.schemas import DailyReport, DailyReportData, EvidenceDailyReportData
 
 
 def truncate_text(text: str, max_chars: int) -> str:
@@ -53,13 +53,27 @@ def get_month_date_range(year_month: str) -> tuple[date, date]:
     return start, end
 
 
-def format_period_report_context(reports: list[DailyReportData]) -> str:
+def format_period_report_context(reports: list[DailyReport]) -> str:
     """按日期拼接日报文本，供周报和月报聚合使用。"""
     if not reports:
         return "无日报数据"
 
     sections: list[str] = []
     for report in sorted(reports, key=lambda item: item.date):
+        if isinstance(report, EvidenceDailyReportData):
+            def items_text(items):
+                return "\n".join(f"- {item.text} [{', '.join(report.source_labels[key] for key in item.source_ids)}]" for item in items) or "无"
+
+            sections.append(
+                f"## {report.date}\n"
+                f"报告类型：文件内容证据；质量：{report.quality_label}。\n"
+                "摘要描述所读文件的内容；安排、待核实线索和用户附注保留原语义。\n\n"
+                f"### 文件内容摘要\n{items_text(report.summary_items)}\n\n"
+                f"### 待核实事项\n{items_text(report.verification_items)}\n\n"
+                f"### 缺漏\n" + ("\n".join(g.message for g in report.gaps) or "无") +
+                f"\n\n### 用户附注\n{report.user_notes or '无'}"
+            )
+            continue
         sections.append(
             f"## {report.date}\n"
             f"### 今日工作完成内容\n{report.completed_work}\n\n"

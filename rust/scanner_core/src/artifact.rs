@@ -136,8 +136,8 @@ impl ArtifactDraft {
         snapshot_eligible: bool,
         final_context: String,
         semantic_summary: SemanticSummary,
-        file_rows: Vec<ArtifactFileRow>,
-        decision_rows: Vec<ArtifactDecisionRow>,
+        mut file_rows: Vec<ArtifactFileRow>,
+        mut decision_rows: Vec<ArtifactDecisionRow>,
     ) -> Result<ArtifactDraft, String> {
         semantic_summary.validate_counts()?;
         let context_sha256 = sha256_hex(final_context.as_bytes());
@@ -171,6 +171,9 @@ impl ArtifactDraft {
         } else if !file_rows.is_empty() || !decision_rows.is_empty() {
             return Err("ineligible artifact must carry no file or decision rows".to_string());
         }
+        // SQL replay orders these relational rows by identity; make fresh drafts canonical too.
+        file_rows.sort_unstable_by(|a, b| a.file_identity.cmp(&b.file_identity));
+        decision_rows.sort_unstable_by(|a, b| a.file_identity.cmp(&b.file_identity));
         Ok(ArtifactDraft {
             snapshot_eligible,
             final_context,

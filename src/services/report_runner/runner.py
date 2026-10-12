@@ -12,6 +12,7 @@ from typing import Callable, Literal, Protocol, cast
 
 from ...models.scanner_contract import Diagnostic
 from ...models.schemas import (
+    DailyReport,
     DailyReportData,
     MonthlyReportData,
     WeeklyReportData,
@@ -65,12 +66,12 @@ class _ReportStore(Protocol):
 
     def get_week_reports(
         self, year: int, week: int
-    ) -> tuple[list[DailyReportData], list[str]]:
+    ) -> tuple[list[DailyReport], list[str]]:
         ...
 
     def get_reports_in_range(
         self, start_date: date, end_date: date
-    ) -> tuple[list[DailyReportData], list[str]]:
+    ) -> tuple[list[DailyReport], list[str]]:
         ...
 
     def save_report(self, report: DailyReportData) -> object:
@@ -113,7 +114,7 @@ class _AcceptedScan:
 
 @dataclass(frozen=True, slots=True)
 class _PeriodSourceData:
-    reports: list[DailyReportData]
+    reports: list[DailyReport]
     missing_days: list[str]
     file_context: str
     status: Literal["ok", "partial"]
@@ -148,13 +149,17 @@ class ReportRunner:
         raise TypeError(f"unknown request variant: {type(request).__name__}")
 
     def _run_daily(self, request: DailyReportRunRequest) -> ReportRunOutcome:
-        period = resolve_daily_period(request.as_of_date)
+        period = resolve_daily_period(
+            request.as_of_date,
+            request.target_date,
+            timezone=request.context.timezone if request.context else "Asia/Shanghai",
+        )
         accepted = self._build_scan_context(period, requested=request.save)
         if isinstance(accepted, ReportRunFailure):
             return accepted
 
         try:
-            target = datetime.combine(request.as_of_date, time.min)
+            target = datetime.combine(request.target_date, time.min)
             yesterday_plan = self.store.get_yesterday_plan(target_date=target)
         except Exception as exc:
             return self._failure(
@@ -171,9 +176,7 @@ class ReportRunner:
                 cause=type(exc).__name__,
             )
 
-        user_input = request.user_input
-        if user_input is None:
-            user_input = self.daily_input.read()
+        user_input = request.user_input or ""
         if not user_input.strip():
             user_input = "（未提供用户口述，请依据今日文件证据生成日报）"
 
@@ -194,8 +197,7 @@ class ReportRunner:
         if isinstance(generated, ReportRunFailure):
             return generated
         report = cast(DailyReportData, generated)
-        if request.report_date_override:
-            report = report.model_copy(update={"date": request.report_date_override})
+        report = report.model_copy(update={"date": request.target_date.isoformat()})
 
         return self._render_and_publish(
             mode="daily",
@@ -417,6 +419,8 @@ class ReportRunner:
             report_mode=period.mode,
             start_date=period.start_date,
             end_date=period.end_date,
+            window_start_utc=period.window_start_utc,
+            window_end_utc=period.window_end_utc,
         )
         try:
             scan_result = self.scanner.build_context(scan_request)
@@ -470,7 +474,7 @@ class ReportRunner:
 
     def _read_period_reports(
         self, mode: PeriodMode, period: ResolvedPeriod
-    ) -> tuple[list[DailyReportData], list[str]]:
+    ) -> tuple[list[DailyReport], list[str]]:
         if mode == "weekly":
             year, week, _ = period.start_date.isocalendar()
             return self.store.get_week_reports(year, week)

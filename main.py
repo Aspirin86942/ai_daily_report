@@ -1,11 +1,20 @@
 """审计日报生成器 v5.0 — 主入口（子命令逻辑见 src/cli/）。"""
 
 import sys
+import os
+
+# pythonw has no console streams. Keep diagnostics in the configured logger,
+# while console-only previews go to a harmless local sink.
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, "w", encoding="utf-8")
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")
 
 # doctor 必须能在 Rich、业务依赖或文件日志不可用时先给出诊断。
 if sys.platform == "win32":
-    sys.stdout.reconfigure(encoding="utf-8")
-    sys.stderr.reconfigure(encoding="utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
 
 from src.cli.doctor import run_bootstrap_doctor
 
@@ -29,6 +38,13 @@ def main() -> int:
     logger = setup_logger()
     try:
         match args.subcommand:
+            case "repair-output":
+                from src.cli.report_runs import repair_output
+                return 0 if repair_output(args, console=console) else 1
+            case "runs":
+                from src.cli.report_runs import list_runs
+                list_runs(args, console=console)
+                return 0
             case "daily":
                 from src.cli.daily import generate_daily_report
 
@@ -48,6 +64,15 @@ def main() -> int:
                 list_reports(console, store=SQLiteStore())
                 return 0
             case "doctor":
+                if args.check_model:
+                    from src.core.config import config
+                    from src.services.report_runner.model_check import check_model
+                    result = check_model(config)
+                    console.print(f"合成模型检查通过：{result['model']}；调用 {result['calls']} 次；运行 {result['run_id']}。")
+                    if not result["context_limits_verified"]:
+                        console.print("上下文长度和输出上限仍需填写已核实的能力配置；业务内容发送保持关闭。")
+                    if not args.strict:
+                        return 0
                 from src.cli.doctor import run_doctor_cmd
                 from src.core.healthcheck import collect_healthcheck
 
@@ -64,8 +89,10 @@ def main() -> int:
         console.print("\n[yellow]操作已取消[/yellow]")
         return 130
     except Exception as exc:
-        logger.error("程序异常: %s", exc, exc_info=True)
-        console.print(f"\n[red]错误: {exc}[/red]")
+        from src.services.report_runner.errors import ReportRunError
+        code = exc.code if isinstance(exc, ReportRunError) else type(exc).__name__
+        logger.error("程序异常: %s", code)
+        console.print(f"\n[red]错误代码：{code}[/red]")
         return 1
 
     return 0

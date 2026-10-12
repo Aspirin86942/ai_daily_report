@@ -32,6 +32,10 @@ struct NativeScanRequest {
     start_date: String,
     end_date: String,
     #[serde(default)]
+    window_start_utc: Option<String>,
+    #[serde(default)]
+    window_end_utc: Option<String>,
+    #[serde(default)]
     compression_profile: Option<CompressionProfile>,
 }
 
@@ -71,6 +75,8 @@ impl PyScanner {
             report_mode: request.report_mode,
             start_date: request.start_date,
             end_date: request.end_date,
+            window_start_utc: request.window_start_utc,
+            window_end_utc: request.window_end_utc,
             compression_profile: request.compression_profile,
         };
         let result = guard_panic(|| py.detach(|| self.inner.build_context(&request)))?

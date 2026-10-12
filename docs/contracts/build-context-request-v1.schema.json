@@ -64,6 +64,20 @@
     },
     "adapters": {
       "$ref": "#/$defs/adapterPaths"
+    },
+    "window_start_utc": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?(Z|\\+00:00)$"
+    },
+    "window_end_utc": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?(Z|\\+00:00)$"
     }
   },
   "allOf": [
@@ -120,6 +134,50 @@
               null,
               "monthly_balanced_v1"
             ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "window_start_utc"
+        ],
+        "properties": {
+          "window_start_utc": {
+            "type": "string"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "window_end_utc"
+        ],
+        "properties": {
+          "window_end_utc": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "window_end_utc"
+        ],
+        "properties": {
+          "window_end_utc": {
+            "type": "string"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "window_start_utc"
+        ],
+        "properties": {
+          "window_start_utc": {
+            "type": "string"
           }
         }
       }
