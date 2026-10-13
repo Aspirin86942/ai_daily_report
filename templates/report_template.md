@@ -1,5 +1,7 @@
 # {{ report.date }} 审计日报
 
+来源覆盖：未知。此旧版日报没有结构化来源字段。
+
 ## 今日工作完成内容
 {{ report.completed_work }}
 

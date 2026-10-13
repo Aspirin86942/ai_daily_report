@@ -6,6 +6,9 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from src.models.content_audit import ParsedContentAudit
+from .pdf_pages import PdfPageAudit
+
 
 ParserBackend = Literal[
     "rust_office_oxide_v2",
@@ -34,7 +37,7 @@ class ClassifyRequest(WorkerModel):
     file_path: Annotated[str, Field(min_length=3, max_length=32_767)]
     source_version: Annotated[str, Field(pattern=r"^mtime_ns=[0-9]+:size=[0-9]+$")]
     max_pages: Annotated[int, Field(ge=1, le=10_000)]
-    policy_version: Literal["pdf_text_presence_v1"]
+    policy_version: Literal["pdf_text_presence_v1", "pdf_text_presence_v2"]
 
     @model_validator(mode="after")
     def validate_path(self) -> "ClassifyRequest":
@@ -47,6 +50,7 @@ class ClassifyRequest(WorkerModel):
 
 
 class ClassifyResult(WorkerModel):
+    page_audit: PdfPageAudit | None = None
     status: Literal[
         "text_in_parse_window",
         "no_text_in_parse_window",
@@ -59,6 +63,11 @@ class ClassifyResult(WorkerModel):
 
     @model_validator(mode="after")
     def validate_status(self) -> "ClassifyResult":
+        if self.page_audit is not None:
+            if (self.result_examined_pages != len(self.page_audit.checked_pages)
+                or self.page_count is None
+                or any(page > self.page_count for page in self.page_audit.checked_pages)):
+                raise ValueError("PDF observed pages violate page counts")
         if self.status in {"text_in_parse_window", "no_text_in_parse_window"}:
             if self.diagnostic is not None:
                 raise ValueError("text/no-text result must not carry a diagnostic")
@@ -96,6 +105,15 @@ class PdfLimits(WorkerModel):
     kind: Literal["pdf"]
     max_pages: Annotated[int, Field(ge=1, le=10_000)]
     excerpt_max_chars: Annotated[int, Field(ge=1, le=10_000_000)]
+    selected_pages: list[Annotated[int, Field(ge=1)]] | None = Field(default=None, max_length=10_000)
+
+    @model_validator(mode="after")
+    def validate_selection(self):
+        if self.selected_pages is not None and (not self.selected_pages
+            or len(self.selected_pages) > self.max_pages
+            or len(set(self.selected_pages)) != len(self.selected_pages)):
+            raise ValueError("invalid PDF selected pages")
+        return self
 
 
 class SharePointTextLimits(WorkerModel):
@@ -154,6 +172,7 @@ class ParseResult(WorkerModel):
     file_path: Annotated[str, Field(min_length=3, max_length=32_767)]
     file_type: Annotated[str, Field(pattern=r"^\.[a-z0-9]{1,31}$")]
     content: str
+    evidence_audit: ParsedContentAudit | None = None
     parser_backend: ParserBackend
     worker_lane: WorkerLane
     truncated: bool
@@ -165,6 +184,8 @@ class ParseResult(WorkerModel):
 
     @model_validator(mode="after")
     def validate_route_and_path(self) -> "ParseResult":
+        if self.evidence_audit is not None:
+            self.evidence_audit.validate_content(self.content)
         if not (
             self.file_path.startswith("\\\\")
             or (len(self.file_path) >= 3 and self.file_path[1:3] in {":\\", ":/"})

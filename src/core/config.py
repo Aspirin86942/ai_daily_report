@@ -235,6 +235,9 @@ class Config:
     @property
     def llm_config(self) -> Dict[str, Any]:
         """LLM 配置"""
+        request_settings = self.model_request_settings.fingerprint_data()
+        if request_settings["thinking_mode"] is None:
+            del request_settings["thinking_mode"]
         return {
             "model_id": self._settings.llm.model_id,
             "temperature": self._settings.llm.temperature,
@@ -244,7 +247,7 @@ class Config:
             "base_url": str(
                 getattr(self._settings.llm, "base_url", "") or ""
             ).strip(),
-            **self.model_request_settings.model_dump(),
+            **request_settings,
         }
 
     def _report_section(self, name: str, model: type[SettingsModel]) -> SettingsModel:
@@ -299,9 +302,8 @@ class Config:
     def office_worker_path(self) -> str:
         """隔离 Office worker 路径。"""
         if self.installed_mode:
-            return str(
-                (self.project_root / DEFAULT_OFFICE_WORKER_PATH).resolve()
-            )
+            release_root = self.project_root.parent if self.project_root.name == "app" else self.project_root
+            return str((release_root / "bin" / "ai-daily-office-parser.exe").resolve())
         return self._non_blank_string(
             getattr(
                 self._settings.scanner,

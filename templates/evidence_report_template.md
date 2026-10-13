@@ -9,6 +9,10 @@
 
 **质量：{{ report.quality_label }}。** 来源 {{ report.sources | length }} 份。
 
+{% set coverage = report.coverage_summary %}**文件覆盖：** 登记 {{ coverage.registered_count }} 条；有效摘录 {{ coverage.usable_excerpt_count }} 条；成功批次覆盖 {{ coverage.model_covered_count }} 条；摘要或待核实引用 {{ coverage.presented_count }} 条。未安排解析 {{ coverage.not_parsed_count }} 条；解析失败 {{ coverage.parse_failed_count }} 条；空摘录 {{ coverage.empty_excerpt_count }} 条。用户陈述另计 {{ coverage.user_statement_count }} 条。
+{% if coverage.primary_reasons %}主要缺口：{% for reason, count in coverage.primary_reason_labels.items() %}{{ reason }} {{ count }} 条{% if not loop.last %}；{% endif %}{% endfor %}。
+{% endif %}实际读取范围已记录 {{ coverage.actual_ranges_known_count }} 条；其余 {{ coverage.registered_count - coverage.actual_ranges_known_count }} 条来源实际范围未知。
+
 以下内容根据实际读取时的文件内容与用户陈述整理。文档中提及的安排、进度和结果，保留其来源语义。
 
 ## 文件内容摘要

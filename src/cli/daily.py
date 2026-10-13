@@ -15,7 +15,7 @@ from .common import (
     ConsolePort,
     MarkdownFactory,
     RunnerFactory,
-    build_default_report_runner,
+    build_report_dependencies,
     present_report_outcome,
 )
 
@@ -32,6 +32,38 @@ def generate_daily_report(
     scheduled = getattr(args, "scheduled", False)
     regenerate = getattr(args, "regenerate", False)
     reason = (getattr(args, "reason", None) or "").strip()
+    context = _resolve_daily_context(args, console=console, scheduled=scheduled, regenerate=regenerate, reason=reason)
+    if getattr(args, "dry_run", False):
+        if getattr(args, "no_save", False):
+            raise ValueError("--dry-run 与 --no-save 不能同时使用")
+        from src.services.scan_preview import run_preview
+
+        preview = run_preview(context, config)
+        console.print(f"本地预检：{context.target_date}，来源 {preview.source_count}，可用 {preview.usable_count}，状态 {preview.quality}。")
+        console.print(f"模型调用 0 次；预检清单：{preview.manifest_path}")
+        return preview.quality != "unavailable"
+    if runner_factory is None:
+        return _generate_evidence_daily(args, context, console=console, markdown=markdown,
+                                        scheduled=scheduled, reason=reason, regenerate=regenerate)
+    runner, markdown = build_report_dependencies(console, runner_factory, markdown)
+    outcome = runner.run(
+        DailyReportRunRequest(
+            as_of_date=context.started_at.astimezone(ZoneInfo(context.timezone)).date(),
+            save=not args.no_save,
+            user_input=args.input,
+            report_date_override=getattr(args, "date", None),
+            context=context,
+        )
+    )
+    return present_report_outcome(
+        outcome,
+        label="日报",
+        console=console,
+        markdown=markdown,
+    )
+
+def _resolve_daily_context(args: Namespace, *, console: ConsolePort, scheduled: bool, regenerate: bool, reason: str) -> RunContext:
+    """校验参数，并固定本次运行的日期和时区。"""
     if scheduled and any((getattr(args, "no_save", False), getattr(args, "dry_run", False), regenerate)):
         raise ValueError("--scheduled 与 --no-save、--dry-run、--regenerate 不能同时使用")
     if bool(regenerate) != bool(reason):
@@ -55,53 +87,30 @@ def generate_daily_report(
         scheduled=getattr(args, "scheduled", False),
         scheduled_time=config.schedule_settings.local_time,
     )
-    if getattr(args, "dry_run", False):
-        if getattr(args, "no_save", False):
-            raise ValueError("--dry-run 与 --no-save 不能同时使用")
-        from src.services.scan_preview import run_preview
+    return context
 
-        preview = run_preview(context, config)
-        console.print(f"本地预检：{context.target_date}，来源 {preview.source_count}，可用 {preview.usable_count}，状态 {preview.quality}。")
-        console.print(f"模型调用 0 次；预检清单：{preview.manifest_path}")
-        return preview.quality != "unavailable"
-    if runner_factory is None:
-        from src.services.report_runner.evidence_daily import EvidenceDailyService
-        from src.core.logger import setup_logger
 
-        if scheduled:
-            key_env = "DEEPSEEK_API_KEY" if config.llm_provider == "deepseek" else "OPENAI_API_KEY"
-            setup_logger().info("scheduled_start id=%s date=%s pid=%d credential_env_present=%s",
-                                context.run_id, context.target_date, os.getpid(), bool(os.environ.get(key_env)))
-        outcome = EvidenceDailyService(config).run(context, user_input=args.input or "",
-            save=not args.no_save, scheduled=scheduled, regenerate_reason=reason if regenerate else None)
-        console.print(f"日期 {outcome.target_date}；质量 {outcome.quality}；模型调用记录 {outcome.model_calls} 次。")
-        if outcome.output_path:
-            console.print(f"日报文件：{outcome.output_path}")
-        if not scheduled:
-            if markdown is None:
-                from rich.markdown import Markdown
-                markdown = Markdown
-            console.print(markdown(outcome.markdown))
-        setup_logger().info("report_run id=%s date=%s quality=%s action=%s calls=%d", outcome.run_id,
-                            outcome.target_date, outcome.quality, outcome.action, outcome.model_calls)
-        return True
-    if markdown is None:
-        from rich.markdown import Markdown
+def _generate_evidence_daily(args: Namespace, context: RunContext, *, console: ConsolePort,
+                             markdown: MarkdownFactory | None, scheduled: bool, reason: str,
+                             regenerate: bool) -> bool:
+    """执行证据日报，并按手动或调度模式展示结果。"""
+    from src.services.report_runner.evidence_daily import EvidenceDailyService
+    from src.core.logger import setup_logger
 
-        markdown = Markdown
-    runner = runner_factory() if runner_factory else build_default_report_runner(console)
-    outcome = runner.run(
-        DailyReportRunRequest(
-            as_of_date=now.astimezone(ZoneInfo(timezone)).date(),
-            save=not args.no_save,
-            user_input=args.input,
-            report_date_override=date_alias,
-            context=context,
-        )
-    )
-    return present_report_outcome(
-        outcome,
-        label="日报",
-        console=console,
-        markdown=markdown,
-    )
+    if scheduled:
+        key_env = "DEEPSEEK_API_KEY" if config.llm_provider == "deepseek" else "OPENAI_API_KEY"
+        setup_logger().info("scheduled_start id=%s date=%s pid=%d credential_env_present=%s",
+                            context.run_id, context.target_date, os.getpid(), bool(os.environ.get(key_env)))
+    outcome = EvidenceDailyService(config).run(context, user_input=args.input or "",
+        save=not args.no_save, scheduled=scheduled, regenerate_reason=reason if regenerate else None)
+    console.print(f"日期 {outcome.target_date}；质量 {outcome.quality}；模型调用记录 {outcome.model_calls} 次。")
+    if outcome.output_path:
+        console.print(f"日报文件：{outcome.output_path}")
+    if not scheduled:
+        if markdown is None:
+            from rich.markdown import Markdown
+            markdown = Markdown
+        console.print(markdown(outcome.markdown))
+    setup_logger().info("report_run id=%s date=%s quality=%s action=%s calls=%d", outcome.run_id,
+                        outcome.target_date, outcome.quality, outcome.action, outcome.model_calls)
+    return True

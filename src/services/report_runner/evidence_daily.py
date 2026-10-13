@@ -6,7 +6,6 @@ from dataclasses import dataclass, replace
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from hashlib import sha256
-import json
 import os
 from pathlib import Path
 from threading import Event
@@ -23,7 +22,8 @@ from .context import RunContext
 from .errors import ReportRunError
 from .locking import ReportLock
 from .model_calls import AuditedModel, Deadline, LazyModelTransport, OpenAITransport
-from .model_plan import PlannedBatch, check_capabilities, merge_summaries, plan_evidence
+from .model_plan import PlannedBatch, merge_summaries, plan_evidence
+from .model_slicing import apply_model_coverage
 from .publication import ReportPublisher
 from .retention import cleanup_snapshots
 from .scan_evidence import coverage_gaps, scan_with_retry
@@ -53,12 +53,49 @@ class EvidenceDailyService:
         self.clock = clock or (lambda: datetime.now(UTC))
         self.db_path = Path(runtime_config.db_dir) / "reports.sqlite3"
         self.templates = Path(__file__).resolve().parents[3] / "templates"
+        self.job_budget: dict = {}
+        self.on_run_created: Callable | None = None
 
     def _config_fingerprint(self) -> str:
         return fingerprint({"report": self.config.report_settings.model_dump(), "llm": self.config.llm_config,
-            "model_requests": self.config.model_request_settings.model_dump(),
+            "model_requests": self.config.model_request_settings.fingerprint_data(),
             "provider": self.config.llm_provider, "scanner": ReportScannerConfig(self.config).scanner_settings(),
             "work_dir": str(Path(self.config.work_dir).resolve())})
+
+    def _legacy_config_fingerprint(self) -> str:
+        return fingerprint({"report": self.config.report_settings.model_dump(), "llm": self.config.llm_config,
+            "model_requests": self.config.model_request_settings.fingerprint_data(exclude={
+                "truncation_policy", "max_strategy_changes"}),
+            "provider": self.config.llm_provider, "scanner": ReportScannerConfig(self.config).scanner_settings(),
+            "work_dir": str(Path(self.config.work_dir).resolve())})
+
+    def _recovery_fingerprint(self) -> str:
+        """Sending availability may change; frozen input and output meaning may not."""
+        return fingerprint({"version": 1, "report": self.config.report_settings.model_dump(),
+            "llm": {key: value for key, value in self.config.llm_config.items() if key != "max_retries"},
+            "provider": self.config.llm_provider,
+            "scanner": ReportScannerConfig(self.config).scanner_settings(),
+            "work_dir": str(Path(self.config.work_dir).resolve()),
+            "model_requests": self.config.model_request_settings.fingerprint_data(exclude={
+                "context_window_tokens", "verified_max_output_tokens", "request_timeout_seconds", "max_retries"})})
+
+    def _model_client(self, deadline: Deadline, payload: dict | None = None) -> AuditedModel:
+        from ...models.report_settings import ModelPricing
+        frozen = (payload or {}).get("model_pricing")
+        return AuditedModel(self.runs, self.snapshots, transport=LazyModelTransport(self._transport),
+            settings=self.config.model_request_settings, limits=self.config.recovery_settings, deadline=deadline,
+            output_tokens_upper=self.config.llm_config["max_tokens"],
+            frozen_pricing=ModelPricing.model_validate(frozen) if frozen is not None else None,
+            job_budget=(payload or {}).get("job_budget", self.job_budget),
+            reused_calls=(payload or {}).get("reused_model_calls"), prior_calls=(payload or {}).get("prior_model_calls"))
+
+    def _local_recovery_compatible(self, run: dict, deadline: Deadline) -> bool:
+        payload = self.snapshots.read(SnapshotRef(run["snapshot_path"], run["snapshot_sha256"]))
+        if payload.get("recovery_fingerprint") != self._recovery_fingerprint():
+            return False
+        client = self._model_client(deadline, payload)
+        return all(client.cached_result(run["run_id"], PlannedBatch.model_validate(batch)) is not None
+                   for batch in payload["batches"])
 
     def _open(self) -> None:
         self.runs = ReportRunStore(SQLiteStore(self.db_path, report_lock_held=True), clock=self.clock)
@@ -117,6 +154,39 @@ class EvidenceDailyService:
         index.parent.mkdir(parents=True, exist_ok=True)
         return NativeScanner(ReportScannerConfig(self.config))
 
+    def _prepare_input(self, context: RunContext, scan, *, user_input: str = "", model_settings=None):
+        """Freeze evidence and output meaning without preparing or sending a model request."""
+        gaps = coverage_gaps(scan, root=Path(self.config.work_dir))
+        prompt = (self.templates / "evidence_summary_prompt.md").read_text(encoding="utf-8")
+        plan = plan_evidence(context, scan.sources, user_input=user_input or "", system_prompt=prompt,
+            llm_config={**self.config.llm_config, "provider": self.config.llm_provider},
+            settings=model_settings or self.config.model_request_settings,
+            scanner_profile={"work_root": str(Path(self.config.work_dir).resolve()),
+                             "settings": ReportScannerConfig(self.config).scanner_settings()},
+            gaps=[gap.model_dump(mode="json") for gap in gaps])
+        for source in plan.sources:
+            if source.model_truncated:
+                gaps.append(CoverageGap(code="MODEL_INPUT_BOUNDED", stage="model", source_id=source.source_id,
+                    message="受模型请求数量或文本体积上限影响，此来源部分内容未发送。"))
+        has_evidence = any(source.model_chars for source in plan.sources)
+        quality = "partial" if gaps else "complete"
+        if not has_evidence:
+            quality = "no_changes" if not plan.sources and not gaps else "unavailable"
+        if scan.envelope.status == "error" and not user_input.strip():
+            quality = "unavailable"
+        payload = {"version": 2, "context": context.to_dict(), "quality": quality,
+            "job_budget": self.job_budget, "recovery_fingerprint": self._recovery_fingerprint(),
+            "model_pricing": self.config.recovery_settings.model_pricing.model_dump(mode="json")
+                if self.config.recovery_settings.model_pricing is not None else None,
+            "sources": [source.model_dump(mode="json") for source in plan.sources],
+            "gaps": [gap.model_dump(mode="json") for gap in gaps],
+            "batches": [batch.model_dump(mode="json") for batch in plan.batches],
+            "input_fingerprint": plan.input_fingerprint,
+            "missed_dates": self.runs.missed_dates(context.target_date),
+            "template": (self.templates / "evidence_report_template.md").read_text(encoding="utf-8"),
+            "notes": self._notes(context), "root_alias": self.config.report_settings.root_alias}
+        return plan, payload
+
     def run(self, context: RunContext, *, user_input: str = "", save: bool = True,
             scheduled: bool = False, regenerate_reason: str | None = None) -> EvidenceDailyOutcome:
         limits = self.config.recovery_settings
@@ -131,7 +201,9 @@ class EvidenceDailyService:
                 for run in pending:
                     # Recovery uses the old frozen context even after midnight. A changed
                     # model/configuration cannot silently reinterpret prepared requests.
-                    if run["phase"] != "db_committed" and run["config_fingerprint"] != context.config_fingerprint:
+                    if (run["phase"] != "db_committed" and run["config_fingerprint"] != context.config_fingerprint
+                            and run["config_fingerprint"] != self._legacy_config_fingerprint()
+                            and not self._local_recovery_compatible(run, deadline)):
                         raise ReportRunError("RECOVERY_CONFIG_CHANGED")
                     self.runs.resume(run["run_id"])
                     recovered = self._finish_guarded(run["run_id"], deadline)
@@ -139,34 +211,12 @@ class EvidenceDailyService:
                         return recovered
             self.runs.create(context, kind="report" if save else "preview", regeneration_reason=regenerate_reason)
             try:
+                if self.on_run_created is not None:
+                    self.on_run_created(context.run_id)
                 self.runs.set_scanning(context.run_id)
                 scan = scan_with_retry(self._scanner(), context, deadline)
-                gaps = coverage_gaps(scan, root=Path(self.config.work_dir))
-                prompt = (self.templates / "evidence_summary_prompt.md").read_text(encoding="utf-8")
-                plan = plan_evidence(context, scan.sources, user_input=user_input or "", system_prompt=prompt,
-                    llm_config={**self.config.llm_config, "provider": self.config.llm_provider},
-                    settings=self.config.model_request_settings,
-                    scanner_profile={"work_root": str(Path(self.config.work_dir).resolve()),
-                                     "settings": ReportScannerConfig(self.config).scanner_settings()},
-                    gaps=[gap.model_dump(mode="json") for gap in gaps])
-                for source in plan.sources:
-                    if source.model_truncated:
-                        gaps.append(CoverageGap(code="MODEL_INPUT_BOUNDED", stage="model", source_id=source.source_id,
-                                               message="受模型请求数量或文本体积上限影响，此来源部分内容未发送。"))
-                has_evidence = any(source.model_chars for source in plan.sources)
-                quality = "partial" if gaps else "complete"
-                if not has_evidence:
-                    quality = "no_changes" if not plan.sources and not gaps else "unavailable"
-                if scan.envelope.status == "error" and not user_input.strip():
-                    quality = "unavailable"
-                payload = {"version": 1, "context": context.to_dict(), "quality": quality,
-                    "sources": [source.model_dump(mode="json") for source in plan.sources],
-                    "gaps": [gap.model_dump(mode="json") for gap in gaps],
-                    "batches": [batch.model_dump(mode="json") for batch in plan.batches],
-                    "input_fingerprint": plan.input_fingerprint,
-                    "missed_dates": self.runs.missed_dates(context.target_date),
-                    "template": (self.templates / "evidence_report_template.md").read_text(encoding="utf-8"),
-                    "notes": self._notes(context), "root_alias": self.config.report_settings.root_alias}
+                plan, payload = self._prepare_input(context, scan, user_input=user_input)
+                quality = payload["quality"]
                 reference = self.snapshots.put(context.run_id, "input", payload)
                 if quality == "unavailable":
                     self.runs.scan_failure(context.run_id, reference, list(plan.sources))
@@ -217,27 +267,42 @@ class EvidenceDailyService:
             return EvidenceDailyOutcome(run_id, run["target_date"], run["quality"], run["markdown"], path,
                                         "repaired", len(self.runs.calls(run_id)))
         payload = self.snapshots.read(SnapshotRef(run["snapshot_path"], run["snapshot_sha256"]))
+        if payload.get("version") not in {1, 2}:
+            raise ReportRunError("SNAPSHOT_VERSION_UNSUPPORTED")
         context = RunContext.from_dict(payload["context"])
         if context.run_id != run_id or payload["input_fingerprint"] != run["input_fingerprint"]:
             raise ReportRunError("SNAPSHOT_CONTEXT_MISMATCH")
         batches = [PlannedBatch.model_validate(batch) for batch in payload["batches"]]
         results = []
+        sources = [ReportSource.model_validate(source) for source in payload["sources"]]
+        gaps = [CoverageGap.model_validate(gap) for gap in payload["gaps"]]
+        quality = payload["quality"]
         if batches:
-            for batch in batches:
-                check_capabilities(self.config.model_request_settings, message_bytes=batch.message_bytes,
-                                   max_tokens=batch.max_tokens)
-            client = AuditedModel(self.runs, self.snapshots, transport=LazyModelTransport(self._transport),
-                settings=self.config.model_request_settings, limits=self.config.recovery_settings, deadline=deadline)
+            client = self._model_client(deadline, payload)
             results = generate_model_batches(client, run_id, batches, workers=self.model_workers)
-        summary = merge_summaries(results) if results else EvidenceSummaryData(summary_items=[], verification_items=[])
+            if all(batch.response_schema_version == 2 for batch in batches):
+                effective = [client.effective_batch(run_id, batch)[0] for batch in batches]
+                sources = apply_model_coverage(sources, gaps, effective, client.audited_calls(run_id))
+                if gaps:
+                    quality = "partial"
+        summary = merge_summaries(results, bounded=all(batch.response_schema_version == 2 for batch in batches)) if results else EvidenceSummaryData(summary_items=[], verification_items=[])
+        unverified = {source.source_id for source in sources if
+            source.coverage_limits.get("evidence_audit", {}).get("text_unverified")
+            or source.coverage_limits.get("ocr", {}).get("text_unverified")}
+        if unverified:
+            pending = [item for item in summary.summary_items if set(item.source_ids) & unverified]
+            retained = [item for item in summary.summary_items if not set(item.source_ids) & unverified]
+            from ...models.evidence_report import EvidenceMergedSummaryData
+            unique = {(item.text, tuple(sorted(item.source_ids))): item for item in summary.verification_items + pending}
+            summary = EvidenceMergedSummaryData(summary_items=retained, verification_items=list(unique.values()))
         report = EvidenceDailyReportData(**summary.model_dump(), date=str(context.target_date),
             window_start_utc=context.window_start_utc.isoformat(), window_end_utc=context.window_end_utc.isoformat(),
-            quality=payload["quality"], sources=payload["sources"], gaps=payload["gaps"], missed_dates=payload["missed_dates"],
+            quality=quality, sources=sources, gaps=gaps, missed_dates=payload["missed_dates"],
             generated_at=self.clock().astimezone(UTC).isoformat(), user_notes=payload["notes"], root_alias=payload["root_alias"])
         deadline.remaining()
         if run["run_kind"] == "preview":
             markdown = self._render(payload, report)
-            self.runs.finish_preview(run_id, report.quality)
+            self.runs.finish_preview(run_id, report.quality, report=report, markdown=markdown)
             return EvidenceDailyOutcome(run_id, report.date, report.quality, markdown, None, "preview", len(self.runs.calls(run_id)))
         return self._stage_publish(run_id, report, payload)
 
@@ -264,10 +329,26 @@ class EvidenceDailyService:
 
 def generate_model_batches(client, run_id: str, batches: list[PlannedBatch], *, workers: int = 1):
     """Keep ordered results and finish in-flight audit writes before propagating errors."""
-    if workers == 1 or len(batches) <= 1:
-        return [client.generate(run_id, batch) for batch in batches]
-    client.transport.prepare()
     results = [None] * len(batches)
+    cache = getattr(client, "cached_result", None)
+    missing = []
+    for index, batch in enumerate(batches):
+        result = cache(run_id, batch) if cache is not None else None
+        if result is None:
+            missing.append(index)
+        else:
+            results[index] = result
+    if not missing:
+        return results
+    if workers == 1 or len(missing) <= 1:
+        for index in missing:
+            results[index] = client.generate(run_id, batches[index])
+        return results
+    check = getattr(client, "check_batch", None)
+    if check is not None:
+        for index in missing:
+            check(batches[index])
+    client.transport.prepare()
     pending = {}
     next_index = 0
     failed = Event()
@@ -281,10 +362,11 @@ def generate_model_batches(client, run_id: str, batches: list[PlannedBatch], *, 
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         try:
-            while next_index < len(batches) or pending:
-                while next_index < len(batches) and len(pending) < workers and not failed.is_set():
-                    future = executor.submit(generate, batches[next_index])
-                    pending[future] = next_index
+            while next_index < len(missing) or pending:
+                while next_index < len(missing) and len(pending) < workers and not failed.is_set():
+                    index = missing[next_index]
+                    future = executor.submit(generate, batches[index])
+                    pending[future] = index
                     next_index += 1
                 completed, _ = wait(pending, return_when=FIRST_COMPLETED)
                 for future in completed:

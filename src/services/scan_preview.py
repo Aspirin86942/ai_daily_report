@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from ..models.report_settings import RecoverySettings
+from ..models.coverage import source_audit, summarize_coverage
 from .native_scanner import NativeScanner, ScanResult
 from .report_runner.context import RunContext
 from .report_runner.model_calls import Deadline
@@ -48,7 +49,7 @@ class ReportScannerConfig:
 
 def scan_quality(result: ScanResult) -> str:
     envelope = result.envelope
-    usable = [s for s in result.sources if s.parse_status == "success" and s.excerpt]
+    usable = [s for s in result.sources if source_audit(s).primary_status == "usable_excerpt"]
     gaps = coverage_gaps(result)
     if envelope.status == "error":
         return "unavailable"
@@ -72,6 +73,7 @@ def run_preview(context: RunContext, runtime_config: Any, *, scanner: Any = None
     manifest = {
         "schema_version": 1, "kind": "scan_preview", "context": context.to_dict(),
         "quality": quality, "model_calls": 0,
+        "coverage_summary": summarize_coverage(result.sources).model_dump(mode="json"),
         "summary": result.envelope.summary.model_dump(mode="json"),
         "error_code": result.envelope.error.error_code if result.envelope.error else None,
         "coverage_gaps": [gap.model_dump(mode="json") for gap in coverage_gaps(
@@ -92,4 +94,4 @@ def run_preview(context: RunContext, runtime_config: Any, *, scanner: Any = None
         os.fsync(stream.fileno())
     os.replace(temporary, path)
     return ScanPreview(quality, len(result.sources),
-                       sum(s.parse_status == "success" and bool(s.excerpt) for s in result.sources), path)
+                       summarize_coverage(result.sources).usable_excerpt_count, path)

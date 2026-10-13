@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .scan_sources import ScanSource, Sha256
 from .scanner_contract import DateString, RelativePath
+from .coverage import CoverageSummary, summarize_coverage, validate_coverage_limits
 
 SourceId = Annotated[str, Field(pattern=r"^(src_[0-9a-f]{64}|user_input)$")]
 
@@ -43,7 +44,27 @@ class EvidenceMergedSummaryData(EvidenceSummaryData):
     """Preserve every item from up to eight validated 256-item batches."""
 
     summary_items: list[EvidenceItem] = Field(max_length=2048)
-    verification_items: list[EvidenceItem] = Field(max_length=2048)
+    verification_items: list[EvidenceItem] = Field(max_length=4096)
+
+
+class EvidenceBatchItem(EvidenceItem):
+    text: str = Field(min_length=1, max_length=180)
+
+
+class EvidenceVerificationItem(EvidenceItem):
+    text: str = Field(min_length=1, max_length=120)
+
+
+class EvidenceBatchSummaryData(EvidenceSummaryData):
+    """New generation contract; legacy summaries retain their original limits."""
+
+    summary_items: list[EvidenceBatchItem] = Field(max_length=6)
+    verification_items: list[EvidenceVerificationItem] = Field(max_length=3)
+
+
+class EvidenceReducedBatchSummaryData(EvidenceBatchSummaryData):
+    summary_items: list[EvidenceBatchItem] = Field(max_length=3)
+    verification_items: list[EvidenceVerificationItem] = Field(max_length=1)
 
 
 class ReportSource(EvidenceModel):
@@ -77,6 +98,7 @@ class ReportSource(EvidenceModel):
 
     @model_validator(mode="after")
     def validate_source_kind(self):
+        validate_coverage_limits(self.coverage_limits)
         if self.source_kind == "file" and (not self.relative_path or self.source_id == "user_input"):
             raise ValueError("file source requires a relative path and file identity")
         if self.source_kind == "user_statement" and (self.source_id != "user_input" or self.relative_path is not None):
@@ -157,3 +179,7 @@ class EvidenceDailyReportData(EvidenceMergedSummaryData):
     @property
     def quality_label(self) -> str:
         return {"complete": "完整覆盖", "partial": "部分覆盖", "no_changes": "未发现目标日期内修改的文件"}[self.quality]
+
+    @property
+    def coverage_summary(self) -> CoverageSummary:
+        return summarize_coverage(self.sources, self.summary_items + self.verification_items)

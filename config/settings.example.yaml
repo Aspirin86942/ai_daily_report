@@ -24,6 +24,11 @@ llm:
   # 单次实际请求的超时；SDK 自动重试关闭，由应用计数。
   request_timeout_seconds: 120
   response_format: "json_object"
+  # 思考模式参数默认不发送；经当前路由联调后可显式设置 enabled/disabled。
+  thinking_mode: null
+  # 直连使用 top_level；需要嵌套参数的网关使用 extra_body。
+  # 有效值须与已设置的 thinking_mode 配合；未指定时保持原顶层发送格式。
+  thinking_parameter_location: null
   max_request_utf8_bytes: 16000
   max_sources_per_batch: 8
   max_batches: 8
@@ -39,6 +44,7 @@ report:
   notes_dir: "data/report_notes"
 
 recovery:
+  enforce_model_budgets: true
   missed_days_policy: "latest_due_day_with_gap_notice"
   max_calls_per_run: 12
   max_calls_per_calendar_day: 30
@@ -94,6 +100,7 @@ scanner:
   excel_max_rows: 50
   pdf_max_pages: 5
   text_max_chars: 6000
+  csv_encodings: [utf-8, utf-8-sig, gb18030]
   summary_excel_max_rows: 10
   summary_pdf_max_pages: 2
   summary_text_max_chars: 2000

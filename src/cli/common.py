@@ -46,6 +46,20 @@ def build_default_report_runner(console: ConsolePort) -> ReportRunner:
     )
 
 
+def build_report_dependencies(
+    console: ConsolePort,
+    runner_factory: RunnerFactory | None,
+    markdown: MarkdownFactory | None,
+) -> tuple[ReportRunner, MarkdownFactory]:
+    """按既有顺序准备 Markdown 展示器和报告运行器。"""
+    if markdown is None:
+        from rich.markdown import Markdown
+
+        markdown = Markdown
+    runner = runner_factory() if runner_factory else build_default_report_runner(console)
+    return runner, markdown
+
+
 def present_report_outcome(
     outcome: ReportRunOutcome,
     *,

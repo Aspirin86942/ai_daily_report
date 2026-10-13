@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .scanner_contract import RelativePath
+from .coverage import SourceCoverageAudit, validate_coverage_limits
 
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
@@ -42,6 +43,9 @@ class ScanSource(BaseModel):
 
     @model_validator(mode="after")
     def validate_extracted_evidence(self) -> ScanSource:
+        validate_coverage_limits(self.coverage_limits)
+        if "evidence_audit" in self.coverage_limits:
+            SourceCoverageAudit.model_validate(self.coverage_limits["evidence_audit"]).validate_excerpt(len(self.excerpt))
         if sha256(self.excerpt.encode("utf-8")).hexdigest() != self.excerpt_sha256:
             raise ValueError("excerpt checksum mismatch")
         if self.excerpt and (self.parse_status != "success" or self.content_sha256 is None):

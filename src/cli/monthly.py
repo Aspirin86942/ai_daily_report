@@ -11,7 +11,7 @@ from .common import (
     ConsolePort,
     MarkdownFactory,
     RunnerFactory,
-    build_default_report_runner,
+    build_report_dependencies,
     present_report_outcome,
 )
 
@@ -24,11 +24,7 @@ def generate_monthly_report_cmd(
     markdown: MarkdownFactory | None = None,
 ) -> bool:
     """映射 monthly 参数并展示 ReportRunner outcome。"""
-    if markdown is None:
-        from rich.markdown import Markdown
-
-        markdown = Markdown
-    runner = runner_factory() if runner_factory else build_default_report_runner(console)
+    runner, markdown = build_report_dependencies(console, runner_factory, markdown)
     outcome = runner.run(
         MonthlyReportRunRequest(
             as_of_date=date.today(),

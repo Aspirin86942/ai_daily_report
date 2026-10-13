@@ -15,6 +15,7 @@ from src.workers.python_worker_identity import (
     PYTHON_SHAREPOINT_TEXT_BACKEND,
 )
 from src.workers.models import ParseRequest, ParseResult, WorkerOperationError
+from src.models.content_audit import ParsedContentAudit
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,7 @@ class WorkerParsePayload:
     truncated: bool
     error_code: str | None = None
     retryable: bool = False
+    evidence_audit: ParsedContentAudit | None = None
 
 
 DocumentParser = Callable[..., Any]
@@ -125,6 +127,7 @@ def parse_worker_request(
         file_path=request.file_path,
         file_type=request.file_type,
         content=payload.content,
+        evidence_audit=payload.evidence_audit,
         parser_backend=request.backend,
         worker_lane="python_document_process_v2",
         truncated=payload.truncated,
@@ -148,7 +151,10 @@ def parse_legacy_excel_payload(
         limits.get("document_excerpt_max_chars", limits.get("text_max_chars")),
         6000,
     )
-    reader = excel_reader or parse_excel_table_content
+    if excel_reader is None:
+        from src.services.document_parser import parse_document_file
+        return parse_document_file(file_path, file_type, limits)
+    reader = excel_reader
     try:
         raw_content, budget_truncated = reader(
             file_path,
@@ -156,7 +162,11 @@ def parse_legacy_excel_payload(
             max_rows,
             max_columns,
         )
-        content, char_truncated = _truncate_text(raw_content, max_chars)
+        from src.services.document_parser import _PreviewBuilder
+        builder = _PreviewBuilder(max_chars)
+        for part in raw_content.split("\n\n"):
+            builder.add(part)
+        content, char_truncated = builder.build(), builder.was_truncated
         return WorkerParsePayload(
             file_path=str(file_path),
             file_type=file_type,
@@ -272,6 +282,7 @@ def _dispatch_worker_parse(
         limits = {
             "pdf_max_pages": limits["max_pages"],
             "document_excerpt_max_chars": limits["excerpt_max_chars"],
+            "pdf_selected_pages": limits.get("selected_pages"),
         }
         options = DocumentParserOptions(pdf_parser_backend=PDF_TEXT_BACKEND)
     else:
@@ -289,6 +300,7 @@ def _dispatch_worker_parse(
         file_path=str(context.file_path),
         file_type=str(context.file_type),
         content=str(context.content),
+        evidence_audit=getattr(context, "evidence_audit", None),
         error="document parser reported an error" if context.error else None,
         parser_backend=str(context.parser_backend),
         truncated=bool(context.truncated),
@@ -325,32 +337,14 @@ def parse_excel_table_content(
     max_rows: int,
     max_columns: int,
 ) -> tuple[str, bool]:
-    """Build a bounded legacy-XLS preview and report any budget truncation."""
-    import pandas as pd
-
-    content_parts: list[str] = []
-    truncated = False
-    with pd.ExcelFile(file_path) as excel_file:
-        sheet_names = list(excel_file.sheet_names)
-        if len(sheet_names) > max_sheets:
-            truncated = True
-        for sheet_index, sheet_name in enumerate(sheet_names[:max_sheets]):
-            sheet = excel_file.book.sheet_by_index(sheet_index)
-            read_columns = min(int(sheet.ncols), max_columns)
-            if int(sheet.nrows) > max_rows + 1 or int(sheet.ncols) > max_columns:
-                truncated = True
-            content_parts.append(f"## {sheet_name}")
-            if read_columns == 0:
-                continue
-            dataframe = pd.read_excel(
-                excel_file,
-                sheet_name=sheet_name,
-                nrows=max_rows,
-                usecols=range(read_columns),
-            ).dropna(how="all")
-            if not dataframe.empty:
-                content_parts.append(_dataframe_to_markdown(dataframe, pd))
-    return "\n\n".join(content_parts), truncated
+    """Use the same format-aware parser as the production XLS worker."""
+    payload = parse_legacy_excel_payload(file_path, ".xls", {
+        "excel_max_sheets": max_sheets, "excel_max_rows": max_rows,
+        "excel_max_columns": max_columns, "document_excerpt_max_chars": 10_000_000,
+    })
+    if payload.error:
+        raise ValueError(payload.error)
+    return payload.content, payload.truncated
 
 
 def _dataframe_to_markdown(dataframe: Any, pandas_module: Any) -> str:

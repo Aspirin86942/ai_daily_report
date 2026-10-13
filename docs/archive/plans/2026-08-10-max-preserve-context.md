@@ -446,7 +446,7 @@ git commit -m "config: pin generous context budgets in settings (500k/100k chars
 ### Task 4: 文档更新（spec 校正 + scanner-backends.md + CLAUDE.md）
 
 **Files:**
-- Modify: `docs/superpowers/specs/2026-08-10-max-preserve-context-design.md`（§3 版本行、§4 不变量规则、§6 测试名）
+- Modify: `docs/archive/specs/2026-08-10-max-preserve-context-design.md`（§3 版本行、§4 不变量规则、§6 测试名）
 - Modify: `docs/scanner-backends.md`（`:84-94` Cache identity 节后追加）
 - Modify: `CLAUDE.md`（Key Patterns 扫描策略行）
 
@@ -455,7 +455,7 @@ git commit -m "config: pin generous context budgets in settings (500k/100k chars
 
 - [ ] **Step 1: 校正 spec**
 
-`docs/superpowers/specs/2026-08-10-max-preserve-context-design.md` 三处：
+`docs/archive/specs/2026-08-10-max-preserve-context-design.md` 三处：
 
 1. §3 表格版本行（`:53`）：`markdown_context_v1` → **`markdown_context_v2`** 改为 `markdown_context_v2` → **`markdown_context_v3`**（现状常量已是 v2，实测 `rust/scanner_contract/src/lib.rs:704`；v1 分支保持 `markdown_context_v1` 不动）。
 2. §5 风险 4（`:88`）同校。
@@ -501,7 +501,7 @@ values are overridable through the scanner profile leaves.
 - [ ] **Step 4: Commit**
 
 ```bash
-git add docs/superpowers/specs/2026-08-10-max-preserve-context-design.md docs/scanner-backends.md CLAUDE.md
+git add docs/archive/specs/2026-08-10-max-preserve-context-design.md docs/scanner-backends.md CLAUDE.md
 git commit -m "docs: correct compression version target and document verbatim-preserving budgets"
 ```
 

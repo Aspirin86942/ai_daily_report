@@ -40,7 +40,9 @@ def check_model(runtime_config, *, transport_factory=None, clock=lambda: datetim
                     "checked_at": clock().astimezone(UTC).isoformat(), "config_fingerprint": context.config_fingerprint,
                     "request_max_tokens": runtime_config.llm_config["max_tokens"],
                     "json_verified": True, "source_references_verified": True,
-                    "usage_available": calls[-1]["usage_json"] is not None,
+                    "usage_available": any(type(value) is int and value >= 0 for key, value in
+                        json.loads(calls[-1]["usage_json"] or "{}").items()
+                        if key in {"prompt_tokens", "completion_tokens", "total_tokens", "input_tokens", "output_tokens"}),
                     "context_limits_verified": runtime_config.model_request_settings.context_window_tokens is not None
                         and runtime_config.model_request_settings.verified_max_output_tokens is not None}
             directory = Path(runtime_config.data_dir) / "diagnostics"

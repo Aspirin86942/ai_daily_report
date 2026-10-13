@@ -1,6 +1,7 @@
 """Windows-first native scanner 的严格领域合同。"""
 
 from __future__ import annotations
+from src.workers.pdf_pages import PdfPageAudit
 
 import re
 from datetime import date, datetime, timedelta
@@ -13,6 +14,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    field_validator,
     model_validator,
 )
 
@@ -144,6 +146,7 @@ class ScannerSettings(ContractModel):
         Field(max_length=256),
     ] | None = None
     total_max_chars: CharBudget | None = None
+    excerpt_priority_paths: Annotated[list[RelativePath], Field(max_length=4096)] | None = None
     fallback_after_timeout: bool | None = None
     legacy_office_enabled: bool | None = None
     pptx_include_notes: bool | None = None
@@ -154,6 +157,7 @@ class ScannerSettings(ContractModel):
     excel_max_rows: RowBudget | None = None
     pdf_max_pages: PdfPageBudget | None = None
     text_max_chars: CharBudget | None = None
+    csv_encodings: Annotated[list[Literal["utf-8", "utf-8-sig", "gb18030"]], Field(min_length=1, max_length=3)] | None = None
     excel_max_sheets: ExcelSheetBudget | None = None
     excel_max_columns: ColumnBudget | None = None
     docx_max_paragraphs: ParagraphBudget | None = None
@@ -194,6 +198,13 @@ class ScannerSettings(ContractModel):
                 )
         return value
 
+    @field_validator("csv_encodings")
+    @classmethod
+    def validate_csv_encodings(cls, value: list[str] | None) -> list[str] | None:
+        if value is not None and len(set(value)) != len(value):
+            raise ValueError("CSV encoding allowlist contains duplicates")
+        return value
+
 
 class DiscoveryProfile(ContractModel):
     allowed_extensions: Annotated[list[Extension], Field(max_length=256)]
@@ -230,11 +241,19 @@ class ExecutionProfile(ContractModel):
 
 
 class TextParseProfile(ContractModel):
+    csv_encodings: Annotated[list[Literal["utf-8", "utf-8-sig", "gb18030"]], Field(min_length=1, max_length=3)] = Field(default_factory=lambda: ["utf-8", "utf-8-sig"])
     backend: Literal["light_text_v2"]
     read_head_bytes: ReadBudget
     read_tail_bytes: ReadBudget
     max_chars: CharBudget
     excerpt_max_chars: CharBudget
+
+    @field_validator("csv_encodings")
+    @classmethod
+    def validate_encodings(cls, value: list[str]) -> list[str]:
+        if len(set(value)) != len(value):
+            raise ValueError("CSV encoding allowlist contains duplicates")
+        return value
 
 
 class OfficeParseProfile(ContractModel):
@@ -266,16 +285,27 @@ class OfficeParseProfile(ContractModel):
 
 
 class PdfParseProfile(ContractModel):
+    selection_policy_version: Literal["pdf_text_presence_v1", "pdf_text_presence_v2"] = "pdf_text_presence_v1"
     backend: NonEmpty1024
     max_pages: PdfPageBudget
     excerpt_max_chars: CharBudget
 
 
 class ParseProfile(ContractModel):
+    cache_payload_version: Literal[1] = 1
+    excerpt_policy_version: Literal["fair_semantic_v1", "fair_semantic_v2", "fair_semantic_v3", "fair_semantic_v4", "fair_semantic_v5", "fair_semantic_v6", "fair_semantic_v7", "fair_semantic_v8", "fair_semantic_v9"] = "fair_semantic_v1"
+    excerpt_priority_paths: Annotated[list[RelativePath], Field(max_length=4096)] = Field(default_factory=list)
     aggregate_max_chars: CharBudget
     text: TextParseProfile
     office: OfficeParseProfile
     pdf: PdfParseProfile
+
+    @field_validator("excerpt_priority_paths")
+    @classmethod
+    def validate_priority_paths(cls, value: list[str]) -> list[str]:
+        if value != sorted(set(value)):
+            raise ValueError("excerpt priority paths must be sorted and unique")
+        return value
 
 
 class ContextProfile(ContractModel):
@@ -313,8 +343,8 @@ class NormalizedScannerSettings(ContractModel):
     execution: ExecutionProfile
     parse: ParseProfile
     context: ContextProfile
-    admission_policy_version: Literal["budget_admission_v2"]
-    classifier_policy_version: Literal["pdf_text_presence_v1"]
+    admission_policy_version: Literal["budget_admission_v2", "budget_refill_v3"]
+    classifier_policy_version: Literal["pdf_text_presence_v1", "pdf_text_presence_v2"]
     max_candidate_files: Annotated[int, Field(ge=1, le=1_000_000)]
     max_pdf_text_extractions: Annotated[int, Field(ge=0, le=100_000)]
     max_total_pdf_classification_pages: Annotated[int, Field(ge=0, le=10_000_000)]
@@ -394,6 +424,7 @@ class Diagnostic(ContractModel):
         "PARSER_TIMEOUT",
         "PARSER_INVALID_PAYLOAD",
         "PARSER_FAILED",
+        "PDF_PROTECTED",
         "WORKER_HANDSHAKE_FAILED",
         "WORKER_VERSION_MISMATCH",
         "WORKER_BUILD_CHANGED",
@@ -692,6 +723,7 @@ _BODY_PARSER_LANES = {
 
 
 class PdfClassificationAuditV1(ContractModel):
+    page_audit: "PdfPageAudit | None" = None
     status: PdfClassificationStatus
     # spec Part 3: the three page fields are nullable u64 — 0 is a legitimate
     # value (snapshot/not_eligible rows report run/result pages as 0).
@@ -709,6 +741,18 @@ class PdfClassificationAuditV1(ContractModel):
 
     @model_validator(mode="after")
     def validate_cache_miss_reason(self) -> "PdfClassificationAuditV1":
+        if self.page_audit is not None:
+            from src.workers.pdf_pages import sample_pages
+            audit = self.page_audit
+            if (self.result_examined_pages != len(audit.checked_pages) or self.page_count is None
+                or audit.checked_pages != sample_pages(self.page_count, self.nominal_charged_pages,
+                    audit.policy_version)[:len(audit.checked_pages)]):
+                raise ValueError("PDF page observations violate provenance")
+            if audit.observations is not None:
+                text = self.status == "text_in_parse_window"
+                if any(page.has_text != (text and index + 1 == len(audit.observations))
+                    for index, page in enumerate(audit.observations)):
+                    raise ValueError("PDF text observations violate status")
         if self.classification_cache_status == "miss":
             if (
                 self.classification_cache_miss_reason
@@ -958,7 +1002,49 @@ class FileAuditV2(ContractModel):
         return self
 
 
+class RefillRoundAudit(ContractModel):
+    round: Annotated[int, Field(ge=1, le=2)]
+    planned_source_count: PositiveInt
+    plan_sha256: Sha256Hex
+    candidate_slots_used: NonNegativeInt
+    classification_pages_held: NonNegativeInt
+    extraction_slots_used: NonNegativeInt
+    reserved_chars: NonNegativeInt
+    refunded_chars: NonNegativeInt
+    refunded_classification_pages: NonNegativeInt
+
+
+class RefillAudit(ContractModel):
+    policy_version: Literal["budget_refill_v3"]
+    stop_reason: Literal["complete", "quota_exhausted", "no_progress", "deadline", "round_limit"]
+    max_rounds: Literal[2]
+    candidate_cap: NonNegativeInt
+    classification_page_cap: NonNegativeInt
+    extraction_cap: NonNegativeInt
+    context_char_cap: NonNegativeInt
+    candidate_slots_used: NonNegativeInt
+    classification_pages_held: NonNegativeInt
+    extraction_slots_used: NonNegativeInt
+    refunded_chars: NonNegativeInt
+    refunded_classification_pages: NonNegativeInt
+    rounds: Annotated[list[RefillRoundAudit], Field(max_length=2)]
+
+    @model_validator(mode="after")
+    def validate_caps(self) -> "RefillAudit":
+        values = [self, *self.rounds]
+        for value in values:
+            if (value.candidate_slots_used > self.candidate_cap
+                    or value.classification_pages_held > self.classification_page_cap
+                    or value.extraction_slots_used > self.extraction_cap):
+                raise ValueError("refill consumption exceeds original quota")
+        for index, value in enumerate(self.rounds, 1):
+            if value.round != index or value.reserved_chars > self.context_char_cap:
+                raise ValueError("invalid frozen refill round")
+        return self
+
+
 class ExecutionMetricsV2(ContractModel):
+    refill_audit: RefillAudit | None = None
     discovery_observed_file_count: NonNegativeInt
     source_guard_content_hash_file_count: NonNegativeInt
     source_guard_unavailable_count: NonNegativeInt

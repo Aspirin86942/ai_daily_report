@@ -1,10 +1,12 @@
 # 审计日报生成器 v5.0
 
-仅支持 Windows x64 与 CPython 3.13.13。生产扫描链已经收口为：
+仅支持 Windows x64 与 CPython 3.13.13。Python 编排报告业务，Rust 负责扫描和上下文构建。
 
 ```text
-CLI → ReportRunner → NativeScanner → PyO3 Scanner
-→ scanner_core → worker v2 pools
+daily → EvidenceDailyService → 扫描、模型调用审计、报告发布
+weekly / monthly → ReportRunner → 历史聚合或扫描、模型调用、报告发布
+
+扫描：NativeScanner → PyO3 Scanner → scanner_core → worker v2 pools
 ```
 
 Python 负责 CLI、配置、报告 SQLite、模板、Markdown 和 LLM；Rust 在当前
@@ -27,11 +29,11 @@ if (
 
 # 编辑本机配置，至少把 paths.work_dir 改成获批的绝对目录。
 # 在当前进程或凭据系统中注入 DEEPSEEK_API_KEY / OPENAI_API_KEY。
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+uv sync --frozen
 $env:PYO3_PYTHON = (Resolve-Path '.\.venv\Scripts\python.exe').Path
 cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 .\.venv\Scripts\python.exe main.py doctor --strict
-.\.venv\Scripts\python.exe main.py daily -i "今日完成 XX 审计"
+.\.venv\Scripts\python.exe main.py daily -i "昨日完成 XX 审计"
 ```
 
 根目录 `.python-version` 是开发、Release 和部署唯一版本来源。原生模块在首次
@@ -42,8 +44,10 @@ cargo build --manifest-path rust/Cargo.toml --workspace --release --locked
 
 ```powershell
 # 日报、周报、月报
-.\.venv\Scripts\python.exe main.py daily -i "今日工作内容"
+.\.venv\Scripts\python.exe main.py daily -i "昨日工作内容"
 .\.venv\Scripts\python.exe main.py daily --no-save -i "预览模式"
+.\.venv\Scripts\python.exe main.py daily --target-date 2026-10-12
+.\.venv\Scripts\python.exe main.py daily --dry-run --target-date 2026-10-12
 .\.venv\Scripts\python.exe main.py weekly --source db
 .\.venv\Scripts\python.exe main.py weekly 2026-W05 --source scan
 .\.venv\Scripts\python.exe main.py monthly 2026-01 --source db
@@ -75,7 +79,11 @@ Benchmark 不读取本机 `settings.yaml`，每组 cold/warm 使用独立的新�
 
 ## Scanner 接口与路由
 
-外部报告 seam 保持为：
+日报以已经结束的自然日为目标，默认处理昨日。`--target-date` 同时确定扫描范围和报告日期。
+`--dry-run` 执行本地扫描预检，模型调用为零；`--no-save` 生成预览并保留调用审计，正式报告版本保持原状。
+补跑、覆盖修复和调度操作见 [日报操作说明](docs/daily-report-operations.md)。
+
+历史日报接口及周报、月报的报告运行接口保持为：
 
 ```python
 ReportRunner.run(ReportRunRequest) -> ReportRunOutcome
@@ -161,7 +169,7 @@ src/services/report_runner/  # 报告业务深模块
 src/services/native_scanner.py # 唯一 Python scanner adapter
 src/workers/                 # crash-isolated Python worker v2
 rust/scanner_native/         # PyO3 CPython 3.13 extension
-rust/scanner_core/           # scanner/context 深模块
+rust/scanner_core/           # scanner/context 核心；store 内按职责组织
 rust/scanner_contract/       # scanner 领域 DTO
 rust/worker_contract/        # worker v2 envelope
 rust/discovery/              # discovery library
@@ -174,3 +182,11 @@ tests/                       # Python/Windows release tests
 项目只承诺 Windows x64、PowerShell、CPython 3.13.13、
 `.venv\Scripts\python.exe` 与 `doctor --strict` 组合下的行为；不提供 abi3、其他
 Python 版本或 Linux 兼容层。
+
+## 阅读代码
+
+- 从 `src/cli/` 查看参数如何进入业务服务。日报参数校验、日期确定和执行展示分别组织；周报、月报共享依赖装配。
+- 从 `src/services/report_runner/model_plan.py` 查看来源准备、内容切片、批次安排、覆盖审计和输入指纹的生成顺序。规划过程不读取文件、不调用模型。
+- 从 `src/services/report_runner/evidence_daily.py` 查看快照、调用恢复和发布；模型实际处理的范围由 `model_slicing.py` 根据成功批次及审计记录计算。
+- 从 `src/services/coverage_repair.py` 查看历史覆盖修复。候选生成前后均核对正式报告，已完成候选可以复用。
+- 从 `rust/scanner_core/src/store/` 查看扫描数据库：`mod.rs` 保留连接、缓存和索引入口；`types` 定义类型，`runs` 管理运行和提交，`lease` 管理独占运行，`artifacts` 读写产物，`retention` 执行保留策略，`tests` 保留单元测试。

@@ -3,18 +3,21 @@
 ## Project Structure & Module Organization
 - `main.py` is the CLI entry point.
 - `src/` holds the Python application shell: `core/` (config, health checks, logging, LLM client), `models/` (Pydantic contracts), `services/` (Rust-core orchestration, report storage and generation), `workers/` (crash-isolated Python document worker), and `utils/` (text helpers).
+- `EvidenceDailyService` handles evidence daily reports, frozen inputs, audited model calls and recovery. `ReportRunner` preserves the historical daily API and orchestrates weekly/monthly reports.
 - `templates/` contains LLM prompts and Jinja2 report templates.
 - `config/` stores YAML settings. Track only `settings.example.yaml`; keep `settings.windows.yaml` and `.secrets.yaml` local.
 - `data/` stores the SQLite database and generated Markdown reports; `logs/` holds runtime logs.
 - `rust/` is the Cargo workspace for the production scanner/context core: `scanner_core/`, the PyO3 `scanner_native` extension, shared domain types in `scanner_contract/`, the worker-v2 envelope in `worker_contract/`, the reusable `discovery/` library, and the crash-isolated `office_parser/` worker.
+- `scanner_core::store` keeps its public API in `mod.rs`; private `types`, `runs`, `lease`, `artifacts`, `retention` and `tests` modules separate persistence responsibilities.
 - `scripts/benchmark_scanner.py` runs the real scanner path and writes parser/discovery benchmark evidence.
 - `tests/` contains pytest test modules.
 
 ## Build, Test, and Development Commands
 - The only supported runtime is CPython `3.13.13`; `.python-version` is the source of truth for development, release, and deployment.
-- `uv sync` installs dependencies from `pyproject.toml` / `uv.lock` into the project `.venv`.
+- `uv sync --frozen` installs dependencies from `pyproject.toml` / `uv.lock` into the project `.venv`.
 - `uv run python main.py doctor --strict` validates the production config, templates, dependencies, workers, and Rust core.
 - `uv run python main.py daily -i "..."` generates a daily report. Examples: add `--no-save` or `--date 2026-02-05` as needed.
+- Daily reports default to the previous completed calendar day. Prefer `--target-date YYYY-MM-DD`; `--date` remains a deprecated alias. `--dry-run` scans locally without model calls, while `--no-save` generates an audited preview.
 - `uv run python main.py weekly --source db` aggregates weekly reports; `--source scan` scans files instead.
 - `uv run python main.py monthly --source db` aggregates monthly reports.
 - `uv run pytest` runs the Python test suite.
