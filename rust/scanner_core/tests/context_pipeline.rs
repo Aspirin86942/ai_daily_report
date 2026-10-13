@@ -20,6 +20,7 @@ fn profile(global_max_chars: u64, per_file_max_chars: u64) -> ContextProfile {
 
 fn evidence(path: &str, extension: &str, content: &str) -> ContextFileEvidence {
     ContextFileEvidence {
+        evidence_audit: None,
         file_identity: format!("fixture:{path}"),
         absolute_path: format!("C:\\fixture\\{}", path.replace('/', "\\")),
         relative_path: path.replace('/', "\\"),

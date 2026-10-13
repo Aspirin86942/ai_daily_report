@@ -55,6 +55,7 @@ pub struct ContextFileEvidence {
     /// `None` preserves the legacy unreadable-size behavior without rereading the file.
     pub size_bytes: Option<u64>,
     pub content: String,
+    pub evidence_audit: Option<ai_daily_worker_contract::ParsedContentAudit>,
     pub parser_backend: String,
     pub worker_lane: AuditWorkerLane,
     pub cache_status: CacheStatus,
@@ -73,6 +74,9 @@ pub struct ContextFileEvidence {
 
 impl ContextFileEvidence {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(audit) = &self.evidence_audit {
+            audit.validate(&self.content)?;
+        }
         let probe = ContextDecision {
             relative_path: self.relative_path.clone(),
             action: ContextAction::Keep,

@@ -33,6 +33,7 @@ fn request_id() -> String {
 
 fn text_result() -> ClassifyResult {
     ClassifyResult {
+        page_audit: None,
         status: ClassifyStatus::TextInParseWindow,
         page_count: Some(1),
         result_examined_pages: Some(1),
@@ -66,6 +67,7 @@ fn classifier_domain_types_round_trip_and_validate() {
 fn classifier_domain_rejects_bad_status_invariants() {
     // text result must not carry a diagnostic
     let bad_result = ClassifyResult {
+        page_audit: None,
         status: ClassifyStatus::TextInParseWindow,
         page_count: Some(1),
         result_examined_pages: Some(1),
@@ -82,6 +84,7 @@ fn classifier_domain_rejects_bad_status_invariants() {
 
     // unknown must carry a retryable diagnostic
     let bad_unknown = ClassifyResult {
+        page_audit: None,
         status: ClassifyStatus::Unknown,
         page_count: None,
         result_examined_pages: None,
@@ -91,6 +94,7 @@ fn classifier_domain_rejects_bad_status_invariants() {
 
     // error must not be retryable
     let bad_error = ClassifyResult {
+        page_audit: None,
         status: ClassifyStatus::Error,
         page_count: None,
         result_examined_pages: None,
@@ -128,6 +132,7 @@ fn classifier_result_is_bounded_by_the_request_window() {
     );
 
     let unknown = ClassifyResult {
+        page_audit: None,
         status: ClassifyStatus::Unknown,
         page_count: None,
         result_examined_pages: Some(6),
@@ -390,6 +395,7 @@ fn session_process_classifies_and_parses_text_pdf() {
             remaining_timeout_ms: 30_000,
             max_file_size_bytes: 1_000_000,
             parser_limits: ParserLimits::Pdf {
+                selected_pages: None,
                 max_pages: 5,
                 excerpt_max_chars: 4000,
             },

@@ -22,6 +22,8 @@ fn local_source_fingerprint() -> String {
         "scanner_core/src",
         "discovery/src",
         "office_parser/src",
+        "worker_contract/src",
+        "scanner_native/src",
     ] {
         collect_files(&workspace.join(relative), &mut files);
     }
@@ -31,6 +33,8 @@ fn local_source_fingerprint() -> String {
         "scanner_core/Cargo.toml",
         "discovery/Cargo.toml",
         "office_parser/Cargo.toml",
+        "worker_contract/Cargo.toml",
+        "scanner_native/Cargo.toml",
     ] {
         files.push(workspace.join(relative));
     }

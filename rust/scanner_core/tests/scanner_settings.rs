@@ -8,6 +8,7 @@ fn empty_settings_receive_frozen_current_defaults() {
 
     assert_eq!(normalized.execution.max_workers, 4);
     assert_eq!(normalized.parse.text.backend, "light_text_v2");
+    assert_eq!(normalized.parse.excerpt_policy_version, "fair_semantic_v9");
     assert_eq!(
         normalized.parse.office.primary_backend,
         "rust_office_oxide_v2"
@@ -16,6 +17,26 @@ fn empty_settings_receive_frozen_current_defaults() {
     assert_eq!(normalized.worker_max_requests, 128);
     assert_eq!(normalized.worker_idle_ttl_ms, 30_000);
     assert_eq!(normalized.worker_rss_limit_bytes, 512 * 1024 * 1024);
+}
+
+#[test]
+fn excerpt_priorities_are_canonical_relative_paths_in_the_frozen_profile() {
+    let raw: ScannerSettings = serde_json::from_value(serde_json::json!({
+        "excerpt_priority_paths": ["z\\salary.xlsx", "a.md", "a.md"]
+    }))
+    .unwrap();
+    let normalized = normalize_scanner_settings(&raw, ReportMode::Daily).unwrap();
+    assert_eq!(
+        normalized.parse.excerpt_priority_paths,
+        ["a.md", "z/salary.xlsx"]
+    );
+    for path in ["../private.md", "C:/private.md", "/private.md"] {
+        let raw: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "excerpt_priority_paths": [path]
+        }))
+        .unwrap();
+        assert!(normalize_scanner_settings(&raw, ReportMode::Daily).is_err());
+    }
 }
 
 #[test]

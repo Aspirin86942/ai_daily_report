@@ -4,14 +4,16 @@
 use ai_daily_scanner_contract::{
     CacheMissReason, CacheRetentionPolicy, NormalizedScannerSettings, Validate,
 };
+use ai_daily_worker_contract::ParsedContentAudit;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::classifier::ParserRoute;
 use crate::planner::PlannedFile;
 
 pub const PARSE_PROFILE_HASH_ALGORITHM: &str = "sha256-parse-profile-v1";
+pub const PARSE_CACHE_PAYLOAD_VERSION: u64 = 1;
 pub const CLASSIFIER_PROFILE_HASH_ALGORITHM: &str = "sha256-classifier-profile-v1";
 pub(crate) const CACHE_LOOKUP_BATCH_SIZE: usize = 256;
 const CLASSIFIER_DOMAIN: &[u8] = b"classifier-profile-v1\0";
@@ -176,6 +178,8 @@ pub struct CacheWriteRecord {
     pub parse_profile_hash: String,
     pub content: String,
     pub content_sha256: String,
+    pub cache_payload_version: u64,
+    pub evidence_audit: Option<ParsedContentAudit>,
     pub parser_backend: String,
     pub worker_lane: String,
     pub truncated: bool,
@@ -186,6 +190,12 @@ pub struct CacheWriteRecord {
 
 impl CacheWriteRecord {
     pub(crate) fn validate(&self) -> Result<(), String> {
+        if self.cache_payload_version > PARSE_CACHE_PAYLOAD_VERSION {
+            return Err("unsupported parse cache payload version".into());
+        }
+        if let Some(audit) = &self.evidence_audit {
+            audit.validate(&self.content)?;
+        }
         let guard_sha256 = |value: &str| {
             value.len() == 64
                 && value
@@ -225,6 +235,7 @@ impl CacheWriteRecord {
 pub struct CacheEntry {
     pub content: String,
     pub content_sha256: String,
+    pub evidence_audit: Option<ParsedContentAudit>,
     pub parser_backend: String,
     pub worker_lane: String,
     pub truncated: bool,
@@ -255,9 +266,73 @@ impl CacheEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Hits are bounded by the run's candidate cap. Keep the decoded entry inline so
+// the hot cache path does not allocate an additional box for each source.
+#[allow(clippy::large_enum_variant)]
 pub enum CacheLookup {
     Fresh(CacheEntry),
     Miss(CacheMissReason),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParseCachePayload {
+    version: u64,
+    text: String,
+    text_sha256: String,
+    evidence_audit: ParsedContentAudit,
+}
+
+impl CacheLookup {
+    /// The caller selects the format from its parse profile; business JSON is never sniffed.
+    pub fn decode_payload(self, version: u64) -> Self {
+        if version == 0 {
+            return self;
+        }
+        let Self::Fresh(mut entry) = self else {
+            return self;
+        };
+        let decoded: Result<ParseCachePayload, String> = (|| {
+            entry.validate()?;
+            let payload: ParseCachePayload = serde_json::from_str(&entry.content)
+                .map_err(|_| "invalid parse cache payload".to_string())?;
+            if payload.version != version
+                || version != PARSE_CACHE_PAYLOAD_VERSION
+                || sha256_hex(payload.text.as_bytes()) != payload.text_sha256
+            {
+                return Err("parse cache logical identity is invalid".to_string());
+            }
+            payload
+                .evidence_audit
+                .validate(&payload.text)
+                .map_err(|_| "invalid cached positions".to_string())?;
+            Ok(payload)
+        })();
+        match decoded {
+            Ok(payload) => {
+                entry.content = payload.text;
+                entry.content_sha256 = payload.text_sha256;
+                entry.evidence_audit = Some(payload.evidence_audit);
+                Self::Fresh(entry)
+            }
+            Err(_) => Self::Miss(CacheMissReason::EntryAbsentOrEvicted),
+        }
+    }
+}
+
+fn stored_content(record: &CacheWriteRecord) -> (String, String) {
+    if record.cache_payload_version == 0 {
+        return (record.content.clone(), record.content_sha256.clone());
+    }
+    let content = serde_json::to_string(&ParseCachePayload {
+        version: record.cache_payload_version,
+        text: record.content.clone(),
+        text_sha256: record.content_sha256.clone(),
+        evidence_audit: record.evidence_audit.clone().unwrap_or_default(),
+    })
+    .expect("serializable parse cache payload");
+    let hash = sha256_hex(content.as_bytes());
+    (content, hash)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -269,6 +344,8 @@ pub struct CacheAwarePlanEntry {
 
 #[derive(Serialize)]
 struct ParseProfileFingerprint<'a> {
+    cache_payload_version: u64,
+    excerpt_policy_version: &'static str,
     protocol_version: u64,
     route_stack: &'a RouteStackFingerprint,
     core_build_identity: &'a str,
@@ -297,6 +374,8 @@ fn parse_profile_fingerprint_json(
     profile: &NormalizedScannerSettings,
 ) -> Result<Vec<u8>, String> {
     let input = ParseProfileFingerprint {
+        cache_payload_version: PARSE_CACHE_PAYLOAD_VERSION,
+        excerpt_policy_version: crate::source_allocation::EXCERPT_POLICY_VERSION,
         protocol_version,
         route_stack,
         core_build_identity: env!("AI_DAILY_ENGINE_BUILD"),
@@ -356,6 +435,7 @@ pub(crate) fn lookup_cache(
             ],
             |row| {
                 Ok(CacheEntry {
+                    evidence_audit: None,
                     content: row.get(0)?,
                     content_sha256: row.get(1)?,
                     parser_backend: row.get(2)?,
@@ -502,6 +582,7 @@ pub(crate) fn lookup_cache_batch(
             }
             let exact = match row.get::<_, Option<String>>(1)? {
                 Some(content) => Some(CacheEntry {
+                    evidence_audit: None,
                     content,
                     content_sha256: row.get(2)?,
                     parser_backend: row.get(3)?,
@@ -577,13 +658,14 @@ pub(crate) fn recompute_rank(parser_backend: &str) -> Option<i64> {
 /// parse cache row 的逻辑 payload 字节数（spec Part 4：Store 计算，不接受 wire
 /// 输入；本实现覆盖全部 text 列 + truncated 的 SQLite i64 表示）。
 pub(crate) fn parse_entry_size_bytes(record: &CacheWriteRecord) -> i64 {
+    let (stored, _) = stored_content(record);
     let text_bytes: usize = [
         record.file_identity.as_str(),
         record.source_version.as_str(),
         record.source_guard_kind.as_str(),
         record.source_guard_sha256.as_str(),
         record.parse_profile_hash.as_str(),
-        record.content.as_str(),
+        stored.as_str(),
         record.content_sha256.as_str(),
         record.parser_backend.as_str(),
         record.worker_lane.as_str(),
@@ -697,14 +779,15 @@ pub(crate) fn write_success_cache_with_check(
             ))
             .into());
         }
+        let (stored, stored_sha256) = stored_content(record);
         statement.execute(params![
             record.file_identity,
             record.source_version,
             record.source_guard_kind,
             record.source_guard_sha256,
             record.parse_profile_hash,
-            record.content,
-            record.content_sha256,
+            stored,
+            stored_sha256,
             record.parser_backend,
             record.worker_lane,
             i64::from(record.truncated),
@@ -801,6 +884,7 @@ fn evict_parse_cache_with_check(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassificationCacheEntry {
+    pub page_audit: Option<ai_daily_scanner_contract::PdfPageAudit>,
     pub status: String,
     pub page_count: u64,
     pub result_examined_pages: u64,
@@ -960,6 +1044,7 @@ pub(crate) fn lookup_classification_cache(
             ],
             |row| {
                 Ok(ClassificationCacheEntry {
+                    page_audit: None,
                     status: row.get(0)?,
                     page_count: row.get::<_, i64>(1)? as u64,
                     result_examined_pages: row.get::<_, i64>(2)? as u64,
@@ -967,8 +1052,49 @@ pub(crate) fn lookup_classification_cache(
             },
         )
         .optional()?;
-    if let Some(entry) = fresh {
+    if let Some(mut entry) = fresh {
         if entry.validate().is_ok() {
+            // The schema-3 cache row stays unchanged. Recover optional observations
+            // from the originating run, bound to every immutable cache key field.
+            let metadata: Option<String> = connection.query_row(
+                "SELECT r.final_envelope_metadata_json FROM scan_file_execution x
+                 JOIN scan_runs r ON r.scan_run_id=x.scan_run_id
+                 JOIN context_runs c ON c.scan_run_id=r.scan_run_id
+                 JOIN context_artifact_files a ON a.artifact_id=c.artifact_id AND a.file_identity=x.file_identity
+                 WHERE x.file_identity=?1 AND a.source_version=?2
+                   AND a.source_guard_kind=?3 AND a.source_guard_sha256=?4
+                   AND x.classifier_profile_hash=?5 AND x.classifier_build=?6
+                   AND x.classification_cache_status='miss'
+                   AND r.final_envelope_metadata_json IS NOT NULL
+                 ORDER BY r.scan_run_id DESC LIMIT 1",
+                params![file_identity, source_version, source_guard_kind, source_guard_sha256,
+                    classifier_profile_hash, classifier_build], |row| row.get(0)).optional()?.flatten();
+            if let Some(metadata) = metadata {
+                let value: serde_json::Value = serde_json::from_str(&metadata).map_err(|_| {
+                    CacheLookupReadError::Corrupt("invalid classifier page metadata")
+                })?;
+                if let Some(pages) = value
+                    .get("pdf_page_audits")
+                    .and_then(|v| v.get(file_identity))
+                {
+                    let audit: ai_daily_scanner_contract::PdfPageAudit =
+                        serde_json::from_value(pages.clone()).map_err(|_| {
+                            CacheLookupReadError::Corrupt("invalid cached classifier page audit")
+                        })?;
+                    if audit.validate().is_err()
+                        || audit.checked_pages.len() as u64 != entry.result_examined_pages
+                        || audit
+                            .checked_pages
+                            .iter()
+                            .any(|page| *page > entry.page_count)
+                    {
+                        return Err(CacheLookupReadError::Corrupt(
+                            "cached page audit differs from classification result",
+                        ));
+                    }
+                    entry.page_audit = Some(audit);
+                }
+            }
             return Ok(ClassificationCacheLookup::Fresh(entry));
         }
         return Err(CacheLookupReadError::Corrupt(
@@ -1279,6 +1405,8 @@ mod tests {
         guard.execution.max_file_size_bytes += 1;
         let mut parse = profile.clone();
         parse.parse.text.max_chars += 1;
+        let mut encoding = profile.clone();
+        encoding.parse.text.csv_encodings.push("gb18030".into());
         let mut backend = profile.clone();
         backend.parse.office.primary_backend = "different_office_backend_v1".to_string();
         let mut fallback = profile.clone();
@@ -1301,6 +1429,7 @@ mod tests {
         );
         assert_ne!(base, parse_profile_hash(1, &route, &guard).unwrap());
         assert_ne!(base, parse_profile_hash(1, &route, &parse).unwrap());
+        assert_ne!(base, parse_profile_hash(1, &route, &encoding).unwrap());
         assert_ne!(base, parse_profile_hash(1, &route, &backend).unwrap());
         assert_ne!(base, parse_profile_hash(1, &route, &fallback).unwrap());
         assert_ne!(
@@ -1614,6 +1743,8 @@ mod tests {
 
     fn parse_record(identity: &str, source_version: &str, profile_hash: &str) -> CacheWriteRecord {
         CacheWriteRecord {
+            evidence_audit: None,
+            cache_payload_version: 0,
             file_identity: identity.to_string(),
             source_version: source_version.to_string(),
             source_guard_kind: "content_sha256_v1".to_string(),
@@ -1774,5 +1905,64 @@ mod tests {
         assert_eq!(date_bucket_for_ms(1_577_836_800_000), "2020-01-01");
         assert_eq!(date_bucket_for_ms(1_577_923_200_000 - 1), "2020-01-01");
         assert_eq!(date_bucket_for_ms(1_577_923_200_000), "2020-01-02");
+    }
+
+    #[test]
+    fn versioned_payload_preserves_positions_and_counts_storage_bytes() {
+        use ai_daily_worker_contract::{
+            AuditTextBuilder, ContentUnitKind, SourceRange, SourceRangeUnit,
+        };
+        let mut record = parse_record("fixture:a", "mtime_ns=1:size=2", &"a".repeat(64));
+        let mut builder = AuditTextBuilder::new(200, "xlsx");
+        let range = SourceRange::new(SourceRangeUnit::SheetRow, 7, 8, Some("amounts".into()));
+        builder.read(range.clone());
+        builder.push("1234.56 CNY", ContentUnitKind::TableRow, vec![range]);
+        let (text, audit, _) = builder.finish();
+        record.content = text.clone();
+        record.content_sha256 = sha256_hex(text.as_bytes());
+        record.cache_payload_version = 1;
+        record.evidence_audit = Some(audit.clone());
+        let (stored, stored_sha256) = stored_content(&record);
+        assert!(parse_entry_size_bytes(&record) > text.len() as i64 + 256);
+        let entry = CacheEntry {
+            content: stored.clone(),
+            content_sha256: stored_sha256,
+            evidence_audit: None,
+            parser_backend: record.parser_backend,
+            worker_lane: record.worker_lane,
+            truncated: false,
+            worker_contract_version: record.worker_contract_version,
+            worker_version: record.worker_version,
+            worker_build: record.worker_build,
+        };
+        let CacheLookup::Fresh(decoded) = CacheLookup::Fresh(entry.clone()).decode_payload(1)
+        else {
+            panic!("valid cache");
+        };
+        assert_eq!(decoded.content, text);
+        assert_eq!(decoded.content_sha256, sha256_hex(text.as_bytes()));
+        assert_eq!(decoded.evidence_audit, Some(audit));
+        let mut damaged: serde_json::Value = serde_json::from_str(&stored).unwrap();
+        damaged.as_object_mut().unwrap().remove("evidence_audit");
+        let mut lost_metadata = entry.clone();
+        lost_metadata.content = damaged.to_string();
+        lost_metadata.content_sha256 = sha256_hex(lost_metadata.content.as_bytes());
+        assert!(matches!(
+            CacheLookup::Fresh(lost_metadata).decode_payload(1),
+            CacheLookup::Miss(_)
+        ));
+        let mut invalid_logical_hash = entry.clone();
+        invalid_logical_hash.content = stored.replace("1234.56", "9999.99");
+        invalid_logical_hash.content_sha256 = sha256_hex(invalid_logical_hash.content.as_bytes());
+        assert!(matches!(
+            CacheLookup::Fresh(invalid_logical_hash).decode_payload(1),
+            CacheLookup::Miss(_)
+        ));
+        let CacheLookup::Fresh(legacy_business_json) = CacheLookup::Fresh(entry).decode_payload(0)
+        else {
+            panic!("legacy plaintext");
+        };
+        assert_eq!(legacy_business_json.content, stored);
+        assert!(legacy_business_json.evidence_audit.is_none());
     }
 }

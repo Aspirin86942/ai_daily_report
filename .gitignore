@@ -62,3 +62,7 @@ scripts/corpus/
 # wheels: native scanner packaging build artifacts (evidence json is tracked)
 .artifacts/wheels/
 .artifacts/wheels-repaired/
+
+# Local coverage validation, release packages and toolchain downloads
+.artifacts/coverage-optimization/
+.artifacts/toolchain/

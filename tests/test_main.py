@@ -335,3 +335,16 @@ def test_cli_invalid_week_exits_nonzero(tmp_path):
 
     assert completed.returncode == 1
     assert "错误:" in completed.stdout
+
+
+@pytest.mark.parametrize("week", ["invalid-week", "2026-W00", "2026-W54"])
+def test_invalid_week_is_reported_before_constructing_runtime(week):
+    from types import SimpleNamespace
+
+    printed = []
+    args = SimpleNamespace(week=week, source="db", no_save=False, input=None)
+    def forbidden_runner():
+        pytest.fail("invalid input must not initialize runtime or read local config")
+    assert not weekly_cli.generate_weekly_report_cmd(args, console=SimpleNamespace(print=printed.append),
+                                                     runner_factory=forbidden_runner)
+    assert "错误:" in printed[0]

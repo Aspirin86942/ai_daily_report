@@ -164,6 +164,7 @@ fn assemble_snapshot_classification(
     match provenance.status {
         PdfClassificationStatus::TextInParseWindow
         | PdfClassificationStatus::NoTextInParseWindow => Some(PdfClassificationAuditV1 {
+            page_audit: None,
             status: provenance.status,
             page_count: Nullable(provenance.page_count),
             classification_cache_status: ClassificationCacheStatus::Snapshot,
@@ -178,6 +179,7 @@ fn assemble_snapshot_classification(
             classifier_profile_hash: provenance.classifier_profile_hash.clone(),
         }),
         PdfClassificationStatus::NotClassifiedByBudget => Some(PdfClassificationAuditV1 {
+            page_audit: None,
             status: provenance.status,
             page_count: Nullable(None),
             classification_cache_status: ClassificationCacheStatus::NotEligible,

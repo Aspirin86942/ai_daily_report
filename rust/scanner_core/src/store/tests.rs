@@ -435,6 +435,7 @@ fn audit_size_counts_the_execution_child_payload() {
     )];
     let parse_only_size = compute_audit_size(&batch);
     batch.file_results[0].pdf_classification = Some(PdfClassificationAuditV1 {
+        page_audit: None,
         status: PdfClassificationStatus::TextInParseWindow,
         page_count: Nullable(Some(2)),
         classification_cache_status: ClassificationCacheStatus::Miss,
@@ -462,6 +463,8 @@ fn cache_record(
     content: &str,
 ) -> CacheWriteRecord {
     CacheWriteRecord {
+        evidence_audit: None,
+        cache_payload_version: 0,
         file_identity: identity.to_string(),
         source_version: source_version.to_string(),
         source_guard_kind: "content_sha256_v1".to_string(),
@@ -1344,6 +1347,21 @@ fn error_run_with_file_rows_produces_complete_evidence() {
         snapshot_hit: None,
         execution_metrics: Some(ai_daily_scanner_contract::ExecutionMetricsV2 {
             discovery_observed_file_count: 1,
+            refill_audit: Some(ai_daily_scanner_contract::RefillAudit {
+                policy_version: "budget_refill_v3".into(),
+                stop_reason: "complete".into(),
+                max_rounds: 2,
+                candidate_cap: 96,
+                classification_page_cap: 80,
+                extraction_cap: 8,
+                context_char_cap: 500_000,
+                candidate_slots_used: 0,
+                classification_pages_held: 0,
+                extraction_slots_used: 0,
+                refunded_chars: 0,
+                refunded_classification_pages: 0,
+                rounds: Vec::new(),
+            }),
             source_guard_content_hash_file_count: 0,
             source_guard_unavailable_count: 0,
             source_guard_bytes_read: 0,
@@ -1413,6 +1431,26 @@ fn error_run_with_file_rows_produces_complete_evidence() {
     assert_eq!(evidence.artifact_id.0, None, "error run has no artifact");
     assert_eq!(evidence.execution_metrics.worker_handshake_ms, 5);
     assert_eq!(evidence.execution_metrics.discovery_ms, 2);
+    harness.store.connection.execute(
+            "UPDATE scan_runs SET final_envelope_metadata_json=json_set(final_envelope_metadata_json,
+                '$.pdf_page_audits', json('{\"invented\":{\"policy_version\":\"pdf_text_presence_v2\",\"checked_pages\":[1],\"observations\":null}}')) WHERE scan_run_id=?1",
+            [active.scan_run_id() as i64]).unwrap();
+    assert!(
+        harness.store.load_evidence(active.scan_run_id()).is_err(),
+        "a persisted page audit must belong to an observed PDF source"
+    );
+    harness.store.connection.execute(
+            "UPDATE scan_runs SET final_envelope_metadata_json=json_remove(final_envelope_metadata_json,
+                '$.pdf_page_audits') WHERE scan_run_id=?1", [active.scan_run_id() as i64]).unwrap();
+    assert_eq!(
+        evidence
+            .execution_metrics
+            .refill_audit
+            .as_ref()
+            .unwrap()
+            .stop_reason,
+        "complete"
+    );
 
     let rows_written: i64 = harness
         .store
@@ -1452,6 +1490,14 @@ fn error_run_with_file_rows_produces_complete_evidence() {
         )
         .is_err(),
         "current evidence must fail closed when provenance is unavailable"
+    );
+    harness.store.connection.execute(
+            "UPDATE scan_runs SET final_envelope_metadata_json=json_set(final_envelope_metadata_json,
+                '$.refill_audit.candidate_slots_used', 97) WHERE scan_run_id=?1",
+            [active.scan_run_id() as i64]).unwrap();
+    assert!(
+        harness.store.load_evidence(active.scan_run_id()).is_err(),
+        "over-budget persisted refill audit must fail closed"
     );
 }
 
@@ -1544,6 +1590,7 @@ fn zero_file_error_run_produces_complete_evidence() {
         snapshot_hit: None,
         execution_metrics: Some(ai_daily_scanner_contract::ExecutionMetricsV2 {
             discovery_observed_file_count: 1_000_001,
+            refill_audit: None,
             source_guard_content_hash_file_count: 0,
             source_guard_unavailable_count: 0,
             source_guard_bytes_read: 0,

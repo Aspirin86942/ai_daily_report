@@ -81,8 +81,12 @@ where
 /// 完整 Envelope），`warnings` 恒为数组（绝不 null），`error` 可为 null；
 /// `file_context` 不进入 metadata（正文在 artifact 只存一次）。形状必须与
 /// `rebuild_envelope` 期望完全一致。
-pub(super) fn envelope_metadata_json(envelope: &ContextEnvelope) -> Result<String, StoreError> {
-    let value = serde_json::json!({
+pub(super) fn envelope_metadata_json(
+    envelope: &ContextEnvelope,
+    refill: Option<&ai_daily_scanner_contract::RefillAudit>,
+    batch: &FinalizationBatch,
+) -> Result<String, StoreError> {
+    let mut value = serde_json::json!({
         "contract": envelope.contract,
         "protocol_version": envelope.protocol_version,
         "request_id": envelope.request_id,
@@ -96,6 +100,26 @@ pub(super) fn envelope_metadata_json(envelope: &ContextEnvelope) -> Result<Strin
         "error": envelope.error.0,
         "summary": envelope.summary,
     });
+    if let Some(refill) = refill {
+        refill.validate().map_err(StoreError::RunCorrupt)?;
+        value["refill_audit"] = serde_json::to_value(refill)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+    }
+    let mut pages = std::collections::BTreeMap::new();
+    for record in &batch.file_results {
+        if let Some(audit) = record
+            .pdf_classification
+            .as_ref()
+            .and_then(|item| item.page_audit.as_ref())
+        {
+            audit.validate().map_err(StoreError::RunCorrupt)?;
+            pages.insert(&record.file_identity, audit);
+        }
+    }
+    if !pages.is_empty() {
+        value["pdf_page_audits"] = serde_json::to_value(pages)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+    }
     serde_json::to_string(&value).map_err(|error| StoreError::InvalidRequest(error.to_string()))
 }
 

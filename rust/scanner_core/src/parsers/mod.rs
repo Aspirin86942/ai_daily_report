@@ -623,6 +623,7 @@ pub(crate) fn worker_request(
     };
     let parser_limits = match route {
         ParserRoute::Pdf => ParserLimits::Pdf {
+            selected_pages: None,
             max_pages: profile.parse.pdf.max_pages,
             excerpt_max_chars: profile.parse.pdf.excerpt_max_chars,
         },

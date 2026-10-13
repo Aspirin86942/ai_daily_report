@@ -109,19 +109,23 @@ def test_local_ocr_retains_source_hash_and_exposes_recognition_uncertainty(tmp_p
     text_path = tmp_path / 'ocr.txt'
     text_path.write_text('扫描件说明', encoding='utf-8')
     pdf_path = tmp_path / 'work.pdf'
-    pdf_path.write_bytes(b'scanned PDF original bytes')
+    from reportlab.pdfgen import canvas
+    pdf = canvas.Canvas(str(pdf_path), invariant=1)
+    for _ in range(8):
+        pdf.showPage()
+    pdf.save()
     digest = sha256(pdf_path.read_bytes()).hexdigest()
     original = source(text='', relative_path='work.pdf', extension='.pdf',
                       source_id='src_' + sha256(b'work.pdf').hexdigest(), size_bytes=pdf_path.stat().st_size,
                       content_sha256=digest if native_hash_available else None)
     manifest = tmp_path / 'documents.json'
     manifest.write_text(json.dumps([{'source_id': original.source_id, 'content_sha256': digest,
-        'pages_total': 8, 'pages': [{'page': 1, 'text': str(text_path)}]}]), encoding='utf-8')
+        'pages_total': 8, 'pages': [{'page': 1, 'text': str(text_path), 'text_sha256': sha256(text_path.read_bytes()).hexdigest()}]}]), encoding='utf-8')
     scanner = PdfOcrScanner(Scanner(scan_result(original)), manifest, work_root=tmp_path)
     result = scanner.build_context(None)
     parsed = ScanSource.model_validate(result.sources[0].model_dump())
     assert parsed.content_sha256 == digest
-    assert parsed.parser_backend == 'windows_ocr_v1' and parsed.worker_lane == 'local_ocr_preflight'
+    assert parsed.parser_backend == 'local_ocr_import_v2' and parsed.worker_lane == 'local_ocr_preflight'
     assert parsed.parse_truncated and '扫描件说明' in parsed.excerpt
     assert 'OCR_TEXT_UNVERIFIED' in {gap.code for gap in coverage_gaps(result)}
     if native_hash_available:
@@ -139,6 +143,15 @@ def test_native_empty_directory_publishes_no_changes_without_credentials(config)
     result = app.run(context(), scheduled=True)
     assert result.quality == "no_changes" and result.model_calls == 0
     assert result.output_path.exists() and "未发现符合扫描规则的修改文件" in result.markdown
+
+
+def test_unverified_ocr_claims_are_forced_into_verification(config):
+    scanned = source(coverage_limits={"ocr": {"text_unverified": True}})
+    app = service(config, Scanner(scan_result(scanned)), Transport())
+    result = app.run(context())
+    report = app.runs.store.get_report(result.target_date)
+    assert not report.summary_items
+    assert any(item.text == "材料记载了工作安排。" for item in report.verification_items)
 
 
 def test_native_full_pipeline_keeps_candidate_on_cache_reuse(config):
@@ -293,15 +306,63 @@ def test_failed_regeneration_keeps_old_run_recoverable_until_publication(config)
     assert path.read_text(encoding="utf-8") == "User-owned report"
 
 
-def test_all_successful_batches_restore_without_constructing_gateway_client(config, monkeypatch):
-    app = service(config, Scanner(scan_result(source())))
+@pytest.mark.parametrize("workers", [1, 3])
+def test_all_successful_batches_restore_without_constructing_gateway_client(config, monkeypatch, workers):
+    config.model_request_settings = config.model_request_settings.model_copy(update={"max_sources_per_batch": 1})
+    scanner = Scanner(scan_result(source(), source("第二份材料记载金额。",
+        source_id="src_" + sha256(b"second.md").hexdigest(), relative_path="second.md")))
+    transport = Transport()
+    app = EvidenceDailyService(config, scanner=scanner, transport_factory=lambda: transport,
+                               clock=lambda: NOW, model_workers=workers)
     publish = app._stage_publish
     monkeypatch.setattr(app, "_stage_publish", lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt()))
     with pytest.raises(KeyboardInterrupt):
         app.run(context())
+    run = app.runs.pending()[0]
+    assert len(app.runs.calls(run["run_id"])) == len(transport.requests) == 2
     monkeypatch.setattr(app, "_stage_publish", publish)
     monkeypatch.setattr(app, "_transport", lambda: (_ for _ in ()).throw(AssertionError("credentials must not be needed")))
-    assert app.run(context()).output_path.exists()
+    monkeypatch.setattr(type(app.runs), "reserve_call", lambda *_args, **_kwargs: (_ for _ in ()).throw(
+        AssertionError("offline recovery must not reserve calls")))
+    config.recovery_settings = RecoverySettings(max_calls_per_run=1, max_calls_per_calendar_day=1)
+    config.model_request_settings = config.model_request_settings.model_copy(update={
+        "context_window_tokens": None, "verified_max_output_tokens": None})
+    result = app.run(context())
+    assert result.run_id == run["run_id"] and result.output_path.exists()
+    assert len(scanner.requests) == 1 and len(transport.requests) == 2
+
+
+def test_cached_recovery_rejects_changed_model_semantics(config, monkeypatch):
+    app = service(config, Scanner(scan_result(source())))
+    monkeypatch.setattr(app, "_stage_publish", lambda *_args: (_ for _ in ()).throw(KeyboardInterrupt()))
+    with pytest.raises(KeyboardInterrupt):
+        app.run(context())
+    config.llm_config["model_id"] = "another-model"
+    with pytest.raises(ReportRunError, match="RECOVERY_CONFIG_CHANGED"):
+        app.run(context())
+
+
+def test_reduced_batch_publishes_actual_character_counts_and_preserves_planned_counts(config):
+    class TruncatedTransport(Transport):
+        def send(self, request, *, timeout):
+            result = super().send(request, timeout=timeout)
+            if len(self.requests) == 1:
+                result["choices"][0]["finish_reason"] = "length"
+            return result
+
+    transport = TruncatedTransport()
+    app = service(config, Scanner(scan_result(source("材料记载金额100元。\n" * 400))), transport)
+    outcome = app.run(context())
+    report = app.runs.store.get_report(outcome.target_date)
+    actual = report.sources[0]
+    assert actual.model_chars < actual.coverage_limits["evidence_audit"]["planned_model_chars"]
+    assert actual.coverage_limits["evidence_audit"]["effective_plan_sha256"]
+    assert actual.model_truncated and report.quality == "partial"
+    assert report.coverage_summary.model_covered_count == 1
+    audit = actual.coverage_limits["evidence_audit"]
+    from src.services.report_runner.model_slicing import union_chars
+    assert audit["model_ranges"] and union_chars(audit["model_ranges"]) == actual.model_chars
+    assert audit["attempted_model_chars"] >= actual.model_chars
 
 
 def test_synthetic_model_check_is_audited_and_never_contains_working_file_text(config):

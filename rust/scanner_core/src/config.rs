@@ -121,8 +121,24 @@ pub fn normalize_scanner_settings(
             )?,
         },
         parse: ParseProfile {
+            cache_payload_version: 1,
+            excerpt_policy_version: crate::source_allocation::EXCERPT_POLICY_VERSION.into(),
+            excerpt_priority_paths: {
+                let mut paths = raw.excerpt_priority_paths.clone().unwrap_or_default();
+                paths = paths
+                    .into_iter()
+                    .map(|path| path.replace('\\', "/"))
+                    .collect();
+                paths.sort();
+                paths.dedup();
+                paths
+            },
             aggregate_max_chars: raw.total_max_chars.unwrap_or(500_000),
             text: TextParseProfile {
+                csv_encodings: raw
+                    .csv_encodings
+                    .clone()
+                    .unwrap_or_else(ai_daily_scanner_contract::default_csv_encodings),
                 backend: "light_text_v2".to_string(),
                 read_head_bytes: raw.direct_text_read_bytes.unwrap_or(default_head_bytes),
                 read_tail_bytes: raw.log_tail_read_bytes.unwrap_or(262_144),
@@ -151,6 +167,7 @@ pub fn normalize_scanner_settings(
                 document_excerpt_max_chars,
             },
             pdf: PdfParseProfile {
+                selection_policy_version: CLASSIFIER_POLICY_VERSION.to_string(),
                 backend: "python_pdf_text_v2".to_string(),
                 max_pages: pdf_max_pages,
                 excerpt_max_chars: document_excerpt_max_chars,

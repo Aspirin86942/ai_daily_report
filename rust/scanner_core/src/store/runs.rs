@@ -389,7 +389,14 @@ impl ScannerStore {
         let envelope = validate_finalization_with_check(active, batch, &ensure_deadline)?;
         ensure_deadline()?;
         let now_ms = checked_i64(now_ms, "finalization timestamp")?;
-        let metadata_json = envelope_metadata_json(&envelope)?;
+        let metadata_json = envelope_metadata_json(
+            &envelope,
+            batch
+                .execution_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.refill_audit.as_ref()),
+            batch,
+        )?;
         let metadata_value: serde_json::Value = serde_json::from_str(&metadata_json)
             .map_err(|error| StoreError::RunCorrupt(error.to_string()))?;
         let status = terminal_status_text(batch.status)?;
@@ -946,6 +953,28 @@ pub(super) fn compute_audit_size_with_check(
     ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
 ) -> Result<i64, StoreError> {
     let mut total = batch.envelope_json.len() as i64;
+    if let Some(refill) = batch
+        .execution_metrics
+        .as_ref()
+        .and_then(|metrics| metrics.refill_audit.as_ref())
+    {
+        let bytes = serde_json::to_vec(refill)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+        // Metadata is retained in both legacy-envelope and metadata columns.
+        total = total.saturating_add(bytes.len() as i64 * 2 + 32);
+    }
+    for record in &batch.file_results {
+        if let Some(audit) = record
+            .pdf_classification
+            .as_ref()
+            .and_then(|item| item.page_audit.as_ref())
+        {
+            let bytes = serde_json::to_vec(audit)
+                .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+            total =
+                total.saturating_add((bytes.len() + record.file_identity.len()) as i64 * 2 + 64);
+        }
+    }
     for (index, record) in batch.file_results.iter().enumerate() {
         if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
             ensure_deadline()?;

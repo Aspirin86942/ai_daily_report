@@ -115,6 +115,9 @@ def test_pdf_worker_parses_a_bounded_text_layer(tmp_path: Path) -> None:
     )
 
     assert response.parser_backend == "python_pdf_text_v2"
+    assert response.evidence_audit.detected_format == "pdf"
+    assert [(r.unit, r.start, r.end) for r in response.evidence_audit.read_ranges] == [("pdf_page", 1, 2)]
+    assert response.evidence_audit.content_units
     assert "PDF worker text" in response.content
 
 
@@ -250,7 +253,7 @@ def test_legacy_xls_adapter_keeps_table_preview_capability(tmp_path: Path) -> No
     assert isinstance(payload, WorkerParsePayload)
     assert payload.error is None
     assert payload.parser_backend == "python_office_v2"
-    assert payload.content == "## Sheet\n\nlegacy xls"
+    assert payload.content == ""  # The amount/data unit must fit completely.
     assert payload.truncated is True
 
 

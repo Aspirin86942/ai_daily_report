@@ -247,7 +247,18 @@ impl FileResultRecord {
                 .as_ref()
                 .is_some_and(|diagnostic| diagnostic.validate().is_err())
         {
-            return Err("invalid scan file result".to_string());
+            return Err(format!(
+                "invalid scan file result: cache={cache_consistent}, error={error_consistent}, \
+                 execution={execution_consistent}, provenance={provenance_consistent}, \
+                 classifier_audit={}, file_audit={}, classifier_error={:?}",
+                self.pdf_classification
+                    .as_ref()
+                    .is_none_or(|audit| audit.validate().is_ok()),
+                audit.validate().is_ok(),
+                self.pdf_classification
+                    .as_ref()
+                    .and_then(|audit| audit.validate().err()),
+            ));
         }
         Ok(())
     }
@@ -690,6 +701,7 @@ mod tests {
         omitted.parse_transport = ParseTransport::NotApplicable;
         omitted.parse_attempt_count = 0;
         omitted.pdf_classification = Some(PdfClassificationAuditV1 {
+            page_audit: None,
             status: ai_daily_scanner_contract::PdfClassificationStatus::NoTextInParseWindow,
             page_count: ai_daily_scanner_contract::Nullable(Some(2)),
             classification_cache_status: ai_daily_scanner_contract::ClassificationCacheStatus::Miss,
@@ -712,6 +724,7 @@ mod tests {
     #[test]
     fn snapshot_budget_exclusion_preserves_zero_execution_classification_shape() {
         let classification = PdfClassificationAuditV1 {
+            page_audit: None,
             status: ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget,
             page_count: ai_daily_scanner_contract::Nullable(None),
             classification_cache_status:

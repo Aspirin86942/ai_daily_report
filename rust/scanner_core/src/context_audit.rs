@@ -350,6 +350,7 @@ pub fn assemble_execution_metrics_v2(snapshot: &EvidenceSnapshot) -> ExecutionMe
 
     ExecutionMetricsV2 {
         discovery_observed_file_count,
+        refill_audit: None,
         source_guard_content_hash_file_count,
         source_guard_unavailable_count,
         source_guard_bytes_read,
@@ -785,8 +786,29 @@ fn load_execution_metrics(
             "persisted metric bool is invalid".to_string(),
         )),
     };
+    let metadata_json: Option<String> = transaction
+        .query_row(
+            "SELECT final_envelope_metadata_json FROM scan_runs WHERE scan_run_id=?1",
+            [scan_run_id],
+            |row| row.get(0),
+        )
+        .map_err(EvidenceAuditError::Sql)?;
+    let refill_audit = match metadata_json {
+        Some(text) => {
+            let value: serde_json::Value = serde_json::from_str(&text)
+                .map_err(|_| EvidenceAuditError::RunCorrupt("invalid run metadata JSON".into()))?;
+            value
+                .get("refill_audit")
+                .cloned()
+                .map(serde_json::from_value)
+                .transpose()
+                .map_err(|_| EvidenceAuditError::RunCorrupt("invalid refill audit".into()))?
+        }
+        None => None,
+    };
     let metrics = ExecutionMetricsV2 {
         discovery_observed_file_count: to_u64(row.0, "discovery_observed_file_count")?,
+        refill_audit,
         source_guard_content_hash_file_count: to_u64(
             row.1,
             "source_guard_content_hash_file_count",
@@ -939,6 +961,28 @@ fn load_file_audits_v2(
     scan_run_id: i64,
     artifact_id: Option<i64>,
 ) -> Result<Vec<FileAuditV2Source>, EvidenceAuditError> {
+    let metadata_json: Option<String> = transaction
+        .query_row(
+            "SELECT final_envelope_metadata_json FROM scan_runs WHERE scan_run_id=?1",
+            [scan_run_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| EvidenceAuditError::RunCorrupt(error.to_string()))?;
+    let mut page_audits: std::collections::BTreeMap<
+        String,
+        ai_daily_scanner_contract::PdfPageAudit,
+    > = match metadata_json {
+        Some(json) => {
+            let value: serde_json::Value = serde_json::from_str(&json)
+                .map_err(|error| EvidenceAuditError::RunCorrupt(error.to_string()))?;
+            match value.get("pdf_page_audits") {
+                Some(value) => serde_json::from_value(value.clone())
+                    .map_err(|error| EvidenceAuditError::RunCorrupt(error.to_string()))?,
+                None => std::collections::BTreeMap::new(),
+            }
+        }
+        None => std::collections::BTreeMap::new(),
+    };
     #[allow(clippy::type_complexity)]
     let mut statement = transaction
         .prepare(
@@ -1102,7 +1146,7 @@ fn load_file_audits_v2(
                 ));
             }
         };
-        let classification_execution = match (
+        let mut classification_execution = match (
             row.32.as_deref(),
             row.33,
             row.34.as_deref(),
@@ -1131,6 +1175,7 @@ fn load_file_audits_v2(
                 Some(profile),
             ) => {
                 let audit = PdfClassificationAuditV1 {
+                    page_audit: None,
                     status: parse_enum(status, "classification execution status")?,
                     page_count: Nullable(to_positive_u64(
                         page_count,
@@ -1182,6 +1227,13 @@ fn load_file_audits_v2(
                 ));
             }
         };
+        if let Some(pages) = page_audits.remove(&row.1) {
+            let audit = classification_execution.as_mut().ok_or_else(|| {
+                EvidenceAuditError::RunCorrupt("PDF page audit has no execution provenance".into())
+            })?;
+            audit.page_audit = Some(pages);
+            audit.validate().map_err(EvidenceAuditError::RunCorrupt)?;
+        }
         rows.push(FileAuditV2Source {
             relative_path: row.0,
             file_identity: row.1,
@@ -1207,6 +1259,11 @@ fn load_file_audits_v2(
             classifier,
             classification_execution,
         });
+    }
+    if !page_audits.is_empty() {
+        return Err(EvidenceAuditError::RunCorrupt(
+            "orphan PDF page audit".into(),
+        ));
     }
     Ok(rows)
 }

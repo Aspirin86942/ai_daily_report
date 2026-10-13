@@ -47,6 +47,8 @@ use crate::store::{
 
 pub use crate::deadline::{Clock, RealClock, RunDeadlines, FINALIZATION_RESERVE_MS};
 
+mod refill;
+
 // ---------------------------------------------------------------------------
 // Clock / guard / ports
 // ---------------------------------------------------------------------------
@@ -168,6 +170,7 @@ pub trait CachePort: Send + Sync {
 /// Per-file parse request.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseRequest {
+    pub selected_pdf_pages: Option<Vec<u64>>,
     pub file: DiscoveredFileOut,
     pub route: RouteKind,
     pub timeout_ms: u64,
@@ -178,6 +181,7 @@ pub struct ParseRequest {
 pub struct ParseResult {
     pub file_identity: String,
     pub content: String,
+    pub evidence_audit: Option<ai_daily_worker_contract::ParsedContentAudit>,
     pub parser_backend: String,
     pub worker_lane: String,
     pub truncated: bool,
@@ -449,6 +453,7 @@ pub enum TerminalIntent {
 /// Bounded execution metrics collected by the scheduler (spec Part 5.3 subset).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExecutionMetrics {
+    pub refill_audit: Option<ai_daily_scanner_contract::RefillAudit>,
     /// Discovery-observed accepted source count; fixed to `MAX_SOURCE_FILES_PER_RUN
     /// + 1` when the engine-owned ceiling triggers (spec Part 2.1).
     pub discovery_observed_file_count: u64,
@@ -681,7 +686,7 @@ impl BudgetedContextScheduler {
 
         // ---- Stage A: freeze ClassificationPlan before any classification I/O ----
         let candidates: Vec<PlanCandidate> = input.discovery.iter().map(plan_candidate).collect();
-        let classified = ClassificationPlan::build(
+        let mut classified = ClassificationPlan::build(
             candidates,
             &profile,
             profile.max_total_pdf_classification_pages,
@@ -736,10 +741,10 @@ impl BudgetedContextScheduler {
             .map(|file| (file.file_identity.clone(), file))
             .collect();
         let (
-            classifications,
-            classification_audits,
-            runtime_classification,
-            classification_fresh_hits,
+            mut classifications,
+            mut classification_audits,
+            mut runtime_classification,
+            mut classification_fresh_hits,
             classification_cache_receipts,
             classification_cache_write_warnings,
         ) = self.run_classifications(
@@ -771,7 +776,7 @@ impl BudgetedContextScheduler {
                 fixed.push(line);
             }
         }
-        let model = ContextBudgetModel::new(&profile.context, &fixed).map_err(|error| {
+        let mut model = ContextBudgetModel::new(&profile.context, &fixed).map_err(|error| {
             SchedulerFailure::new(
                 ErrorCode::ContextFixedSectionsOverBudget,
                 error.to_string(),
@@ -790,7 +795,8 @@ impl BudgetedContextScheduler {
             })
             .cloned()
             .collect();
-        let admission = ContentAdmissionPlan::build(&filtered, &profile, &model, &classifications);
+        let mut admission =
+            ContentAdmissionPlan::build(&filtered, &profile, &model, &classifications);
         metrics.admitted_file_count = admission
             .iter()
             .filter(|decision| matches!(decision.action, PlanAction::Admit { .. }))
@@ -823,6 +829,27 @@ impl BudgetedContextScheduler {
             &executor,
         )?;
         parse_outputs.classification_cache_receipts = classification_cache_receipts;
+        if profile.admission_policy_version == "budget_refill_v3" {
+            self.run_refills(
+                &input.discovery,
+                &input.work_dir,
+                &profile,
+                &snapshot,
+                &existed_before,
+                &mut classified,
+                &mut admission,
+                &mut classifications,
+                &mut classification_audits,
+                &mut runtime_classification,
+                &mut classification_fresh_hits,
+                &mut parse_outputs,
+                &mut model,
+                &classifier_profile_hash,
+                &classifier_build,
+                &mut metrics,
+                &executor,
+            )?;
+        }
         for file in &input.discovery {
             if self.guard.is_tainted(&file.path) {
                 parse_outputs
@@ -877,7 +904,29 @@ impl BudgetedContextScheduler {
             &parse_outputs,
         )?;
         let render_started = self.clock.now_ms();
-        let sources = crate::sources::collect_sources(&evidence, &input.discovery, &profile);
+        let mut sources = crate::sources::collect_sources(&evidence, &input.discovery, &profile);
+        if metrics
+            .refill_audit
+            .as_ref()
+            .is_some_and(|audit| audit.stop_reason == "round_limit")
+        {
+            for source in &mut sources {
+                if source.parse_status == ParseStatus::NotParsed
+                    && matches!(
+                        source.reason.as_deref(),
+                        Some(
+                            "semantic_file_quota_exhausted"
+                                | "pdf_classification_page_quota_exhausted"
+                                | "pdf_text_extraction_quota_exhausted"
+                                | "global_context_budget_exceeded"
+                        )
+                    )
+                {
+                    source.coverage_limits["evidence_audit"]["secondary_tags"] =
+                        serde_json::json!(["REFILL_ROUND_LIMIT_REACHED"]);
+                }
+            }
+        }
         let rendered = match build_context(evidence, &profile.context, profile.report_mode) {
             Ok(rendered) => rendered,
             Err(message) => {
@@ -1201,10 +1250,17 @@ fn classifier_error_line(
                 plan.relative_path
             ))
         }
-        Some(PdfClassificationStatus::Error) => Some(format!(
-            "- {} | reason=parse_error | error=PARSER_FAILED",
-            plan.relative_path
-        )),
+        Some(PdfClassificationStatus::Error) => {
+            let code = if result.and_then(|r| r.error_code.as_deref()) == Some("PDF_PROTECTED") {
+                "PDF_PROTECTED"
+            } else {
+                "PARSER_FAILED"
+            };
+            Some(format!(
+                "- {} | reason=parse_error | error={code}",
+                plan.relative_path
+            ))
+        }
         _ => None,
     }
 }
@@ -1344,6 +1400,7 @@ impl BudgetedContextScheduler {
                     audits.insert(
                         plan.file_identity.clone(),
                         PdfClassificationAuditV1 {
+                            page_audit: None,
                             status: PdfClassificationStatus::NotClassifiedByBudget,
                             page_count: Nullable(None),
                             classification_cache_status: ClassificationCacheStatus::NotEligible,
@@ -1362,6 +1419,20 @@ impl BudgetedContextScheduler {
                 }
                 crate::admission::PdfClassificationPlan::NotPdf => continue,
             };
+            // A shortened supplemental window has a distinct cache identity.
+            let supplemental_hash = if nominal_charged_pages != profile.parse.pdf.max_pages {
+                let mut bounded = profile.clone();
+                bounded.parse.pdf.max_pages = nominal_charged_pages;
+                Some(
+                    crate::store::classifier_profile_hash(&bounded)
+                        .map_err(|message| SchedulerFailure::internal(&message))?,
+                )
+            } else {
+                None
+            };
+            let classifier_profile_hash = supplemental_hash
+                .as_deref()
+                .unwrap_or(classifier_profile_hash);
             let Some(file) = snapshot.get(&plan.file_identity) else {
                 continue;
             };
@@ -1411,6 +1482,7 @@ impl BudgetedContextScheduler {
                     audits.insert(
                         plan.file_identity.clone(),
                         PdfClassificationAuditV1 {
+                            page_audit: None,
                             status,
                             page_count: Nullable(Some(entry.page_count)),
                             classification_cache_status: ClassificationCacheStatus::Fresh,
@@ -1425,6 +1497,23 @@ impl BudgetedContextScheduler {
                             classifier_profile_hash: classifier_profile_hash.to_string(),
                         },
                     );
+                    if let Some(audit) = audits.get_mut(&plan.file_identity) {
+                        let pages = ai_daily_scanner_contract::pdf_sample_pages(
+                            entry.page_count,
+                            nominal_charged_pages,
+                            &profile.classifier_policy_version,
+                        );
+                        audit.page_audit = Some(entry.page_audit.unwrap_or_else(|| {
+                            ai_daily_scanner_contract::PdfPageAudit {
+                                policy_version: profile.classifier_policy_version.clone(),
+                                checked_pages: pages
+                                    .into_iter()
+                                    .take(entry.result_examined_pages as usize)
+                                    .collect(),
+                                observations: None,
+                            }
+                        }));
+                    }
                 }
                 ClassificationCacheLookup::Miss(reason) => {
                     any_miss = true;
@@ -1443,7 +1532,7 @@ impl BudgetedContextScheduler {
                             payload: ai_daily_worker_contract::ClassifyRequest {
                                 file_path: file.path.clone(),
                                 source_version: file.source_version.clone(),
-                                max_pages: profile.parse.pdf.max_pages,
+                                max_pages: nominal_charged_pages,
                                 policy_version: profile.classifier_policy_version.clone(),
                             },
                         },
@@ -1486,7 +1575,10 @@ impl BudgetedContextScheduler {
             index = wave_end;
         }
 
-        metrics.classification_cache_all_hit = if any_lookup { Some(!any_miss) } else { None };
+        if any_lookup {
+            metrics.classification_cache_all_hit =
+                Some(metrics.classification_cache_all_hit.unwrap_or(true) && !any_miss);
+        }
         Ok((
             results,
             audits,
@@ -1528,6 +1620,11 @@ impl BudgetedContextScheduler {
             // (page_count / result_examined_pages), and distinguish a classifier
             // per-file timeout (-> Timeout) from crash / transient I/O /
             // protocol failure (-> Error, retryable=true).
+            let observed_pages = execution
+                .outcome
+                .as_ref()
+                .ok()
+                .and_then(|result| result.page_audit.clone());
             let classification = match execution.outcome {
                 Ok(result) => {
                     let status = match result.status {
@@ -1550,6 +1647,7 @@ impl BudgetedContextScheduler {
                     {
                         "SOURCE_VERSION_CHANGED" => "SOURCE_VERSION_CHANGED".to_string(),
                         "PARSER_TIMEOUT" => "PARSER_TIMEOUT".to_string(),
+                        "PDF_PROTECTED" => "PDF_PROTECTED".to_string(),
                         _ => "PARSER_FAILED".to_string(),
                     });
                     PdfClassificationResult {
@@ -1634,6 +1732,7 @@ impl BudgetedContextScheduler {
             audits.insert(
                 identity.clone(),
                 PdfClassificationAuditV1 {
+                    page_audit: observed_pages,
                     status,
                     page_count: Nullable(page_count),
                     classification_cache_status: ClassificationCacheStatus::Miss,
@@ -1823,6 +1922,7 @@ impl BudgetedContextScheduler {
                             ParseResult {
                                 file_identity: decision.file_identity.clone(),
                                 content: entry.content,
+                                evidence_audit: entry.evidence_audit,
                                 parser_backend: entry.parser_backend,
                                 worker_lane: entry.worker_lane,
                                 truncated: entry.truncated,
@@ -1899,6 +1999,16 @@ impl BudgetedContextScheduler {
                     continue;
                 }
                 requests.push(ParseRequest {
+                    selected_pdf_pages: classifications
+                        .get(&task.file.file_identity)
+                        .and_then(|result| result.page_count)
+                        .map(|count| {
+                            ai_daily_scanner_contract::pdf_sample_pages(
+                                count,
+                                profile.parse.pdf.max_pages,
+                                &profile.parse.pdf.selection_policy_version,
+                            )
+                        }),
                     file: task.file.clone(),
                     route: task.route,
                     timeout_ms: task.own_timeout_ms.min(remaining),
@@ -1944,6 +2054,8 @@ impl BudgetedContextScheduler {
                             parse_profile_hash: profile_hash.clone(),
                             content: result.content.clone(),
                             content_sha256: result.content_sha256.clone(),
+                            evidence_audit: result.evidence_audit.clone(),
+                            cache_payload_version: crate::store::cache::PARSE_CACHE_PAYLOAD_VERSION,
                             parser_backend: result.parser_backend.clone(),
                             worker_lane: result.worker_lane.clone(),
                             truncated: result.truncated,
@@ -1980,7 +2092,10 @@ impl BudgetedContextScheduler {
             }
             index = wave_end;
         }
-        metrics.parse_cache_all_hit = if any_lookup { Some(!any_miss) } else { None };
+        if any_lookup {
+            metrics.parse_cache_all_hit =
+                Some(metrics.parse_cache_all_hit.unwrap_or(true) && !any_miss);
+        }
         let _ = existed_before;
         Ok(ParseOutputs {
             results,
@@ -2015,6 +2130,9 @@ fn classifier_failure_semantics(
     if marker == Some("SOURCE_VERSION_CHANGED") {
         return (ParseStatus::Error, ErrorCode::SourceVersionChanged, true);
     }
+    if marker == Some("PDF_PROTECTED") && *status == PdfClassificationStatus::Error {
+        return (ParseStatus::Error, ErrorCode::PdfProtected, false);
+    }
     match (status, marker == Some("PARSER_TIMEOUT")) {
         (PdfClassificationStatus::Unknown, true) => {
             (ParseStatus::Timeout, ErrorCode::ParserTimeout, true)
@@ -2029,6 +2147,7 @@ fn classifier_failure_semantics(
 
 fn source_version_changed_parse(file: &DiscoveredFileOut) -> ParseResult {
     ParseResult {
+        evidence_audit: None,
         file_identity: file.file_identity.clone(),
         content: String::new(),
         parser_backend: "not_parsed".to_string(),
@@ -2062,6 +2181,7 @@ fn source_version_changed_after_parse(
 ) -> ParseResult {
     debug_assert!(executed.parse_attempt_count > 0);
     ParseResult {
+        evidence_audit: None,
         file_identity: file.file_identity.clone(),
         content: String::new(),
         parser_backend: executed.parser_backend,
@@ -2153,6 +2273,7 @@ fn file_evidence(
         .filter(|result| is_source_version_changed_result(result))
     {
         return ContextFileEvidence {
+            evidence_audit: None,
             file_identity: file.file_identity.clone(),
             absolute_path: file.path.clone(),
             relative_path: relative_path.to_string(),
@@ -2170,6 +2291,7 @@ fn file_evidence(
     }
     match action {
         PlanAction::NotParsed { reason } => ContextFileEvidence {
+            evidence_audit: None,
             file_identity: file.file_identity.clone(),
             absolute_path: file.path.clone(),
             relative_path: relative_path.to_string(),
@@ -2190,6 +2312,7 @@ fn file_evidence(
                 RejectReason::ProfileRouteInvariant => (ErrorCode::ProfileRouteInvariant, false),
             };
             ContextFileEvidence {
+                evidence_audit: None,
                 file_identity: file.file_identity.clone(),
                 absolute_path: file.path.clone(),
                 relative_path: relative_path.to_string(),
@@ -2220,6 +2343,7 @@ fn file_evidence(
             let (parse_status, code, retryable) =
                 classifier_failure_semantics(status, classifications.get(&file.file_identity));
             ContextFileEvidence {
+                evidence_audit: None,
                 file_identity: file.file_identity.clone(),
                 absolute_path: file.path.clone(),
                 relative_path: relative_path.to_string(),
@@ -2250,6 +2374,7 @@ fn file_evidence(
             {
                 // spec Part 2.3: runtime NotParsed (deadline) — NEVER snapshot.
                 ContextFileEvidence {
+                    evidence_audit: None,
                     file_identity: file.file_identity.clone(),
                     absolute_path: file.path.clone(),
                     relative_path: relative_path.to_string(),
@@ -2266,6 +2391,7 @@ fn file_evidence(
                 }
             } else if let Some(result) = parse_outputs.results.get(&file.file_identity) {
                 ContextFileEvidence {
+                    evidence_audit: result.evidence_audit.clone(),
                     file_identity: file.file_identity.clone(),
                     absolute_path: file.path.clone(),
                     relative_path: relative_path.to_string(),
@@ -2292,6 +2418,7 @@ fn file_evidence(
                     .unwrap_or(PdfClassificationStatus::NoTextInParseWindow);
                 if status == PdfClassificationStatus::NoTextInParseWindow {
                     ContextFileEvidence {
+                        evidence_audit: None,
                         file_identity: file.file_identity.clone(),
                         absolute_path: file.path.clone(),
                         relative_path: relative_path.to_string(),
@@ -2308,6 +2435,7 @@ fn file_evidence(
                     }
                 } else {
                     ContextFileEvidence {
+                        evidence_audit: None,
                         file_identity: file.file_identity.clone(),
                         absolute_path: file.path.clone(),
                         relative_path: relative_path.to_string(),

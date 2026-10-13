@@ -53,6 +53,7 @@ dependencies = [
  "ai-daily-scanner-contract",
  "ai-daily-worker-contract",
  "chrono",
+ "encoding_rs",
  "rayon",
  "rusqlite",
  "serde",
@@ -79,6 +80,7 @@ dependencies = [
 name = "ai-daily-worker-contract"
 version = "0.1.0"
 dependencies = [
+ "ai-daily-scanner-contract",
  "serde",
  "serde_json",
 ]

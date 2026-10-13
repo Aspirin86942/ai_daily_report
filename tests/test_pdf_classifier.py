@@ -195,7 +195,7 @@ def test_classifier_numeric_gate():
         fixture = CLASSIFIER_FIXTURES / entry["file"]
         assert fixture.exists(), f"missing fixture {fixture}"
         max_pages = int(entry.get("max_pages", 5))
-        result = classify_pdf(str(fixture), max_pages=max_pages)
+        result = classify_pdf(str(fixture), max_pages=max_pages, policy_version="pdf_text_presence_v1")
         status = result["status"]
         ground_truth = entry["ground_truth"]
 

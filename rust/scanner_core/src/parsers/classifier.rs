@@ -114,6 +114,56 @@ fn validate_classifier_result_for_request(
     request: &ClassifyOperation,
     result: &ClassifyResult,
 ) -> Result<(), ParseFailure> {
+    if request.policy_version == "pdf_text_presence_v2"
+        && result.page_audit.is_none()
+        && matches!(
+            result.status,
+            ai_daily_worker_contract::ClassifyStatus::TextInParseWindow
+                | ai_daily_worker_contract::ClassifyStatus::NoTextInParseWindow
+        )
+    {
+        return Err(contract_failure(
+            ErrorCode::ParserInvalidPayload,
+            "classifier v2 requires observed page provenance",
+            Some(&request.file_path),
+            None,
+            DiagnosticStage::Process,
+        ));
+    }
+    if let Some(audit) = &result.page_audit {
+        let expected = ai_daily_worker_contract::pdf_sample_pages(
+            result.page_count.unwrap_or(0),
+            request.max_pages,
+            &request.policy_version,
+        );
+        if audit.policy_version != request.policy_version
+            || expected.get(..audit.checked_pages.len()) != Some(audit.checked_pages.as_slice())
+        {
+            return Err(contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "classifier observed pages violate the selected policy",
+                Some(&request.file_path),
+                None,
+                DiagnosticStage::Process,
+            ));
+        }
+        if let Some(observations) = &audit.observations {
+            let text = result.status == ai_daily_worker_contract::ClassifyStatus::TextInParseWindow;
+            if observations
+                .iter()
+                .enumerate()
+                .any(|(index, page)| page.has_text != (text && index + 1 == observations.len()))
+            {
+                return Err(contract_failure(
+                    ErrorCode::ParserInvalidPayload,
+                    "classifier text observations violate its status",
+                    Some(&request.file_path),
+                    None,
+                    DiagnosticStage::Process,
+                ));
+            }
+        }
+    }
     result
         .validate_for_max_pages(request.max_pages)
         .map_err(|_| {
