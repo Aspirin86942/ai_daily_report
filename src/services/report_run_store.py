@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo
 
 from ..models.evidence_report import EvidenceDailyReportData, ReportSource
 from ..models.report_settings import RecoverySettings
+from ..models.model_budget import BudgetReservation, JobBudgetRevision, JobCallsRevision, charged_usage, usage_tokens
+from .job_budget_revisions import append_budget_revision, read_revision_chain, reservation_is_approved
 from .report_runner.context import RunContext
 from .report_runner.errors import ReportRunError
 from .report_runner.snapshots import SnapshotRef, canonical_json
@@ -66,6 +68,7 @@ class ReportRunStore:
             rows = connection.execute("""SELECT * FROM report_runs WHERE run_kind='report'
                 AND phase IN ('prepared','generating','db_committed') AND status!='succeeded'
                 AND COALESCE(error_code,'')!='RUN_SUPERSEDED'
+                AND COALESCE(regeneration_reason,'') NOT LIKE 'coverage_publish:%'
                 AND (? IS NULL OR target_date=?)
                 ORDER BY CASE WHEN phase='db_committed' THEN 0 ELSE 1 END,created_at,run_id""",
                 (target_date, target_date)).fetchall()
@@ -110,7 +113,8 @@ class ReportRunStore:
         return self.get(run_id)
 
     def reserve_call(self, run_id: str, *, request_fingerprint: str, logical_step: str,
-                     request: SnapshotRef, limits: RecoverySettings, max_attempts: int = 3) -> dict:
+                     request: SnapshotRef, limits: RecoverySettings, max_attempts: int = 3,
+                     budget: BudgetReservation | None = None) -> dict:
         if not 1 <= max_attempts <= 3:
             raise ValueError("model attempts must be between one and three")
         now = self._now()
@@ -125,29 +129,145 @@ class ReportRunStore:
             if existing >= max_attempts:
                 raise ReportRunError("MODEL_STEP_BUDGET_EXHAUSTED")
             count = connection.execute("SELECT COUNT(*) FROM report_model_calls WHERE run_id=?", (run_id,)).fetchone()[0]
-            if count >= limits.max_calls_per_run:
+            if limits.enforce_model_budgets and count >= limits.max_calls_per_run:
                 raise ReportRunError("MODEL_RUN_BUDGET_EXHAUSTED")
             daily = connection.execute("SELECT COUNT(*) FROM report_model_calls WHERE call_date=?", (day,)).fetchone()[0]
-            if daily >= limits.max_calls_per_calendar_day:
+            if limits.enforce_model_budgets and daily >= limits.max_calls_per_calendar_day:
                 raise ReportRunError("MODEL_DAY_BUDGET_EXHAUSTED")
+            if budget is not None and limits.enforce_model_budgets:
+                self._check_reserved_budget(connection, run_id, day, budget)
             timestamp = now.isoformat()
             cursor = connection.execute("""INSERT INTO report_model_calls(run_id,generation_id,request_fingerprint,
-                logical_step,attempt,call_date,status,request_path,request_sha256,started_at)
-                VALUES (?,?,?,?,?,?,'reserved',?,?,?)""",
+                logical_step,attempt,call_date,status,request_path,request_sha256,started_at,usage_json)
+                VALUES (?,?,?,?,?,?,'reserved',?,?,?,?)""",
                 (run_id, run["generation_id"], request_fingerprint, logical_step, existing + 1, day,
-                 request.path, request.sha256, timestamp))
+                 request.path, request.sha256, timestamp,
+                 _json({"reserved_budget": budget.model_dump(mode="json"),
+                     **({"budget_limits_enforced": False} if not limits.enforce_model_budgets else {})}) if budget else
+                 (_json({"budget_limits_enforced": False}) if not limits.enforce_model_budgets else None)))
             connection.execute("UPDATE report_runs SET phase='generating',updated_at=? WHERE run_id=?", (timestamp, run_id))
             return dict(connection.execute("SELECT * FROM report_model_calls WHERE call_id=?", (cursor.lastrowid,)).fetchone())
+
+    @staticmethod
+    def _check_reserved_budget(connection, run_id: str, day: str, budget: BudgetReservation) -> None:
+        revision_hash = budget.request_audit.get("job_calls_revision_sha256")
+        chain = read_revision_chain(connection, budget.job_id)
+        if chain:
+            revision, identity = chain[-1]
+            if (revision_hash != identity or revision.calls_limit != budget.job_calls_limit
+                    or revision.tokens_limit != budget.job_tokens_limit
+                    or revision.cost_limit_microunits != budget.job_cost_limit_microunits
+                    or revision.pricing != budget.pricing):
+                raise ReportRunError("MODEL_JOB_BUDGET_CHANGED")
+        elif revision_hash is not None:
+            raise ReportRunError("MODEL_JOB_BUDGET_CHANGED")
+        rows = connection.execute("""SELECT call_id,run_id,call_date,status,usage_json FROM report_model_calls
+            WHERE run_id=? OR call_date=? OR (? IS NOT NULL AND
+                json_extract(usage_json,'$.reserved_budget.job_id')=?)""",
+            (run_id, day, budget.job_id, budget.job_id)).fetchall()
+        used = {scope: [0, 0] for scope in ("run", "day", "job")}
+        money_unknown = set()
+        job_calls = 0
+        for row in rows:
+            usage = json.loads(row["usage_json"] or "{}")
+            stored = usage.get("reserved_budget")
+            scopes = []
+            if row["run_id"] == run_id:
+                scopes.append("run")
+            if row["call_date"] == day:
+                scopes.append("day")
+            if budget.job_id is not None and stored and stored.get("job_id") == budget.job_id:
+                scopes.append("job")
+                job_calls += 1
+            if stored:
+                prior = BudgetReservation.model_validate(stored)
+                tokens, money = charged_usage(row, prior, usage)
+                if budget.pricing is not None and (prior.pricing is None
+                        or prior.pricing.currency != budget.pricing.currency):
+                    money = None
+                if "job" in scopes and not reservation_is_approved(prior, row["call_id"], chain, budget):
+                    raise ReportRunError("MODEL_JOB_BUDGET_CHANGED")
+            else:
+                # Old unknown calls occupy a full conservative request; fees cannot be invented.
+                tokens = usage_tokens(usage)[2] if row["status"] in {"succeeded", "failed"} else None
+                tokens = tokens if tokens is not None else budget.legacy_tokens_upper
+                money = None
+            for scope in scopes:
+                used[scope][0] += tokens
+                if money is None:
+                    money_unknown.add(scope)
+                else:
+                    used[scope][1] += money
+        if budget.job_calls_limit is not None and job_calls >= budget.job_calls_limit:
+            raise ReportRunError("MODEL_JOB_CALL_BUDGET_EXHAUSTED")
+        for scope, token_limit, cost_limit in (
+                ("run", budget.run_tokens_limit, budget.run_cost_limit_microunits),
+                ("day", budget.day_tokens_limit, budget.day_cost_limit_microunits),
+                ("job", budget.job_tokens_limit, budget.job_cost_limit_microunits)):
+            if token_limit is not None and used[scope][0] + budget.token_upper > token_limit:
+                raise ReportRunError(f"MODEL_{scope.upper()}_TOKEN_BUDGET_EXHAUSTED")
+            if cost_limit is not None:
+                if scope in money_unknown:
+                    raise ReportRunError("MODEL_LEGACY_COST_UNKNOWN")
+                if used[scope][1] + budget.cost_upper_microunits > cost_limit:
+                    raise ReportRunError(f"MODEL_{scope.upper()}_COST_BUDGET_EXHAUSTED")
+
+    def register_job_calls_revision(self, revision: JobCallsRevision | JobBudgetRevision) -> str:
+        """Register an explicitly authorized increase; never rewrite existing reservations."""
+        if isinstance(revision, JobBudgetRevision):
+            with self.store._get_conn() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                return append_budget_revision(connection, revision)
+        value = revision.model_dump(mode="json")
+        identity = sha256(canonical_json(value)).hexdigest()
+        key = "job_calls_revision:" + revision.job_id
+        envelope = _json({"revision": value, "sha256": identity})
+        with self.store._get_conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            prior = connection.execute("SELECT value FROM report_metadata WHERE key=?", (key,)).fetchone()
+            if prior is not None:
+                if prior["value"] != envelope:
+                    raise ReportRunError("MODEL_JOB_CALL_REVISION_ALREADY_REGISTERED")
+                return identity
+            rows = [dict(row) for row in connection.execute("""SELECT call_id,run_id,status,error_code,
+                usage_json,request_sha256,response_sha256 FROM report_model_calls
+                WHERE json_extract(usage_json,'$.reserved_budget.job_id')=? ORDER BY call_id""", (revision.job_id,))]
+            if ([row["call_id"] for row in rows] != revision.retained_call_ids
+                    or sha256(canonical_json(rows)).hexdigest() != revision.retained_calls_sha256):
+                raise ReportRunError("MODEL_JOB_CALL_REVISION_CHANGED")
+            for row in rows:
+                old = BudgetReservation.model_validate(json.loads(row["usage_json"])["reserved_budget"])
+                if (row["status"] not in {"failed", "succeeded"} or old.request_audit.get("job_calls_revision_sha256") is not None
+                        or old.job_calls_limit != revision.previous_calls_limit or old.job_tokens_limit != revision.tokens_limit
+                        or old.job_cost_limit_microunits != revision.cost_limit_microunits or old.pricing != revision.pricing):
+                    raise ReportRunError("MODEL_JOB_CALL_REVISION_CHANGED")
+            connection.execute("INSERT INTO report_metadata(key,value) VALUES (?,?)", (key, envelope))
+        return identity
 
     def finish_call(self, call_id: int, *, status: str, response: SnapshotRef | None = None,
                     usage: dict | None = None, error_code: str | None = None, duration_ms: int = 0) -> None:
         if status not in {"succeeded", "failed", "unknown"} or (status == "succeeded" and response is None):
             raise ValueError("invalid call completion")
         with self.store._get_conn() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT usage_json FROM report_model_calls WHERE call_id=? AND status='reserved'",
+                                     (call_id,)).fetchone()
+            if row is None:
+                raise ReportRunError("CALL_ALREADY_FINISHED")
+            reserved_usage = json.loads(row["usage_json"] or "{}")
+            reserved = reserved_usage.get("reserved_budget")
+            merged_usage = dict(usage or {})
+            merged_usage.pop("reserved_budget", None)
+            merged_usage.pop("budget_limits_enforced", None)
+            if reserved_usage.get("budget_limits_enforced") is False:
+                merged_usage["budget_limits_enforced"] = False
+            if reserved is not None:
+                merged_usage["reserved_budget"] = reserved
             cursor = connection.execute("""UPDATE report_model_calls SET status=?,response_path=?,response_sha256=?,
                 usage_json=?,error_code=?,finished_at=?,duration_ms=? WHERE call_id=? AND status='reserved'""",
                 (status, response.path if response else None, response.sha256 if response else None,
-                 _json(usage) if usage is not None else None, error_code, self._now().isoformat(), duration_ms, call_id))
+                 _json(merged_usage) if merged_usage or usage is not None else None,
+                 error_code, self._now().isoformat(), duration_ms, call_id))
             if cursor.rowcount != 1:
                 raise ReportRunError("CALL_ALREADY_FINISHED")
 
@@ -230,9 +350,23 @@ class ReportRunStore:
                     AND run_id!=? AND created_at<=?""",
                     (now, now, run["scope_id"], run["target_date"], run_id, run["created_at"]))
 
-    def finish_preview(self, run_id: str, quality: str) -> None:
+    def finish_preview(self, run_id: str, quality: str, *, report: EvidenceDailyReportData | None = None,
+                       markdown: str | None = None) -> None:
         now = self._now().isoformat()
+        if (report is None) != (markdown is None):
+            raise ValueError("preview report and Markdown must be saved together")
         with self.store._get_conn() as connection:
+            if report is not None:
+                run = connection.execute("SELECT run_kind,context_json FROM report_runs WHERE run_id=?", (run_id,)).fetchone()
+                if run is None or run["run_kind"] != "preview":
+                    raise ReportRunError("RUN_PHASE_INVALID")
+                context = RunContext.from_dict(json.loads(run["context_json"]))
+                if report.date != str(context.target_date) or report.window_start_utc != context.window_start_utc.isoformat():
+                    raise ReportRunError("REPORT_CONTEXT_MISMATCH")
+                if markdown.startswith("\ufeff") or "\r" in markdown:
+                    raise ReportRunError("REPORT_MARKDOWN_INVALID")
+                connection.execute("UPDATE report_runs SET report_json=?,markdown=?,expected_sha256=? WHERE run_id=?",
+                    (report.model_dump_json(), markdown, sha256(markdown.encode("utf-8")).hexdigest(), run_id))
             cursor = connection.execute("""UPDATE report_runs SET status='succeeded',quality=?,updated_at=?,finished_at=?
                 WHERE run_id=? AND run_kind!='report' AND status='running'""", (quality, now, now, run_id))
             if cursor.rowcount != 1:

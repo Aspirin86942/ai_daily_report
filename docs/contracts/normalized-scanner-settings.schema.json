@@ -43,10 +43,16 @@
       "$ref": "#/$defs/context"
     },
     "admission_policy_version": {
-      "const": "budget_admission_v2"
+      "enum": [
+        "budget_admission_v2",
+        "budget_refill_v3"
+      ]
     },
     "classifier_policy_version": {
-      "const": "pdf_text_presence_v1"
+      "enum": [
+        "pdf_text_presence_v1",
+        "pdf_text_presence_v2"
+      ]
     },
     "max_candidate_files": {
       "type": "integer",
@@ -274,6 +280,26 @@
         "pdf"
       ],
       "properties": {
+        "cache_payload_version": {
+          "type": "integer",
+          "const": 1,
+          "default": 1
+        },
+        "excerpt_policy_version": {
+          "type": "string",
+          "enum": [
+            "fair_semantic_v1",
+            "fair_semantic_v2",
+            "fair_semantic_v3",
+            "fair_semantic_v4",
+            "fair_semantic_v5",
+            "fair_semantic_v6",
+            "fair_semantic_v7",
+            "fair_semantic_v8",
+            "fair_semantic_v9"
+          ],
+          "default": "fair_semantic_v1"
+        },
         "aggregate_max_chars": {
           "$ref": "#/$defs/charBudget"
         },
@@ -285,6 +311,16 @@
         },
         "pdf": {
           "$ref": "#/$defs/pdfParse"
+        },
+        "excerpt_priority_paths": {
+          "type": "array",
+          "maxItems": 4096,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32767
+          },
+          "default": []
         }
       }
     },
@@ -299,6 +335,19 @@
         "excerpt_max_chars"
       ],
       "properties": {
+        "csv_encodings": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "utf-8",
+              "utf-8-sig",
+              "gb18030"
+            ]
+          }
+        },
         "backend": {
           "const": "light_text_v2"
         },
@@ -414,6 +463,12 @@
         },
         "excerpt_max_chars": {
           "$ref": "#/$defs/charBudget"
+        },
+        "selection_policy_version": {
+          "enum": [
+            "pdf_text_presence_v1",
+            "pdf_text_presence_v2"
+          ]
         }
       }
     },

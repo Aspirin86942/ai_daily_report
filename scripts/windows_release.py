@@ -356,6 +356,7 @@ def _application_payload(repo_root: Path) -> list[tuple[Path, str]]:
         "requirements.lock",
         "config/settings.example.yaml",
         "scripts/windows_release.py",
+        "scripts/backfill_daily_reports.py",
         "scripts/archive_scanner_database.ps1",
         "scripts/update_release_pointer.ps1",
     ]

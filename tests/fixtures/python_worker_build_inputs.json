@@ -2,6 +2,7 @@
   "algorithm": "sha256-python-worker-build-v1",
   "inputs": [
     "requirements.lock",
+    "src/models/content_audit.py",
     "src/models/scanner_contract.py",
     "src/models/schemas.py",
     "src/services/document_parser.py",
@@ -10,6 +11,7 @@
     "src/workers/models.py",
     "src/workers/pdf_classifier.py",
     "src/workers/pdf_classifier_identity.py",
+    "src/workers/pdf_pages.py",
     "src/workers/python_worker_identity.py"
   ]
 }

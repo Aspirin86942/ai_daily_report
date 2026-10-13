@@ -1,4 +1,7 @@
 use ai_daily_scanner_contract::{TextParseProfile, Validate};
+use ai_daily_worker_contract::{
+    AuditTextBuilder, ContentUnitKind, ParsedContentAudit, SourceRange, SourceRangeUnit,
+};
 use serde_json::Value;
 use std::borrow::Cow;
 use std::fs::File;
@@ -12,6 +15,7 @@ const LEGACY_CSV_FIELD_SIZE_LIMIT: usize = 131_072;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedLightText {
     pub content: String,
+    pub evidence_audit: ParsedContentAudit,
     pub parser_backend: String,
     pub truncated: bool,
     pub warnings: Vec<LightTextWarning>,
@@ -51,8 +55,11 @@ pub enum LightTextError {
 #[derive(Debug)]
 struct RawExcerpt {
     text: String,
+    encoding: &'static str,
     source: &'static str,
     truncated: bool,
+    byte_start: u64,
+    byte_end: u64,
 }
 
 pub fn parse_light_text(
@@ -79,18 +86,34 @@ pub fn parse_light_text(
     let raw = if normalized_type == ".log" {
         read_tail(&mut file, metadata.len(), profile.read_tail_bytes)?
     } else {
-        read_head(&mut file, metadata.len(), profile.read_head_bytes)?
+        read_head(
+            &mut file,
+            metadata.len(),
+            profile.read_head_bytes,
+            (normalized_type == ".csv").then_some(profile.csv_encodings.as_slice()),
+        )?
     };
     let max_output_chars = profile.max_chars.min(profile.excerpt_max_chars);
-    let (content, truncated, warning) = match normalized_type.as_str() {
-        ".json" => build_json_content(&raw, max_output_chars),
-        ".csv" => build_csv_content(&raw, max_output_chars),
-        // 日志是时间序，新信息在尾部——摘录取读窗的最后 max_chars 字符。
-        ".log" => build_log_content(&raw, max_output_chars),
-        _ => build_text_content(&raw, "Text preview", max_output_chars, None),
+    let (content, truncated, warning, evidence_audit) = match normalized_type.as_str() {
+        ".json" => {
+            let (content, truncated, warning) = build_json_content(&raw, max_output_chars);
+            let audit = ParsedContentAudit {
+                read_ranges: Some(byte_ranges(&raw)),
+                usable_chars: Some(if raw.text.trim().is_empty() {
+                    0
+                } else {
+                    content.chars().count() as u64
+                }),
+                ..ParsedContentAudit::default()
+            };
+            (content, truncated, warning, audit)
+        }
+        ".csv" => audited_csv(&raw, max_output_chars),
+        _ => audited_text(&raw, max_output_chars, normalized_type == ".log", None),
     };
     Ok(ParsedLightText {
         content,
+        evidence_audit,
         parser_backend: profile.backend.clone(),
         truncated,
         warnings: warning.into_iter().collect(),
@@ -101,6 +124,7 @@ fn read_head(
     file: &mut File,
     file_size: u64,
     read_bytes: u64,
+    csv_encodings: Option<&[String]>,
 ) -> Result<RawExcerpt, LightTextError> {
     let mut raw = Vec::new();
     file.by_ref()
@@ -108,12 +132,267 @@ fn read_head(
         .read_to_end(&mut raw)
         .map_err(|_| LightTextError::ReadFailed)?;
     let truncated = file_size > raw.len() as u64;
-    let text = decode_head(&raw, truncated)?;
+    let (text, encoding) = match csv_encodings {
+        Some(encodings) => decode_csv(&raw, truncated, encodings)?,
+        None => (decode_head(&raw, truncated)?, "utf-8"),
+    };
     Ok(RawExcerpt {
         text,
+        encoding,
         source: "head",
         truncated,
+        byte_start: 0,
+        byte_end: raw.len() as u64,
     })
+}
+
+fn byte_ranges(raw: &RawExcerpt) -> Vec<SourceRange> {
+    if raw.byte_end == raw.byte_start {
+        return Vec::new();
+    }
+    vec![SourceRange::new(
+        SourceRangeUnit::Byte,
+        raw.byte_start,
+        raw.byte_end,
+        Some(raw.source.into()),
+    )]
+}
+
+fn audited_text(
+    raw: &RawExcerpt,
+    max_chars: u64,
+    tail: bool,
+    warning: Option<LightTextWarning>,
+) -> (String, bool, Option<LightTextWarning>, ParsedContentAudit) {
+    let title = if tail {
+        "Log tail preview"
+    } else {
+        "Text preview"
+    };
+    let mut builder = AuditTextBuilder::new(max_chars, "text");
+    for range in byte_ranges(raw) {
+        builder.read(range);
+    }
+    let mut metadata = vec![
+        title.to_string(),
+        format!("excerpt_source: {}", raw.source),
+        format!("read_window_truncated: {}", raw.truncated),
+    ];
+    if let Some(warning) = warning {
+        metadata.push(format!("warning: {}", warning.code()));
+    }
+    builder.push(&metadata.join("\n"), ContentUnitKind::Heading, vec![]);
+    let mut segments = Vec::new();
+    let mut start = 0;
+    let mut chars = 0;
+    for (byte, ch) in raw.text.char_indices() {
+        chars += 1;
+        let table_line = raw.text[start..].trim_start().starts_with('|');
+        if ch == '\n'
+            || (!table_line
+                && (matches!(ch, '。' | '！' | '？')
+                    || (ch == '.'
+                        && raw.text[byte + 1..]
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_whitespace()))))
+        {
+            segments.push((start, byte + ch.len_utf8(), chars));
+            start = byte + ch.len_utf8();
+        }
+    }
+    // A cut read window cannot claim the final partial sentence or line.
+    if start < raw.text.len() && (!raw.truncated || tail) {
+        segments.push((start, raw.text.len(), chars));
+    }
+    let mut pieces = Vec::new();
+    let mut previous_chars = 0;
+    for (from, to, end_chars) in segments {
+        let text = &raw.text[from..to];
+        let trimmed = text.trim();
+        let leading = text.chars().take_while(|c| c.is_whitespace()).count() as u64;
+        let ranges = if !tail && !trimmed.is_empty() {
+            vec![SourceRange::new(
+                SourceRangeUnit::TextChar,
+                previous_chars + leading,
+                previous_chars + leading + trimmed.chars().count() as u64,
+                None,
+            )]
+        } else {
+            vec![]
+        };
+        previous_chars = end_chars;
+        pieces.push((trimmed, ranges));
+    }
+    let mut selection_bounded = false;
+    if tail {
+        // Select complete latest lines, then restore their original order.
+        let mut remaining = max_chars.saturating_sub(64);
+        let mut selected = Vec::new();
+        for (text, ranges) in pieces.into_iter().rev() {
+            let size = text.chars().count() as u64 + 1;
+            if size <= remaining {
+                remaining -= size;
+                selected.push((text, ranges));
+            } else {
+                selection_bounded = true;
+            }
+        }
+        selected.reverse();
+        for (text, ranges) in selected {
+            builder.push(text, ContentUnitKind::Text, ranges);
+        }
+    } else {
+        let mut index = 0;
+        while index < pieces.len() {
+            let (text, ranges) = &pieces[index];
+            if text.starts_with('|')
+                && text.ends_with('|')
+                && pieces
+                    .get(index + 1)
+                    .is_some_and(|(separator, _)| markdown_separator(separator))
+            {
+                let end = (index + 2..pieces.len())
+                    .find(|next| {
+                        !pieces[*next].0.starts_with('|') || !pieces[*next].0.ends_with('|')
+                    })
+                    .unwrap_or(pieces.len());
+                if end > index + 2 {
+                    let headers = [&pieces[index], &pieces[index + 1]];
+                    let header_chars = headers
+                        .iter()
+                        .map(|(line, _)| line.chars().count() + 1)
+                        .sum::<usize>();
+                    let mut cursor = index + 2;
+                    while cursor < end {
+                        let mut lines = headers.iter().map(|(line, _)| *line).collect::<Vec<_>>();
+                        let mut physical = headers
+                            .iter()
+                            .flat_map(|(_, ranges)| ranges.iter().cloned())
+                            .collect::<Vec<_>>();
+                        let mut size = header_chars;
+                        let first = cursor;
+                        while cursor < end {
+                            let cost = pieces[cursor].0.chars().count() + 1;
+                            if cursor > first && size + cost > 512 {
+                                break;
+                            }
+                            size += cost;
+                            lines.push(pieces[cursor].0);
+                            physical.extend(pieces[cursor].1.iter().cloned());
+                            cursor += 1;
+                        }
+                        builder.push(&lines.join("\n"), ContentUnitKind::TableRow, physical);
+                    }
+                    index = end;
+                    continue;
+                }
+            }
+            let kind = if text.starts_with('#') {
+                ContentUnitKind::Heading
+            } else {
+                ContentUnitKind::Text
+            };
+            builder.push(text, kind, ranges.clone());
+            index += 1;
+        }
+    }
+    let (content, mut audit, bounded) = builder.finish();
+    audit.encoding = Some(raw.encoding.into());
+    (
+        content,
+        raw.truncated || bounded || selection_bounded,
+        warning,
+        audit,
+    )
+}
+
+fn markdown_separator(text: &str) -> bool {
+    text.starts_with('|')
+        && text.ends_with('|')
+        && text.trim_matches('|').split('|').all(|cell| {
+            let value = cell.trim();
+            value.chars().filter(|ch| *ch == '-').count() >= 3
+                && value.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
+        })
+}
+
+fn audited_csv(
+    raw: &RawExcerpt,
+    max_chars: u64,
+) -> (String, bool, Option<LightTextWarning>, ParsedContentAudit) {
+    let input = if raw.truncated {
+        let mut in_quotes = false;
+        let mut last = 0;
+        let mut chars = raw.text.char_indices().peekable();
+        while let Some((byte, ch)) = chars.next() {
+            if ch == '"' {
+                if in_quotes && chars.peek().is_some_and(|(_, next)| *next == '"') {
+                    chars.next();
+                } else {
+                    in_quotes = !in_quotes;
+                }
+            } else if ch == '\n' && !in_quotes {
+                last = byte + 1;
+            }
+        }
+        &raw.text[..last]
+    } else {
+        &raw.text
+    };
+    let Ok(rows) = parse_csv(input.trim_start_matches('\u{feff}')) else {
+        let (content, truncated, _, audit) = audited_text(
+            raw,
+            max_chars,
+            false,
+            Some(LightTextWarning::CsvPreviewFallback),
+        );
+        return (
+            content,
+            truncated,
+            Some(LightTextWarning::CsvPreviewFallback),
+            audit,
+        );
+    };
+    let mut builder = AuditTextBuilder::new(max_chars, "csv");
+    for range in byte_ranges(raw) {
+        builder.read(range);
+    }
+    builder.push(
+        &metadata_lines("CSV preview", raw.source, raw.truncated).join("\n"),
+        ContentUnitKind::Heading,
+        vec![],
+    );
+    for (index, row) in rows.iter().enumerate() {
+        let range = SourceRange::new(
+            SourceRangeUnit::CsvRecord,
+            index as u64 + 1,
+            index as u64 + 2,
+            None,
+        );
+        builder.read(range.clone());
+        if index > 3 {
+            continue;
+        }
+        let (prefix, kind) = if index == 0 {
+            ("header: ".into(), ContentUnitKind::TableHeader)
+        } else {
+            (format!("row {index}: "), ContentUnitKind::TableRow)
+        };
+        builder.push(
+            &format!("{prefix}{}", format_csv_row(row)),
+            kind,
+            vec![range],
+        );
+    }
+    let (content, mut audit, bounded) = builder.finish();
+    audit.encoding = Some(raw.encoding.into());
+    (
+        content,
+        raw.truncated || bounded || rows.len() > 4,
+        None,
+        audit,
+    )
 }
 
 fn read_tail(
@@ -140,9 +419,44 @@ fn read_tail(
     let text = decode_tail(raw, leading_context, truncated)?;
     Ok(RawExcerpt {
         text,
+        encoding: "utf-8",
         source: "tail",
         truncated,
+        byte_start: context_offset,
+        byte_end: context_offset + context_and_raw.len() as u64,
     })
+}
+
+fn decode_csv(
+    raw: &[u8],
+    truncated: bool,
+    allowed: &[String],
+) -> Result<(String, &'static str), LightTextError> {
+    let has_bom = raw.starts_with(&[0xef, 0xbb, 0xbf]);
+    let utf_encoding = if has_bom { "utf-8-sig" } else { "utf-8" };
+    if allowed.iter().any(|encoding| encoding == utf_encoding) {
+        if let Ok(text) = decode_head(raw, truncated) {
+            return Ok((text, utf_encoding));
+        }
+    }
+    // A UTF-8 BOM fixes the encoding; malformed BOM-marked input cannot be
+    // silently reinterpreted through the alternate encoding.
+    if has_bom || !allowed.iter().any(|encoding| encoding == "gb18030") {
+        return Err(LightTextError::DecodeFailed);
+    }
+    let mut decoder = encoding_rs::GB18030.new_decoder_without_bom_handling();
+    let capacity = decoder
+        .max_utf8_buffer_length_without_replacement(raw.len())
+        .ok_or(LightTextError::DecodeFailed)?;
+    let mut text = String::with_capacity(capacity);
+    let (result, consumed) =
+        decoder.decode_to_string_without_replacement(raw, &mut text, !truncated);
+    if result != encoding_rs::DecoderResult::InputEmpty || consumed != raw.len() {
+        return Err(LightTextError::DecodeFailed);
+    }
+    // last=false deliberately keeps a split two/four-byte character pending.
+    // The CSV reader then emits only complete logical records from this window.
+    Ok((text, "gb18030"))
 }
 
 fn decode_head(raw: &[u8], trim_trailing_fragment: bool) -> Result<String, LightTextError> {
@@ -268,45 +582,6 @@ fn build_json_content(
     (content, truncated, None)
 }
 
-fn build_csv_content(raw: &RawExcerpt, max_chars: u64) -> (String, bool, Option<LightTextWarning>) {
-    if raw.truncated {
-        return build_text_content(
-            raw,
-            "Text preview",
-            max_chars,
-            Some(LightTextWarning::CsvPreviewFallback),
-        );
-    }
-    let rows = match parse_csv(&raw.text) {
-        Ok(rows) => rows,
-        Err(()) => {
-            return build_text_content(
-                raw,
-                "Text preview",
-                max_chars,
-                Some(LightTextWarning::CsvPreviewFallback),
-            );
-        }
-    };
-    let (content, truncated) = finalize_content(
-        |truncated| {
-            let mut lines = metadata_lines("CSV preview", raw.source, truncated);
-            if let Some(header) = rows.first() {
-                lines.push(format!("header: {}", format_csv_row(header)));
-                for (index, row) in rows.iter().skip(1).take(3).enumerate() {
-                    lines.push(format!("row {}: {}", index + 1, format_csv_row(row)));
-                }
-            } else {
-                lines.push("header: ".to_string());
-            }
-            lines.join("\n")
-        },
-        raw.truncated,
-        max_chars,
-    );
-    (content, truncated, None)
-}
-
 fn build_text_content(
     raw: &RawExcerpt,
     title: &str,
@@ -327,65 +602,6 @@ fn build_text_content(
         max_chars,
     );
     (content, truncated, warning)
-}
-
-/// `.log` 摘录：metadata 行保持在开头，正文取读窗的最后 `max_chars` 字符
-/// （日志为时间序，新信息在尾部）。
-fn build_log_content(raw: &RawExcerpt, max_chars: u64) -> (String, bool, Option<LightTextWarning>) {
-    let (content, truncated) = finalize_tail_content(
-        |truncated| {
-            let mut lines = metadata_lines("Log tail preview", raw.source, truncated);
-            lines.push(String::new());
-            lines.push(raw.text.clone());
-            lines.join("\n")
-        },
-        raw.truncated,
-        max_chars,
-    );
-    (content, truncated, None)
-}
-
-/// `finalize_content` 的尾部变体：正文取最后 `max_chars` 字符，metadata 行
-/// （正文前的第一个 `\n\n` 之前）始终保留。
-fn finalize_tail_content<F>(builder: F, read_truncated: bool, max_chars: u64) -> (String, bool)
-where
-    F: Fn(bool) -> String,
-{
-    let content = builder(read_truncated);
-    let (limited, output_truncated) = limit_tail_chars(&content, max_chars);
-    let final_truncated = read_truncated || output_truncated;
-    if final_truncated != read_truncated {
-        let rebuilt = builder(final_truncated);
-        let (limited, rebuilt_truncated) = limit_tail_chars(&rebuilt, max_chars);
-        return (limited, read_truncated || rebuilt_truncated);
-    }
-    (limited, final_truncated)
-}
-
-/// 保留 metadata 头，只对正文做后缀截断（Unicode scalar 安全）。
-fn limit_tail_chars(content: &str, max_chars: u64) -> (String, bool) {
-    let max_chars = usize::try_from(max_chars).unwrap_or(usize::MAX);
-    let total = content.chars().count();
-    if total <= max_chars {
-        return (content.to_string(), false);
-    }
-    let body_start = content
-        .match_indices("\n\n")
-        .next()
-        .map(|(index, _)| index + 2)
-        .unwrap_or(0);
-    let metadata = &content[..body_start.min(content.len())];
-    let body = &content[body_start.min(content.len())..];
-    let metadata_chars = metadata.chars().count();
-    let body_budget = max_chars.saturating_sub(metadata_chars);
-    let body_chars = body.chars().count();
-    let skip = body_chars.saturating_sub(body_budget);
-    let keep_from = body
-        .char_indices()
-        .nth(skip)
-        .map(|(index, _)| index)
-        .unwrap_or(0);
-    (format!("{metadata}{}", &body[keep_from..]), true)
 }
 
 fn normalize_python_json_constants(input: &str) -> Cow<'_, str> {
@@ -601,6 +817,7 @@ mod tests {
             .collect();
         fs::write(&path, lines.join("\n")).expect("log fixture should be written");
         let profile = TextParseProfile {
+            csv_encodings: ai_daily_scanner_contract::default_csv_encodings(),
             backend: "light_text_v2".to_string(),
             read_head_bytes: 1_048_576,
             read_tail_bytes: 1_048_576,
@@ -626,6 +843,7 @@ mod tests {
             .collect();
         fs::write(&path, lines.join("\n")).expect("md fixture should be written");
         let profile = TextParseProfile {
+            csv_encodings: ai_daily_scanner_contract::default_csv_encodings(),
             backend: "light_text_v2".to_string(),
             read_head_bytes: 1_048_576,
             read_tail_bytes: 1_048_576,
@@ -653,7 +871,7 @@ mod tests {
         fs::write(&path, "replacement content that is much larger")
             .expect("replacement fixture should be written");
 
-        let excerpt = read_head(&mut file, metadata.len(), 1024)
+        let excerpt = read_head(&mut file, metadata.len(), 1024, None)
             .expect("the original opened handle should remain readable");
 
         assert_eq!(excerpt.text, "opened content");

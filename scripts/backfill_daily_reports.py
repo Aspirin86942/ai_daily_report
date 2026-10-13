@@ -111,65 +111,24 @@ class BackfillService(EvidenceDailyService):
 
 
 class PdfOcrScanner:
-    """Overlay locally recognized PDF text only when its original content hash still matches."""
+    """Overlay hash-bound local OCR while preserving original page locations."""
 
     def __init__(self, inner, manifest: Path | None, *, work_root: Path | None = None):
+        from src.services.ocr_import import load_ocr_manifest
         self.inner = inner
         self.work_root = Path(work_root or config.work_dir)
-        self.documents = {}
-        if manifest is not None:
-            for document in json.loads(manifest.read_text(encoding='utf-8-sig')):
-                parts = []
-                for page in document['pages']:
-                    data = Path(page['text']).read_bytes()
-                    if page.get('text_sha256') and sha256(data).hexdigest() != page['text_sha256']:
-                        raise ReportRunError('BACKFILL_OCR_TEXT_CHANGED')
-                    text = data.decode('utf-8-sig')
-                    text = re.sub(r'(?<=[\u4e00-\u9fff])[ \t]+(?=[\u4e00-\u9fff])', '', text)
-                    parts.append(f"[第 {page['page']} 页]\n{text}")
-                full_text = '\n\n'.join(parts)
-                if not any(Path(page['text']).read_text(encoding='utf-8-sig').strip() for page in document['pages']):
-                    raise ReportRunError('BACKFILL_OCR_EMPTY')
-                self.documents[document['source_id']] = {**document, 'full_text': full_text}
+        self.documents = load_ocr_manifest(manifest)
 
     def build_context(self, request):
+        from src.services.ocr_import import overlay_ocr_source
         result = self.inner.build_context(request)
-        if result.envelope.status == 'error':
+        if result.envelope.status == "error":
             return result
         sources = []
         for source in result.sources:
-            supplement = self.documents.get(source.source_id)
-            if supplement is None or source.excerpt:
-                sources.append(source)
-                continue
-            digest = source.content_sha256
-            if digest is None:
-                path = self.work_root / source.relative_path
-                try:
-                    if any(is_redirect(component) for component in (path, *path.parents)):
-                        raise ReportRunError('BACKFILL_OCR_SOURCE_CHANGED')
-                    before = path.stat()
-                    digest = sha256(path.read_bytes()).hexdigest()
-                    after = path.stat()
-                except OSError:
-                    raise ReportRunError('BACKFILL_OCR_SOURCE_CHANGED') from None
-                identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-                if before.st_size != source.size_bytes or identity(before) != identity(after):
-                    raise ReportRunError('BACKFILL_OCR_SOURCE_CHANGED')
-            if digest != supplement['content_sha256']:
-                raise ReportRunError('BACKFILL_OCR_SOURCE_CHANGED')
-            full_text = supplement['full_text']
-            excerpt = full_text[:6000]
-            limits = {**source.coverage_limits, 'ocr': {'engine': 'windows_ocr', 'language': 'zh-Hans-CN',
-                      'pages_read': len(supplement['pages']), 'pages_total': supplement['pages_total'], 'text_unverified': True}}
-            sources.append(ScanSource.model_validate({**source.model_dump(),
-                'excerpt': excerpt, 'excerpt_sha256': sha256(excerpt.encode('utf-8')).hexdigest(),
-                'content_sha256': digest,
-                'parser_backend': 'windows_ocr_v1', 'worker_lane': 'local_ocr_preflight',
-                'parse_status': 'success', 'parse_truncated': len(supplement['pages']) < supplement['pages_total'],
-                'excerpt_truncated': len(full_text) > len(excerpt), 'coverage_limits': limits,
-                'reason': 'local_ocr_text_requires_verification',
-            }))
+            document = self.documents.get(source.source_id)
+            sources.append(source if document is None or source.excerpt else
+                overlay_ocr_source(source, document, self.work_root))
         return replace(result, sources=tuple(sources))
 
 
@@ -293,16 +252,55 @@ def run(args) -> dict:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--start-date', required=True)
-    parser.add_argument('--end-date', required=True)
-    parser.add_argument('--preflight', required=True, type=Path)
-    parser.add_argument('--call-budget', type=int, required=True)
+    parser.add_argument('--start-date')
+    parser.add_argument('--end-date')
+    parser.add_argument('--preflight', type=Path)
+    parser.add_argument('--call-budget', type=int)
     parser.add_argument('--workers', type=int, choices=range(1,5), default=1)
     parser.add_argument('--ocr-manifest', type=Path)
     parser.add_argument('--only-no-model', action='store_true')
     parser.add_argument('--only-failed', action='store_true')
     parser.add_argument('--output-tokens', type=int)
+    parser.add_argument('--repair-coverage', action='store_true')
+    parser.add_argument('--dates')
+    parser.add_argument('--gap-codes')
+    parser.add_argument('--scope-root', type=Path)
+    parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--refresh-preflight', action='store_true')
+    parser.add_argument('--plan', type=Path)
+    parser.add_argument('--generate-candidates', action='store_true')
+    parser.add_argument('--publish-candidates', type=Path)
+    parser.add_argument('--token-budget', type=int)
+    parser.add_argument('--cost-budget-microunits', type=int)
     args = parser.parse_args()
+    new_mode = args.repair_coverage or args.publish_candidates is not None
+    new_flags = any((args.dates, args.gap_codes, args.scope_root, args.dry_run, args.refresh_preflight,
+        args.plan, args.generate_candidates, args.token_budget is not None, args.cost_budget_microunits is not None))
+    if new_mode:
+        if any((args.only_failed, args.only_no_model, args.start_date, args.end_date, args.preflight, args.ocr_manifest, args.output_tokens)):
+            parser.error('coverage repair and legacy backfill options are mutually exclusive')
+        from src.services.coverage_repair import make_plan, generate_candidates, publish_candidates
+        if args.publish_candidates is not None:
+            if args.repair_coverage or new_flags or args.call_budget is not None:
+                parser.error('publish-candidates requires only the reviewed manifest')
+            published = publish_candidates(config, args.publish_candidates)
+            print(json.dumps({'published_dates': published, 'new_model_calls': 0}, ensure_ascii=False))
+            return 0
+        if args.dry_run:
+            if not args.dates or not args.gap_codes or args.scope_root is None or args.call_budget is None or args.token_budget is None or args.plan or args.generate_candidates:
+                parser.error('dry-run requires dates, gap-codes, scope-root, call-budget and token-budget')
+            path = make_plan(config, dates=args.dates.split(','), gap_codes=args.gap_codes.split(','),
+                approved_root=args.scope_root, calls_limit=args.call_budget, tokens_limit=args.token_budget,
+                cost_limit_microunits=args.cost_budget_microunits, refresh=args.refresh_preflight)
+        elif args.generate_candidates and args.plan and not any((args.dates, args.gap_codes, args.scope_root,
+                args.refresh_preflight, args.call_budget is not None, args.token_budget is not None, args.cost_budget_microunits is not None)):
+            path = generate_candidates(config, args.plan, workers=args.workers)
+        else:
+            parser.error('choose explicit dry-run or generate-candidates with a frozen plan')
+        print(json.dumps({'artifact': str(path)}, ensure_ascii=False))
+        return 0
+    if new_flags or any(value is None for value in (args.start_date, args.end_date, args.preflight, args.call_budget)):
+        parser.error('legacy backfill requires start-date, end-date, preflight and call-budget')
     if args.only_no_model:
         os.environ['AI_DAILY_TEST_FORBID_LLM'] = '1'
     state = run(args)

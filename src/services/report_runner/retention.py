@@ -27,6 +27,7 @@ def cleanup_snapshots(runs: ReportRunStore, snapshots: SnapshotStore, settings: 
         rows = [dict(row) for row in connection.execute("SELECT * FROM report_runs")]
         current = {row[0] for row in connection.execute("SELECT current_run_id FROM daily_reports WHERE current_run_id IS NOT NULL")}
     protected = {run["run_id"] for run in rows if run["status"] == "running" or
+        (run["run_kind"] == "preview" and (run["regeneration_reason"] or "").startswith("coverage_candidate:")) or
         (run["run_kind"] == "report" and run["phase"] in {"prepared", "generating", "db_committed"}
          and run["status"] != "succeeded" and run["error_code"] != "RUN_SUPERSEDED")}
     generations = {run["generation_id"] for run in rows if run["run_id"] in protected}

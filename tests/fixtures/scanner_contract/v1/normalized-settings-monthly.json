@@ -33,8 +33,14 @@
     }
   },
   "parse": {
+    "cache_payload_version": 1,
+    "excerpt_policy_version": "fair_semantic_v9",
     "aggregate_max_chars": 500000,
     "text": {
+      "csv_encodings": [
+        "utf-8",
+        "utf-8-sig"
+      ],
       "backend": "light_text_v2",
       "read_head_bytes": 262144,
       "read_tail_bytes": 262144,
@@ -65,7 +71,8 @@
     "pdf": {
       "backend": "python_pdf_text_v2",
       "max_pages": 2,
-      "excerpt_max_chars": 2000
+      "excerpt_max_chars": 2000,
+      "selection_policy_version": "pdf_text_presence_v2"
     }
   },
   "context": {
@@ -78,8 +85,8 @@
     "priority_policy_version": "budget_nominal_v2",
     "compression_policy_version": "markdown_context_v2"
   },
-  "admission_policy_version": "budget_admission_v2",
-  "classifier_policy_version": "pdf_text_presence_v1",
+  "admission_policy_version": "budget_refill_v3",
+  "classifier_policy_version": "pdf_text_presence_v2",
   "max_candidate_files": 384,
   "max_pdf_text_extractions": 16,
   "max_total_pdf_classification_pages": 370,

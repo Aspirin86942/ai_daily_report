@@ -898,7 +898,11 @@ fn execute_active_build(
                 *sources = structured;
                 Some((hit, artifact))
             }
-            None if request.window_start_utc.is_none() => Some((hit, artifact)),
+            None if profile.parse.cache_payload_version == 0
+                && request.window_start_utc.is_none() =>
+            {
+                Some((hit, artifact))
+            }
             None => None,
         }
     });
@@ -1058,12 +1062,7 @@ fn execute_active_build(
     // spec Part 5.1/5.4: every Success/Partial run persists an artifact
     // (eligible → snapshot key + per-file semantic rows; otherwise a payload
     // artifact with no rows). Built before the outcome is consumed by the batch.
-    let artifact_draft = match build_batch_artifact(
-        &outcome,
-        normalized_settings,
-        &worker_identities,
-        &classifier_identity.profile_hash,
-    ) {
+    let artifact_draft = match build_batch_artifact(&outcome) {
         Ok(draft) => draft,
         Err(message) => {
             return persist_active_error_without_heartbeat(
@@ -1403,6 +1402,7 @@ fn assemble_scheduler_execution_metrics(
 ) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
     ai_daily_scanner_contract::ExecutionMetricsV2 {
         discovery_observed_file_count: metrics.discovery_observed_file_count,
+        refill_audit: metrics.refill_audit.clone(),
         source_guard_content_hash_file_count: metrics.source_guard_content_hash_file_count,
         source_guard_unavailable_count: metrics.source_guard_unavailable_count,
         source_guard_bytes_read: metrics.source_guard_bytes_read,
@@ -1456,6 +1456,7 @@ fn assemble_snapshot_execution_metrics(
 ) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
     ai_daily_scanner_contract::ExecutionMetricsV2 {
         discovery_observed_file_count,
+        refill_audit: None,
         source_guard_content_hash_file_count: guards.content_hash_file_count,
         source_guard_unavailable_count: guards.unavailable_file_count,
         source_guard_bytes_read: guards.bytes_read,
@@ -1504,6 +1505,7 @@ fn assemble_engine_error_execution_metrics(
 ) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
     ai_daily_scanner_contract::ExecutionMetricsV2 {
         discovery_observed_file_count,
+        refill_audit: None,
         source_guard_content_hash_file_count: guards.content_hash_file_count,
         source_guard_unavailable_count: guards.unavailable_file_count,
         source_guard_bytes_read: guards.bytes_read,
@@ -1566,7 +1568,50 @@ fn finalize_snapshot_hit(
     started_at: Instant,
     timing: &ActiveRunTiming,
 ) -> ScannerOperation<ContextEnvelope> {
-    let file_results = snapshot_file_results(&artifact, Some(classifier_identity));
+    let mut file_results = snapshot_file_results(&artifact, Some(classifier_identity));
+    for record in &mut file_results {
+        let Some(audit) = record.pdf_classification.as_mut() else {
+            continue;
+        };
+        let Some(row) = artifact
+            .file_rows
+            .iter()
+            .find(|r| r.file_identity == record.file_identity)
+        else {
+            continue;
+        };
+        let (Some(kind), Some(hash)) = (
+            row.source_guard_kind.as_deref(),
+            row.source_guard_sha256.as_deref(),
+        ) else {
+            continue;
+        };
+        match store.lookup_classification_cache(
+            &row.file_identity,
+            &row.legacy_source_version,
+            kind,
+            hash,
+            &audit.classifier_profile_hash,
+            &audit.classifier_build,
+            true,
+        ) {
+            Ok(crate::store::ClassificationCacheLookup::Fresh(entry)) => {
+                audit.page_audit = entry.page_audit
+            }
+            Ok(crate::store::ClassificationCacheLookup::Miss(_)) => {}
+            Err(error) => {
+                heartbeat.stop();
+                return build_error_output(
+                    request,
+                    version,
+                    error.diagnostic(DiagnosticStage::Cache),
+                    Vec::new(),
+                    empty_summary(),
+                    Some(active.scan_run_id()),
+                );
+            }
+        }
+    }
     let decisions: Vec<ContextDecisionRecord> = artifact
         .decision_rows
         .iter()
@@ -1771,13 +1816,7 @@ fn finalize_snapshot_hit(
 /// `None` for Error runs; `Some` for Success/Partial. An eligible artifact
 /// (Ok + warnings-empty + no Error/Timeout) carries the snapshot key plus
 /// per-source-file rows; ineligible runs persist a payload artifact with no rows.
-#[allow(clippy::too_many_arguments)]
-fn build_batch_artifact(
-    outcome: &BudgetedScanOutcome,
-    normalized_settings: &ai_daily_scanner_contract::NormalizedScannerSettings,
-    worker_identities: &WorkerIdentities,
-    classifier_profile_hash: &str,
-) -> Result<Option<ArtifactDraft>, String> {
+fn build_batch_artifact(outcome: &BudgetedScanOutcome) -> Result<Option<ArtifactDraft>, String> {
     let Some(context) = &outcome.context else {
         return Ok(None);
     };
@@ -1805,12 +1844,7 @@ fn build_batch_artifact(
         rendered_chars: outcome.execution_metrics.rendered_chars,
     };
     if eligible {
-        let file_rows = artifact_file_rows(
-            outcome,
-            normalized_settings,
-            worker_identities,
-            classifier_profile_hash,
-        );
+        let file_rows = artifact_file_rows(outcome);
         let decision_rows = artifact_decision_rows(&context.decisions);
         ArtifactDraft::new(
             true,
@@ -1832,22 +1866,12 @@ fn build_batch_artifact(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn artifact_file_rows(
-    outcome: &BudgetedScanOutcome,
-    normalized_settings: &ai_daily_scanner_contract::NormalizedScannerSettings,
-    worker_identities: &WorkerIdentities,
-    classifier_profile_hash: &str,
-) -> Vec<ArtifactFileRow> {
+fn artifact_file_rows(outcome: &BudgetedScanOutcome) -> Vec<ArtifactFileRow> {
     let result_by_identity: std::collections::HashMap<&str, &FileResultRecord> = outcome
         .file_results
         .iter()
         .map(|record| (record.file_identity.as_str(), record))
         .collect();
-    let classifier_build = worker_identities
-        .classifier_build
-        .clone()
-        .unwrap_or_else(|| "0".repeat(64));
     outcome
         .inventory
         .iter()
@@ -1858,26 +1882,16 @@ fn artifact_file_rows(
             // provenance subset (status/page/result/nominal/build/profile-hash);
             // cache status / miss reason / run pages / duration / transport /
             // attempt are current-run execution fields and never reused.
-            let classifier =
-                outcome
-                    .classifications
-                    .get(&item.file_identity)
-                    .map(|classification| {
-                        PdfClassificationProvenanceV1 {
-                    status: classification.status,
-                    page_count: classification.page_count,
-                    result_examined_pages: classification.result_examined_pages,
-                    nominal_charged_pages: if classification.status
-                        == ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget
-                    {
-                        0
-                    } else {
-                        normalized_settings.parse.pdf.max_pages
-                    },
-                    classifier_build: classifier_build.clone(),
-                    classifier_profile_hash: classifier_profile_hash.to_string(),
-                }
-                    });
+            let classifier = result
+                .and_then(|record| record.pdf_classification.as_ref())
+                .map(|audit| PdfClassificationProvenanceV1 {
+                    status: audit.status,
+                    page_count: audit.page_count.0,
+                    result_examined_pages: audit.result_examined_pages.0,
+                    nominal_charged_pages: audit.nominal_charged_pages,
+                    classifier_build: audit.classifier_build.clone(),
+                    classifier_profile_hash: audit.classifier_profile_hash.clone(),
+                });
             ArtifactFileRow {
                 file_identity: item.file_identity.clone(),
                 relative_path: item.relative_path.clone(),
@@ -2011,6 +2025,7 @@ fn snapshot_classification_audit(
     let not_eligible = provenance.status
         == ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget;
     Some(ai_daily_scanner_contract::PdfClassificationAuditV1 {
+        page_audit: None,
         status: provenance.status,
         page_count: Nullable(provenance.page_count),
         classification_cache_status: if not_eligible {
@@ -3183,6 +3198,41 @@ mod tests {
             );
             assert!(outcome.diagnostics.is_empty());
         }
+    }
+
+    #[test]
+    fn snapshot_preserves_the_short_refill_classification_window() {
+        let file = guarded_discovery_file(Path::new("/work/short.pdf"));
+        let mut artifact = artifact_for_discovery(&file);
+        let provenance = PdfClassificationProvenanceV1 {
+            status: ai_daily_scanner_contract::PdfClassificationStatus::NoTextInParseWindow,
+            page_count: Some(10),
+            result_examined_pages: Some(2),
+            nominal_charged_pages: 2,
+            classifier_build: "a".repeat(64),
+            classifier_profile_hash: "b".repeat(64),
+        };
+        artifact.file_rows[0].parser_backend = "pdf_metadata_v2".to_string();
+        artifact.file_rows[0].classifier = Some(provenance.clone());
+        let mut outcome = successful_outcome_for_rss_test();
+        outcome.inventory =
+            vec![InventoryRecord::from_discovered(&file, "short.pdf".to_string()).unwrap()];
+        outcome.file_results = snapshot_file_results(&artifact, None);
+        artifact.file_rows = artifact_file_rows(&outcome);
+        assert_eq!(artifact.file_rows[0].classifier, Some(provenance));
+        let restored = snapshot_file_results(&artifact, None);
+        restored[0]
+            .validate_for_persistence(true)
+            .expect("short window remains valid on snapshot reuse");
+        assert_eq!(
+            restored[0]
+                .pdf_classification
+                .as_ref()
+                .unwrap()
+                .run_inspected_pages
+                .0,
+            Some(0)
+        );
     }
 
     #[test]

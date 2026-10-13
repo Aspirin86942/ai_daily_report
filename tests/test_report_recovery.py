@@ -128,6 +128,36 @@ def test_successful_call_is_reused_without_a_new_reservation(state):
     assert 0 < transport.requests[0][1] <= 120
 
 
+def test_cached_result_bypasses_send_capabilities_and_checks_request_and_response_hashes(state, monkeypatch):
+    context, plan = prepared(state)
+    transport = FakeTransport(response())
+    client = model(state, transport)
+    client.generate(context.run_id, plan.batches[0])
+    client.settings = ModelRequestSettings()
+    client.transport = SimpleNamespace(prepare=lambda: pytest.fail("prepare must not be called"),
+                                       send=lambda *_args, **_kwargs: pytest.fail("send must not be called"))
+    monkeypatch.setattr(state.runs, "reserve_call", lambda *_args, **_kwargs: pytest.fail("no reservation"))
+    assert client.generate(context.run_id, plan.batches[0]).summary_items
+    call = state.runs.calls(context.run_id)[0]
+    (state.snapshots.root / call["request_path"]).write_bytes(b"{}")
+    with pytest.raises(ReportRunError, match="HASH_MISMATCH"):
+        client.generate(context.run_id, plan.batches[0])
+
+
+@pytest.mark.parametrize("workers", [1, 3])
+def test_mixed_cache_only_generates_missing_batches_and_preserves_order(state, workers):
+    from src.services.report_runner.evidence_daily import generate_model_batches
+    settings = SETTINGS.model_copy(update={"max_request_utf8_bytes": 7000, "max_batches": 3})
+    context, plan = prepared(state, text="用户陈述：今天核对了资料。" * 1000, settings=settings)
+    assert len(plan.batches) == 3
+    client = model(state, FakeTransport(response("first"), response("last"), response("middle")))
+    client.generate(context.run_id, plan.batches[0])
+    client.generate(context.run_id, plan.batches[2])
+    results = generate_model_batches(client, context.run_id, list(plan.batches), workers=workers)
+    assert [item.summary_items[0].text for item in results] == ["first", "middle", "last"]
+    assert len(state.runs.calls(context.run_id)) == 3
+
+
 def test_unknown_call_survives_resume_and_exhausts_persisted_step_budget(state):
     context, plan = prepared(state)
     reference = state.snapshots.put(context.run_id, "request", plan.batches[0].request())
@@ -188,11 +218,13 @@ def test_permanent_model_error_never_retries_or_leaks_body(state, status):
 
 
 def test_transient_error_honors_retry_after_and_validation_has_one_retry(state):
-    context, plan = prepared(state)
+    context, plan = prepared(state, text="用户陈述：今天核对了资料。" * 500)
     waits = []
     transport = FakeTransport(HTTPFailure(429, "7"), response(finish="length"), response())
     model(state, transport, sleeper=waits.append).generate(context.run_id, plan.batches[0])
-    assert len(transport.requests) == 3 and waits == [7, 2]
+    assert len(transport.requests) == 3 and waits == [7]
+    assert transport.requests[0][0] == transport.requests[1][0]
+    assert transport.requests[1][0] != transport.requests[2][0]
     assert [c["status"] for c in state.runs.calls(context.run_id)] == ["failed", "failed", "succeeded"]
     other, other_plan = prepared(state)
     bad = FakeTransport(response(source="src_" + "e" * 64), response(source="src_" + "e" * 64))
@@ -202,6 +234,70 @@ def test_transient_error_honors_retry_after_and_validation_has_one_retry(state):
     with pytest.raises(ReportRunError, match="VALIDATION_BUDGET"):
         model(state, bad).generate(other.run_id, other_plan.batches[0])
     assert len(bad.requests) == 2
+
+
+def test_truncation_revision_is_smaller_frozen_and_restores_without_sending(state):
+    context, plan = prepared(state, text="用户陈述：金额100元，计划明日核对。\n" * 400)
+    frozen = state.runs.get(context.run_id)
+    original_hash = frozen["snapshot_sha256"]
+    transport = FakeTransport(response(finish="length"), response())
+    client = model(state, transport)
+    generated = client.generate(context.run_id, plan.batches[0])
+    revised, reference = client.effective_batch(context.run_id, plan.batches[0])
+    assert revised.revision == 1 and reference is not None
+    assert revised.message_bytes <= plan.batches[0].message_bytes // 2
+    assert state.runs.get(context.run_id)["snapshot_sha256"] == original_hash
+    calls = state.runs.calls(context.run_id)
+    assert [row["attempt"] for row in calls] == [1, 2]
+    assert calls[0]["request_fingerprint"] != calls[1]["request_fingerprint"]
+    assert calls[0]["response_path"] and json.loads(calls[0]["usage_json"])["response_audit"]["finish_reason"] == "length"
+    client.settings = ModelRequestSettings()
+    client.transport = SimpleNamespace(prepare=lambda: pytest.fail("no prepare"),
+                                       send=lambda *_args, **_kwargs: pytest.fail("no send"))
+    assert client.generate(context.run_id, plan.batches[0]) == generated
+    assert len(state.runs.calls(context.run_id)) == 2
+
+
+def test_second_truncation_stops_without_splitting_or_resetting_attempts(state):
+    context, plan = prepared(state, text="用户陈述：金额100元，计划明日核对。\n" * 400)
+    transport = FakeTransport(response(finish="length"), response(finish="length"))
+    client = model(state, transport)
+    with pytest.raises(ReportRunError, match="MODEL_OUTPUT_TRUNCATED"):
+        client.generate(context.run_id, plan.batches[0])
+    state.runs.resume(context.run_id)
+    with pytest.raises(ReportRunError, match="MODEL_VALIDATION_BUDGET_EXHAUSTED"):
+        client.generate(context.run_id, plan.batches[0])
+    assert len(transport.requests) == len(state.runs.calls(context.run_id)) == 2
+
+
+def test_half_size_request_without_space_for_meaningful_text_stops(state):
+    context, plan = prepared(state)
+    transport = FakeTransport(response(finish="length"))
+    with pytest.raises(ReportRunError, match="MODEL_ADAPTIVE_PLAN_UNAVAILABLE"):
+        model(state, transport).generate(context.run_id, plan.batches[0])
+    assert len(transport.requests) == 1
+
+
+def test_new_schema_rejects_excessive_items_and_unicode_text_and_legacy_stays_readable():
+    from src.models.evidence_report import EvidenceBatchSummaryData, EvidenceReducedBatchSummaryData
+    item = {"text": "材料记载了金额。", "source_ids": ["user_input"]}
+    for payload in ({"summary_items": [item] * 7, "verification_items": []},
+                    {"summary_items": [{**item, "text": "甲" * 181}], "verification_items": []},
+                    {"summary_items": [], "verification_items": [{**item, "text": "甲" * 121}]}):
+        with pytest.raises(ValueError):
+            EvidenceBatchSummaryData.model_validate(payload)
+        assert EvidenceSummaryData.model_validate(payload)
+    with pytest.raises(ValueError):
+        EvidenceReducedBatchSummaryData(summary_items=[item] * 4, verification_items=[])
+
+
+def test_legacy_frozen_batch_uses_original_response_contract(state):
+    context, plan = prepared(state)
+    legacy = plan.batches[0].model_copy(update={"response_schema_version": 1, "response_schema_sha256": None})
+    transport = FakeTransport(response(text="旧版合法内容。" * 30))
+    client = model(state, transport)
+    assert len(client.generate(context.run_id, legacy).summary_items[0].text) > 180
+    assert client.cached_result(context.run_id, legacy).summary_items
 
 
 def test_response_persistence_failure_does_not_resend(state, monkeypatch):

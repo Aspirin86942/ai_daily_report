@@ -167,7 +167,7 @@ def _session_classify(
             retryable=True,
         )
 
-    result = classify_pdf(request.file_path, request.max_pages)
+    result = classify_pdf(request.file_path, request.max_pages, policy_version=request.policy_version)
 
     try:
         observed_after, _ = _observe_source(path)
@@ -188,12 +188,14 @@ def _session_classify(
 
     if result["status"] in ("text_in_parse_window", "no_text_in_parse_window"):
         return ClassifyResult(
+            page_audit=result.get("page_audit"),
             status=result["status"],
             page_count=result["page_count"],
             result_examined_pages=result["result_examined_pages"],
             diagnostic=None,
         )
     return ClassifyResult(
+        page_audit=result.get("page_audit"),
         status=result["status"],
         page_count=result["page_count"],
         result_examined_pages=result["result_examined_pages"],

@@ -674,6 +674,7 @@ fn evidence(
     content: &str,
 ) -> ai_daily_scanner_core::decision::ContextFileEvidence {
     ai_daily_scanner_core::decision::ContextFileEvidence {
+        evidence_audit: None,
         file_identity: format!("fixture:{path}"),
         absolute_path: format!("C:\\fixture\\{}", path.replace('/', "\\")),
         relative_path: path.replace('/', "\\"),
@@ -832,6 +833,7 @@ struct TestCache {
 impl TestCache {
     fn fresh_parse(_identity: &str, content: &str) -> CacheEntry {
         CacheEntry {
+            evidence_audit: None,
             content: content.to_string(),
             content_sha256: ai_daily_scanner_core::store::sha256_hex(content.as_bytes()),
             parser_backend: "light_text_v2".to_string(),
@@ -941,6 +943,7 @@ impl ParserPort for TestParser {
             .get(&request.file.file_identity)
             .cloned()
             .unwrap_or_else(|| ParseResult {
+                evidence_audit: None,
                 file_identity: request.file.file_identity.clone(),
                 content: String::new(),
                 parser_backend: "light_text_v2".to_string(),
@@ -972,6 +975,7 @@ impl ParserPort for TestParser {
 fn success_parse(identity: &str, path: &str, content: &str) -> ParseResult {
     let _ = path;
     ParseResult {
+        evidence_audit: None,
         file_identity: identity.to_string(),
         content: content.to_string(),
         parser_backend: "light_text_v2".to_string(),
@@ -1176,6 +1180,7 @@ fn discovered(rel: &str, ext: &str, size: u64) -> DiscoveredFileOut {
 
 fn text_result(_path: &str) -> ClassifyResult {
     ClassifyResult {
+        page_audit: None,
         status: ClassifyStatus::TextInParseWindow,
         page_count: Some(2),
         result_examined_pages: Some(2),
@@ -1185,6 +1190,7 @@ fn text_result(_path: &str) -> ClassifyResult {
 
 fn no_text_result(_path: &str) -> ClassifyResult {
     ClassifyResult {
+        page_audit: None,
         status: ClassifyStatus::NoTextInParseWindow,
         page_count: Some(2),
         result_examined_pages: Some(2),
@@ -1448,6 +1454,7 @@ fn cache_state_does_not_change_semantic_output() {
     partial_cache.classification.insert(
         "fixture:report.pdf".to_string(),
         ClassificationCacheLookup::Fresh(ai_daily_scanner_core::store::ClassificationCacheEntry {
+            page_audit: None,
             status: "text_in_parse_window".to_string(),
             page_count: 2,
             result_examined_pages: 2,
@@ -1479,6 +1486,7 @@ fn cache_state_does_not_change_semantic_output() {
     full_cache.classification.insert(
         "fixture:report.pdf".to_string(),
         ClassificationCacheLookup::Fresh(ai_daily_scanner_core::store::ClassificationCacheEntry {
+            page_audit: None,
             status: "text_in_parse_window".to_string(),
             page_count: 2,
             result_examined_pages: 2,
@@ -1680,6 +1688,7 @@ impl ParserPort for DeadlineParser {
         if self.advance_full && finished_at >= self.work_deadline {
             // spec Part 2.3: in-flight work killed by the WorkDeadline -> Timeout.
             ParseResult {
+                evidence_audit: None,
                 file_identity: identity,
                 content: String::new(),
                 parser_backend: request.route.backend().to_string(),
@@ -2485,6 +2494,7 @@ fn classifier_unknown_maps_timeout_vs_crash() {
         backend: None,
     };
     let unknown_result = |code: &str| ClassifyResult {
+        page_audit: None,
         status: ClassifyStatus::Unknown,
         page_count: None,
         result_examined_pages: None,
@@ -2607,4 +2617,233 @@ fn parse_executes_in_parallel_waves() {
         "parse must run in parallel waves (max_workers=2), saw max {}",
         max_seen.load(std::sync::atomic::Ordering::SeqCst)
     );
+}
+
+#[test]
+fn refill_small_files_uses_confirmed_chars_without_resetting_candidate_quota() {
+    let mut profile = normalized_settings(ReportMode::Daily);
+    profile.max_candidate_files = 96;
+    profile.context.global_max_chars = 500_000;
+    profile.parse.text.max_chars = 6_000;
+    let mut discovery = Vec::new();
+    let mut results = HashMap::new();
+    for index in 0..120 {
+        let path = format!("notes/{index:03}.md");
+        let file = discovered(&path, ".md", 64);
+        results.insert(
+            file.file_identity.clone(),
+            success_parse(&file.file_identity, &file.path, "amount 1234.56 yuan."),
+        );
+        discovery.push(file);
+    }
+    let mut hashes = Vec::new();
+    for workers in [1, 3] {
+        profile.execution.max_workers = workers;
+        if workers == 3 {
+            discovery.reverse();
+        }
+        let outcome = run_scheduler(
+            &FakeClock::new(),
+            TestCache::default(),
+            TestParser {
+                results: results.clone(),
+            },
+            TestClassifier {
+                results: HashMap::new(),
+            },
+            discovery.clone(),
+            profile.clone(),
+        )
+        .unwrap();
+        assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
+        assert_eq!(
+            outcome
+                .file_results
+                .iter()
+                .filter(|row| row.parse_status == ParseStatus::Success)
+                .count(),
+            96
+        );
+        assert_eq!(
+            outcome
+                .file_results
+                .iter()
+                .filter(|row| row.parse_status == ParseStatus::NotParsed)
+                .count(),
+            24
+        );
+        let ledger = outcome.execution_metrics.refill_audit.as_ref().unwrap();
+        assert_eq!(ledger.candidate_slots_used, 96);
+        assert_eq!(ledger.rounds.len(), 1);
+        assert!(ledger.refunded_chars > 300_000);
+        assert!(outcome.execution_metrics.reserved_chars <= 500_000);
+        hashes.push((
+            outcome.context.unwrap().context_sha256,
+            ledger.rounds[0].plan_sha256.clone(),
+        ));
+    }
+    assert_eq!(
+        hashes[0], hashes[1],
+        "enumeration and worker count cannot change the frozen refill"
+    );
+}
+
+#[derive(Debug, Clone)]
+struct OnePageClassifier {
+    windows: Arc<Mutex<Vec<u64>>>,
+}
+
+impl PdfClassifierPort for OnePageClassifier {
+    fn classify_pdf(
+        &self,
+        request: &ClassifyOperation,
+        _timeout: Duration,
+    ) -> PdfClassifierExecution {
+        self.windows.lock().unwrap().push(request.max_pages);
+        let mut result = no_text_result(&request.file_path);
+        result.page_count = Some(1);
+        result.result_examined_pages = Some(1);
+        PdfClassifierExecution::test_execution(Ok(result))
+    }
+}
+
+#[test]
+fn refill_pdf_short_files_share_one_page_cap_and_stop_after_two_rounds() {
+    let mut profile = normalized_settings(ReportMode::Daily);
+    profile.parse.pdf.max_pages = 5;
+    profile.max_total_pdf_classification_pages = 5;
+    let windows = Arc::new(Mutex::new(Vec::new()));
+    let outcome = run_scheduler(
+        &FakeClock::new(),
+        TestCache::default(),
+        TestParser {
+            results: HashMap::new(),
+        },
+        OnePageClassifier {
+            windows: windows.clone(),
+        },
+        (0..6)
+            .map(|index| discovered(&format!("{index}.pdf"), ".pdf", 64))
+            .collect(),
+        profile,
+    )
+    .unwrap();
+    assert_eq!(*windows.lock().unwrap(), vec![5, 4, 3]);
+    let ledger = outcome.execution_metrics.refill_audit.unwrap();
+    assert_eq!(ledger.rounds.len(), 2);
+    assert_eq!(ledger.candidate_slots_used, 3);
+    assert_eq!(ledger.classification_pages_held, 3);
+    assert_eq!(
+        outcome
+            .execution_metrics
+            .confirmed_run_inspected_pages_total,
+        3
+    );
+    assert_eq!(outcome.execution_metrics.classify_attempt_count, 3);
+    assert_eq!(
+        outcome
+            .file_results
+            .iter()
+            .filter(|row| row.parse_status == ParseStatus::NotParsed)
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn refill_unknown_classifier_never_refunds_reserved_pages() {
+    let mut profile = normalized_settings(ReportMode::Daily);
+    profile.parse.pdf.max_pages = 5;
+    profile.max_total_pdf_classification_pages = 5;
+    let first = discovered("0.pdf", ".pdf", 64);
+    let outcome = run_scheduler(
+        &FakeClock::new(),
+        TestCache::default(),
+        TestParser {
+            results: HashMap::new(),
+        },
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        vec![first, discovered("1.pdf", ".pdf", 64)],
+        profile,
+    )
+    .unwrap();
+    let ledger = outcome.execution_metrics.refill_audit.unwrap();
+    assert_eq!(ledger.classification_pages_held, 5);
+    assert_eq!(ledger.refunded_classification_pages, 0);
+    assert!(ledger.rounds.is_empty());
+    assert_eq!(outcome.execution_metrics.classify_attempt_count, 1);
+}
+
+#[test]
+fn refill_cached_pdf_extraction_returns_slot_but_failed_parse_keeps_it() {
+    for cached in [true, false] {
+        let mut profile = normalized_settings(ReportMode::Daily);
+        profile.max_pdf_text_extractions = 1;
+        let a = discovered("0.pdf", ".pdf", 64);
+        let b = discovered("1.pdf", ".pdf", 64);
+        let mut cache = TestCache::default();
+        if cached {
+            let mut entry = TestCache::fresh_parse(&a.file_identity, "paid 1234.56 yuan.");
+            entry.parser_backend = "python_pdf_text_v2".into();
+            entry.worker_lane = "python_document_process_v2".into();
+            cache.parse.insert(a.file_identity.clone(), entry);
+        }
+        let mut parsed = success_parse(&b.file_identity, &b.path, "received 10 units.");
+        parsed.parser_backend = "python_pdf_text_v2".into();
+        parsed.worker_lane = "python_document_process_v2".into();
+        parsed.parse_transport = ParseTransport::Session;
+        let outcome = run_scheduler(
+            &FakeClock::new(),
+            cache,
+            TestParser {
+                results: HashMap::from([(b.file_identity.clone(), parsed)]),
+            },
+            TestClassifier {
+                results: HashMap::from([
+                    (a.path.clone(), text_result(&a.path)),
+                    (b.path.clone(), text_result(&b.path)),
+                ]),
+            },
+            vec![a, b],
+            profile,
+        )
+        .unwrap();
+        let ledger = outcome.execution_metrics.refill_audit.unwrap();
+        assert_eq!(ledger.extraction_slots_used, 1);
+        assert_eq!(outcome.execution_metrics.parse_attempt_count, 1);
+        assert_eq!(ledger.rounds.len(), usize::from(cached));
+        assert_eq!(
+            outcome
+                .file_results
+                .iter()
+                .filter(|row| row.parse_status == ParseStatus::Success)
+                .count(),
+            if cached { 2 } else { 0 }
+        );
+    }
+}
+
+#[test]
+fn supplemental_plan_does_not_spend_candidate_slot_on_unreserved_pdf() {
+    let mut profile = normalized_settings(ReportMode::Daily);
+    profile.max_candidate_files = 1;
+    let plans = ClassificationPlan::build(
+        vec![candidate("a.pdf", ".pdf", 64), candidate("z.md", ".md", 64)],
+        &profile,
+        0,
+    );
+    assert!(matches!(
+        plans[0].action,
+        PlanAction::NotParsed {
+            reason: NotParsedReason::PdfClassificationPageQuotaExhausted
+        }
+    ));
+    assert!(matches!(
+        plans[1].action,
+        PlanAction::Admit {
+            route: RouteKind::LightText
+        }
+    ));
 }

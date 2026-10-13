@@ -9,8 +9,8 @@ use tempfile::tempdir;
 fn head_read_trims_only_an_incomplete_utf8_tail() {
     let directory = tempdir().expect("temporary root should exist");
     let path = directory.path().join("中文 preview.txt");
-    fs::write(&path, "ab中cd").expect("fixture should be written");
-    let profile = text_profile(4, 8, 200);
+    fs::write(&path, "ab\n中cd").expect("fixture should be written");
+    let profile = text_profile(5, 8, 200);
 
     let parsed = parse_light_text(&path, ".txt", &profile, 1024)
         .expect("split UTF-8 tail should be trimmed");
@@ -32,6 +32,77 @@ fn invalid_utf8_inside_the_read_window_is_an_explicit_error() {
         .expect_err("interior invalid UTF-8 must fail");
 
     assert_eq!(error, LightTextError::DecodeFailed);
+}
+
+#[test]
+fn csv_strict_encodings_preserve_amounts_and_quoted_multiline_records() {
+    let dir = tempdir().unwrap();
+    let text = "项目,金额\n\"𠀀\n采购\",1234.56\n";
+    let gb18030 =
+        b"\xcf\xee\xc4\xbf,\xbd\xf0\xb6\xee\n\"\x95\x32\x82\x36\n\xb2\xc9\xb9\xba\",1234.56\n";
+    let mut profile = text_profile(1024, 1024, 6000);
+    profile.csv_encodings.push("gb18030".into());
+    for (encoding, data) in [
+        ("utf-8", text.as_bytes().to_vec()),
+        (
+            "utf-8-sig",
+            [b"\xef\xbb\xbf".as_slice(), text.as_bytes()].concat(),
+        ),
+        ("gb18030", gb18030.to_vec()),
+    ] {
+        let path = dir.path().join(format!("{encoding}.csv"));
+        fs::write(&path, data).unwrap();
+        let result = parse_light_text(&path, ".csv", &profile, 1024).unwrap();
+        assert!(result.content.contains("1234.56"));
+        assert!(result.content.contains("𠀀"));
+        assert!(result.content.contains("采购"));
+        assert!(!result.content.contains('\u{fffd}'));
+        assert_eq!(result.evidence_audit.encoding.as_deref(), Some(encoding));
+        let ranges = result.evidence_audit.read_ranges.unwrap();
+        assert_eq!(
+            ranges
+                .iter()
+                .filter(|range| range.unit == ai_daily_worker_contract::SourceRangeUnit::CsvRecord)
+                .count(),
+            2
+        );
+    }
+    let path = dir.path().join("disabled.csv");
+    fs::write(&path, gb18030).unwrap();
+    assert_eq!(
+        parse_light_text(&path, ".csv", &text_profile(1024, 1024, 6000), 1024),
+        Err(LightTextError::DecodeFailed)
+    );
+}
+
+#[test]
+fn gb18030_window_cut_and_invalid_interior_never_produce_partial_records() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("cut.csv");
+    let bytes = b"name,amount\nfirst,1234.56\n\x95\x32\x82\x36,9999.99\n";
+    fs::write(&path, bytes).unwrap();
+    let start = bytes.iter().position(|value| *value == 0x95).unwrap();
+    for cut in 1..=3 {
+        let mut profile = text_profile((start + cut) as u64, 1024, 6000);
+        profile.csv_encodings = vec!["gb18030".into()];
+        let result = parse_light_text(&path, ".csv", &profile, 1024).unwrap();
+        assert!(result.truncated);
+        assert!(result.content.contains("1234.56"));
+        assert!(!result.content.contains("9999"));
+        assert!(!result.content.contains('\u{fffd}'));
+    }
+    let mut profile = text_profile(1024, 1024, 6000);
+    profile.csv_encodings.push("gb18030".into());
+    for bytes in [
+        b"name,amount\nfirst,\xff123\n".as_slice(),
+        b"\xef\xbb\xbfname,amount\nfirst,\xff123\n".as_slice(),
+    ] {
+        fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            parse_light_text(&path, ".csv", &profile, 1024),
+            Err(LightTextError::DecodeFailed)
+        );
+    }
 }
 
 #[test]
@@ -113,7 +184,18 @@ fn csv_boundaries_match_the_legacy_python_reader() {
     let bare_cr = parse_light_text(&bare_cr_path, ".csv", &profile, 4096)
         .expect("malformed CSV should remain an auditable preview");
 
-    assert!(legal.content.contains("header: a\"b | c"));
+    assert!(legal.content.is_empty());
+    assert_eq!(legal.evidence_audit.usable_chars, Some(0));
+    assert!(legal
+        .evidence_audit
+        .read_ranges
+        .as_ref()
+        .unwrap()
+        .iter()
+        .any(
+            |range| range.unit == ai_daily_worker_contract::SourceRangeUnit::CsvRecord
+                && range.start == 1
+        ));
     assert!(legal.warnings.is_empty());
     assert_eq!(bare_cr.warnings, [LightTextWarning::CsvPreviewFallback]);
 }
@@ -199,8 +281,36 @@ fn output_budget_and_large_file_guard_are_enforced_before_parse() {
     assert_eq!(error, LightTextError::FileTooLarge);
 }
 
+#[test]
+fn markdown_table_is_a_complete_unit_with_original_cell_ranges() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("stats.md");
+    let text = "# 验收数字\n| 指标 | 值 |\n| --- | --- |\n| 组数 | 41 |\n| 金额档 | 95 |\n| 覆盖节点 | 167 |\n| 空组合 | 32 |\n";
+    fs::write(&path, text).unwrap();
+    let parsed = parse_light_text(&path, ".md", &text_profile(4096, 4096, 1000), 4096).unwrap();
+    parsed.evidence_audit.validate(&parsed.content).unwrap();
+    let chars = parsed.content.chars().collect::<Vec<_>>();
+    let units = parsed.evidence_audit.content_units.unwrap();
+    let table = units
+        .iter()
+        .find(|unit| unit.kind == ai_daily_worker_contract::ContentUnitKind::TableRow)
+        .unwrap();
+    let rendered = chars[table.text_start as usize..table.text_end as usize]
+        .iter()
+        .collect::<String>();
+    for value in ["41", "95", "167", "32"] {
+        assert!(rendered.contains(value));
+    }
+    assert_eq!(table.ranges.len(), 6);
+    assert!(table
+        .ranges
+        .iter()
+        .all(|range| range.end <= text.chars().count() as u64));
+}
+
 fn text_profile(read_head_bytes: u64, read_tail_bytes: u64, max_chars: u64) -> TextParseProfile {
     TextParseProfile {
+        csv_encodings: ai_daily_scanner_contract::default_csv_encodings(),
         backend: "light_text_v2".to_string(),
         read_head_bytes,
         read_tail_bytes,

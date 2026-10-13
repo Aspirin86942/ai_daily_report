@@ -123,6 +123,7 @@ impl CachePort for StoreCachePort {
             .map_err(|error| CachePortError::Store {
                 detail: error.to_string(),
             })?;
+        let lookup = lookup.decode_payload(crate::store::cache::PARSE_CACHE_PAYLOAD_VERSION);
         Ok(ParseLookupOutcome {
             parse_profile_hash: profile_hash,
             lookup,
@@ -235,18 +236,24 @@ impl ProductionParser {
         request: &ParseRequest,
         pool: &crate::session::WorkerPool,
     ) -> ParseResult {
-        let worker_request = crate::parsers::worker_request(
+        let mut worker_request = crate::parsers::worker_request(
             &request.file,
             parser_route(request.route),
             request.timeout_ms,
             &self.profile,
         );
+        if let ai_daily_worker_contract::ParserLimits::Pdf { selected_pages, .. } =
+            &mut worker_request.parser_limits
+        {
+            *selected_pages = request.selected_pdf_pages.clone();
+        }
         match pool.parse_worker(&worker_request, Duration::from_millis(request.timeout_ms)) {
             Ok(outcome) => {
                 let duration_ms = outcome.duration_ms;
                 let response = outcome.value;
                 let content_sha256 = crate::store::sha256_hex(response.content.as_bytes());
                 ParseResult {
+                    evidence_audit: response.evidence_audit,
                     file_identity: request.file.file_identity.clone(),
                     content: response.content,
                     parser_backend: response.parser_backend.as_str().to_string(),
@@ -279,6 +286,7 @@ impl ProductionParser {
                 };
                 let parser_started = failure.attempt_count > 0;
                 ParseResult {
+                    evidence_audit: None,
                     file_identity: request.file.file_identity.clone(),
                     content: String::new(),
                     parser_backend: if parser_started {
@@ -429,6 +437,7 @@ impl ProductionParser {
         let duration_ms = elapsed_ms(started);
         let content_sha256 = crate::store::sha256_hex(parsed.content.as_bytes());
         ParseResult {
+            evidence_audit: Some(parsed.evidence_audit),
             file_identity: request.file.file_identity.clone(),
             content: parsed.content,
             parser_backend: "light_text_v2".to_string(),
@@ -459,6 +468,7 @@ fn light_text_error(
     duration_ms: u64,
 ) -> ParseResult {
     ParseResult {
+        evidence_audit: None,
         file_identity: request.file.file_identity.clone(),
         content: String::new(),
         parser_backend: if attempt_count == 0 {
@@ -565,6 +575,7 @@ fn office_execution_result(
         |response| worker_lane_name(response.worker_lane).to_string(),
     );
     ParseResult {
+        evidence_audit: response.as_ref().and_then(|r| r.evidence_audit.clone()),
         file_identity: request.file.file_identity.clone(),
         content_sha256: crate::store::sha256_hex(content.as_bytes()),
         content,

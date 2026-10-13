@@ -8,8 +8,8 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyException, PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyModule};
-use pythonize::{depythonize, pythonize};
-use serde::Deserialize;
+use pythonize::depythonize;
+use serde::{Deserialize, Serialize};
 
 create_exception!(ai_daily_scanner_native, NativeScannerError, PyException);
 
@@ -81,17 +81,23 @@ impl PyScanner {
         };
         let result = guard_panic(|| py.detach(|| self.inner.build_context(&request)))?
             .map_err(scanner_error)?;
-        pythonize(py, &result.value)
-            .map(Bound::unbind)
-            .map_err(|error| PyRuntimeError::new_err(format!("result conversion failed: {error}")))
+        json_result(py, &result.value)
     }
 
     fn doctor(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let result = guard_panic(|| py.detach(|| self.inner.doctor()))?.map_err(scanner_error)?;
-        pythonize(py, &result.value)
-            .map(Bound::unbind)
-            .map_err(|error| PyRuntimeError::new_err(format!("result conversion failed: {error}")))
+        json_result(py, &result.value)
     }
+}
+
+fn json_result(py: Python<'_>, value: &impl Serialize) -> PyResult<Py<PyAny>> {
+    // serde_json arbitrary-precision numbers serialize through a private map in
+    // generic Serde adapters. The actual JSON wire format preserves integer types.
+    let serialized = serde_json::to_string(value)
+        .map_err(|_| PyRuntimeError::new_err("result JSON conversion failed"))?;
+    py.import("json")?
+        .call_method1("loads", (serialized,))
+        .map(Bound::unbind)
 }
 
 fn scanner_error(error: ScannerError) -> PyErr {

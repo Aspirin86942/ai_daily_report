@@ -8,9 +8,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+import re
 from typing import Any
 
 from ..workers.contracts import WorkerParsePayload
+from ..models.content_audit import ContentUnit, ParsedContentAudit, SourceRange
 
 OFFICE_PARSER_BACKEND = "python_office_v2"
 PDF_TEXT_PARSER_BACKEND = "python_pdf_text_v2"
@@ -44,29 +46,52 @@ class _PreviewBuilder:
         self.parts: list[str] = []
         self.current_chars = 0
         self.was_truncated = False
+        self.units: list[ContentUnit] = []
+        self.read_ranges: list[SourceRange] | None = []
+        self.usable_chars = 0
 
-    def add(self, text: str) -> bool:
+    def add(self, text: str, *, kind: str | None = None,
+            ranges: list[SourceRange] | None = None) -> bool:
         """追加文本；达到预算后返回 False 并标记截断。"""
+        text = text.strip()
         if not text:
             return True
+        kind = kind or ("heading" if text.startswith("#") else "paragraph")
         separator = "\n\n" if self.parts else ""
         candidate = separator + text
         remaining = self.max_chars - self.current_chars
         if remaining <= 0:
             self.was_truncated = True
             return False
-        if len(candidate) > remaining:
-            self.parts.append(candidate[:remaining])
-            self.current_chars = self.max_chars
+        if len(candidate) > remaining or len(self.units) >= 512:
             self.was_truncated = True
             return False
+        self.units.append(ContentUnit(unit_id=f"u{len(self.units) + 1}", kind=kind,
+            text_start=self.current_chars + len(separator),
+            text_end=self.current_chars + len(candidate), ranges=ranges or []))
         self.parts.append(candidate)
         self.current_chars += len(candidate)
+        if kind not in {"heading", "table_header", "unit", "placeholder"}:
+            self.usable_chars += len(text)
         return True
+
+    def read(self, range_: SourceRange) -> None:
+        if self.read_ranges is None:
+            return
+        if range_ not in self.read_ranges:
+            if len(self.read_ranges) >= 512:
+                self.read_ranges = None
+            else:
+                self.read_ranges.append(range_)
+
+    def audit(self, format_: str) -> ParsedContentAudit:
+        return ParsedContentAudit(read_ranges=self.read_ranges,
+            content_units=self.units if self.usable_chars else [],
+            usable_chars=self.usable_chars, detected_format=format_)
 
     def build(self) -> str:
         """返回已累计的 preview 文本。"""
-        return "".join(self.parts).strip()
+        return "".join(self.parts) if self.usable_chars else ""
 
 
 def parse_document_file(
@@ -83,6 +108,17 @@ def parse_document_file(
             return _parse_docx(file_path, normalized_type, limits, parser_options)
         if normalized_type == ".xlsx":
             return _parse_xlsx(file_path, normalized_type, limits, parser_options)
+        if normalized_type == ".xls":
+            with file_path.open("rb") as stream:
+                signature = stream.read(8)
+            if signature.startswith(b"PK\x03\x04"):
+                return _parse_xlsx(file_path, normalized_type, limits, parser_options)
+            if signature == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1":
+                return _parse_xls(file_path, normalized_type, limits, parser_options)
+            return WorkerParsePayload(file_path=str(file_path), file_type=normalized_type,
+                content="", error="PYTHON_OFFICE_XLS_UNKNOWN_FORMAT",
+                parser_backend=parser_options.office_parser_backend, truncated=False,
+                error_code="PARSER_FAILED", retryable=False)
         if normalized_type == ".pptx":
             return _parse_pptx(file_path, normalized_type, limits, parser_options)
         if normalized_type == ".pdf":
@@ -95,12 +131,12 @@ def parse_document_file(
             parser_backend=NOT_PARSED_PARSER_BACKEND,
             truncated=False,
         )
-    except Exception as exc:
+    except Exception:
         return WorkerParsePayload(
             file_path=str(file_path),
             file_type=normalized_type,
             content="",
-            error=f"{_error_code_for(normalized_type)}: {exc}",
+            error=_error_code_for(normalized_type),
             parser_backend=_backend_for(normalized_type, parser_options),
             truncated=False,
         )
@@ -118,7 +154,7 @@ def _parse_docx(
     builder = _new_builder(limits)
     truncated = False
 
-    paragraphs = [item.text.strip() for item in document.paragraphs if item.text.strip()]
+    paragraphs = document.paragraphs
     max_paragraphs = _positive_limit(
         limits,
         "docx_max_paragraphs",
@@ -131,8 +167,9 @@ def _parse_docx(
             if index >= max_paragraphs:
                 truncated = True
                 break
-            if not builder.add(paragraph):
-                break
+            range_ = SourceRange(unit="paragraph", start=index + 1, end=index + 2)
+            builder.read(range_)
+            builder.add(paragraph.text, ranges=[range_])
         if len(paragraphs) > max_paragraphs:
             truncated = True
 
@@ -151,16 +188,29 @@ def _parse_docx(
         if table_index >= max_tables:
             truncated = True
             break
-        markdown, table_truncated = _docx_table_to_markdown(table, max_rows, max_cols)
-        truncated = truncated or table_truncated
-        if markdown and not builder.add(f"## Table {table_index + 1}\n\n{markdown}"):
-            break
+        builder.add(f"## Table {table_index + 1}")
+        for row_index, row in enumerate(table.rows[:max_rows]):
+            if not row.cells:
+                continue
+            range_ = SourceRange(unit="table_row", start=row_index + 1, end=row_index + 2,
+                label=f"Table {table_index + 1}", column_start=1,
+                column_end=min(len(row.cells), max_cols) + 1)
+            builder.read(range_)
+            cells = [_clean_cell(cell.text) for cell in row.cells[:max_cols]]
+            if any(cells):
+                line = "| " + " | ".join(cells) + " |"
+                builder.add(line, kind="table_header" if row_index == 0 else "table_row", ranges=[range_])
+                if row_index == 0:
+                    builder.add("| " + " | ".join("---" for _ in cells) + " |", kind="table_header", ranges=[range_])
+            truncated |= len(row.cells) > max_cols
+        truncated |= len(table.rows) > max_rows
 
-    content = builder.build() or "No paragraph/table text extracted"
+    content = builder.build()
     return WorkerParsePayload(
         file_path=str(file_path),
         file_type=file_type,
         content=content,
+        evidence_audit=builder.audit("docx"),
         error=None,
         parser_backend=options.office_parser_backend,
         truncated=truncated or builder.was_truncated,
@@ -175,7 +225,12 @@ def _parse_xlsx(
 ) -> WorkerParsePayload:
     from openpyxl import load_workbook
 
-    workbook = load_workbook(file_path, read_only=True, data_only=True)
+    stream = file_path.open("rb")
+    try:
+        workbook = load_workbook(stream, read_only=True, data_only=True)
+    except Exception:
+        stream.close()
+        raise
     builder = _new_builder(limits)
     truncated = False
     max_sheets = _positive_limit(limits, "excel_max_sheets", DEFAULT_EXCEL_MAX_SHEETS)
@@ -189,37 +244,91 @@ def _parse_xlsx(
                 truncated = True
                 break
             sheet = workbook[sheet_name]
-            rows: list[list[str]] = []
-            for raw_row in sheet.iter_rows(
-                max_row=max_rows + 1,
-                max_col=max_cols + 1,
+            builder.add(f"## Sheet: {sheet_name}")
+            truncated |= bool(sheet.max_row and sheet.max_row > max_rows)
+            truncated |= bool(sheet.max_column and sheet.max_column > max_cols)
+            header_seen = False
+            for row_number, raw_row in enumerate(sheet.iter_rows(
+                max_row=max_rows,
+                max_col=max_cols,
                 values_only=True,
-            ):
+            ), 1):
+                range_ = SourceRange(unit="sheet_row", start=row_number, end=row_number + 1,
+                    label=sheet_name, column_start=1, column_end=max_cols + 1)
+                builder.read(range_)
                 if _is_empty_row(raw_row):
                     continue
-                if len(raw_row) > max_cols and any(
-                    cell not in (None, "") for cell in raw_row[max_cols:]
-                ):
-                    truncated = True
-                if len(rows) >= max_rows:
-                    truncated = True
-                    break
-                rows.append([_format_cell(cell) for cell in raw_row[:max_cols]])
-            markdown = _rows_to_markdown(rows)
-            if markdown and not builder.add(f"## Sheet: {sheet_name}\n\n{markdown}"):
-                break
+                cells = [_format_cell(cell) for cell in raw_row[:max_cols]]
+                line = "| " + " | ".join(cells) + " |"
+                kind = ("unit" if "单位" in line else "total" if "合计" in line or "小计" in line
+                        else "table_header" if not header_seen and (sheet.max_row or 0) > 1 else "table_row")
+                if kind not in {"unit", "total"}:
+                    header_seen = True
+                builder.add(line, kind=kind, ranges=[range_])
+                if kind == "table_header":
+                    builder.add("| " + " | ".join("---" for _ in cells) + " |", kind=kind, ranges=[range_])
     finally:
         workbook.close()
+        stream.close()
 
-    content = builder.build() or "No worksheet text extracted"
+    content = builder.build()
     return WorkerParsePayload(
         file_path=str(file_path),
         file_type=file_type,
         content=content,
+        evidence_audit=builder.audit("xlsx"),
         error=None,
         parser_backend=options.office_parser_backend,
         truncated=truncated or builder.was_truncated,
     )
+
+
+def _parse_xls(
+    file_path: Path, file_type: str, limits: Mapping[str, Any], options: DocumentParserOptions,
+) -> WorkerParsePayload:
+    import xlrd
+
+    workbook = xlrd.open_workbook(str(file_path), on_demand=True)
+    builder = _new_builder(limits)
+    max_sheets = _positive_limit(limits, "excel_max_sheets", DEFAULT_EXCEL_MAX_SHEETS)
+    max_rows = _positive_limit(limits, "excel_max_rows", DEFAULT_EXCEL_MAX_ROWS)
+    max_cols = _positive_limit(limits, "excel_max_columns", DEFAULT_EXCEL_MAX_COLUMNS)
+    truncated = workbook.nsheets > max_sheets
+    try:
+        for index in range(min(workbook.nsheets, max_sheets)):
+            sheet = workbook.sheet_by_index(index)
+            builder.add(f"## Sheet: {sheet.name}")
+            # Preserve the existing XLS contract: a header plus max_rows data rows.
+            rows = min(sheet.nrows, max_rows + 1)
+            cols = min(sheet.ncols, max_cols)
+            truncated |= sheet.nrows > rows or sheet.ncols > cols
+            if cols == 0:
+                continue
+            for row_index in range(rows):
+                range_ = SourceRange(unit="sheet_row", start=row_index + 1, end=row_index + 2,
+                    label=sheet.name, column_start=1, column_end=cols + 1)
+                builder.read(range_)
+                cells = []
+                for col in range(cols):
+                    cell = sheet.cell(row_index, col)
+                    value = cell.value
+                    if cell.ctype == xlrd.XL_CELL_DATE:
+                        value = xlrd.xldate_as_datetime(value, workbook.datemode)
+                    cells.append(_format_cell(value))
+                if not any(cells):
+                    continue
+                line = "| " + " | ".join(cells) + " |"
+                kind = ("unit" if "单位" in line else "total" if "合计" in line or "小计" in line
+                    else "table_header" if row_index == 0 and sheet.nrows > 1 else "table_row")
+                builder.add(line, kind=kind, ranges=[range_])
+                if kind == "table_header":
+                    builder.add("| " + " | ".join("---" for _ in cells) + " |", kind=kind, ranges=[range_])
+            workbook.unload_sheet(index)
+    finally:
+        workbook.release_resources()
+    return WorkerParsePayload(file_path=str(file_path), file_type=file_type,
+        content=builder.build(), evidence_audit=builder.audit("xls"), error=None,
+        parser_backend=options.office_parser_backend, truncated=truncated or builder.was_truncated)
 
 
 def _parse_pptx(
@@ -240,6 +349,9 @@ def _parse_pptx(
         if slide_index >= max_slides:
             truncated = True
             break
+        range_ = SourceRange(unit="slide", start=slide_index + 1, end=slide_index + 2,
+            label="body_and_notes" if options.include_pptx_notes else "body")
+        builder.read(range_)
         slide_parts: list[str] = []
         for shape in slide.shapes:
             if getattr(shape, "has_table", False):
@@ -254,16 +366,17 @@ def _parse_pptx(
         if notes_text:
             slide_parts.append(f"### Notes\n\n{notes_text}")
         if slide_parts:
-            if not builder.add(
-                f"## Slide {slide_index + 1}\n\n" + "\n\n".join(slide_parts)
-            ):
-                break
+            builder.add(f"## Slide {slide_index + 1}")
+            for part in slide_parts:
+                for paragraph in part.split("\n\n"):
+                    builder.add(paragraph, ranges=[range_])
 
-    content = builder.build() or "No slide text extracted"
+    content = builder.build()
     return WorkerParsePayload(
         file_path=str(file_path),
         file_type=file_type,
         content=content,
+        evidence_audit=builder.audit("pptx"),
         error=None,
         parser_backend=options.office_parser_backend,
         truncated=truncated or builder.was_truncated,
@@ -285,16 +398,25 @@ def _parse_pdf(
 
     builder.add("# PDF text preview")
     with pdfplumber.open(file_path) as pdf:
-        for page_index, page in enumerate(pdf.pages):
-            if page_index >= max_pages:
-                truncated = True
-                break
+        selected = limits.get("pdf_selected_pages")
+        if selected is None:
+            selected = list(range(1, min(len(pdf.pages), max_pages) + 1))
+        if (not selected or len(selected) > max_pages or len(set(selected)) != len(selected)
+            or any(type(page) is not int or not 1 <= page <= len(pdf.pages) for page in selected)):
+            raise ValueError("PDF selected pages violate the document or budget")
+        for page_number in selected:
+            page_index = page_number - 1
+            page = pdf.pages[page_index]
             text = page.extract_text() or ""
+            range_ = SourceRange(unit="pdf_page", start=page_index + 1, end=page_index + 2)
+            builder.read(range_)
             if text.strip():
                 extracted_any_text = True
-                if not builder.add(f"## Page {page_index + 1}\n\n{text.strip()}"):
-                    _close_pdf_page(page)
-                    break
+                builder.add(f"## Page {page_index + 1}")
+                for paragraph in text.splitlines():
+                    # Dotted TOC leaders carry layout, while the title, count and page stay intact.
+                    paragraph = re.sub(r"(?<=\S)[.．·]{3,}(?=\s*\d+\s*$)", " ", paragraph)
+                    builder.add(paragraph, ranges=[range_])
             _close_pdf_page(page)
         if len(pdf.pages) > max_pages:
             truncated = True
@@ -304,7 +426,7 @@ def _parse_pdf(
             file_path=str(file_path),
             file_type=file_type,
             content="",
-            error=f"PDF_NO_TEXT_LAYER: no extractable text in first {max_pages} pages",
+            error="PDF_NO_TEXT_LAYER: no extractable text in selected pages",
             parser_backend=options.pdf_parser_backend,
             truncated=False,
         )
@@ -313,6 +435,7 @@ def _parse_pdf(
         file_path=str(file_path),
         file_type=file_type,
         content=builder.build(),
+        evidence_audit=builder.audit("pdf"),
         error=None,
         parser_backend=options.pdf_parser_backend,
         truncated=truncated or builder.was_truncated,

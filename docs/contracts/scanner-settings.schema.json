@@ -5,6 +5,19 @@
   "type": "object",
   "additionalProperties": false,
   "properties": {
+    "csv_encodings": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "utf-8",
+          "utf-8-sig",
+          "gb18030"
+        ]
+      }
+    },
     "allowed_extensions": {
       "$ref": "#/$defs/extensionArray"
     },
@@ -175,6 +188,15 @@
     },
     "cloud_files_policy": {
       "const": "local_only"
+    },
+    "excerpt_priority_paths": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32767
+      }
     }
   },
   "$defs": {

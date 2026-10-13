@@ -1597,7 +1597,14 @@ impl ScannerStore {
         let envelope = validate_finalization_with_check(active, batch, &ensure_deadline)?;
         ensure_deadline()?;
         let now_ms = checked_i64(now_ms, "finalization timestamp")?;
-        let metadata_json = envelope_metadata_json(&envelope)?;
+        let metadata_json = envelope_metadata_json(
+            &envelope,
+            batch
+                .execution_metrics
+                .as_ref()
+                .and_then(|metrics| metrics.refill_audit.as_ref()),
+            batch,
+        )?;
         let metadata_value: serde_json::Value = serde_json::from_str(&metadata_json)
             .map_err(|error| StoreError::RunCorrupt(error.to_string()))?;
         let status = terminal_status_text(batch.status)?;
@@ -2229,6 +2236,28 @@ fn compute_audit_size_with_check(
     ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
 ) -> Result<i64, StoreError> {
     let mut total = batch.envelope_json.len() as i64;
+    if let Some(refill) = batch
+        .execution_metrics
+        .as_ref()
+        .and_then(|metrics| metrics.refill_audit.as_ref())
+    {
+        let bytes = serde_json::to_vec(refill)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+        // Metadata is retained in both legacy-envelope and metadata columns.
+        total = total.saturating_add(bytes.len() as i64 * 2 + 32);
+    }
+    for record in &batch.file_results {
+        if let Some(audit) = record
+            .pdf_classification
+            .as_ref()
+            .and_then(|item| item.page_audit.as_ref())
+        {
+            let bytes = serde_json::to_vec(audit)
+                .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+            total =
+                total.saturating_add((bytes.len() + record.file_identity.len()) as i64 * 2 + 64);
+        }
+    }
     for (index, record) in batch.file_results.iter().enumerate() {
         if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
             ensure_deadline()?;
@@ -4007,8 +4036,12 @@ where
 /// 完整 Envelope），`warnings` 恒为数组（绝不 null），`error` 可为 null；
 /// `file_context` 不进入 metadata（正文在 artifact 只存一次）。形状必须与
 /// `rebuild_envelope` 期望完全一致。
-fn envelope_metadata_json(envelope: &ContextEnvelope) -> Result<String, StoreError> {
-    let value = serde_json::json!({
+fn envelope_metadata_json(
+    envelope: &ContextEnvelope,
+    refill: Option<&ai_daily_scanner_contract::RefillAudit>,
+    batch: &FinalizationBatch,
+) -> Result<String, StoreError> {
+    let mut value = serde_json::json!({
         "contract": envelope.contract,
         "protocol_version": envelope.protocol_version,
         "request_id": envelope.request_id,
@@ -4022,6 +4055,26 @@ fn envelope_metadata_json(envelope: &ContextEnvelope) -> Result<String, StoreErr
         "error": envelope.error.0,
         "summary": envelope.summary,
     });
+    if let Some(refill) = refill {
+        refill.validate().map_err(StoreError::RunCorrupt)?;
+        value["refill_audit"] = serde_json::to_value(refill)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+    }
+    let mut pages = std::collections::BTreeMap::new();
+    for record in &batch.file_results {
+        if let Some(audit) = record
+            .pdf_classification
+            .as_ref()
+            .and_then(|item| item.page_audit.as_ref())
+        {
+            audit.validate().map_err(StoreError::RunCorrupt)?;
+            pages.insert(&record.file_identity, audit);
+        }
+    }
+    if !pages.is_empty() {
+        value["pdf_page_audits"] = serde_json::to_value(pages)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+    }
     serde_json::to_string(&value).map_err(|error| StoreError::InvalidRequest(error.to_string()))
 }
 
@@ -4897,6 +4950,7 @@ mod tests {
         )];
         let parse_only_size = compute_audit_size(&batch);
         batch.file_results[0].pdf_classification = Some(PdfClassificationAuditV1 {
+            page_audit: None,
             status: PdfClassificationStatus::TextInParseWindow,
             page_count: Nullable(Some(2)),
             classification_cache_status: ClassificationCacheStatus::Miss,
@@ -4924,6 +4978,8 @@ mod tests {
         content: &str,
     ) -> CacheWriteRecord {
         CacheWriteRecord {
+            evidence_audit: None,
+            cache_payload_version: 0,
             file_identity: identity.to_string(),
             source_version: source_version.to_string(),
             source_guard_kind: "content_sha256_v1".to_string(),
@@ -5807,6 +5863,21 @@ mod tests {
             snapshot_hit: None,
             execution_metrics: Some(ai_daily_scanner_contract::ExecutionMetricsV2 {
                 discovery_observed_file_count: 1,
+                refill_audit: Some(ai_daily_scanner_contract::RefillAudit {
+                    policy_version: "budget_refill_v3".into(),
+                    stop_reason: "complete".into(),
+                    max_rounds: 2,
+                    candidate_cap: 96,
+                    classification_page_cap: 80,
+                    extraction_cap: 8,
+                    context_char_cap: 500_000,
+                    candidate_slots_used: 0,
+                    classification_pages_held: 0,
+                    extraction_slots_used: 0,
+                    refunded_chars: 0,
+                    refunded_classification_pages: 0,
+                    rounds: Vec::new(),
+                }),
                 source_guard_content_hash_file_count: 0,
                 source_guard_unavailable_count: 0,
                 source_guard_bytes_read: 0,
@@ -5876,6 +5947,26 @@ mod tests {
         assert_eq!(evidence.artifact_id.0, None, "error run has no artifact");
         assert_eq!(evidence.execution_metrics.worker_handshake_ms, 5);
         assert_eq!(evidence.execution_metrics.discovery_ms, 2);
+        harness.store.connection.execute(
+            "UPDATE scan_runs SET final_envelope_metadata_json=json_set(final_envelope_metadata_json,
+                '$.pdf_page_audits', json('{\"invented\":{\"policy_version\":\"pdf_text_presence_v2\",\"checked_pages\":[1],\"observations\":null}}')) WHERE scan_run_id=?1",
+            [active.scan_run_id() as i64]).unwrap();
+        assert!(
+            harness.store.load_evidence(active.scan_run_id()).is_err(),
+            "a persisted page audit must belong to an observed PDF source"
+        );
+        harness.store.connection.execute(
+            "UPDATE scan_runs SET final_envelope_metadata_json=json_remove(final_envelope_metadata_json,
+                '$.pdf_page_audits') WHERE scan_run_id=?1", [active.scan_run_id() as i64]).unwrap();
+        assert_eq!(
+            evidence
+                .execution_metrics
+                .refill_audit
+                .as_ref()
+                .unwrap()
+                .stop_reason,
+            "complete"
+        );
 
         let rows_written: i64 = harness
             .store
@@ -5915,6 +6006,14 @@ mod tests {
             )
             .is_err(),
             "current evidence must fail closed when provenance is unavailable"
+        );
+        harness.store.connection.execute(
+            "UPDATE scan_runs SET final_envelope_metadata_json=json_set(final_envelope_metadata_json,
+                '$.refill_audit.candidate_slots_used', 97) WHERE scan_run_id=?1",
+            [active.scan_run_id() as i64]).unwrap();
+        assert!(
+            harness.store.load_evidence(active.scan_run_id()).is_err(),
+            "over-budget persisted refill audit must fail closed"
         );
     }
 
@@ -6008,6 +6107,7 @@ mod tests {
             snapshot_hit: None,
             execution_metrics: Some(ai_daily_scanner_contract::ExecutionMetricsV2 {
                 discovery_observed_file_count: 1_000_001,
+                refill_audit: None,
                 source_guard_content_hash_file_count: 0,
                 source_guard_unavailable_count: 0,
                 source_guard_bytes_read: 0,

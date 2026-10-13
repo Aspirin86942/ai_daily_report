@@ -140,6 +140,23 @@ impl ClassificationPlan {
         profile: &NormalizedScannerSettings,
         page_budget: u64,
     ) -> Vec<ClassifiedPlan> {
+        Self::build_with_remaining(
+            files,
+            profile,
+            page_budget,
+            profile.max_candidate_files,
+            false,
+        )
+    }
+
+    /// Freeze a supplemental wave against this run's confirmed remaining quotas.
+    pub fn build_with_remaining(
+        files: Vec<PlanCandidate>,
+        profile: &NormalizedScannerSettings,
+        page_budget: u64,
+        candidate_budget: u64,
+        allow_partial_pages: bool,
+    ) -> Vec<ClassifiedPlan> {
         let mut classified = Vec::with_capacity(files.len());
         let mut candidates = Vec::new();
 
@@ -200,7 +217,7 @@ impl ClassificationPlan {
                 &file.file_identity,
             )
         });
-        let mut candidate_slots = profile.max_candidate_files;
+        let mut candidate_slots = candidate_budget;
         let mut page_remaining = page_budget;
         for (file, route) in candidates {
             let priority = crate::nominal::NominalKey::new(
@@ -222,10 +239,13 @@ impl ClassificationPlan {
                 });
                 continue;
             }
-            candidate_slots -= 1;
             if route == RouteKind::Pdf {
-                let charge = profile.parse.pdf.max_pages;
-                if charge > page_remaining {
+                let charge = if allow_partial_pages {
+                    profile.parse.pdf.max_pages.min(page_remaining)
+                } else {
+                    profile.parse.pdf.max_pages
+                };
+                if charge == 0 || charge > page_remaining {
                     classified.push(ClassifiedPlan {
                         file_identity: file.file_identity,
                         relative_path: file.relative_path,
@@ -237,6 +257,7 @@ impl ClassificationPlan {
                         pdf_classification: PdfClassificationPlan::NotClassifiedByBudget,
                     });
                 } else {
+                    candidate_slots -= 1;
                     page_remaining -= charge;
                     classified.push(ClassifiedPlan {
                         file_identity: file.file_identity,
@@ -250,6 +271,7 @@ impl ClassificationPlan {
                     });
                 }
             } else {
+                candidate_slots -= 1;
                 classified.push(ClassifiedPlan {
                     file_identity: file.file_identity,
                     relative_path: file.relative_path,
@@ -285,9 +307,27 @@ impl ContentAdmissionPlan {
         model: &ContextBudgetModel,
         classifications: &BTreeMap<String, PdfClassificationResult>,
     ) -> Vec<AdmissionDecision> {
+        Self::build_with_remaining(
+            classified,
+            profile,
+            model,
+            classifications,
+            0,
+            profile.max_pdf_text_extractions,
+        )
+    }
+
+    pub fn build_with_remaining(
+        classified: &[ClassifiedPlan],
+        profile: &NormalizedScannerSettings,
+        model: &ContextBudgetModel,
+        classifications: &BTreeMap<String, PdfClassificationResult>,
+        retained_chars: u64,
+        remaining_extractions: u64,
+    ) -> Vec<AdmissionDecision> {
         let mut decisions = Vec::with_capacity(classified.len());
-        let mut running = 0_u64;
-        let mut extraction_slots = profile.max_pdf_text_extractions;
+        let mut running = retained_chars;
+        let mut extraction_slots = remaining_extractions;
 
         for plan in classified {
             let (action, reserved) = match &plan.action {

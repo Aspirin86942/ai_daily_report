@@ -537,6 +537,7 @@ mod tests {
 
     fn head_tail_evidence(path: &str, extension: &str, content: &str) -> ContextFileEvidence {
         ContextFileEvidence {
+            evidence_audit: None,
             file_identity: format!("fixture:{path}"),
             absolute_path: format!("C:\\fixture\\{}", path.replace('/', "\\")),
             relative_path: path.replace('/', "\\"),

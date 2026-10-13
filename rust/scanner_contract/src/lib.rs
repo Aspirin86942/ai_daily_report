@@ -4,6 +4,8 @@ use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
+mod pdf_audit;
+pub use pdf_audit::{pdf_sample_pages, PdfPageAudit, PdfPageObservation};
 
 pub trait Validate {
     fn validate(&self) -> Result<(), String>;
@@ -282,8 +284,8 @@ impl Validate for AdapterPaths {
 // optional; Rust normalization owns every default and routing policy.
 // ---------------------------------------------------------------------------
 
-pub const ADMISSION_POLICY_VERSION: &str = "budget_admission_v2";
-pub const CLASSIFIER_POLICY_VERSION: &str = "pdf_text_presence_v1";
+pub const ADMISSION_POLICY_VERSION: &str = "budget_refill_v3";
+pub const CLASSIFIER_POLICY_VERSION: &str = "pdf_text_presence_v2";
 pub const PRIORITY_POLICY_VERSION: &str = "budget_nominal_v2";
 pub const COMPRESSION_POLICY_VERSION: &str = "markdown_context_v2";
 pub const MAX_SOURCE_FILES_PER_RUN: u64 = 1_000_000;
@@ -376,6 +378,12 @@ pub struct ScannerSettings {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
+    pub excerpt_priority_paths: Option<Vec<String>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
     pub fallback_after_timeout: Option<bool>,
     #[serde(
         default,
@@ -431,6 +439,12 @@ pub struct ScannerSettings {
         deserialize_with = "deserialize_optional_non_null"
     )]
     pub text_max_chars: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub csv_encodings: Option<Vec<String>>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -597,6 +611,12 @@ pub struct ScannerSettings {
 
 impl Validate for ScannerSettings {
     fn validate(&self) -> Result<(), String> {
+        if let Some(paths) = &self.excerpt_priority_paths {
+            validate_excerpt_priority_paths(paths)?;
+        }
+        if let Some(encodings) = &self.csv_encodings {
+            validate_csv_encodings(encodings)?;
+        }
         if let Some(values) = &self.allowed_extensions {
             validate_extensions(values, "allowed_extensions", false)?;
         }
@@ -795,6 +815,8 @@ impl Validate for ExecutionProfile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TextParseProfile {
+    #[serde(default = "default_csv_encodings")]
+    pub csv_encodings: Vec<String>,
     pub backend: String,
     pub read_head_bytes: u64,
     pub read_tail_bytes: u64,
@@ -805,6 +827,7 @@ pub struct TextParseProfile {
 impl Validate for TextParseProfile {
     fn validate(&self) -> Result<(), String> {
         require_const(&self.backend, "light_text_v2", "text.backend")?;
+        validate_csv_encodings(&self.csv_encodings)?;
         require_range(self.read_head_bytes, 1, 67_108_864, "read_head_bytes")?;
         require_range(self.read_tail_bytes, 1, 67_108_864, "read_tail_bytes")?;
         require_range(self.max_chars, 1, 10_000_000, "text.max_chars")?;
@@ -815,6 +838,26 @@ impl Validate for TextParseProfile {
             "text.excerpt_max_chars",
         )
     }
+}
+
+pub fn default_csv_encodings() -> Vec<String> {
+    vec!["utf-8".into(), "utf-8-sig".into()]
+}
+
+fn validate_csv_encodings(encodings: &[String]) -> Result<(), String> {
+    let unique: std::collections::BTreeSet<_> = encodings.iter().collect();
+    if encodings.is_empty()
+        || encodings.len() > 3
+        || unique.len() != encodings.len()
+        || encodings
+            .iter()
+            .any(|value| !matches!(value.as_str(), "utf-8" | "utf-8-sig" | "gb18030"))
+    {
+        return Err(
+            "csv_encodings must be a unique explicit allowlist of utf-8, utf-8-sig, gb18030".into(),
+        );
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -881,6 +924,8 @@ impl Validate for OfficeParseProfile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PdfParseProfile {
+    #[serde(default = "legacy_pdf_selection_policy")]
+    pub selection_policy_version: String,
     pub backend: String,
     pub max_pages: u64,
     pub excerpt_max_chars: u64,
@@ -888,6 +933,12 @@ pub struct PdfParseProfile {
 
 impl Validate for PdfParseProfile {
     fn validate(&self) -> Result<(), String> {
+        if !matches!(
+            self.selection_policy_version.as_str(),
+            "pdf_text_presence_v1" | "pdf_text_presence_v2"
+        ) {
+            return Err("unsupported PDF selection policy".into());
+        }
         require_non_empty(&self.backend, 1024, "pdf.backend")?;
         require_range(self.max_pages, 1, 10_000, "pdf.max_pages")?;
         require_range(
@@ -899,17 +950,62 @@ impl Validate for PdfParseProfile {
     }
 }
 
+fn legacy_pdf_selection_policy() -> String {
+    "pdf_text_presence_v1".into()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParseProfile {
+    #[serde(default = "default_cache_payload_version")]
+    pub cache_payload_version: u64,
+    #[serde(default = "default_excerpt_policy_version")]
+    pub excerpt_policy_version: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub excerpt_priority_paths: Vec<String>,
     pub aggregate_max_chars: u64,
     pub text: TextParseProfile,
     pub office: OfficeParseProfile,
     pub pdf: PdfParseProfile,
 }
 
+fn default_cache_payload_version() -> u64 {
+    1
+}
+fn default_excerpt_policy_version() -> String {
+    "fair_semantic_v1".into()
+}
+
+fn validate_excerpt_priority_paths(paths: &[String]) -> Result<(), String> {
+    if paths.len() > 4096 {
+        return Err("excerpt_priority_paths contains too many items".into());
+    }
+    for path in paths {
+        require_relative_path(path, "excerpt_priority_paths")?;
+    }
+    Ok(())
+}
+
 impl Validate for ParseProfile {
     fn validate(&self) -> Result<(), String> {
+        if self.cache_payload_version != 1
+            || !matches!(
+                self.excerpt_policy_version.as_str(),
+                "fair_semantic_v1"
+                    | "fair_semantic_v2"
+                    | "fair_semantic_v3"
+                    | "fair_semantic_v4"
+                    | "fair_semantic_v5"
+                    | "fair_semantic_v6"
+                    | "fair_semantic_v7"
+                    | "fair_semantic_v8"
+                    | "fair_semantic_v9"
+            )
+        {
+            return Err("parse evidence policies are unsupported".into());
+        }
+        validate_excerpt_priority_paths(&self.excerpt_priority_paths)?;
+        require_sorted_unique(&self.excerpt_priority_paths, "excerpt_priority_paths")?;
         require_range(
             self.aggregate_max_chars,
             1,
@@ -999,16 +1095,18 @@ impl Validate for NormalizedScannerSettings {
         if actual != expected {
             return Err("report mode and normalized context profile do not match".to_string());
         }
-        require_const(
-            &self.admission_policy_version,
-            ADMISSION_POLICY_VERSION,
-            "admission_policy_version",
-        )?;
-        require_const(
-            &self.classifier_policy_version,
-            CLASSIFIER_POLICY_VERSION,
-            "classifier_policy_version",
-        )?;
+        if !matches!(
+            self.admission_policy_version.as_str(),
+            "budget_admission_v2" | "budget_refill_v3"
+        ) {
+            return Err("unsupported admission_policy_version".to_string());
+        }
+        if !matches!(
+            self.classifier_policy_version.as_str(),
+            "pdf_text_presence_v1" | "pdf_text_presence_v2"
+        ) {
+            return Err("unsupported classifier policy".into());
+        }
         macro_rules! range {
             ($field:ident, $min:expr, $max:expr) => {
                 require_range(self.$field, $min, $max, stringify!($field))?;
@@ -1132,6 +1230,7 @@ pub enum ErrorCode {
     ParserTimeout,
     ParserInvalidPayload,
     ParserFailed,
+    PdfProtected,
     WorkerHandshakeFailed,
     WorkerVersionMismatch,
     WorkerBuildChanged,
@@ -1711,6 +1810,8 @@ pub enum ClassificationTransport {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PdfClassificationAuditV1 {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_audit: Option<PdfPageAudit>,
     pub status: PdfClassificationStatus,
     #[serde(deserialize_with = "deserialize_required_nullable")]
     pub page_count: Nullable<u64>,
@@ -1730,6 +1831,35 @@ pub struct PdfClassificationAuditV1 {
 
 impl Validate for PdfClassificationAuditV1 {
     fn validate(&self) -> Result<(), String> {
+        if let Some(audit) = &self.page_audit {
+            audit.validate()?;
+            if self.result_examined_pages.0 != Some(audit.checked_pages.len() as u64)
+                || self
+                    .page_count
+                    .0
+                    .is_none_or(|count| audit.checked_pages.iter().any(|page| *page > count))
+            {
+                return Err("PDF observed pages violate page provenance".into());
+            }
+            let expected = pdf_sample_pages(
+                self.page_count.0.unwrap_or(0),
+                self.nominal_charged_pages,
+                &audit.policy_version,
+            );
+            if expected.get(..audit.checked_pages.len()) != Some(audit.checked_pages.as_slice()) {
+                return Err("PDF observed pages violate the selected policy".into());
+            }
+            if let Some(observations) = &audit.observations {
+                let text = self.status == PdfClassificationStatus::TextInParseWindow;
+                if observations
+                    .iter()
+                    .enumerate()
+                    .any(|(index, page)| page.has_text != (text && index + 1 == observations.len()))
+                {
+                    return Err("PDF text observations violate its status".into());
+                }
+            }
+        }
         require_sha256_hex(&self.classifier_build, "classifier_build")?;
         require_sha256_hex(&self.classifier_profile_hash, "classifier_profile_hash")?;
         require_range(self.attempt_count, 0, 3, "attempt_count")?;
@@ -2144,7 +2274,84 @@ pub enum ReuseKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RefillRoundAudit {
+    pub round: u64,
+    pub planned_source_count: u64,
+    pub plan_sha256: String,
+    pub candidate_slots_used: u64,
+    pub classification_pages_held: u64,
+    pub extraction_slots_used: u64,
+    pub reserved_chars: u64,
+    pub refunded_chars: u64,
+    pub refunded_classification_pages: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RefillAudit {
+    pub policy_version: String,
+    pub stop_reason: String,
+    pub max_rounds: u64,
+    pub candidate_cap: u64,
+    pub classification_page_cap: u64,
+    pub extraction_cap: u64,
+    pub context_char_cap: u64,
+    pub candidate_slots_used: u64,
+    pub classification_pages_held: u64,
+    pub extraction_slots_used: u64,
+    pub refunded_chars: u64,
+    pub refunded_classification_pages: u64,
+    pub rounds: Vec<RefillRoundAudit>,
+}
+
+impl Validate for RefillAudit {
+    fn validate(&self) -> Result<(), String> {
+        require_const(
+            &self.policy_version,
+            "budget_refill_v3",
+            "refill.policy_version",
+        )?;
+        if !matches!(
+            self.stop_reason.as_str(),
+            "complete" | "quota_exhausted" | "no_progress" | "deadline" | "round_limit"
+        ) {
+            return Err("invalid refill stop reason".into());
+        }
+        if self.max_rounds != 2 || self.rounds.len() > 2 {
+            return Err("refill may freeze at most two supplemental rounds".into());
+        }
+        if self.candidate_slots_used > self.candidate_cap
+            || self.classification_pages_held > self.classification_page_cap
+            || self.extraction_slots_used > self.extraction_cap
+        {
+            return Err("refill consumption exceeds the original run quota".into());
+        }
+        for (index, round) in self.rounds.iter().enumerate() {
+            if round.round != index as u64 + 1
+                || round.planned_source_count == 0
+                || round.plan_sha256.len() != 64
+                || !round
+                    .plan_sha256
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                || round.candidate_slots_used > self.candidate_cap
+                || round.classification_pages_held > self.classification_page_cap
+                || round.extraction_slots_used > self.extraction_cap
+                || round.reserved_chars > self.context_char_cap
+            {
+                return Err("invalid frozen refill round".into());
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExecutionMetricsV2 {
+    /// Absent in legacy runs; new runs record confirmed quota reclamation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refill_audit: Option<RefillAudit>,
     pub discovery_observed_file_count: u64,
     pub source_guard_content_hash_file_count: u64,
     pub source_guard_unavailable_count: u64,
@@ -2185,6 +2392,9 @@ pub struct ExecutionMetricsV2 {
 
 impl Validate for ExecutionMetricsV2 {
     fn validate(&self) -> Result<(), String> {
+        if let Some(refill) = &self.refill_audit {
+            refill.validate()?;
+        }
         require_range(
             self.stage_deadline_exhausted_count,
             0,

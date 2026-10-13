@@ -312,7 +312,9 @@ def test_installed_mode_derives_release_binaries_and_shared_scan_db(tmp_path):
         scanner=SimpleNamespace(),
     )
 
-    assert Path(cfg.office_worker_path).is_relative_to(release_root)
+    assert Path(cfg.office_worker_path) == release_root / "bin" / "ai-daily-office-parser.exe"
+    cfg._project_root = release_root / "app"
+    assert Path(cfg.office_worker_path) == release_root / "bin" / "ai-daily-office-parser.exe"
     assert Path(cfg.index_db_path) == paths["db_dir"] / "scan_index_v3.sqlite3"
     assert cfg.log_dir == paths["log_dir"]
 

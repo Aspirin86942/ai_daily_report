@@ -23,14 +23,38 @@ class ModelRequestSettings(SettingsModel):
     max_retries: int = Field(default=3, ge=1, le=3, strict=True)
     request_timeout_seconds: float = Field(default=120.0, gt=0, le=900)
     response_format: Literal["json_object"] = "json_object"
+    thinking_mode: Literal["enabled", "disabled"] | None = None
+    thinking_parameter_location: Literal["top_level", "extra_body"] | None = None
     max_request_utf8_bytes: int = Field(default=16000, ge=2048)
     max_sources_per_batch: int = Field(default=8, ge=1)
     max_batches: int = Field(default=8, ge=1)
     context_window_tokens: int | None = Field(default=None, ge=2048)
     verified_max_output_tokens: int | None = Field(default=None, ge=1)
+    truncation_policy: Literal["reduce_once", "stop"] = "reduce_once"
+    max_strategy_changes: int = Field(default=1, ge=0, le=1, strict=True)
+
+    @model_validator(mode="after")
+    def validate_thinking_location(self):
+        if self.thinking_parameter_location is not None and self.thinking_mode is None:
+            raise ValueError("an explicit thinking parameter location requires a thinking mode")
+        return self
+
+    def fingerprint_data(self, *, exclude: set[str] | None = None) -> dict:
+        values = self.model_dump(exclude=exclude or set())
+        if self.thinking_parameter_location is None:
+            values.pop("thinking_parameter_location", None)
+        return values
+
+
+class ModelPricing(SettingsModel):
+    rate_version: str = Field(min_length=1, max_length=128)
+    currency: Literal["CNY", "USD"]
+    input_per_million_microunits: int = Field(ge=0, strict=True)
+    output_per_million_microunits: int = Field(ge=0, strict=True)
 
 
 class RecoverySettings(SettingsModel):
+    enforce_model_budgets: bool = True
     missed_days_policy: Literal["latest_due_day_with_gap_notice"] = (
         "latest_due_day_with_gap_notice"
     )
@@ -38,11 +62,25 @@ class RecoverySettings(SettingsModel):
     max_calls_per_calendar_day: int = Field(default=30, ge=1)
     run_budget_seconds: int = Field(default=900, ge=1)
     lock_wait_seconds: float = Field(default=5.0, ge=0, le=60)
+    max_tokens_per_run: int | None = Field(default=None, ge=1, strict=True)
+    max_tokens_per_calendar_day: int | None = Field(default=None, ge=1, strict=True)
+    max_cost_per_run_microunits: int | None = Field(default=None, ge=0, strict=True)
+    max_cost_per_calendar_day_microunits: int | None = Field(default=None, ge=0, strict=True)
+    model_pricing: ModelPricing | None = None
 
     @model_validator(mode="after")
     def validate_budgets(self) -> RecoverySettings:
         if self.max_calls_per_calendar_day < self.max_calls_per_run:
             raise ValueError("daily call budget must be at least the per-run budget")
+        if (self.max_tokens_per_run is not None and self.max_tokens_per_calendar_day is not None
+                and self.max_tokens_per_calendar_day < self.max_tokens_per_run):
+            raise ValueError("daily token budget must be at least the per-run budget")
+        if (self.max_cost_per_run_microunits is not None and self.max_cost_per_calendar_day_microunits is not None
+                and self.max_cost_per_calendar_day_microunits < self.max_cost_per_run_microunits):
+            raise ValueError("daily cost budget must be at least the per-run budget")
+        if self.model_pricing is None and (self.max_cost_per_run_microunits is not None
+                                          or self.max_cost_per_calendar_day_microunits is not None):
+            raise ValueError("cost budgets require verified pricing")
         return self
 
 

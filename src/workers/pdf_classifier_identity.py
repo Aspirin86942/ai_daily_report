@@ -16,7 +16,7 @@ except ImportError:  # Keep hashing available without third-party imports.
         from _hashlib import openssl_sha256 as _sha256
 
 
-POLICY_VERSION = "pdf_text_presence_v1"
+POLICY_VERSION = "pdf_text_presence_v2"
 CLASSIFIER_CONTRACT_VERSION = "ai_daily_pdf_classifier_v1"
 CLASSIFIER_PROTOCOL_VERSION = 1
 _CLASSIFIER_DOMAIN = b"classifier-build-v1\0"
@@ -27,6 +27,7 @@ CLASSIFIER_BUILD_INPUTS = (
     "src/workers/document_parser_worker.py",
     "src/workers/pdf_classifier.py",
     "src/workers/pdf_classifier_identity.py",
+    "src/workers/pdf_pages.py",
 )
 
 

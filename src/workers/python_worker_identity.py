@@ -15,6 +15,7 @@ WORKER_CONTRACT_VERSION = "ai_daily_worker_v2"
 PYTHON_WORKER_VERSION = "0.1.0"
 PYTHON_WORKER_BUILD_INPUTS = (
     "requirements.lock",
+    "src/models/content_audit.py",
     "src/models/scanner_contract.py",
     "src/models/schemas.py",
     "src/services/document_parser.py",
@@ -23,6 +24,7 @@ PYTHON_WORKER_BUILD_INPUTS = (
     "src/workers/models.py",
     "src/workers/pdf_classifier.py",
     "src/workers/pdf_classifier_identity.py",
+    "src/workers/pdf_pages.py",
     "src/workers/python_worker_identity.py",
 )
 PYTHON_OFFICE_BACKEND = "python_office_v2"

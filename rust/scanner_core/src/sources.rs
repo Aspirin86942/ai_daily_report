@@ -53,16 +53,18 @@ pub(crate) fn collect_sources(
         .collect();
     let mut ordered: Vec<_> = evidence.iter().collect();
     ordered.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    let mut remaining = profile.parse.aggregate_max_chars as usize;
+    let allocated = crate::source_allocation::allocate_excerpts_with_priority(
+        &ordered,
+        profile.parse.aggregate_max_chars as usize,
+        &profile.parse.excerpt_priority_paths,
+    );
     ordered
         .into_iter()
-        .filter_map(|item| {
+        .zip(allocated)
+        .filter_map(|(item, selected)| {
             let file = files.get(item.file_identity.as_str())?;
             let relative_path = item.relative_path.replace('\\', "/");
-            let full_chars = item.content.chars().count();
-            let take = full_chars.min(remaining);
-            let excerpt: String = item.content.chars().take(take).collect();
-            remaining -= take;
+            let excerpt = selected.text;
             let ns: i64 = file
                 .source_version
                 .strip_prefix("mtime_ns=")?
@@ -71,11 +73,47 @@ pub(crate) fn collect_sources(
                 .parse()
                 .ok()?;
             let modified_at_utc = DateTime::<Utc>::from_timestamp_nanos(ns).to_rfc3339();
-            let reason = if take < full_chars {
+            let reason = if selected.truncated {
                 Some("excerpt_character_budget".to_string())
             } else {
                 item.reason.clone()
             };
+            let mut limits =
+                serde_json::to_value(&profile.parse).expect("serializable parse profile");
+            let mut audit = selected
+                .audit
+                .as_ref()
+                .map(|a| serde_json::to_value(a).unwrap())
+                .unwrap_or_else(|| serde_json::json!({"version": 1}));
+            let status = if item.parse_status == ParseStatus::NotParsed {
+                "not_parsed"
+            } else if item.parse_status != ParseStatus::Success {
+                "parse_failed"
+            } else if excerpt.is_empty()
+                || selected
+                    .audit
+                    .as_ref()
+                    .is_some_and(|a| a.usable_chars == Some(0))
+            {
+                "empty_excerpt"
+            } else {
+                "usable_excerpt"
+            };
+            audit["primary_status"] = serde_json::json!(status);
+            audit["excerpt_ranges"] = serde_json::to_value(selected.ranges).unwrap();
+            audit["parser_version"] = serde_json::json!(item.parser_backend);
+            audit["algorithm_versions"] = serde_json::json!({
+                "cache_payload": "1", "excerpt": crate::source_allocation::EXCERPT_POLICY_VERSION,
+                "admission": profile.admission_policy_version,
+                "pdf_selection": profile.parse.pdf.selection_policy_version });
+            if status == "empty_excerpt"
+                && item.content.is_empty()
+                && !item.truncated
+                && item.evidence_audit.is_some()
+            {
+                audit["primary_reason"] = serde_json::json!("empty_document");
+            }
+            limits["evidence_audit"] = audit;
             Some(ScanSource {
                 source_id: format!("src_{}", crate::store::sha256_hex(relative_path.as_bytes())),
                 relative_path,
@@ -90,9 +128,8 @@ pub(crate) fn collect_sources(
                 worker_lane: item.worker_lane,
                 parse_status: item.parse_status,
                 parse_truncated: item.truncated,
-                excerpt_truncated: take < full_chars,
-                coverage_limits: serde_json::to_value(&profile.parse)
-                    .expect("serializable parse profile"),
+                excerpt_truncated: selected.truncated,
+                coverage_limits: limits,
                 reason,
                 absolute_path: item.absolute_path.clone(),
                 guard: file
@@ -123,7 +160,9 @@ pub(crate) fn snapshot_sources(
     let mut evidence = Vec::new();
     for row in &artifact.file_rows {
         let file = files.get(row.file_identity.as_str())?;
-        let content = if row.parse_status == ParseStatus::Success {
+        let (content, evidence_audit) = if row.parser_backend == "pdf_metadata_v2" {
+            (String::new(), None)
+        } else if row.parse_status == ParseStatus::Success {
             match store
                 .lookup_cache(
                     &row.file_identity,
@@ -134,16 +173,18 @@ pub(crate) fn snapshot_sources(
                     true,
                 )
                 .ok()?
+                .decode_payload(crate::store::cache::PARSE_CACHE_PAYLOAD_VERSION)
             {
                 CacheLookup::Fresh(entry) if entry.content_sha256 == row.content_sha256 => {
-                    entry.content
+                    (entry.content, entry.evidence_audit)
                 }
                 _ => return None,
             }
         } else {
-            String::new()
+            (String::new(), None)
         };
         evidence.push(ContextFileEvidence {
+            evidence_audit,
             file_identity: row.file_identity.clone(),
             absolute_path: file.path.clone(),
             relative_path: row.relative_path.clone(),
@@ -194,6 +235,12 @@ pub(crate) fn fingerprint_sources(
             source.reason = Some("source_unstable_or_fingerprint_unavailable".to_string());
             source.excerpt.clear();
             source.excerpt_sha256 = crate::store::sha256_hex(b"");
+            if let Some(audit) = source.coverage_limits.get_mut("evidence_audit") {
+                audit["usable_chars"] = serde_json::json!(0);
+                audit["content_units"] = serde_json::json!([]);
+                audit["excerpt_ranges"] = serde_json::json!([]);
+                audit["primary_status"] = serde_json::json!("parse_failed");
+            }
         }
     }
 }

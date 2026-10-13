@@ -5,7 +5,14 @@
 //! envelope; operation payloads contain domain data and never embed a second
 //! transport protocol.
 
+pub use ai_daily_scanner_contract::{pdf_sample_pages, PdfPageAudit, PdfPageObservation};
 use serde::{Deserialize, Serialize};
+
+mod content_audit;
+pub use content_audit::{
+    AuditTextBuilder, ContentUnit, ContentUnitKind, ParsedContentAudit, SourceRange,
+    SourceRangeUnit,
+};
 
 pub const CONTRACT: &str = "ai_daily_worker";
 pub const CONTRACT_VERSION: &str = "ai_daily_worker_v2";
@@ -147,6 +154,8 @@ pub enum ParserLimits {
     Pdf {
         max_pages: u64,
         excerpt_max_chars: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        selected_pages: Option<Vec<u64>>,
     },
     #[serde(rename = "sharepoint_text")]
     SharepointText { excerpt_max_chars: u64 },
@@ -193,8 +202,18 @@ impl ParserLimits {
             Self::Pdf {
                 max_pages,
                 excerpt_max_chars,
+                selected_pages,
             } => {
                 validate_range(*max_pages, 1, 10_000, "max_pages")?;
+                if selected_pages.as_ref().is_some_and(|pages| {
+                    pages.is_empty()
+                        || pages.len() as u64 > *max_pages
+                        || pages.contains(&0)
+                        || pages.iter().collect::<std::collections::HashSet<_>>().len()
+                            != pages.len()
+                }) {
+                    return Err("invalid PDF selected pages".into());
+                }
                 validate_range(*excerpt_max_chars, 1, 10_000_000, "excerpt_max_chars")
             }
             Self::SharepointText { excerpt_max_chars } => {
@@ -250,6 +269,8 @@ pub struct ParseResult {
     pub file_path: String,
     pub file_type: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_audit: Option<ParsedContentAudit>,
     pub parser_backend: ParserBackend,
     pub worker_lane: WorkerLane,
     pub truncated: bool,
@@ -271,7 +292,10 @@ impl ClassifyRequest {
         validate_absolute_path(&self.file_path, "file_path")?;
         validate_source_version(&self.source_version)?;
         validate_range(self.max_pages, 1, 10_000, "max_pages")?;
-        if self.policy_version == "pdf_text_presence_v1" {
+        if matches!(
+            self.policy_version.as_str(),
+            "pdf_text_presence_v1" | "pdf_text_presence_v2"
+        ) {
             Ok(())
         } else {
             Err("classifier policy version mismatch".to_string())
@@ -291,6 +315,8 @@ pub enum ClassifyStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClassifyResult {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_audit: Option<PdfPageAudit>,
     pub status: ClassifyStatus,
     pub page_count: Option<u64>,
     pub result_examined_pages: Option<u64>,
@@ -299,6 +325,16 @@ pub struct ClassifyResult {
 
 impl ClassifyResult {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(audit) = &self.page_audit {
+            audit.validate()?;
+            if self.result_examined_pages != Some(audit.checked_pages.len() as u64)
+                || self
+                    .page_count
+                    .is_none_or(|count| audit.checked_pages.iter().any(|page| *page > count))
+            {
+                return Err("PDF observed pages violate page counts".into());
+            }
+        }
         match self.status {
             ClassifyStatus::TextInParseWindow | ClassifyStatus::NoTextInParseWindow => {
                 if self.diagnostic.is_some() {
@@ -366,6 +402,9 @@ impl ClassifyResult {
 
 impl ParseResult {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(audit) = &self.evidence_audit {
+            audit.validate(&self.content)?;
+        }
         validate_absolute_path(&self.file_path, "file_path")?;
         validate_extension(&self.file_type, "file_type")?;
         validate_source_version(&self.observed_source_version)?;
