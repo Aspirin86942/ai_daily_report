@@ -1,6 +1,6 @@
 //! Local PDF classifier port（spec Part 7.1）。
 //!
-//! 生产实现通过 Python worker-v2 pool 调用；测试
+//! 生产实现通过 Rust PDF worker-v3 pool 调用；测试
 //! adapter 返回内存结果。trait 返回 typed ``ClassifyResult``（含
 //! text/no-text/unknown/error 四态），``Err(ParseFailure)`` 只表示进程/传输
 //! 层失败（timeout/crash/坏响应/外层 error），由调度器映射为 ``unknown``。
@@ -32,7 +32,7 @@ impl std::ops::Deref for ClassifyOperation {
     }
 }
 
-/// 本地可替换 PDF 分类 adapter。生产使用 worker-v2 pool，测试使用内存结果。
+/// 本地可替换 PDF 分类 adapter。生产使用 worker-v3 pool，测试使用内存结果。
 pub trait PdfClassifierPort: Send + Sync {
     fn classify_pdf(
         &self,
@@ -60,7 +60,7 @@ impl PdfClassifierExecution {
     }
 }
 
-/// 生产实现：调用 Python worker-v2 pool。
+/// 生产实现：调用 Rust PDF worker-v3 pool。
 #[derive(Clone)]
 pub struct ClassifierPort {
     session: Arc<crate::session::WorkerPool>,

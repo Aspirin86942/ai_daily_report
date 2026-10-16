@@ -1,0 +1,15 @@
+{
+  "paths": {"work_dir":"", "data_dir":"data", "reports_dir":"data/reports", "db_dir":"data/db", "log_dir":"logs"},
+  "llm": {
+    "provider":"deepseek", "model_id":"deepseek-chat", "base_url":"", "temperature":0.2, "max_tokens":2048, "facts_max_tokens":16384,
+    "max_retries":3, "request_timeout_seconds":120.0, "response_format":"json_object", "thinking_mode":null,
+    "thinking_parameter_location":null, "max_request_utf8_bytes":160000, "max_sources_per_batch":8, "max_batches":32,
+    "context_window_tokens":null, "verified_max_output_tokens":null, "truncation_policy":"reduce_once", "max_strategy_changes":1
+  },
+  "report": {"scope_id":"personal_work", "root_alias":"work", "timezone":"Asia/Shanghai", "default_target":"previous_calendar_day", "notes_dir":"data/report_notes"},
+  "recovery": {"enforce_model_budgets":true,"missed_days_policy":"latest_due_day_with_gap_notice","max_calls_per_run":12,"max_calls_per_calendar_day":30,"run_budget_seconds":900,"lock_wait_seconds":5.0,"max_tokens_per_run":null,"max_tokens_per_calendar_day":null,"max_cost_per_run_microunits":null,"max_cost_per_calendar_day_microunits":null,"model_pricing":null},
+  "retention": {"input_snapshot_days":14,"terminal_run_days":30,"snapshot_max_mib":512},
+  "schedule": {"task_name":"AI Daily Report","local_time":"09:00","logon_catchup":true,"wake_to_run":false,"allow_on_battery":true,"stop_on_battery":false,"restart_count":2,"restart_interval_minutes":15,"execution_limit_minutes":20},
+  "scanner": {},
+  "proxy": {"http_proxy":"", "https_proxy":""}
+}

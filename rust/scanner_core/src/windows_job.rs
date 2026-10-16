@@ -19,14 +19,15 @@ use windows_sys::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JobObjectBasicAccountingInformation,
     JobObjectExtendedLimitInformation, QueryInformationJobObject, SetInformationJobObject,
     TerminateJobObject, JOBOBJECT_BASIC_ACCOUNTING_INFORMATION,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_JOB_MEMORY,
+    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
     InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT, PROCESS_INFORMATION,
-    PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    WaitForSingleObject, CREATE_NO_WINDOW, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT,
+    PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
 use crate::process::{
@@ -40,6 +41,26 @@ const TIMEOUT_EXIT_CODE: u32 = 124;
 pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     let started = Instant::now();
     let job = create_kill_on_close_job().map_err(ProcessFailure::before_start)?;
+    if let Some(limit) = spec.memory_limit_bytes {
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY;
+        limits.JobMemoryLimit = usize::try_from(limit)
+            .map_err(|_| ProcessFailure::before_start(ProcessError::ContainmentFailed))?;
+        if unsafe {
+            SetInformationJobObject(
+                job.raw(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<c_void>(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        } == 0
+        {
+            return Err(ProcessFailure::before_start(
+                ProcessError::ContainmentFailed,
+            ));
+        }
+    }
     let mut rss_observation = JobRssObservation::new(spec.rss_tracker.as_ref(), job.raw());
     let (child_stdin, parent_stdin) = create_pipe(false).map_err(ProcessFailure::before_start)?;
     let (parent_stdout, child_stdout) = create_pipe(true).map_err(ProcessFailure::before_start)?;
@@ -75,7 +96,7 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
             null(),
             null(),
             1,
-            CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT,
+            CREATE_SUSPENDED | CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
             null(),
             current_dir_ptr,
             &startup.StartupInfo,
@@ -136,11 +157,24 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
     let stdout_thread = thread::spawn(move || read_bounded(&mut stdout_file, capture_limit));
     let stderr_thread = thread::spawn(move || read_bounded(&mut stderr_file, capture_limit));
 
-    let wait_result = unsafe {
-        WaitForSingleObject(
-            process.raw(),
-            duration_to_wait_ms(spec.timeout.saturating_sub(started.elapsed())),
-        )
+    let (wait_result, cancelled) = loop {
+        let cancelled = spec
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
+        let remaining = spec.timeout.saturating_sub(started.elapsed());
+        if cancelled || remaining.is_zero() {
+            break (WAIT_TIMEOUT, cancelled);
+        }
+        let waited = unsafe {
+            WaitForSingleObject(
+                process.raw(),
+                duration_to_wait_ms(remaining.min(Duration::from_millis(50))),
+            )
+        };
+        if waited != WAIT_TIMEOUT {
+            break (waited, false);
+        }
     };
     if wait_result == WAIT_TIMEOUT {
         if !terminate_and_wait(&job, &process) {
@@ -149,7 +183,11 @@ pub(crate) fn run(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
         let _ = join_optional_writer(&mut input_thread);
         let _ = join_reader(stdout_thread);
         let _ = join_reader(stderr_thread);
-        return Err(ProcessFailure::after_start(ProcessError::TimedOut));
+        return Err(ProcessFailure::after_start(if cancelled {
+            ProcessError::Cancelled
+        } else {
+            ProcessError::TimedOut
+        }));
     }
     if wait_result != WAIT_OBJECT_0 {
         if !terminate_and_wait(&job, &process) {
@@ -223,7 +261,7 @@ fn create_kill_on_close_job() -> Result<OwnedHandle, ProcessError> {
     }
 }
 
-/// Long-lived worker containment handle. Each worker-v2 session
+/// Long-lived worker containment handle. Each worker-v3 session
 /// child gets its own kill-on-close Job Object, so terminating one request's
 /// process tree can never kill a sibling session in the same pool.
 pub(crate) struct SessionJob(OwnedHandle);

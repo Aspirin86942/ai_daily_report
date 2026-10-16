@@ -1,8 +1,8 @@
 use ai_daily_scanner_contract::{
-    quota_defaults, ContextProfile, DiscoveryProfile, ExecutionProfile, FallbackBackend,
-    NormalizedScannerSettings, OfficeParseProfile, ParseProfile, PdfParseProfile, ReportMode,
-    ScannerSettings, TextParseProfile, Validate, ADMISSION_POLICY_VERSION,
-    CLASSIFIER_POLICY_VERSION, COMPRESSION_POLICY_VERSION, PRIORITY_POLICY_VERSION,
+    quota_defaults, ContextProfile, DiscoveryProfile, ExecutionProfile, NormalizedScannerSettings,
+    OfficeParseProfile, ParseProfile, PdfParseProfile, ReportMode, ScannerSettings,
+    TextParseProfile, Validate, ADMISSION_POLICY_VERSION, CLASSIFIER_POLICY_VERSION,
+    COMPRESSION_POLICY_VERSION, PRIORITY_POLICY_VERSION,
 };
 use std::collections::BTreeMap;
 
@@ -13,7 +13,7 @@ const DEFAULT_IGNORED_PATTERNS: &[&str] = &["~$*", "*.tmp"];
 const MIB: u64 = 1024 * 1024;
 
 /// Merge caller-controlled leaves with the current compiled scanner policy.
-/// Routing, backend identities and fallback order are deliberately not part of
+/// Routing and backend identities are deliberately not part of
 /// the public settings surface.
 pub fn normalize_scanner_settings(
     raw: &ScannerSettings,
@@ -147,13 +147,6 @@ pub fn normalize_scanner_settings(
             },
             office: OfficeParseProfile {
                 primary_backend: "rust_office_oxide_v2".to_string(),
-                fallback_enabled: true,
-                fallback_order: vec![
-                    FallbackBackend::PythonOfficeV2,
-                    FallbackBackend::PythonSharepointTextV2,
-                ],
-                fallback_after_timeout: raw.fallback_after_timeout.unwrap_or(false),
-                fallback_policy_version: "worker_v2_fixed_routing".to_string(),
                 legacy_extensions_enabled: raw.legacy_office_enabled.unwrap_or(false),
                 excel_max_sheets,
                 excel_max_rows,
@@ -168,7 +161,7 @@ pub fn normalize_scanner_settings(
             },
             pdf: PdfParseProfile {
                 selection_policy_version: CLASSIFIER_POLICY_VERSION.to_string(),
-                backend: "python_pdf_text_v2".to_string(),
+                backend: "rust_pdfium_v3".to_string(),
                 max_pages: pdf_max_pages,
                 excerpt_max_chars: document_excerpt_max_chars,
             },

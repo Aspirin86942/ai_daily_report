@@ -78,28 +78,22 @@ impl RouteStackFingerprint {
         engine_build: &str,
         office_contract: &str,
         office_build: &str,
-        python_fallback: Option<(&str, &str)>,
-    ) -> Result<Self, String> {
-        let mut members = vec![
-            RouteStackMember::engine(engine_build),
-            RouteStackMember::worker("office_worker", office_contract, office_build),
-        ];
-        if let Some((contract, build)) = python_fallback {
-            members.push(RouteStackMember::worker("python_worker", contract, build));
-        }
-        Self::from_members("modern_office", members)
-    }
-
-    pub fn python_document(
-        engine_build: &str,
-        python_contract: &str,
-        python_build: &str,
     ) -> Result<Self, String> {
         Self::from_members(
-            "python_document",
+            "office",
             vec![
                 RouteStackMember::engine(engine_build),
-                RouteStackMember::worker("python_worker", python_contract, python_build),
+                RouteStackMember::worker("office_worker", office_contract, office_build),
+            ],
+        )
+    }
+
+    pub fn pdf(engine_build: &str, pdf_contract: &str, pdf_build: &str) -> Result<Self, String> {
+        Self::from_members(
+            "pdf",
+            vec![
+                RouteStackMember::engine(engine_build),
+                RouteStackMember::worker("pdf_worker", pdf_contract, pdf_build),
             ],
         )
     }
@@ -137,17 +131,18 @@ impl RouteStackFingerprint {
 pub struct RouteStackFingerprints {
     pub text_like: RouteStackFingerprint,
     pub modern_office: RouteStackFingerprint,
-    pub python_document: RouteStackFingerprint,
+    pub pdf: RouteStackFingerprint,
 }
 
 impl RouteStackFingerprints {
     pub(crate) fn for_route(&self, route: ParserRoute) -> &RouteStackFingerprint {
         match route {
             ParserRoute::LightText => &self.text_like,
-            ParserRoute::RustOffice | ParserRoute::RustXlsx => &self.modern_office,
-            ParserRoute::Pdf | ParserRoute::PythonOffice | ParserRoute::PythonSharepointText => {
-                &self.python_document
-            }
+            ParserRoute::RustOffice
+            | ParserRoute::RustXlsx
+            | ParserRoute::RustXls
+            | ParserRoute::RustLegacyOffice => &self.modern_office,
+            ParserRoute::Pdf => &self.pdf,
         }
     }
 }
@@ -648,9 +643,9 @@ pub(crate) fn recompute_rank(parser_backend: &str) -> Option<i64> {
         "light_text_v2" => Some(1),
         "rust_xlsx_bounded_v2" => Some(2),
         "rust_office_oxide_v2" => Some(2),
-        "python_sharepoint_text_v2" => Some(3),
-        "python_office_v2" => Some(4),
-        "python_pdf_text_v2" => Some(10),
+        "rust_legacy_office_v3" => Some(3),
+        "rust_xls_calamine_v3" => Some(4),
+        "rust_pdfium_v3" => Some(10),
         _ => None,
     }
 }
@@ -836,9 +831,9 @@ fn evict_parse_cache_with_check(
                               WHEN 'light_text_v2' THEN 1
                               WHEN 'rust_xlsx_bounded_v2' THEN 2
                               WHEN 'rust_office_oxide_v2' THEN 2
-                              WHEN 'python_sharepoint_text_v2' THEN 3
-                              WHEN 'python_office_v2' THEN 4
-                              WHEN 'python_pdf_text_v2' THEN 10
+                              WHEN 'rust_legacy_office_v3' THEN 3
+                              WHEN 'rust_xls_calamine_v3' THEN 4
+                              WHEN 'rust_pdfium_v3' THEN 10
                               ELSE 99
                           END ASC,
                           last_accessed_bucket ASC,
@@ -1409,18 +1404,14 @@ mod tests {
         encoding.parse.text.csv_encodings.push("gb18030".into());
         let mut backend = profile.clone();
         backend.parse.office.primary_backend = "different_office_backend_v1".to_string();
-        let mut fallback = profile.clone();
-        fallback.parse.office.fallback_after_timeout = true;
-        let mut fallback_order = profile.clone();
-        fallback_order.parse.office.fallback_order.reverse();
+        let mut legacy = profile.clone();
+        legacy.parse.office.legacy_extensions_enabled = true;
+        let mut pdf = profile.clone();
+        pdf.parse.pdf.max_pages += 1;
         let changed_route = RouteStackFingerprint::text("build-b").unwrap();
-        let changed_backend_route = RouteStackFingerprint::modern_office(
-            "build-a",
-            "ai_daily_worker_v2",
-            "office-build",
-            None,
-        )
-        .unwrap();
+        let changed_backend_route =
+            RouteStackFingerprint::modern_office("build-a", "ai_daily_worker_v3", "office-build")
+                .unwrap();
 
         assert_ne!(base, parse_profile_hash(1, &route, &timeout).unwrap());
         assert_ne!(
@@ -1431,11 +1422,8 @@ mod tests {
         assert_ne!(base, parse_profile_hash(1, &route, &parse).unwrap());
         assert_ne!(base, parse_profile_hash(1, &route, &encoding).unwrap());
         assert_ne!(base, parse_profile_hash(1, &route, &backend).unwrap());
-        assert_ne!(base, parse_profile_hash(1, &route, &fallback).unwrap());
-        assert_ne!(
-            base,
-            parse_profile_hash(1, &route, &fallback_order).unwrap()
-        );
+        assert_ne!(base, parse_profile_hash(1, &route, &legacy).unwrap());
+        assert_ne!(base, parse_profile_hash(1, &route, &pdf).unwrap());
         assert_ne!(
             base,
             parse_profile_hash(1, &changed_route, &profile).unwrap()
@@ -1465,50 +1453,25 @@ mod tests {
 
     #[test]
     fn route_stack_hash_includes_each_applicable_worker_contract_and_build() {
-        let profile = normalize_scanner_settings(&raw_profile(), ReportMode::Daily)
-            .expect("normalized profile");
-        let without_fallback = RouteStackFingerprint::modern_office(
-            "engine-build",
-            "ai_daily_worker_v2",
-            "office-build",
-            None,
-        )
-        .unwrap();
-        let with_fallback = RouteStackFingerprint::modern_office(
-            "engine-build",
-            "ai_daily_worker_v2",
-            "office-build",
-            Some(("ai_daily_worker_v2", "python-build")),
-        )
-        .unwrap();
-        let changed_python = RouteStackFingerprint::modern_office(
-            "engine-build",
-            "ai_daily_worker_v2",
-            "office-build",
-            Some(("ai_daily_worker_v2", "python-build-2")),
-        )
-        .unwrap();
-        let changed_contract = RouteStackFingerprint::modern_office(
-            "engine-build",
-            "ai_daily_worker_v2_changed",
-            "office-build",
-            Some(("ai_daily_worker_v2", "python-build")),
-        )
-        .unwrap();
-
-        let base = parse_profile_hash(1, &without_fallback, &profile).unwrap();
-        assert_ne!(
-            base,
-            parse_profile_hash(1, &with_fallback, &profile).unwrap()
-        );
-        assert_ne!(
-            parse_profile_hash(1, &with_fallback, &profile).unwrap(),
-            parse_profile_hash(1, &changed_python, &profile).unwrap()
-        );
-        assert_ne!(
-            parse_profile_hash(1, &with_fallback, &profile).unwrap(),
-            parse_profile_hash(1, &changed_contract, &profile).unwrap()
-        );
+        let profile = normalized_settings(ReportMode::Daily);
+        for make in [
+            RouteStackFingerprint::modern_office,
+            RouteStackFingerprint::pdf,
+        ] {
+            let base = make("engine", "ai_daily_worker_v3", "worker").unwrap();
+            let hash = parse_profile_hash(1, &base, &profile).unwrap();
+            for (engine, contract, worker) in [
+                ("engine-2", "ai_daily_worker_v3", "worker"),
+                ("engine", "changed-contract", "worker"),
+                ("engine", "ai_daily_worker_v3", "changed-worker"),
+            ] {
+                assert_ne!(
+                    hash,
+                    parse_profile_hash(1, &make(engine, contract, worker).unwrap(), &profile)
+                        .unwrap()
+                );
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

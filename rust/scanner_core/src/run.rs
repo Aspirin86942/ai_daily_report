@@ -119,9 +119,9 @@ pub(crate) fn doctor_command(request: &DoctorRequest) -> ScannerOperation<Doctor
     record_handshake(
         &mut checks,
         &mut first_error,
-        "python_worker_handshake",
+        "pdf_worker_handshake",
         document::worker_command(&request.adapters),
-        "python_office_v2",
+        "rust_pdfium_v3",
     );
 
     let identity = engine_identity();
@@ -397,13 +397,13 @@ fn execute_active_build(
     // The first run performs the parallel preflight; later runs reuse those
     // identities and each session still validates its own hello on startup.
     let office_command = office::worker_command(&request.adapters);
-    let python_command = document::worker_command(&request.adapters);
-    let (office_python_pair, worker_handshake_ms) = if let Some((office, python)) =
-        worker_pools.registered_workers(&office_command, &python_command)
+    let pdf_command = document::worker_command(&request.adapters);
+    let (worker_pair, worker_handshake_ms) = if let Some((office, pdf)) =
+        worker_pools.registered_workers(&office_command, &pdf_command)
     {
-        ((Ok(office), Ok(python)), 0)
+        ((Ok(office), Ok(pdf)), 0)
     } else {
-        // One bounded parallel hello batch validates both worker-v2
+        // One bounded parallel hello batch validates both worker-v3
         // implementations. Pools start lazily on the first operation.
         let remaining_handshake_ms = timing.remaining_work_ms();
         if remaining_handshake_ms == 0 {
@@ -426,17 +426,17 @@ fn execute_active_build(
         let handshake_started = Instant::now();
         let pair = register_worker_pair_observed(
             &office_command,
-            &python_command,
+            &pdf_command,
             handshake_timeout,
             &rss_tracker,
         );
         (pair, elapsed_ms(handshake_started))
     };
-    let (office_result, python_result) = office_python_pair;
+    let (office_result, pdf_result) = worker_pair;
     let (office_worker, office_error) = split_handshake(office_result, "rust_office_oxide_v2");
-    let (python_worker, python_error) = split_handshake(python_result, "python_office_v2");
+    let (pdf_worker, pdf_error) = split_handshake(pdf_result, "rust_pdfium_v3");
     let office_fingerprint = office_worker.as_ref().map(worker_fingerprint);
-    let python_fingerprint = python_worker.as_ref().map(worker_fingerprint);
+    let pdf_fingerprint = pdf_worker.as_ref().map(worker_fingerprint);
     let fingerprint_now_ms = match current_time_millis() {
         Ok(value) => value,
         Err(error) => {
@@ -454,7 +454,7 @@ fn execute_active_build(
     if let Err(error) = store.record_worker_fingerprints(
         active,
         office_fingerprint.as_ref(),
-        python_fingerprint.as_ref(),
+        pdf_fingerprint.as_ref(),
         fingerprint_now_ms,
     ) {
         heartbeat.stop();
@@ -468,7 +468,7 @@ fn execute_active_build(
         );
     }
     let mut handshake_errors: Vec<Diagnostic> =
-        [office_error, python_error].into_iter().flatten().collect();
+        [office_error, pdf_error].into_iter().flatten().collect();
     if !handshake_errors.is_empty() {
         let error = handshake_errors.remove(0);
         return finish_active_error(
@@ -485,7 +485,7 @@ fn execute_active_build(
             timing,
         );
     }
-    let (Some(office_worker), Some(python_worker)) = (office_worker, python_worker) else {
+    let (Some(office_worker), Some(pdf_worker)) = (office_worker, pdf_worker) else {
         return finish_active_error(
             request,
             version,
@@ -505,30 +505,29 @@ fn execute_active_build(
             timing,
         );
     };
-    let route_stacks =
-        match route_stack_fingerprints(version, profile, &office_worker, &python_worker) {
-            Ok(value) => value,
-            Err(message) => {
-                return finish_active_error(
-                    request,
-                    version,
-                    store,
-                    active,
-                    heartbeat,
-                    Vec::new(),
-                    diagnostic(
-                        ErrorCode::InternalError,
-                        message,
-                        false,
-                        DiagnosticStage::Cache,
-                    ),
-                    elapsed_summary(started_at),
-                    worker_handshake_ms,
-                    &rss_tracker,
-                    timing,
-                );
-            }
-        };
+    let route_stacks = match route_stack_fingerprints(version, &office_worker, &pdf_worker) {
+        Ok(value) => value,
+        Err(message) => {
+            return finish_active_error(
+                request,
+                version,
+                store,
+                active,
+                heartbeat,
+                Vec::new(),
+                diagnostic(
+                    ErrorCode::InternalError,
+                    message,
+                    false,
+                    DiagnosticStage::Cache,
+                ),
+                elapsed_summary(started_at),
+                worker_handshake_ms,
+                &rss_tracker,
+                timing,
+            );
+        }
+    };
 
     // ---- discovery (with engine-owned SourceGuardV2) ----
     let remaining_discovery_ms = timing.remaining_work_ms();
@@ -585,15 +584,15 @@ fn execute_active_build(
 
     // ---- assemble + execute the deep-module scheduler ----
     let params = crate::session::SessionParams::from_settings(normalized_settings);
-    let (office_pool, python_pool) = worker_pools.resolve(
+    let (office_pool, pdf_pool) = worker_pools.resolve(
         office_command,
         office_worker.clone(),
-        python_command.clone(),
-        python_worker.clone(),
+        pdf_command.clone(),
+        pdf_worker.clone(),
         params,
     );
-    let classifier_port = ClassifierPort::new(python_pool.clone());
-    let parser_port = ProductionParser::new(profile, python_pool.clone(), office_pool.clone());
+    let classifier_port = ClassifierPort::new(pdf_pool.clone());
+    let parser_port = ProductionParser::new(profile, pdf_pool.clone(), office_pool.clone());
     let cache_port = StoreCachePort::new(
         PathBuf::from(&request.scan_db_path),
         route_stacks,
@@ -669,13 +668,14 @@ fn execute_active_build(
         office_contract: Some(office_worker.identity.worker_contract_version.clone()),
         office_version: Some(office_worker.identity.worker_version.clone()),
         office_build: Some(office_worker.identity.worker_build.clone()),
-        python_contract: Some(python_worker.identity.worker_contract_version.clone()),
-        python_version: Some(python_worker.identity.worker_version.clone()),
-        python_build: Some(python_worker.identity.worker_build.clone()),
-        // carry：worker-v2 hello 的真实 build identity。
-        // PDF 被 profile 允许时 hello 已由 preflight fail-closed
-        // 保证存在；未允许时没有分类动作，classifier build 保持 None。
-        classifier_build: Some(python_worker.identity.worker_build.clone()),
+        pdf_contract: Some(pdf_worker.identity.worker_contract_version.clone()),
+        pdf_version: Some(pdf_worker.identity.worker_version.clone()),
+        pdf_build: Some(pdf_worker.identity.worker_build.clone()),
+        // Classification records retain a 64-character digest of the complete
+        // native worker identity, whose build includes the pinned PDFium input.
+        classifier_build: Some(crate::store::sha256_hex(
+            &serde_json::to_vec(&pdf_worker.identity).expect("validated worker identity"),
+        )),
     };
 
     // Persistence boundary 2: the complete discovery inventory is committed in
@@ -1001,7 +1001,7 @@ fn execute_active_build(
         }
     };
     let session_stats =
-        crate::session::SessionPoolStats::combine(office_pool.stats(), python_pool.stats());
+        crate::session::SessionPoolStats::combine(office_pool.stats(), pdf_pool.stats());
     let peak_worker_rss_bytes = combine_peak_rss(
         rss_tracker.peak_worker_rss_bytes(),
         session_stats.peak_worker_rss_bytes,
@@ -2052,8 +2052,8 @@ fn snapshot_classification_audit(
 fn snapshot_worker_lane(lane: &str) -> AuditWorkerLane {
     match lane {
         "rust_core" => AuditWorkerLane::RustCore,
-        "rust_office_process_v2" => AuditWorkerLane::RustOfficeProcessV2,
-        "python_document_process_v2" => AuditWorkerLane::PythonDocumentProcessV2,
+        "rust_office_process_v3" => AuditWorkerLane::RustOfficeProcessV3,
+        "rust_pdf_process_v3" => AuditWorkerLane::RustPdfProcessV3,
         _ => AuditWorkerLane::NotParsed,
     }
 }
@@ -2119,26 +2119,20 @@ fn worker_fingerprint(worker: &RegisteredWorker) -> WorkerFingerprint {
 
 fn route_stack_fingerprints(
     version: &EngineIdentity,
-    profile: &ai_daily_scanner_contract::NormalizedScannerSettings,
     office_worker: &RegisteredWorker,
-    python_worker: &RegisteredWorker,
+    pdf_worker: &RegisteredWorker,
 ) -> Result<RouteStackFingerprints, String> {
-    let python_fallback = profile.parse.office.fallback_enabled.then_some((
-        python_worker.identity.worker_contract_version.as_str(),
-        python_worker.identity.worker_build.as_str(),
-    ));
     Ok(RouteStackFingerprints {
         text_like: RouteStackFingerprint::text(&version.engine_build)?,
         modern_office: RouteStackFingerprint::modern_office(
             &version.engine_build,
             &office_worker.identity.worker_contract_version,
             &office_worker.identity.worker_build,
-            python_fallback,
         )?,
-        python_document: RouteStackFingerprint::python_document(
+        pdf: RouteStackFingerprint::pdf(
             &version.engine_build,
-            &python_worker.identity.worker_contract_version,
-            &python_worker.identity.worker_build,
+            &pdf_worker.identity.worker_contract_version,
+            &pdf_worker.identity.worker_build,
         )?,
     })
 }
@@ -2858,10 +2852,9 @@ mod tests {
     fn post_outcome_rejection_commits_a_replayable_minimal_error() {
         let directory = tempdir().expect("temporary directory should be created");
         let scan_db = directory.path().join(crate::store::SCAN_DB_FILENAME);
-        let mut request: BuildContextRequest = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/scanner_contract/v1/request.json"
-        ))
-        .expect("request fixture");
+        let mut request: BuildContextRequest =
+            serde_json::from_str(include_str!("../tests/fixtures/request.json"))
+                .expect("request fixture");
         request.request_id = "00000000-0000-4000-8000-000000000001".to_string();
         request.work_dir = directory.path().to_string_lossy().into_owned();
         request.scan_db_path = scan_db.to_string_lossy().into_owned();
@@ -2870,12 +2863,11 @@ mod tests {
             .join("office-worker.exe")
             .to_string_lossy()
             .into_owned();
-        request.adapters.python_executable = directory
+        request.adapters.pdf_worker_path = directory
             .path()
-            .join("python.exe")
+            .join("pdf.exe")
             .to_string_lossy()
             .into_owned();
-        request.adapters.python_module_root = directory.path().to_string_lossy().into_owned();
 
         let profile = normalize_scanner_settings(&request.scanner_settings, request.report_mode)
             .expect("normalized scanner profile");
@@ -2892,17 +2884,17 @@ mod tests {
             BeginRunOutcome::Stored(_) => panic!("expected a new active run"),
         };
         let office = WorkerFingerprint {
-            contract: "ai_daily_worker_v2".to_string(),
+            contract: "ai_daily_worker_v3".to_string(),
             version: "0.1.0".to_string(),
             build: "office-build".to_string(),
         };
-        let python = WorkerFingerprint {
-            contract: "ai_daily_worker_v2".to_string(),
+        let pdf = WorkerFingerprint {
+            contract: "ai_daily_worker_v3".to_string(),
             version: "0.1.0".to_string(),
-            build: "python-build".to_string(),
+            build: "pdf-build".to_string(),
         };
         store
-            .record_worker_fingerprints(&active, Some(&office), Some(&python), now_ms)
+            .record_worker_fingerprints(&active, Some(&office), Some(&pdf), now_ms)
             .expect("worker fingerprints");
         let invalid_outcome = FinalizationBatch {
             status: RunStatus::Success,

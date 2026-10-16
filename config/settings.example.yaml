@@ -1,16 +1,15 @@
 app:
   name: "审计日报生成器"
-  version: "5.0.0"
+  version: "rust-0.1.0"
 
 paths:
-  # Source checkout: copy this file locally and use an absolute work directory.
-  # Installed mode keeps config/data/reports/db/logs below <install-root>/shared
-  # through the launcher-owned DAILY_REPORT_* absolute path contract.
-  # Windows example: D:/audit-work (escape backslashes inside quoted YAML).
+  # 使用绝对工作路径。正式安装时将配置和以下输出目录放在程序包之外。
+  # 相对路径以 EXE 所在目录为基准。
   work_dir: "D:/audit-work"
   data_dir: "data"
   reports_dir: "data/reports"
   db_dir: "data/db"
+  log_dir: "logs"
 
 llm:
   provider: "deepseek"
@@ -18,10 +17,12 @@ llm:
   # API base URL；缺省时 DeepSeek 使用 https://api.deepseek.com。
   base_url: "https://api.deepseek.com"
   temperature: 0.2
-  # 保留足够 token 预算，避免日报生成被截断。
-  max_tokens: 2048
+  # 成稿、周报和月报的输出上限。
+  max_tokens: 8192
+  # 事实提取单独设置输出容量，实际值不超过已验证的模型输出上限。
+  facts_max_tokens: 16384
   max_retries: 3
-  # 单次实际请求的超时；SDK 自动重试关闭，由应用计数。
+  # 单次请求超时；应用统一控制尝试次数。
   request_timeout_seconds: 120
   response_format: "json_object"
   # 思考模式参数默认不发送；经当前路由联调后可显式设置 enabled/disabled。
@@ -29,9 +30,10 @@ llm:
   # 直连使用 top_level；需要嵌套参数的网关使用 extra_body。
   # 有效值须与已设置的 thinking_mode 配合；未指定时保持原顶层发送格式。
   thinking_parameter_location: null
-  max_request_utf8_bytes: 16000
+  max_request_utf8_bytes: 160000
   max_sources_per_batch: 8
-  max_batches: 8
+  # 完整摘录的初始分批上限；容量不足时明确停止，不丢弃剩余内容。
+  max_batches: 32
   # 公司网关的模型能力经联调确认后填写；空值禁止发送业务正文。
   context_window_tokens: null
   verified_max_output_tokens: null
@@ -44,7 +46,7 @@ report:
   notes_dir: "data/report_notes"
 
 recovery:
-  enforce_model_budgets: true
+  enforce_model_budgets: false
   missed_days_policy: "latest_due_day_with_gap_notice"
   max_calls_per_run: 12
   max_calls_per_calendar_day: 30
@@ -54,7 +56,7 @@ recovery:
 retention:
   input_snapshot_days: 14
   terminal_run_days: 30
-  snapshot_max_mib: 512
+  snapshot_max_mib: 8
 
 schedule:
   task_name: "AI Daily Report"
@@ -70,8 +72,7 @@ schedule:
 scanner:
   # 整节替换旧 scanner 配置，避免文件类型及排除列表被追加合并。
   dynaconf_merge: false
-  index_db_path: "data/db/scan_index_v3.sqlite3"
-  office_worker_path: "rust/target/release/ai-daily-office-parser"
+  index_db_path: "data/db/scan_index_rust_v3.sqlite3"
   allowed_extensions:
     - ".xlsx"
     - ".xls"
@@ -92,8 +93,7 @@ scanner:
   follow_symlinks: false
   cloud_files_policy: "local_only"
   discovery_timeout_seconds: 30
-  # Backend/routing/fallback order are compiled Rust policy.
-  fallback_after_timeout: false
+  # 每种真实格式固定一个 Rust 解析器。
   # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.
   legacy_office_enabled: false
   max_workers: 4

@@ -109,8 +109,8 @@ pub enum RouteKind {
     RustOffice,
     RustXlsx,
     Pdf,
-    PythonOffice,
-    PythonSharepointText,
+    RustXls,
+    RustLegacyOffice,
 }
 
 impl RouteKind {
@@ -119,19 +119,19 @@ impl RouteKind {
             Self::LightText => "light_text_v2",
             Self::RustOffice => "rust_office_oxide_v2",
             Self::RustXlsx => "rust_xlsx_bounded_v2",
-            Self::Pdf => "python_pdf_text_v2",
-            Self::PythonOffice => "python_office_v2",
-            Self::PythonSharepointText => "python_sharepoint_text_v2",
+            Self::Pdf => "rust_pdfium_v3",
+            Self::RustXls => "rust_xls_calamine_v3",
+            Self::RustLegacyOffice => "rust_legacy_office_v3",
         }
     }
 
     pub const fn worker_lane(self) -> &'static str {
         match self {
             Self::LightText => "rust_core",
-            Self::RustOffice | Self::RustXlsx => "rust_office_process_v2",
-            Self::Pdf | Self::PythonOffice | Self::PythonSharepointText => {
-                "python_document_process_v2"
+            Self::RustOffice | Self::RustXlsx | Self::RustXls | Self::RustLegacyOffice => {
+                "rust_office_process_v3"
             }
+            Self::Pdf => "rust_pdf_process_v3",
         }
     }
 
@@ -143,7 +143,7 @@ impl RouteKind {
                 .text
                 .max_chars
                 .min(profile.parse.text.excerpt_max_chars),
-            Self::RustOffice | Self::RustXlsx | Self::PythonOffice | Self::PythonSharepointText => {
+            Self::RustOffice | Self::RustXlsx | Self::RustXls | Self::RustLegacyOffice => {
                 profile.parse.office.document_excerpt_max_chars
             }
             Self::Pdf => profile.parse.pdf.excerpt_max_chars,
@@ -428,14 +428,14 @@ mod tests {
 
     #[test]
     fn route_kind_backends_and_lanes_are_stable() {
-        assert_eq!(RouteKind::Pdf.backend(), "python_pdf_text_v2");
+        assert_eq!(RouteKind::Pdf.backend(), "rust_pdfium_v3");
         assert_eq!(
             RouteKind::RustOffice.worker_lane(),
-            "rust_office_process_v2"
+            "rust_office_process_v3"
         );
         assert_eq!(
-            RouteKind::PythonSharepointText.backend(),
-            "python_sharepoint_text_v2"
+            RouteKind::RustLegacyOffice.backend(),
+            "rust_legacy_office_v3"
         );
     }
 }

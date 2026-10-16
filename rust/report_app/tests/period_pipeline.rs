@@ -1,0 +1,266 @@
+use ai_daily_report::{
+    config::AppConfig,
+    model::transport::{HttpResponse, ModelTransport, TransportFailure},
+    run::{repair_run, run_report, App},
+    types::{Period, ReportRequest, ReportSource, RunContext},
+    ReportError,
+};
+use chrono::{DateTime, Utc};
+use serde_json::{json, Value};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    fs,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+fn now() -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339("2026-10-12T01:00:00Z")
+        .unwrap()
+        .with_timezone(&Utc)
+}
+struct Network {
+    responses: Mutex<VecDeque<HttpResponse>>,
+    requests: Mutex<Vec<Value>>,
+}
+struct NetworkHandle(Arc<Network>);
+impl ModelTransport for NetworkHandle {
+    fn send(&self, body: &[u8], _: Duration) -> Result<HttpResponse, TransportFailure> {
+        self.0
+            .requests
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(body).unwrap());
+        Ok(self
+            .0
+            .responses
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unexpected call"))
+    }
+}
+fn response(value: Value) -> HttpResponse {
+    HttpResponse {
+        status: 200,
+        retry_after: None,
+        body: serde_json::to_vec(
+            &json!({"choices":[{"finish_reason":"stop","message":{"content":value.to_string()}}]}),
+        )
+        .unwrap(),
+    }
+}
+fn weekly() -> Value {
+    serde_json::from_str(include_str!("fixtures/weekly-v1.json")).unwrap()
+}
+fn monthly() -> Value {
+    serde_json::from_str(include_str!("fixtures/monthly-v1.json")).unwrap()
+}
+struct Fixture {
+    _dir: tempfile::TempDir,
+    app: App,
+    network: Arc<Network>,
+}
+impl Fixture {
+    fn new(replies: Vec<HttpResponse>) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("config")).unwrap();
+        fs::write(dir.path().join("config/settings.yaml"),"paths:\n  work_dir: nonexistent\nllm:\n  max_request_utf8_bytes: 64000\n  context_window_tokens: 100000\n  verified_max_output_tokens: 8192\n  max_tokens: 4096\nrecovery:\n  enforce_model_budgets: false\n").unwrap();
+        let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
+        let mut app = App::open(config, now()).unwrap();
+        let network = Arc::new(Network {
+            responses: Mutex::new(replies.into()),
+            requests: Mutex::new(vec![]),
+        });
+        app.transport = Box::new(NetworkHandle(network.clone()));
+        let daily = json!({"date":"2026-10-11","completed_work":"方案草稿待评审。","work_summary":"预算外增加复核。","next_plan":"现有材料未提供。"});
+        app.store.connection().unwrap().execute("INSERT INTO daily_reports(date,completed_work,work_summary,next_plan,raw_json) VALUES ('2026-10-11','','','',?)",[daily.to_string()]).unwrap();
+        Self {
+            _dir: dir,
+            app,
+            network,
+        }
+    }
+    fn request(&self, digit: char, month: bool, save: bool) -> ReportRequest {
+        let period = if month {
+            Period::monthly(now().date_naive(), Some("2026-10"), ReportSource::Db)
+        } else {
+            Period::weekly(now().date_naive(), Some("2026-W41"), ReportSource::Db)
+        }
+        .unwrap();
+        ReportRequest {
+            context: RunContext::new(
+                digit.to_string().repeat(32),
+                now(),
+                period.start,
+                String::new(),
+            )
+            .unwrap(),
+            period,
+            input: String::new(),
+            save,
+            dry_run: false,
+            scheduled: false,
+            regeneration_reason: None,
+        }
+    }
+    fn calls(&self) -> usize {
+        self.network.requests.lock().unwrap().len()
+    }
+}
+
+#[test]
+fn database_week_and_month_publish_without_scanner_and_repeat_reuses() {
+    let f = Fixture::new(vec![response(weekly()), response(monthly())]);
+    let week = run_report(f.request('a', false, true), &f.app).unwrap();
+    let month = run_report(f.request('b', true, true), &f.app).unwrap();
+    assert_eq!(week.action, "published");
+    assert_eq!(month.action, "published");
+    assert_eq!(f.calls(), 2);
+    assert!(week
+        .output_path
+        .as_ref()
+        .unwrap()
+        .ends_with(Path::new("weekly/2026-W41.md")));
+    assert!(month
+        .output_path
+        .as_ref()
+        .unwrap()
+        .ends_with(Path::new("monthly/2026-10.md")));
+    assert!(!f.app.config.index_db_path.exists());
+    assert!(week.markdown.contains("采购审批方案草稿"));
+    assert_eq!(
+        run_report(f.request('c', false, true), &f.app)
+            .unwrap()
+            .action,
+        "reused"
+    );
+    assert_eq!(f.calls(), 2);
+    let text = f.network.requests.lock().unwrap()[0]["messages"][1]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(text.contains("草稿待评审"));
+    assert!(text.contains("2026-10-06"));
+    fs::remove_file(week.output_path.unwrap()).unwrap();
+    assert_eq!(
+        repair_run(&f.app, &week.run_id, now()).unwrap().markdown,
+        week.markdown
+    );
+    assert_eq!(f.calls(), 2);
+}
+
+#[test]
+fn period_preview_does_not_update_formal_table() {
+    let f = Fixture::new(vec![response(monthly())]);
+    let report = run_report(f.request('a', true, false), &f.app).unwrap();
+    assert_eq!(report.action, "preview");
+    assert!(report.output_path.is_none());
+    assert!(f
+        .app
+        .store
+        .current_period("monthly", "2026-10")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        f.app
+            .store
+            .connection()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM monthly_reports", [], |r| r
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn period_failed_call_resumes_original_snapshot_and_publication_conflicts_are_recoverable() {
+    let f = Fixture::new(vec![
+        HttpResponse {
+            status: 400,
+            retry_after: None,
+            body: b"{}".to_vec(),
+        },
+        response(weekly()),
+    ]);
+    assert_eq!(
+        run_report(f.request('a', false, true), &f.app)
+            .unwrap_err()
+            .code,
+        "MODEL_HTTP_ERROR"
+    );
+    f.app
+        .store
+        .connection()
+        .unwrap()
+        .execute("DELETE FROM daily_reports", [])
+        .unwrap();
+    let report = run_report(f.request('b', false, true), &f.app).unwrap();
+    assert_eq!(report.run_id, "a".repeat(32));
+    assert_eq!(f.calls(), 2);
+    let requests = f.network.requests.lock().unwrap();
+    assert_eq!(requests[0], requests[1]);
+    drop(requests);
+    fs::write(report.output_path.unwrap(), "用户修改").unwrap();
+    assert_eq!(
+        repair_run(&f.app, &report.run_id, now()).unwrap_err().code,
+        "OUTPUT_CONFLICT"
+    );
+    assert_eq!(f.calls(), 2);
+}
+
+#[test]
+fn unknown_period_schema_and_changed_period_labels_fail_validation() {
+    let mut changed = weekly();
+    changed["week_label"] = json!("2026-W42");
+    let f = Fixture::new(vec![response(changed)]);
+    let error: ReportError = run_report(f.request('a', false, true), &f.app).unwrap_err();
+    assert_eq!(error.code, "MODEL_RESPONSE_INVALID");
+    assert_eq!(f.calls(), 1);
+}
+
+#[test]
+fn scan_week_and_month_use_native_source_text() {
+    let mut f = Fixture::new(vec![response(weekly()), response(monthly())]);
+    let workers = std::env::var_os("AI_DAILY_TEST_WORKER_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug"));
+    f.app.config.office_worker_path =
+        fs::canonicalize(workers.join("ai-daily-office-parser.exe")).unwrap();
+    f.app.config.pdf_worker_path =
+        fs::canonicalize(workers.join("ai-daily-pdf-parser.exe")).unwrap();
+    fs::create_dir_all(&f.app.config.paths.work_dir).unwrap();
+    let file = f.app.config.paths.work_dir.join("approval.md");
+    fs::write(&file, "预算外采购增加复核，方案尚待评审。\n").unwrap();
+    fs::File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_times(
+            fs::FileTimes::new().set_modified(
+                std::time::UNIX_EPOCH
+                    + Duration::from_secs(
+                        DateTime::parse_from_rfc3339("2026-10-11T02:00:00Z")
+                            .unwrap()
+                            .timestamp() as u64,
+                    ),
+            ),
+        )
+        .unwrap();
+    for (digit, month) in [('a', false), ('b', true)] {
+        let mut request = f.request(digit, month, false);
+        request.period.source = ReportSource::Scan;
+        let outcome = run_report(request, &f.app).unwrap();
+        assert_eq!(outcome.action, "preview");
+    }
+    assert_eq!(f.calls(), 2);
+    assert!(f.app.config.index_db_path.exists());
+    for request in f.network.requests.lock().unwrap().iter() {
+        assert!(request["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("预算外采购增加复核"));
+    }
+}

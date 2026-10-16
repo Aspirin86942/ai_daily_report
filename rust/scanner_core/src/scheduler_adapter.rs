@@ -4,7 +4,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ai_daily_discovery::DiscoveredFileOut;
@@ -25,11 +25,12 @@ use crate::store::{
     RouteStackFingerprints, ScannerStore, StoreError,
 };
 
-/// Store-backed [`CachePort`]. Each operation opens its own connection to the
-/// scan database (WAL allows concurrent connections; the lease heartbeat uses
-/// the same pattern). Only verified successful results are written.
+/// Store-backed [`CachePort`]. One lazily validated connection is reused for
+/// this run's cache operations; each write still commits its own transaction.
+/// The mutex keeps SQLite access serialized independently of worker concurrency.
 pub struct StoreCachePort {
     db_path: PathBuf,
+    store: Mutex<Option<ScannerStore>>,
     route_stacks: RouteStackFingerprints,
     settings: NormalizedScannerSettings,
     deadlines: RunDeadlines,
@@ -46,6 +47,7 @@ impl StoreCachePort {
     ) -> Self {
         Self {
             db_path,
+            store: Mutex::new(None),
             route_stacks,
             settings,
             deadlines,
@@ -53,8 +55,23 @@ impl StoreCachePort {
         }
     }
 
-    fn open(&self) -> Result<ScannerStore, CachePortError> {
-        ScannerStore::open_existing(&self.db_path).map_err(map_store_error)
+    fn with_store<T>(
+        &self,
+        operation: impl FnOnce(&mut ScannerStore) -> Result<T, StoreError>,
+    ) -> Result<T, CachePortError> {
+        let mut slot = self.store.lock().map_err(|_| CachePortError::Store {
+            detail: "cache connection lock is poisoned".to_string(),
+        })?;
+        if slot.is_none() {
+            *slot = Some(ScannerStore::open_existing(&self.db_path).map_err(map_store_error)?);
+        }
+        let result = operation(slot.as_mut().expect("cache connection initialized"));
+        // A failed operation must not carry connection-local failure state into
+        // the next request. Successful operations retain the prepared statements.
+        if result.is_err() {
+            *slot = None;
+        }
+        result.map_err(map_store_error)
     }
 }
 
@@ -76,13 +93,18 @@ impl CachePort for StoreCachePort {
         now_ms: u64,
         records: &[InventoryRecord],
     ) -> Result<HashSet<String>, CachePortError> {
-        let mut store = self.open()?;
         let run_id = i64::try_from(scan_run_id).map_err(|_| CachePortError::InvalidKey {
             detail: "scan_run_id exceeds SQLite integer range".to_string(),
         })?;
-        store
-            .prepare_inventory_with_deadline(records, run_id, now_ms, self.deadlines, &self.clock)
-            .map_err(map_store_error)
+        self.with_store(|store| {
+            store.prepare_inventory_with_deadline(
+                records,
+                run_id,
+                now_ms,
+                self.deadlines,
+                &self.clock,
+            )
+        })
     }
 
     fn lookup_parse(
@@ -98,7 +120,6 @@ impl CachePort for StoreCachePort {
             &self.settings,
         )
         .map_err(|message| CachePortError::InvalidKey { detail: message })?;
-        let store = self.open()?;
         let guard_kind =
             file.source_guard_kind
                 .as_deref()
@@ -111,8 +132,8 @@ impl CachePort for StoreCachePort {
                 .ok_or_else(|| CachePortError::InvalidKey {
                     detail: "source guard sha256 is missing".to_string(),
                 })?;
-        let lookup = store
-            .lookup_cache(
+        let lookup = self.with_store(|store| {
+            store.lookup_cache(
                 &file.file_identity,
                 &file.source_version,
                 guard_kind,
@@ -120,9 +141,7 @@ impl CachePort for StoreCachePort {
                 &profile_hash,
                 inventory_existed_before,
             )
-            .map_err(|error| CachePortError::Store {
-                detail: error.to_string(),
-            })?;
+        })?;
         let lookup = lookup.decode_payload(crate::store::cache::PARSE_CACHE_PAYLOAD_VERSION);
         Ok(ParseLookupOutcome {
             parse_profile_hash: profile_hash,
@@ -149,9 +168,8 @@ impl CachePort for StoreCachePort {
                 .ok_or_else(|| CachePortError::InvalidKey {
                     detail: "source guard sha256 is missing".to_string(),
                 })?;
-        let store = self.open()?;
-        store
-            .lookup_classification_cache(
+        self.with_store(|store| {
+            store.lookup_classification_cache(
                 &file.file_identity,
                 &file.source_version,
                 guard_kind,
@@ -160,16 +178,18 @@ impl CachePort for StoreCachePort {
                 classifier_build,
                 inventory_existed_before,
             )
-            .map_err(|error| CachePortError::Store {
-                detail: error.to_string(),
-            })
+        })
     }
 
     fn write_parse(&self, now_ms: u64, records: &[CacheWriteRecord]) -> Result<(), CachePortError> {
-        let mut store = self.open()?;
-        store
-            .write_success_parse_cache_with_deadline(records, now_ms, self.deadlines, &self.clock)
-            .map_err(map_store_error)
+        self.with_store(|store| {
+            store.write_success_parse_cache_with_deadline(
+                records,
+                now_ms,
+                self.deadlines,
+                &self.clock,
+            )
+        })
     }
 
     fn write_classification(
@@ -177,15 +197,14 @@ impl CachePort for StoreCachePort {
         now_ms: u64,
         records: &[ClassificationCacheWriteRecord],
     ) -> Result<(), CachePortError> {
-        let mut store = self.open()?;
-        store
-            .write_success_classification_cache_with_deadline(
+        self.with_store(|store| {
+            store.write_success_classification_cache_with_deadline(
                 records,
                 now_ms,
                 self.deadlines,
                 &self.clock,
             )
-            .map_err(map_store_error)
+        })
     }
 
     fn touch_access(
@@ -197,36 +216,35 @@ impl CachePort for StoreCachePort {
         if parse_hits.is_empty() && classification_hits.is_empty() {
             return Ok(());
         }
-        let mut store = self.open()?;
-        store
-            .touch_cache_access_with_deadline(
+        self.with_store(|store| {
+            store.touch_cache_access_with_deadline(
                 now_ms,
                 parse_hits,
                 classification_hits,
                 self.deadlines,
                 &self.clock,
             )
-            .map_err(map_store_error)
+        })
     }
 }
 
 /// Production parser adapter. Light text stays in-process; every Office/PDF
-/// route crosses one of the two long-lived worker-v2 pools.
+/// route crosses one of the two long-lived worker-v3 pools.
 pub struct ProductionParser {
     profile: NormalizedScannerSettings,
-    python_pool: Arc<crate::session::WorkerPool>,
+    pdf_pool: Arc<crate::session::WorkerPool>,
     office_pool: Arc<crate::session::WorkerPool>,
 }
 
 impl ProductionParser {
     pub fn new(
         profile: &NormalizedScannerSettings,
-        python_pool: Arc<crate::session::WorkerPool>,
+        pdf_pool: Arc<crate::session::WorkerPool>,
         office_pool: Arc<crate::session::WorkerPool>,
     ) -> Self {
         Self {
             profile: profile.clone(),
-            python_pool,
+            pdf_pool,
             office_pool,
         }
     }
@@ -339,24 +357,8 @@ impl ParserPort for ProductionParser {
     fn parse(&self, request: &ParseRequest) -> ParseResult {
         match request.route {
             RouteKind::LightText => self.parse_light_text(request),
-            RouteKind::Pdf | RouteKind::PythonOffice | RouteKind::PythonSharepointText => {
-                self.parse_with_worker_pool(request, &self.python_pool)
-            }
-            RouteKind::RustOffice | RouteKind::RustXlsx => {
-                let worker_request = crate::parsers::worker_request(
-                    &request.file,
-                    parser_route(request.route),
-                    request.timeout_ms,
-                    &self.profile,
-                );
-                let execution = crate::parsers::office::parse_with_pools(
-                    &self.office_pool,
-                    Some(&self.python_pool),
-                    &worker_request,
-                    &self.profile.parse.office,
-                );
-                office_execution_result(execution, request)
-            }
+            RouteKind::Pdf => self.parse_with_worker_pool(request, &self.pdf_pool),
+            _ => self.parse_with_worker_pool(request, &self.office_pool),
         }
     }
 }
@@ -516,123 +518,123 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-fn office_execution_result(
-    execution: crate::parsers::office::OfficeParseExecution,
-    request: &ParseRequest,
-) -> ParseResult {
-    let parser_started = execution.attempt_count > 0;
-    let response = execution.response;
-    let content = response
-        .as_ref()
-        .map_or_else(String::new, |value| value.content.clone());
-    let truncated = response.as_ref().is_some_and(|value| value.truncated);
-    let final_error = execution.final_failure;
-    let parse_status = if final_error.is_none() {
-        ParseStatus::Success
-    } else if final_error
-        .as_ref()
-        .is_some_and(crate::fallback::ParseFailure::is_timeout)
-    {
-        ParseStatus::Timeout
-    } else {
-        ParseStatus::Error
-    };
-    let fallback_reason_code = execution
-        .primary_failure
-        .as_ref()
-        .map(|failure| crate::store::inventory::enum_text(&failure.diagnostic.error_code))
-        .unwrap_or_default();
-    let warnings = if final_error.is_none() {
-        execution
-            .primary_failure
-            .iter()
-            .map(|failure| failure.diagnostic.clone())
-            .collect()
-    } else {
-        Vec::new()
-    };
-    let failure_class = final_error
-        .as_ref()
-        .map(|failure| failure.class.as_str().to_string())
-        .unwrap_or_default();
-    let error = final_error.map(|failure| failure.diagnostic);
-    let backend = response.as_ref().map_or_else(
-        || {
-            execution
-                .last_started_backend
-                .map_or("not_parsed", |backend| backend.as_str())
-                .to_string()
-        },
-        |response| response.parser_backend.as_str().to_string(),
-    );
-    let worker_lane = response.as_ref().map_or_else(
-        || {
-            execution
-                .last_started_backend
-                .map_or("not_parsed", worker_lane_for_backend)
-                .to_string()
-        },
-        |response| worker_lane_name(response.worker_lane).to_string(),
-    );
-    ParseResult {
-        evidence_audit: response.as_ref().and_then(|r| r.evidence_audit.clone()),
-        file_identity: request.file.file_identity.clone(),
-        content_sha256: crate::store::sha256_hex(content.as_bytes()),
-        content,
-        parser_backend: if parser_started {
-            backend
-        } else {
-            "not_parsed".to_string()
-        },
-        worker_lane: if parser_started {
-            worker_lane
-        } else {
-            "not_parsed".to_string()
-        },
-        truncated,
-        parse_status,
-        error,
-        warnings,
-        failure_class,
-        fallback_backend: execution
-            .fallback_backend
-            .map(|backend| backend.as_str().to_string())
-            .unwrap_or_default(),
-        fallback_reason_code,
-        parse_transport: if parser_started {
-            ParseTransport::Session
-        } else {
-            ParseTransport::NotApplicable
-        },
-        parse_attempt_count: execution.attempt_count,
-        primary_duration_ms: execution.primary_duration_ms,
-        fallback_duration_ms: execution.fallback_duration_ms,
-        parse_duration_ms: execution
-            .primary_duration_ms
-            .saturating_add(execution.fallback_duration_ms),
-    }
-}
-
 fn parser_route(route: RouteKind) -> ParserRoute {
     match route {
         RouteKind::LightText => ParserRoute::LightText,
         RouteKind::RustOffice => ParserRoute::RustOffice,
         RouteKind::RustXlsx => ParserRoute::RustXlsx,
         RouteKind::Pdf => ParserRoute::Pdf,
-        RouteKind::PythonOffice => ParserRoute::PythonOffice,
-        RouteKind::PythonSharepointText => ParserRoute::PythonSharepointText,
+        RouteKind::RustXls => ParserRoute::RustXls,
+        RouteKind::RustLegacyOffice => ParserRoute::RustLegacyOffice,
     }
 }
 
-fn worker_lane_for_backend(backend: ai_daily_worker_contract::ParserBackend) -> &'static str {
-    worker_lane_name(backend.lane())
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{CacheLookup, RouteStackFingerprint};
+    use ai_daily_scanner_contract::{CacheMissReason, ReportMode, ScannerSettings};
+    use std::path::Path;
 
-fn worker_lane_name(lane: ai_daily_worker_contract::WorkerLane) -> &'static str {
-    match lane {
-        ai_daily_worker_contract::WorkerLane::RustOfficeProcessV2 => "rust_office_process_v2",
-        ai_daily_worker_contract::WorkerLane::PythonDocumentProcessV2 => {
-            "python_document_process_v2"
+    fn cache_port(path: &Path) -> StoreCachePort {
+        let clock = RealClock::new();
+        let settings: ScannerSettings = serde_json::from_str("{}").unwrap();
+        StoreCachePort::new(
+            path.to_path_buf(),
+            RouteStackFingerprints {
+                text_like: RouteStackFingerprint::text("test-engine").unwrap(),
+                modern_office: RouteStackFingerprint::modern_office(
+                    "test-engine",
+                    "ai_daily_worker_v3",
+                    "test-office",
+                )
+                .unwrap(),
+                pdf: RouteStackFingerprint::pdf("test-engine", "ai_daily_worker_v3", "test-pdf")
+                    .unwrap(),
+            },
+            crate::config::normalize_scanner_settings(&settings, ReportMode::Daily).unwrap(),
+            RunDeadlines::derive(30_000, &clock).unwrap(),
+            clock,
+        )
+    }
+
+    fn file() -> DiscoveredFileOut {
+        DiscoveredFileOut {
+            file_identity: "test-file".to_string(),
+            path: "C:/fixture/test.txt".to_string(),
+            extension: ".txt".to_string(),
+            modified_at: "2026-10-17T00:00:00".to_string(),
+            size_bytes: 1,
+            source_version: "mtime_ns=1:size=1".to_string(),
+            source_guard_kind: Some("content_sha256_v1".to_string()),
+            source_guard_sha256: Some("a".repeat(64)),
+        }
+    }
+
+    fn assert_miss(port: &StoreCachePort) {
+        let result = port
+            .lookup_parse(&file(), RouteKind::LightText, false)
+            .unwrap();
+        assert!(matches!(
+            result.lookup,
+            CacheLookup::Miss(CacheMissReason::NewFile)
+        ));
+    }
+
+    #[test]
+    fn missing_cache_database_is_not_created_and_can_be_retried() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scan_index_rust_v3.sqlite3");
+        let port = cache_port(&path);
+        assert!(port
+            .lookup_parse(&file(), RouteKind::LightText, false)
+            .is_err());
+        assert!(!path.exists());
+        drop(ScannerStore::open(&path).unwrap());
+        assert_miss(&port);
+        assert_miss(&port);
+    }
+
+    #[test]
+    fn cache_connection_rejects_legacy_schema_and_later_table_loss() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scan_index_rust_v3.sqlite3");
+        let database = rusqlite::Connection::open(&path).unwrap();
+        database.pragma_update(None, "user_version", 2).unwrap();
+        assert!(cache_port(&path)
+            .lookup_parse(&file(), RouteKind::LightText, false)
+            .is_err());
+
+        let current_directory = tempfile::tempdir().unwrap();
+        let current_path = current_directory.path().join("scan_index_rust_v3.sqlite3");
+        drop(ScannerStore::open(&current_path).unwrap());
+        let port = cache_port(&current_path);
+        assert_miss(&port);
+        let external = rusqlite::Connection::open(&current_path).unwrap();
+        external.execute_batch("DROP TABLE parse_cache").unwrap();
+        assert!(port
+            .lookup_parse(&file(), RouteKind::LightText, false)
+            .is_err());
+    }
+
+    #[test]
+    fn concurrent_cache_callers_share_serialized_sqlite_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scan_index_rust_v3.sqlite3");
+        drop(ScannerStore::open(&path).unwrap());
+        let port = Arc::new(cache_port(&path));
+        let threads: Vec<_> = (0..4)
+            .map(|_| {
+                let port = Arc::clone(&port);
+                std::thread::spawn(move || {
+                    for _ in 0..8 {
+                        assert_miss(&port);
+                    }
+                })
+            })
+            .collect();
+        for thread in threads {
+            thread.join().unwrap();
         }
     }
 }

@@ -9,12 +9,15 @@ use std::time::Duration;
 use thiserror::Error;
 
 pub const LATEST_USER_VERSION: i32 = 3;
+pub const APPLICATION_ID: i32 = 0x41445233;
 pub const BUSY_TIMEOUT_MS: u64 = 2_000;
 
 #[derive(Debug, Error)]
 pub enum SchemaError {
     #[error("scanner database schema mismatch: expected user_version=3, found {0}")]
     Mismatch(i32),
+    #[error("scanner database is not the native Rust v3 layout; use an independent database")]
+    LayoutMismatch,
     #[error("scanner database schema initialization failed")]
     Sql(#[from] rusqlite::Error),
 }
@@ -64,16 +67,14 @@ CREATE TABLE scan_run_attempts (
     owner_id TEXT NOT NULL,
     normalized_scan_db_path TEXT NOT NULL,
     normalized_office_worker_path TEXT NOT NULL,
-    normalized_python_executable TEXT NOT NULL,
-    normalized_python_module_root TEXT NOT NULL,
-    python_document_worker_module TEXT NOT NULL,
+    normalized_pdf_worker_path TEXT NOT NULL,
     engine_fingerprint TEXT NOT NULL,
     office_worker_contract TEXT,
     office_worker_version TEXT,
     office_worker_build TEXT,
-    python_worker_contract TEXT,
-    python_worker_version TEXT,
-    python_worker_build TEXT,
+    pdf_worker_contract TEXT,
+    pdf_worker_version TEXT,
+    pdf_worker_build TEXT,
     started_at_ms INTEGER NOT NULL,
     finished_at_ms INTEGER,
     status TEXT NOT NULL CHECK (status IN ('running', 'success', 'partial', 'error', 'abandoned')),
@@ -83,9 +84,9 @@ CREATE TABLE scan_run_attempts (
             office_worker_contract IS NOT NULL
             AND office_worker_version IS NOT NULL
             AND office_worker_build IS NOT NULL
-            AND python_worker_contract IS NOT NULL
-            AND python_worker_version IS NOT NULL
-            AND python_worker_build IS NOT NULL
+            AND pdf_worker_contract IS NOT NULL
+            AND pdf_worker_version IS NOT NULL
+            AND pdf_worker_build IS NOT NULL
         )
     ),
     PRIMARY KEY (scan_run_id, attempt_number)
@@ -414,7 +415,13 @@ pub fn user_version(connection: &Connection) -> Result<i32, SchemaError> {
 pub fn require_v3(connection: &Connection) -> Result<(), SchemaError> {
     let version = user_version(connection)?;
     if version == LATEST_USER_VERSION {
-        Ok(())
+        let application: i32 =
+            connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+        if application == APPLICATION_ID {
+            Ok(())
+        } else {
+            Err(SchemaError::LayoutMismatch)
+        }
     } else {
         Err(SchemaError::Mismatch(version))
     }
@@ -428,6 +435,7 @@ pub fn create_v3(connection: &mut Connection) -> Result<(), SchemaError> {
     let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute_batch(V3_DDL)?;
     transaction.pragma_update(None, "user_version", LATEST_USER_VERSION)?;
+    transaction.pragma_update(None, "application_id", APPLICATION_ID)?;
     transaction.commit()?;
     Ok(())
 }
@@ -440,7 +448,7 @@ mod tests {
     #[test]
     fn fresh_database_is_created_at_v3_and_reopens() {
         let directory = tempdir().expect("temporary directory");
-        let path = directory.path().join("scan_index_v3.sqlite3");
+        let path = directory.path().join("scan_index_rust_v3.sqlite3");
         let mut connection = Connection::open(&path).expect("database opens");
         configure_connection(&connection).expect("pragmas");
         create_v3(&mut connection).expect("v3 schema");
@@ -470,5 +478,26 @@ mod tests {
                 matches!(require_v3(&connection), Err(SchemaError::Mismatch(found)) if found == version)
             );
         }
+    }
+
+    #[test]
+    fn a_python_v3_database_is_rejected_without_schema_changes() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.pragma_update(None, "user_version", 3).unwrap();
+        connection
+            .execute_batch("CREATE TABLE legacy_marker(id INTEGER);")
+            .unwrap();
+        assert!(matches!(
+            require_v3(&connection),
+            Err(SchemaError::LayoutMismatch)
+        ));
+        let tables: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tables, 1);
     }
 }

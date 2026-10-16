@@ -20,9 +20,7 @@ struct NativeConfig {
     scan_db_path: String,
     scanner_settings: ScannerSettings,
     office_worker_path: String,
-    python_executable: String,
-    python_module_root: String,
-    python_document_worker_module: String,
+    pdf_worker_path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -58,9 +56,7 @@ impl PyScanner {
                 scanner_settings: config.scanner_settings,
                 adapters: AdapterPaths {
                     office_worker_path: config.office_worker_path,
-                    python_executable: config.python_executable,
-                    python_module_root: config.python_module_root,
-                    python_document_worker_module: config.python_document_worker_module,
+                    pdf_worker_path: config.pdf_worker_path,
                 },
             })
             .map_err(scanner_error)?;

@@ -61,12 +61,6 @@ pub struct WorkerCommand {
 impl WorkerCommand {
     fn args_for(&self, operation: &str) -> Vec<OsString> {
         let mut args = Vec::with_capacity(self.base_args.len() + 2);
-        if matches!(operation, "hello")
-            && self.expected_kind == WorkerKind::PythonDocument
-            && !self.base_args.iter().any(|value| value == "-S")
-        {
-            args.push(OsString::from("-S"));
-        }
         args.extend(self.base_args.iter().cloned());
         args.push(OsString::from(operation));
         args
@@ -83,7 +77,7 @@ pub struct RegisteredWorker {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkerRegistry {
     pub office: Option<RegisteredWorker>,
-    pub python_document: Option<RegisteredWorker>,
+    pub pdf: Option<RegisteredWorker>,
 }
 
 pub fn preflight_workers(
@@ -93,10 +87,8 @@ pub fn preflight_workers(
 ) -> Result<WorkerRegistry, ParseFailure> {
     let needs = required_worker_set(profile);
     let office_command = needs.office.then(|| office::worker_command(adapters));
-    let python_command = needs
-        .python_document
-        .then(|| document::worker_command(adapters));
-    preflight_worker_commands(office_command.as_ref(), python_command.as_ref(), timeout)
+    let pdf_command = needs.pdf.then(|| document::worker_command(adapters));
+    preflight_worker_commands(office_command.as_ref(), pdf_command.as_ref(), timeout)
 }
 
 /// Runs the continuation only after all route-relevant worker identities have
@@ -114,23 +106,23 @@ pub fn preflight_then<T>(
 /// Injectable form used by fault tests and Task 7 cache-boundary tests.
 pub fn preflight_commands_then<T>(
     office_command: Option<&WorkerCommand>,
-    python_command: Option<&WorkerCommand>,
+    pdf_command: Option<&WorkerCommand>,
     timeout: Duration,
     continuation: impl FnOnce(&WorkerRegistry) -> T,
 ) -> Result<T, ParseFailure> {
-    let registry = preflight_worker_commands(office_command, python_command, timeout)?;
+    let registry = preflight_worker_commands(office_command, pdf_command, timeout)?;
     Ok(continuation(&registry))
 }
 
 fn preflight_worker_commands(
     office_command: Option<&WorkerCommand>,
-    python_command: Option<&WorkerCommand>,
+    pdf_command: Option<&WorkerCommand>,
     timeout: Duration,
 ) -> Result<WorkerRegistry, ParseFailure> {
-    let (office, python_document) = match (office_command, python_command) {
+    let (office, pdf) = match (office_command, pdf_command) {
         (Some(office), Some(python)) => {
-            let (office_result, python_result) = register_worker_pair(office, python, timeout);
-            (Some(office_result?), Some(python_result?))
+            let (office_result, pdf_result) = register_worker_pair(office, python, timeout);
+            (Some(office_result?), Some(pdf_result?))
         }
         (office, python) => (
             office
@@ -141,39 +133,36 @@ fn preflight_worker_commands(
                 .transpose()?,
         ),
     };
-    Ok(WorkerRegistry {
-        office,
-        python_document,
-    })
+    Ok(WorkerRegistry { office, pdf })
 }
 
 /// Runs the independent Office and Python version handshakes concurrently.
 pub fn register_worker_pair(
     office_command: &WorkerCommand,
-    python_command: &WorkerCommand,
+    pdf_command: &WorkerCommand,
     timeout: Duration,
 ) -> (
     Result<RegisteredWorker, ParseFailure>,
     Result<RegisteredWorker, ParseFailure>,
 ) {
-    register_worker_pair_inner(office_command, python_command, timeout, None)
+    register_worker_pair_inner(office_command, pdf_command, timeout, None)
 }
 
 pub(crate) fn register_worker_pair_observed(
     office_command: &WorkerCommand,
-    python_command: &WorkerCommand,
+    pdf_command: &WorkerCommand,
     timeout: Duration,
     rss_tracker: &WorkerRssTracker,
 ) -> (
     Result<RegisteredWorker, ParseFailure>,
     Result<RegisteredWorker, ParseFailure>,
 ) {
-    register_worker_pair_inner(office_command, python_command, timeout, Some(rss_tracker))
+    register_worker_pair_inner(office_command, pdf_command, timeout, Some(rss_tracker))
 }
 
 fn register_worker_pair_inner(
     office_command: &WorkerCommand,
-    python_command: &WorkerCommand,
+    pdf_command: &WorkerCommand,
     timeout: Duration,
     rss_tracker: Option<&WorkerRssTracker>,
 ) -> (
@@ -183,7 +172,7 @@ fn register_worker_pair_inner(
     std::thread::scope(|scope| {
         let office_task =
             scope.spawn(|| register_worker_inner(office_command, timeout, rss_tracker));
-        let python_result = register_worker_inner(python_command, timeout, rss_tracker);
+        let pdf_result = register_worker_inner(pdf_command, timeout, rss_tracker);
         let office_result = office_task.join().unwrap_or_else(|_| {
             Err(contract_failure(
                 ErrorCode::WorkerHandshakeFailed,
@@ -193,7 +182,7 @@ fn register_worker_pair_inner(
                 DiagnosticStage::Process,
             ))
         });
-        (office_result, python_result)
+        (office_result, pdf_result)
     })
 }
 
@@ -217,6 +206,8 @@ fn register_worker_inner(
         timeout,
         capture_limit: WORKER_HANDSHAKE_CAPTURE_LIMIT,
         rss_tracker: rss_tracker.cloned(),
+        memory_limit_bytes: None,
+        cancel: None,
     };
     let output = run_process(&spec).map_err(|error| process_failure(error, None, None, true))?;
     if output.exit_code != 0 {
@@ -267,7 +258,7 @@ fn register_worker_inner(
     })
 }
 
-/// Shared pre-dispatch validation for worker-v2 sessions.
+/// Shared pre-dispatch validation for worker-v3 sessions.
 pub(crate) fn validate_worker_request(
     worker: &RegisteredWorker,
     request: &ParseOperation,
@@ -310,12 +301,7 @@ fn supports_required_operations(
     use ai_daily_worker_contract::WorkerOperation;
     let required: &[WorkerOperation] = match command.expected_kind {
         WorkerKind::Office => &[WorkerOperation::OfficeParse],
-        WorkerKind::PythonDocument => &[
-            WorkerOperation::PdfClassify,
-            WorkerOperation::PdfParse,
-            WorkerOperation::PythonOfficeParse,
-            WorkerOperation::PythonSharepointParse,
-        ],
+        WorkerKind::Pdf => &[WorkerOperation::PdfClassify, WorkerOperation::PdfParse],
     };
     required
         .iter()
@@ -327,11 +313,9 @@ pub fn worker_hello_from_registered(
 ) -> ai_daily_worker_contract::WorkerHello {
     let supported_operations = match worker.command.expected_kind {
         WorkerKind::Office => vec![ai_daily_worker_contract::WorkerOperation::OfficeParse],
-        WorkerKind::PythonDocument => vec![
+        WorkerKind::Pdf => vec![
             ai_daily_worker_contract::WorkerOperation::PdfClassify,
             ai_daily_worker_contract::WorkerOperation::PdfParse,
-            ai_daily_worker_contract::WorkerOperation::PythonOfficeParse,
-            ai_daily_worker_contract::WorkerOperation::PythonSharepointParse,
         ],
     };
     WorkerHello {
@@ -340,7 +324,7 @@ pub fn worker_hello_from_registered(
     }
 }
 
-/// Validates a worker-v2 session response and applies source, identity, and
+/// Validates a worker-v3 session response and applies source, identity, and
 /// domain-error mapping.
 pub(crate) fn validate_session_worker_response(
     _worker: &RegisteredWorker,
@@ -361,7 +345,13 @@ pub(crate) fn validate_session_worker_response(
         response.content.chars().count() as u64 <= worker_response_character_budget(request);
     if response.file_path != request.file_path
         || response.file_type != request.file_type
-        || response.parser_backend != request.backend
+        || (response.parser_backend != request.backend
+            && !(request.backend.lane()
+                == ai_daily_worker_contract::WorkerLane::RustOfficeProcessV3
+                && response
+                    .evidence_audit
+                    .as_ref()
+                    .is_some_and(|audit| audit.detected_format.is_some())))
         || response.worker_lane != request.backend.lane()
         || response.duration_ms > request.remaining_timeout_ms
         || !content_within_budget
@@ -385,8 +375,7 @@ fn worker_response_character_budget(request: &ParseOperation) -> u64 {
         } => *document_excerpt_max_chars,
         ParserLimits::Pdf {
             excerpt_max_chars, ..
-        }
-        | ParserLimits::SharepointText { excerpt_max_chars } => *excerpt_max_chars,
+        } => *excerpt_max_chars,
     }
 }
 
@@ -457,6 +446,12 @@ fn process_failure(
                 ErrorCode::ParserTimeout
             },
             "worker process exceeded its deadline",
+            false,
+        ),
+        ProcessError::Cancelled => (
+            FailureClass::Deterministic,
+            ErrorCode::ParserTimeout,
+            "worker process was explicitly cancelled",
             false,
         ),
         ProcessError::IoFailed | ProcessError::OutputTooLarge => (
@@ -616,9 +611,9 @@ pub(crate) fn worker_request(
     let backend = match route {
         ParserRoute::RustOffice => ParserBackend::RustOfficeOxideV2,
         ParserRoute::RustXlsx => ParserBackend::RustXlsxBoundedV2,
-        ParserRoute::Pdf => ParserBackend::PythonPdfTextV2,
-        ParserRoute::PythonOffice => ParserBackend::PythonOfficeV2,
-        ParserRoute::PythonSharepointText => ParserBackend::PythonSharepointTextV2,
+        ParserRoute::Pdf => ParserBackend::RustPdfiumV3,
+        ParserRoute::RustXls => ParserBackend::RustXlsCalamineV3,
+        ParserRoute::RustLegacyOffice => ParserBackend::RustLegacyOfficeV3,
         ParserRoute::LightText => unreachable!("light text does not use a worker request"),
     };
     let parser_limits = match route {
@@ -627,10 +622,8 @@ pub(crate) fn worker_request(
             max_pages: profile.parse.pdf.max_pages,
             excerpt_max_chars: profile.parse.pdf.excerpt_max_chars,
         },
-        ParserRoute::PythonSharepointText => ParserLimits::SharepointText {
-            excerpt_max_chars: profile.parse.office.document_excerpt_max_chars,
-        },
         _ => ParserLimits::Office {
+            legacy_office_enabled: profile.parse.office.legacy_extensions_enabled,
             excel_max_sheets: profile.parse.office.excel_max_sheets,
             excel_max_rows: profile.parse.office.excel_max_rows,
             excel_max_columns: profile.parse.office.excel_max_columns,
@@ -690,7 +683,7 @@ fn next_request_id() -> String {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RequiredWorkerSet {
     office: bool,
-    python_document: bool,
+    pdf: bool,
 }
 
 fn required_worker_set(profile: &NormalizedScannerSettings) -> RequiredWorkerSet {
@@ -701,22 +694,11 @@ fn required_worker_set(profile: &NormalizedScannerSettings) -> RequiredWorkerSet
             .iter()
             .any(|value| value == extension)
     };
-    let modern_office = [".docx", ".pptx", ".xlsx"].into_iter().any(allows);
-    let rust_primary = profile.parse.office.primary_backend == "rust_office_oxide_v2";
-    let python_primary = profile.parse.office.primary_backend == "python_office_v2";
-    let modern_python_fallback =
-        rust_primary
-            && profile.parse.office.fallback_enabled
-            && profile.parse.office.fallback_order.iter().any(|backend| {
-                *backend == ai_daily_scanner_contract::FallbackBackend::PythonOfficeV2
-            });
-    let legacy_document = allows(".xls")
-        || (profile.parse.office.legacy_extensions_enabled && (allows(".doc") || allows(".ppt")));
     RequiredWorkerSet {
-        office: modern_office && rust_primary,
-        python_document: allows(".pdf")
-            || legacy_document
-            || (modern_office && (python_primary || modern_python_fallback)),
+        office: [".docx", ".pptx", ".xlsx", ".xls"].into_iter().any(allows)
+            || (profile.parse.office.legacy_extensions_enabled
+                && [".doc", ".ppt"].into_iter().any(allows)),
+        pdf: allows(".pdf"),
     }
 }
 
@@ -737,32 +719,22 @@ mod tests {
             required_worker_set(&profile),
             RequiredWorkerSet {
                 office: true,
-                python_document: true,
+                pdf: true,
             }
         );
     }
 
     #[test]
-    fn python_hello_skips_site_startup_but_session_uses_runtime_environment() {
+    fn native_commands_pass_only_the_operation() {
         let command = WorkerCommand {
-            program: PathBuf::from("python"),
-            base_args: vec![
-                OsString::from("-m"),
-                OsString::from("src.workers.document_parser_worker"),
-            ],
+            program: PathBuf::from("ai-daily-pdf-parser.exe"),
+            base_args: Vec::new(),
             current_dir: None,
-            expected_kind: WorkerKind::PythonDocument,
+            expected_kind: WorkerKind::Pdf,
             required_backends: Vec::new(),
             required_extensions: Vec::new(),
         };
-
-        assert_eq!(
-            command.args_for("hello").first(),
-            Some(&OsString::from("-S"))
-        );
-        assert_ne!(
-            command.args_for("session").first(),
-            Some(&OsString::from("-S"))
-        );
+        assert_eq!(command.args_for("hello"), [OsString::from("hello")]);
+        assert_eq!(command.args_for("session"), [OsString::from("session")]);
     }
 }

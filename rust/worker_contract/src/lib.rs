@@ -1,4 +1,4 @@
-//! Shared v2 envelope for crash-isolated scanner workers.
+//! Shared v3 envelope for crash-isolated scanner workers.
 //!
 //! The interface is one hello frame followed by request/response NDJSON pairs.
 //! Request ids, status, diagnostics, and worker identity live only in the
@@ -15,14 +15,14 @@ pub use content_audit::{
 };
 
 pub const CONTRACT: &str = "ai_daily_worker";
-pub const CONTRACT_VERSION: &str = "ai_daily_worker_v2";
-pub const PROTOCOL_VERSION: u64 = 2;
+pub const CONTRACT_VERSION: &str = "ai_daily_worker_v3";
+pub const PROTOCOL_VERSION: u64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerKind {
     Office,
-    PythonDocument,
+    Pdf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -31,8 +31,6 @@ pub enum WorkerOperation {
     OfficeParse,
     PdfClassify,
     PdfParse,
-    PythonOfficeParse,
-    PythonSharepointParse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,19 +80,19 @@ pub enum ParserBackend {
     RustOfficeOxideV2,
     #[serde(rename = "rust_xlsx_bounded_v2")]
     RustXlsxBoundedV2,
-    #[serde(rename = "python_office_v2")]
-    PythonOfficeV2,
-    #[serde(rename = "python_pdf_text_v2")]
-    PythonPdfTextV2,
-    #[serde(rename = "python_sharepoint_text_v2")]
-    PythonSharepointTextV2,
+    #[serde(rename = "rust_xls_calamine_v3")]
+    RustXlsCalamineV3,
+    #[serde(rename = "rust_pdfium_v3")]
+    RustPdfiumV3,
+    #[serde(rename = "rust_legacy_office_v3")]
+    RustLegacyOfficeV3,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerLane {
-    RustOfficeProcessV2,
-    PythonDocumentProcessV2,
+    RustOfficeProcessV3,
+    RustPdfProcessV3,
 }
 
 impl ParserBackend {
@@ -102,9 +100,9 @@ impl ParserBackend {
         match self {
             Self::RustOfficeOxideV2 => "rust_office_oxide_v2",
             Self::RustXlsxBoundedV2 => "rust_xlsx_bounded_v2",
-            Self::PythonOfficeV2 => "python_office_v2",
-            Self::PythonPdfTextV2 => "python_pdf_text_v2",
-            Self::PythonSharepointTextV2 => "python_sharepoint_text_v2",
+            Self::RustXlsCalamineV3 => "rust_xls_calamine_v3",
+            Self::RustPdfiumV3 => "rust_pdfium_v3",
+            Self::RustLegacyOfficeV3 => "rust_legacy_office_v3",
         }
     }
 
@@ -112,24 +110,23 @@ impl ParserBackend {
         match self {
             Self::RustOfficeOxideV2 => matches!(extension, ".docx" | ".pptx"),
             Self::RustXlsxBoundedV2 => extension == ".xlsx",
-            Self::PythonOfficeV2 => matches!(extension, ".docx" | ".pptx" | ".xls" | ".xlsx"),
-            Self::PythonPdfTextV2 => extension == ".pdf",
-            Self::PythonSharepointTextV2 => matches!(extension, ".doc" | ".ppt"),
+            Self::RustXlsCalamineV3 => extension == ".xls",
+            Self::RustPdfiumV3 => extension == ".pdf",
+            Self::RustLegacyOfficeV3 => matches!(extension, ".doc" | ".ppt"),
         }
     }
 
     pub const fn lane(self) -> WorkerLane {
         match self {
-            Self::RustOfficeOxideV2 | Self::RustXlsxBoundedV2 => WorkerLane::RustOfficeProcessV2,
-            _ => WorkerLane::PythonDocumentProcessV2,
+            Self::RustPdfiumV3 => WorkerLane::RustPdfProcessV3,
+            _ => WorkerLane::RustOfficeProcessV3,
         }
     }
 
     const fn limit_kind(self) -> &'static str {
         match self {
-            Self::RustOfficeOxideV2 | Self::RustXlsxBoundedV2 | Self::PythonOfficeV2 => "office",
-            Self::PythonPdfTextV2 => "pdf",
-            Self::PythonSharepointTextV2 => "sharepoint_text",
+            Self::RustPdfiumV3 => "pdf",
+            _ => "office",
         }
     }
 }
@@ -139,6 +136,7 @@ impl ParserBackend {
 pub enum ParserLimits {
     #[serde(rename = "office")]
     Office {
+        legacy_office_enabled: bool,
         excel_max_sheets: u64,
         excel_max_rows: u64,
         excel_max_columns: u64,
@@ -157,8 +155,6 @@ pub enum ParserLimits {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         selected_pages: Option<Vec<u64>>,
     },
-    #[serde(rename = "sharepoint_text")]
-    SharepointText { excerpt_max_chars: u64 },
 }
 
 impl ParserLimits {
@@ -166,7 +162,6 @@ impl ParserLimits {
         match self {
             Self::Office { .. } => "office",
             Self::Pdf { .. } => "pdf",
-            Self::SharepointText { .. } => "sharepoint_text",
         }
     }
 
@@ -214,9 +209,6 @@ impl ParserLimits {
                 }) {
                     return Err("invalid PDF selected pages".into());
                 }
-                validate_range(*excerpt_max_chars, 1, 10_000_000, "excerpt_max_chars")
-            }
-            Self::SharepointText { excerpt_max_chars } => {
                 validate_range(*excerpt_max_chars, 1, 10_000_000, "excerpt_max_chars")
             }
         }
@@ -408,7 +400,14 @@ impl ParseResult {
         validate_absolute_path(&self.file_path, "file_path")?;
         validate_extension(&self.file_type, "file_type")?;
         validate_source_version(&self.observed_source_version)?;
-        if self.parser_backend.supports(&self.file_type)
+        let detected = self
+            .evidence_audit
+            .as_ref()
+            .and_then(|audit| audit.detected_format.as_ref())
+            .map(|format| format!(".{format}"));
+        if self
+            .parser_backend
+            .supports(detected.as_deref().unwrap_or(&self.file_type))
             && self.parser_backend.lane() == self.worker_lane
         {
             Ok(())
@@ -561,7 +560,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn hello_requires_v2_identity_and_unique_operations() {
+    fn hello_requires_v3_identity_and_unique_operations() {
         let hello = WorkerHello {
             contract: CONTRACT.to_string(),
             protocol_version: PROTOCOL_VERSION,
@@ -573,6 +572,15 @@ mod tests {
             supported_operations: vec![WorkerOperation::OfficeParse],
         };
         assert_eq!(hello.validate(), Ok(()));
+        let mut old = hello.clone();
+        old.protocol_version = 2;
+        old.worker_contract_version = "ai_daily_worker_v2".into();
+        assert!(old.validate().is_err());
+        let mut duplicate = hello;
+        duplicate
+            .supported_operations
+            .push(WorkerOperation::OfficeParse);
+        assert!(duplicate.validate().is_err());
     }
 
     #[test]

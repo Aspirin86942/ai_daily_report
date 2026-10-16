@@ -247,8 +247,8 @@ fn every_route_reserved_covers_rendered() {
         RouteKind::RustOffice,
         RouteKind::RustXlsx,
         RouteKind::Pdf,
-        RouteKind::PythonOffice,
-        RouteKind::PythonSharepointText,
+        RouteKind::RustXls,
+        RouteKind::RustLegacyOffice,
     ];
     let long_path = format!("{}\\file.md", "\\deep\\nested\\".repeat(30));
     let paths = [
@@ -729,7 +729,7 @@ fn compressor_still_renders_golden_keep_compress_metadata_error() {
     compressed.size_bytes = Some(100_000);
     let mut metadata = evidence("book.xlsx", ".xlsx", "sensitive body");
     metadata.parser_backend = "rust_xlsx_bounded_v2".to_string();
-    metadata.worker_lane = AuditWorkerLane::RustOfficeProcessV2;
+    metadata.worker_lane = AuditWorkerLane::RustOfficeProcessV3;
     metadata.size_bytes = Some(10_485_761);
 
     let result = build_context(
@@ -839,7 +839,7 @@ impl TestCache {
             parser_backend: "light_text_v2".to_string(),
             worker_lane: "rust_core".to_string(),
             truncated: false,
-            worker_contract_version: "ai_daily_worker_v2".to_string(),
+            worker_contract_version: "ai_daily_worker_v3".to_string(),
             worker_version: "0.1.0".to_string(),
             worker_build: "engine-test".to_string(),
         }
@@ -2016,8 +2016,8 @@ fn retry_metrics_count_only_actual_classifier_and_pdf_parse_attempts() {
     let mut profile = normalized_settings(ReportMode::Daily);
     profile.parse.pdf.max_pages = 2;
     let mut parsed = success_parse("fixture:retry.pdf", "", "pdf evidence");
-    parsed.parser_backend = "python_pdf_text_v2".to_string();
-    parsed.worker_lane = "python_document_process_v2".to_string();
+    parsed.parser_backend = "rust_pdfium_v3".to_string();
+    parsed.worker_lane = "rust_pdf_process_v3".to_string();
     parsed.parse_transport = ParseTransport::Session;
     parsed.parse_attempt_count = 2;
     let clock = FakeClock::new();
@@ -2786,13 +2786,13 @@ fn refill_cached_pdf_extraction_returns_slot_but_failed_parse_keeps_it() {
         let mut cache = TestCache::default();
         if cached {
             let mut entry = TestCache::fresh_parse(&a.file_identity, "paid 1234.56 yuan.");
-            entry.parser_backend = "python_pdf_text_v2".into();
-            entry.worker_lane = "python_document_process_v2".into();
+            entry.parser_backend = "rust_pdfium_v3".into();
+            entry.worker_lane = "rust_pdf_process_v3".into();
             cache.parse.insert(a.file_identity.clone(), entry);
         }
         let mut parsed = success_parse(&b.file_identity, &b.path, "received 10 units.");
-        parsed.parser_backend = "python_pdf_text_v2".into();
-        parsed.worker_lane = "python_document_process_v2".into();
+        parsed.parser_backend = "rust_pdfium_v3".into();
+        parsed.worker_lane = "rust_pdf_process_v3".into();
         parsed.parse_transport = ParseTransport::Session;
         let outcome = run_scheduler(
             &FakeClock::new(),

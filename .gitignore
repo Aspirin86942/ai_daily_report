@@ -66,3 +66,6 @@ scripts/corpus/
 # Local coverage validation, release packages and toolchain downloads
 .artifacts/coverage-optimization/
 .artifacts/toolchain/
+.artifacts/rust-migration/
+.releases/
+config-rust/

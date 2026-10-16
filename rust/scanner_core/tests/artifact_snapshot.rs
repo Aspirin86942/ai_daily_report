@@ -79,23 +79,21 @@ fn request(mode: ReportMode, request_id: &str) -> BuildContextRequest {
         "scanner_settings": profile,
         "adapters": {
             "office_worker_path": "C:\\scanner-fixtures\\bin\\ai-daily-office-parser.exe",
-            "python_executable": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
-            "python_module_root": "C:\\scanner-fixtures\\repo",
-            "python_document_worker_module": "src.workers.document_parser_worker"
+            "pdf_worker_path": "C:\\scanner-fixtures\\venv\\Scripts\\python.exe",
         }
     }))
     .expect("request should decode")
 }
 
-fn workers(office_build: &str, python_build: &str) -> WorkerIdentities {
+fn workers(office_build: &str, pdf_build: &str) -> WorkerIdentities {
     WorkerIdentities {
-        office_contract: Some("ai_daily_worker_v2".to_string()),
+        office_contract: Some("ai_daily_worker_v3".to_string()),
         office_version: Some("1.0".to_string()),
         office_build: Some(office_build.to_string()),
-        python_contract: Some("ai_daily_worker_v2".to_string()),
-        python_version: Some("1.0".to_string()),
-        python_build: Some(python_build.to_string()),
-        classifier_build: Some(python_build.to_string()),
+        pdf_contract: Some("ai_daily_worker_v3".to_string()),
+        pdf_version: Some("1.0".to_string()),
+        pdf_build: Some(pdf_build.to_string()),
+        classifier_build: Some(pdf_build.to_string()),
     }
 }
 
@@ -815,10 +813,8 @@ fn snapshot_store_harness() -> (
     let file_path = directory.path().join("a.txt");
     std::fs::write(&file_path, "hello").expect("fixture file");
     let db_path = directory.path().join(SCAN_DB_FILENAME);
-    let mut request: BuildContextRequest = serde_json::from_str(include_str!(
-        "../../../tests/fixtures/scanner_contract/v1/request.json"
-    ))
-    .expect("request fixture");
+    let mut request: BuildContextRequest =
+        serde_json::from_str(include_str!("fixtures/request.json")).expect("request fixture");
     request.request_id = REQUEST_ID_A.to_string();
     request.work_dir = directory.path().to_string_lossy().to_string();
     request.scan_db_path = db_path.to_string_lossy().to_string();
@@ -828,13 +824,11 @@ fn snapshot_store_harness() -> (
             .join("office-worker.exe")
             .to_string_lossy()
             .to_string(),
-        python_executable: directory
+        pdf_worker_path: directory
             .path()
             .join("python.exe")
             .to_string_lossy()
             .to_string(),
-        python_module_root: directory.path().to_string_lossy().to_string(),
-        python_document_worker_module: "src.workers.document_parser_worker".to_string(),
     };
     let profile = normalize_scanner_settings(&request.scanner_settings, request.report_mode)
         .expect("normalized v1 profile");
@@ -854,12 +848,12 @@ fn snapshot_started(outcome: BeginRunOutcome) -> ActiveRun {
 
 fn record_snapshot_workers(store: &mut ScannerStore, active: &ActiveRun, now_ms: u64) {
     let office = WorkerFingerprint {
-        contract: "ai_daily_worker_v2".to_string(),
+        contract: "ai_daily_worker_v3".to_string(),
         version: "1.0".to_string(),
         build: "office-a".to_string(),
     };
     let python = WorkerFingerprint {
-        contract: "ai_daily_worker_v2".to_string(),
+        contract: "ai_daily_worker_v3".to_string(),
         version: "1.0".to_string(),
         build: "python-a".to_string(),
     };

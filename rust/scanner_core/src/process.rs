@@ -74,6 +74,8 @@ pub struct ProcessSpec {
     pub timeout: Duration,
     pub capture_limit: usize,
     pub rss_tracker: Option<WorkerRssTracker>,
+    pub memory_limit_bytes: Option<u64>,
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl ProcessSpec {
@@ -86,6 +88,8 @@ impl ProcessSpec {
             timeout,
             capture_limit: 4 * 1024 * 1024,
             rss_tracker: None,
+            memory_limit_bytes: None,
+            cancel: None,
         }
     }
 }
@@ -108,6 +112,8 @@ pub enum ProcessError {
     IoFailed,
     #[error("worker process timed out")]
     TimedOut,
+    #[error("worker process was cancelled")]
+    Cancelled,
     #[error("worker process output exceeded the capture limit")]
     OutputTooLarge,
 }
@@ -135,6 +141,13 @@ impl ProcessFailure {
 }
 
 pub fn run_process(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessError> {
+    if spec
+        .cancel
+        .as_ref()
+        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed))
+    {
+        return Err(ProcessError::Cancelled);
+    }
     run_process_observed(spec).map_err(|failure| failure.error)
 }
 
@@ -222,13 +235,21 @@ fn run_portable(spec: &ProcessSpec) -> Result<ProcessOutput, ProcessFailure> {
         {
             break status;
         }
-        if started.elapsed() >= spec.timeout {
+        let cancelled = spec
+            .cancel
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Relaxed));
+        if cancelled || started.elapsed() >= spec.timeout {
             let _ = child.kill();
             let _ = child.wait();
             join_writer(input_thread).map_err(ProcessFailure::after_start)?;
             let _ = join_reader(stdout_thread);
             let _ = join_reader(stderr_thread);
-            return Err(ProcessFailure::after_start(ProcessError::TimedOut));
+            return Err(ProcessFailure::after_start(if cancelled {
+                ProcessError::Cancelled
+            } else {
+                ProcessError::TimedOut
+            }));
         }
         thread::sleep(Duration::from_millis(5));
     };

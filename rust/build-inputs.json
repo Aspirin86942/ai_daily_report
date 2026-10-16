@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "target": "x86_64-pc-windows-msvc",
+  "edition": "2021",
+  "pdfium": {
+    "version": "151.0.7881.0",
+    "binding_feature": "pdfium_7881",
+    "source": "https://github.com/bblanchon/pdfium-binaries/releases/tag/chromium/7881",
+    "archive_url": "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/7881/pdfium-win-x64.tgz",
+    "archive_sha256": "73cc0de638ac2095e7445bf56a38200a5b7c7ca0e9f4ba144598f2457377ac08",
+    "dll_sha256": "79d4676b656cfb1abcea88f9ade3b4b0826c5200382db5f4ec72a636c598c118",
+    "archive_license_paths": ["LICENSE", "licenses/"],
+    "license": "BSD-3-Clause and bundled third-party notices"
+  },
+  "selected_dependencies": [
+    {"name": "clap", "version": "4.6.7", "license": "MIT OR Apache-2.0", "source": "https://github.com/clap-rs/clap"},
+    {"name": "serde-saphyr", "version": "2.0.0", "license": "MIT OR Apache-2.0", "source": "https://github.com/bourumir-wyngs/serde-saphyr"},
+    {"name": "reqwest", "version": "0.13.5", "license": "MIT OR Apache-2.0", "source": "https://github.com/seanmonstar/reqwest"},
+    {"name": "minijinja", "version": "3.0.0", "license": "Apache-2.0", "source": "https://github.com/mitsuhiko/minijinja"},
+    {"name": "pdfium-render", "version": "0.9.4", "license": "MIT OR Apache-2.0", "source": "https://github.com/ajrcarey/pdfium-render"},
+    {"name": "calamine", "version": "0.36.1", "license": "MIT", "source": "https://github.com/tafia/calamine"},
+    {"name": "office_oxide", "version": "0.1.2", "license": "MIT OR Apache-2.0", "source": "https://crates.io/crates/office_oxide/0.1.2"}
+  ]
+}

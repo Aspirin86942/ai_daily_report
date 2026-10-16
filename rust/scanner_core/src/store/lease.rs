@@ -134,9 +134,9 @@ pub(super) fn ensure_worker_fingerprints(
                 office_worker_contract IS NOT NULL
                 AND office_worker_version IS NOT NULL
                 AND office_worker_build IS NOT NULL
-                AND python_worker_contract IS NOT NULL
-                AND python_worker_version IS NOT NULL
-                AND python_worker_build IS NOT NULL
+                AND pdf_worker_contract IS NOT NULL
+                AND pdf_worker_version IS NOT NULL
+                AND pdf_worker_build IS NOT NULL
              FROM scan_run_attempts
              WHERE scan_run_id=?1 AND attempt_number=?2 AND owner_id=?3 AND status='running'",
             params![active.scan_run_id, active.attempt_number, active.owner_id],

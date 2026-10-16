@@ -268,11 +268,19 @@ mod strict_report_tests {
         let observer = SourceGuardObserver::strict();
         let guard = observer.compute(&path).unwrap();
         assert!(observer.verify(&path, &guard));
-        std::fs::write(&path, "other").unwrap();
-        let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        // Replace the file itself so this identity test does not depend on the
+        // filesystem clock advancing between two same-size writes.
+        let replacement = directory.path().join("replacement.md");
+        std::fs::write(&replacement, "other").unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&replacement)
+            .unwrap();
         file.set_times(std::fs::FileTimes::new().set_modified(mtime))
             .unwrap();
         drop(file);
+        std::fs::remove_file(&path).unwrap();
+        std::fs::rename(replacement, &path).unwrap();
         assert!(!observer.verify(&path, &guard));
         assert!(observer.is_tainted(&path));
     }

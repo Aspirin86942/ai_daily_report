@@ -14,6 +14,8 @@ use std::path::PathBuf;
 use std::time::{Instant, UNIX_EPOCH};
 use zip::read::ZipArchive;
 
+mod legacy;
+
 pub const RUST_OFFICE_BACKEND: &str = "rust_office_oxide_v2";
 pub const RUST_XLSX_BOUNDED_BACKEND: &str = "rust_xlsx_bounded_v2";
 pub fn worker_hello() -> WorkerHello {
@@ -112,7 +114,14 @@ pub fn parse_office_file(request: &OfficeParseRequest) -> FileContextOut {
         return parse_bounded_xlsx(request, &file_type, max_chars);
     }
 
-    match office_oxide::Document::open(&request.file_path) {
+    let format = office_oxide::DocumentFormat::from_extension(file_type.trim_start_matches('.'));
+    let opened = File::open(&request.file_path)
+        .map_err(|error| error.to_string())
+        .and_then(|file| {
+            office_oxide::Document::from_reader(file, format.expect("supported extension"))
+                .map_err(|error| error.to_string())
+        });
+    match opened {
         Ok(document) => {
             let (content, audit, truncated) = audited_office_content(&document, request, max_chars);
             FileContextOut {
@@ -286,11 +295,55 @@ fn audited_office_content(
                 }
             }
         }
-    } else {
-        // Legacy formats have no trustworthy original positions in this adapter.
-        for part in document.to_markdown().split("\n\n") {
-            if !builder.push(part, ContentUnitKind::Paragraph, vec![]) {
+    } else if let Some(doc) = document.as_doc() {
+        let text = doc.plain_text();
+        let mut offset = 0u64;
+        let max_paragraphs = positive_limit(&request.limits, "docx_max_paragraphs", 200);
+        for (index, part) in text.split_inclusive('\n').enumerate() {
+            let end = offset + part.chars().count() as u64;
+            if end > offset {
+                let range = SourceRange::new(
+                    SourceRangeUnit::TextChar,
+                    offset,
+                    end,
+                    Some("extracted_main_text".into()),
+                );
+                builder.read(range.clone());
+                if index < max_paragraphs {
+                    if !builder.push(part, ContentUnitKind::Paragraph, vec![range]) {
+                        bounded = true;
+                    }
+                } else {
+                    bounded = true;
+                }
+            }
+            offset = end;
+        }
+    } else if let Some(ppt) = document.as_ppt() {
+        let max_slides = positive_limit(&request.limits, "pptx_max_slides", 50);
+        let notes = request
+            .limits
+            .get("pptx_include_notes")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        for (index, slide) in ppt.slides.iter().enumerate() {
+            let range = SourceRange::new(
+                SourceRangeUnit::Slide,
+                index as u64 + 1,
+                index as u64 + 2,
+                None,
+            );
+            builder.read(range.clone());
+            if index >= max_slides {
                 bounded = true;
+                continue;
+            }
+            for run in &slide.text_runs {
+                if (notes || run.text_type != office_oxide::ppt::TextType::Notes)
+                    && !builder.push(&run.text, ContentUnitKind::Slide, vec![range.clone()])
+                {
+                    bounded = true;
+                }
             }
         }
     }
@@ -308,7 +361,7 @@ pub fn parse_worker_request(request: &ParseRequest) -> Result<ParseResult, Box<W
             false,
         )));
     }
-    if request.backend.lane() != WorkerLane::RustOfficeProcessV2 {
+    if request.backend.lane() != WorkerLane::RustOfficeProcessV3 {
         return Err(Box::new(worker_error(
             request,
             "PARSER_INVALID_PAYLOAD",
@@ -357,7 +410,34 @@ pub fn parse_worker_request(request: &ParseRequest) -> Result<ParseResult, Box<W
         )));
     }
 
-    let (context, retryable) = parse_strict_office_context(request);
+    let mut detected_request = request.clone();
+    let (format, backend) = legacy::detect_office_format(&path).map_err(|_| {
+        Box::new(worker_error(
+            request,
+            "PARSER_FAILED",
+            "Office format is invalid".into(),
+            false,
+        ))
+    })?;
+    if matches!(format, ".doc" | ".ppt")
+        && !matches!(
+            request.parser_limits,
+            ParserLimits::Office {
+                legacy_office_enabled: true,
+                ..
+            }
+        )
+    {
+        return Err(Box::new(worker_error(
+            request,
+            "UNSUPPORTED_EXTENSION",
+            "Legacy Office parsing is disabled".into(),
+            false,
+        )));
+    }
+    detected_request.file_type = format.into();
+    detected_request.backend = backend;
+    let (context, retryable) = parse_strict_office_context(&detected_request);
     let observed_after =
         match std::fs::metadata(&path).and_then(|value| metadata_source_version(&value)) {
             Ok(value) => value,
@@ -392,8 +472,8 @@ pub fn parse_worker_request(request: &ParseRequest) -> Result<ParseResult, Box<W
         file_type: request.file_type.clone(),
         content: context.content,
         evidence_audit: context.evidence_audit,
-        parser_backend: request.backend,
-        worker_lane: WorkerLane::RustOfficeProcessV2,
+        parser_backend: backend,
+        worker_lane: WorkerLane::RustOfficeProcessV3,
         truncated: context.truncated,
         duration_ms: elapsed_ms(started_at),
         observed_source_version: observed_after,
@@ -408,6 +488,12 @@ fn parse_strict_office_context(request: &ParseRequest) -> (FileContextOut, bool)
         limits,
         parser_backend: request.backend.as_str().to_string(),
     };
+    if request.backend == ParserBackend::RustXlsCalamineV3 {
+        return (legacy::parse_xls(&office_request), false);
+    }
+    if request.backend == ParserBackend::RustLegacyOfficeV3 {
+        return (parse_office_file(&office_request), false);
+    }
     if request.backend == ParserBackend::RustXlsxBoundedV2 {
         let max_chars = positive_limit(&office_request.limits, "document_excerpt_max_chars", 6000);
         return match parse_bounded_xlsx_inner(&office_request, max_chars) {
@@ -478,6 +564,7 @@ fn office_limits_map(limits: &ParserLimits) -> BTreeMap<String, serde_json::Valu
         pptx_max_slides,
         pptx_include_notes,
         document_excerpt_max_chars,
+        ..
     } = limits
     else {
         return BTreeMap::new();

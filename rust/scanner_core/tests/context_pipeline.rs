@@ -64,7 +64,7 @@ fn golden_keep_compress_metadata_only_and_error_actions_are_frozen() {
     compressed.size_bytes = Some(100_000);
     let mut metadata = evidence("book.xlsx", ".xlsx", "sensitive body");
     metadata.parser_backend = "rust_xlsx_bounded_v2".to_string();
-    metadata.worker_lane = AuditWorkerLane::RustOfficeProcessV2;
+    metadata.worker_lane = AuditWorkerLane::RustOfficeProcessV3;
     metadata.size_bytes = Some(10_485_761);
 
     let result = build_context(
@@ -147,10 +147,10 @@ fn cache_state_does_not_change_context_bytes() {
 fn golden_office_pdf_error_priority_and_path_tie_break_are_frozen() {
     let mut office = evidence("zeta/report.docx", ".docx", "office");
     office.parser_backend = "rust_office_oxide_v2".to_string();
-    office.worker_lane = AuditWorkerLane::RustOfficeProcessV2;
+    office.worker_lane = AuditWorkerLane::RustOfficeProcessV3;
     let mut pdf = evidence("alpha/report.pdf", ".pdf", "pdf");
-    pdf.parser_backend = "python_pdf_text_v2".to_string();
-    pdf.worker_lane = AuditWorkerLane::PythonDocumentProcessV2;
+    pdf.parser_backend = "rust_pdfium_v3".to_string();
+    pdf.worker_lane = AuditWorkerLane::RustPdfProcessV3;
 
     let result = build_context(
         vec![

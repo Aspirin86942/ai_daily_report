@@ -212,9 +212,9 @@ pub struct WorkerIdentities {
     pub office_contract: Option<String>,
     pub office_version: Option<String>,
     pub office_build: Option<String>,
-    pub python_contract: Option<String>,
-    pub python_version: Option<String>,
-    pub python_build: Option<String>,
+    pub pdf_contract: Option<String>,
+    pub pdf_version: Option<String>,
+    pub pdf_build: Option<String>,
     pub classifier_build: Option<String>,
 }
 
@@ -1303,7 +1303,7 @@ fn classification_cache_record(
 fn route_timeout_ms(route: RouteKind, profile: &NormalizedScannerSettings) -> u64 {
     let extension = match route {
         RouteKind::Pdf => ".pdf",
-        RouteKind::PythonOffice => ".xls",
+        RouteKind::RustXls => ".xls",
         RouteKind::RustXlsx => ".xlsx",
         _ => return profile.execution.file_timeout_ms,
     };
@@ -1318,8 +1318,8 @@ fn route_timeout_ms(route: RouteKind, profile: &NormalizedScannerSettings) -> u6
 fn parse_worker_lane(lane: &str) -> AuditWorkerLane {
     match lane {
         "rust_core" => AuditWorkerLane::RustCore,
-        "rust_office_process_v2" => AuditWorkerLane::RustOfficeProcessV2,
-        "python_document_process_v2" => AuditWorkerLane::PythonDocumentProcessV2,
+        "rust_office_process_v3" => AuditWorkerLane::RustOfficeProcessV3,
+        "rust_pdf_process_v3" => AuditWorkerLane::RustPdfProcessV3,
         _ => AuditWorkerLane::NotParsed,
     }
 }
@@ -1778,7 +1778,7 @@ impl BudgetedContextScheduler {
                                 retryable: true,
                                 stage: DiagnosticStage::Cache,
                                 file_path: Nullable(Some(task.file.path.clone())),
-                                backend: Nullable(Some("python_pdf_text_v2".to_string())),
+                                backend: Nullable(Some("rust_pdfium_v3".to_string())),
                             });
                         }
                     }
@@ -1791,14 +1791,17 @@ impl BudgetedContextScheduler {
 impl BudgetedContextScheduler {
     /// Worker identity used for successful parse-cache provenance (spec
     /// Part 5.2). Light-text parses are local engine work; office routes use
-    /// the office worker; python routes use the python worker.
+    /// the office worker; PDF routes use the PDF worker.
     fn worker_identity_for(&self, route: RouteKind) -> (String, String, String) {
         match route {
-            RouteKind::RustOffice | RouteKind::RustXlsx => (
+            RouteKind::RustOffice
+            | RouteKind::RustXlsx
+            | RouteKind::RustXls
+            | RouteKind::RustLegacyOffice => (
                 self.stored_workers
                     .office_contract
                     .clone()
-                    .unwrap_or_else(|| "ai_daily_worker_v2".to_string()),
+                    .unwrap_or_else(|| "ai_daily_worker_v3".to_string()),
                 self.stored_workers
                     .office_version
                     .clone()
@@ -1808,17 +1811,17 @@ impl BudgetedContextScheduler {
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
             ),
-            RouteKind::Pdf | RouteKind::PythonOffice | RouteKind::PythonSharepointText => (
+            RouteKind::Pdf => (
                 self.stored_workers
-                    .python_contract
+                    .pdf_contract
                     .clone()
-                    .unwrap_or_else(|| "ai_daily_worker_v2".to_string()),
+                    .unwrap_or_else(|| "ai_daily_worker_v3".to_string()),
                 self.stored_workers
-                    .python_version
+                    .pdf_version
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
                 self.stored_workers
-                    .python_build
+                    .pdf_build
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
             ),

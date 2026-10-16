@@ -270,7 +270,7 @@ pub fn assemble_execution_metrics_v2(snapshot: &EvidenceSnapshot) -> ExecutionMe
                 parse_cache_fresh_count += 1;
             }
         }
-        if file.parser_backend == "python_pdf_text_v2" && cache_status == Some("miss") {
+        if file.parser_backend == "rust_pdfium_v3" && cache_status == Some("miss") {
             pdfplumber_invocations += 1;
         }
         if cache_status == Some("miss")
@@ -1909,14 +1909,16 @@ pub(crate) fn relative_contract_path(
     work_dir: &Path,
     absolute_path: &str,
 ) -> Result<String, String> {
-    let absolute = Path::new(absolute_path);
+    let root_text = ai_daily_discovery::normalize_contract_path_text(&work_dir.to_string_lossy());
+    let path_text = ai_daily_discovery::normalize_contract_path_text(absolute_path);
+    let absolute = Path::new(&path_text);
     let relative = absolute
-        .strip_prefix(work_dir)
+        .strip_prefix(Path::new(&root_text))
         .ok()
         .map(|path| path.to_string_lossy().into_owned())
         .or_else(|| {
-            let root = work_dir.to_string_lossy().replace('/', "\\");
-            let path = absolute_path.replace('/', "\\");
+            let root = root_text.replace('/', "\\");
+            let path = path_text.replace('/', "\\");
             let root = root.trim_end_matches('\\');
             if path.len() > root.len()
                 && path
@@ -1950,4 +1952,30 @@ fn is_sha256(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn relative_path_accepts_both_windows_path_representations() {
+        for (root, file) in [
+            (r"\\?\C:\work", r"C:\work\采购方案.md"),
+            (r"C:\work", r"\\?\C:\work\采购方案.md"),
+            (r"\\?\UNC\server\work", r"\\server\work\采购方案.md"),
+        ] {
+            assert_eq!(
+                relative_contract_path(Path::new(root), file).unwrap(),
+                "采购方案.md"
+            );
+        }
+    }
+
+    #[test]
+    fn normalized_paths_still_reject_other_directories_and_parent_traversal() {
+        for file in [r"C:\work-other\report.md", r"C:\work\..\report.md"] {
+            assert!(relative_contract_path(Path::new(r"\\?\C:\work"), file).is_err());
+        }
+    }
 }

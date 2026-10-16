@@ -1,10 +1,9 @@
 //! PDF 分类器 wire 与本地 port（spec Part 7.1 / Part 3.2）的测试。
 
 use ai_daily_scanner_core::session::{
-    build_classify_request, session_classify, session_parse, SessionParams,
-    WorkerSession as PythonSession, SESSION_CONTRACT_VERSION,
+    build_classify_request, session_classify, session_parse, SessionParams, WorkerSession,
+    SESSION_CONTRACT_VERSION,
 };
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -221,24 +220,31 @@ fn classifier_profile_hash_is_canonical_and_input_sensitive() {
     );
 }
 
-fn python_executable() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    let candidates = if cfg!(windows) {
-        vec![root.join(".venv").join("Scripts").join("python.exe")]
+fn pdf_worker_path() -> Option<PathBuf> {
+    let directory = std::env::var_os("AI_DAILY_TEST_WORKER_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug"));
+    let path = directory.join(if cfg!(windows) {
+        "ai-daily-pdf-parser.exe"
     } else {
-        vec![root.join(".venv").join("bin").join("python")]
-    };
-    candidates.into_iter().find(|path| path.is_file())
+        "ai-daily-pdf-parser"
+    });
+    assert!(
+        path.is_file(),
+        "build native workers before running integration tests: {}",
+        path.display()
+    );
+    Some(path)
 }
 
 #[test]
 fn session_contract_version_is_frozen() {
-    assert_eq!(SESSION_CONTRACT_VERSION, "ai_daily_worker_v2");
+    assert_eq!(SESSION_CONTRACT_VERSION, "ai_daily_worker_v3");
 }
 
 #[test]
 fn session_recycles_on_idle_ttl_not_process_age() {
-    let Some(python) = python_executable() else {
+    let Some(python) = pdf_worker_path() else {
         return;
     };
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
@@ -252,24 +258,21 @@ fn session_recycles_on_idle_ttl_not_process_age() {
     }
     let command = WorkerCommand {
         program: python,
-        base_args: vec![
-            OsString::from("-m"),
-            OsString::from("src.workers.document_parser_worker"),
-        ],
+        base_args: Vec::new(),
         current_dir: Some(repository_root),
-        expected_kind: WorkerKind::PythonDocument,
-        required_backends: vec!["python_pdf_text_v2".to_string()],
+        expected_kind: WorkerKind::Pdf,
+        required_backends: vec!["rust_pdfium_v3".to_string()],
         required_extensions: vec![".pdf".to_string()],
     };
     let registered =
-        register_worker(&command, Duration::from_secs(20)).expect("worker-v2 hello preflight");
+        register_worker(&command, Duration::from_secs(20)).expect("worker-v3 hello preflight");
     let expected = worker_hello_from_registered(&registered);
     let params = SessionParams {
         idle_ttl: Duration::from_millis(60),
         max_requests_per_session: u64::MAX,
         ..SessionParams::default()
     };
-    let mut session = PythonSession::start(&command, &expected, params, Duration::from_secs(20))
+    let mut session = WorkerSession::start(&command, &expected, params, Duration::from_secs(20))
         .expect("session starts");
     assert!(!session.recycle_due(), "fresh session must not be idle");
 
@@ -301,41 +304,36 @@ fn session_recycles_on_idle_ttl_not_process_age() {
 }
 
 #[test]
-fn worker_v2_hello_registers_all_python_operations() {
-    let Some(python) = python_executable() else {
+fn worker_v3_hello_registers_only_pdf_operations() {
+    let Some(python) = pdf_worker_path() else {
         return;
     };
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     let command = WorkerCommand {
         program: python,
-        base_args: vec![
-            OsString::from("-m"),
-            OsString::from("src.workers.document_parser_worker"),
-        ],
+        base_args: Vec::new(),
         current_dir: Some(repository_root),
-        expected_kind: WorkerKind::PythonDocument,
-        required_backends: vec!["python_pdf_text_v2".to_string()],
+        expected_kind: WorkerKind::Pdf,
+        required_backends: vec!["rust_pdfium_v3".to_string()],
         required_extensions: vec![".pdf".to_string()],
     };
     let worker =
-        register_worker(&command, Duration::from_secs(20)).expect("worker-v2 hello preflight");
+        register_worker(&command, Duration::from_secs(20)).expect("worker-v3 hello preflight");
     let hello = worker_hello_from_registered(&worker);
-    assert_eq!(hello.worker_contract_version, "ai_daily_worker_v2");
+    assert_eq!(hello.worker_contract_version, "ai_daily_worker_v3");
     assert_eq!(
         hello.supported_operations,
         vec![
             ai_daily_worker_contract::WorkerOperation::PdfClassify,
             ai_daily_worker_contract::WorkerOperation::PdfParse,
-            ai_daily_worker_contract::WorkerOperation::PythonOfficeParse,
-            ai_daily_worker_contract::WorkerOperation::PythonSharepointParse,
         ]
     );
-    assert_eq!(hello.worker_build.len(), 64);
+    assert!(hello.worker_build.starts_with("sha256-source-v1:"));
 }
 
 #[test]
 fn session_process_classifies_and_parses_text_pdf() {
-    let Some(python) = python_executable() else {
+    let Some(python) = pdf_worker_path() else {
         return;
     };
     let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
@@ -349,17 +347,14 @@ fn session_process_classifies_and_parses_text_pdf() {
     }
     let command = WorkerCommand {
         program: python,
-        base_args: vec![
-            OsString::from("-m"),
-            OsString::from("src.workers.document_parser_worker"),
-        ],
+        base_args: Vec::new(),
         current_dir: Some(repository_root.clone()),
-        expected_kind: WorkerKind::PythonDocument,
-        required_backends: vec!["python_pdf_text_v2".to_string()],
+        expected_kind: WorkerKind::Pdf,
+        required_backends: vec!["rust_pdfium_v3".to_string()],
         required_extensions: vec![".pdf".to_string()],
     };
     let registered =
-        register_worker(&command, Duration::from_secs(20)).expect("worker-v2 hello preflight");
+        register_worker(&command, Duration::from_secs(20)).expect("worker-v3 hello preflight");
     let expected = worker_hello_from_registered(&registered);
 
     let metadata = std::fs::metadata(&fixture).expect("fixture metadata");
@@ -371,7 +366,7 @@ fn session_process_classifies_and_parses_text_pdf() {
     let source_version =
         ai_daily_discovery::build_source_version(modified.as_nanos(), metadata.len());
 
-    let mut session = PythonSession::start(
+    let mut session = WorkerSession::start(
         &command,
         &expected,
         SessionParams::default(),
@@ -391,7 +386,7 @@ fn session_process_classifies_and_parses_text_pdf() {
         payload: ParseRequest {
             file_path: fixture.to_string_lossy().into_owned(),
             file_type: ".pdf".to_string(),
-            backend: ParserBackend::PythonPdfTextV2,
+            backend: ParserBackend::RustPdfiumV3,
             remaining_timeout_ms: 30_000,
             max_file_size_bytes: 1_000_000,
             parser_limits: ParserLimits::Pdf {
@@ -404,7 +399,7 @@ fn session_process_classifies_and_parses_text_pdf() {
     };
     let parse_result = session_parse(&mut session, &parse_request, Duration::from_secs(20))
         .expect("session parse completes");
-    assert_eq!(parse_result.parser_backend, ParserBackend::PythonPdfTextV2);
+    assert_eq!(parse_result.parser_backend, ParserBackend::RustPdfiumV3);
     assert_eq!(parse_result.observed_source_version, source_version);
 
     session.kill();

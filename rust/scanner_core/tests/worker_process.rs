@@ -1,368 +1,197 @@
 use ai_daily_scanner_core::process::{run_process, ProcessError, ProcessSpec, WorkerRssTracker};
-use std::ffi::OsString;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::sync::{Arc, Barrier};
-use std::thread;
-use std::time::Duration;
-use std::time::Instant;
-
+use std::{
+    ffi::OsString,
+    fs,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Barrier,
+    },
+    thread,
+    time::{Duration, Instant},
+};
+fn helper() -> PathBuf {
+    let path = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples")
+        .join(if cfg!(windows) {
+            "process_fixture.exe"
+        } else {
+            "process_fixture"
+        });
+    assert!(
+        path.is_file(),
+        "Build the Rust process_fixture example before focused process tests"
+    );
+    path
+}
+fn spec(mode: &str) -> ProcessSpec {
+    let mut value = ProcessSpec::new(helper(), Duration::from_secs(5));
+    value.args = vec![mode.into()];
+    value
+}
 #[test]
 fn missing_worker_is_an_explicit_start_failure() {
-    let missing = std::env::temp_dir().join(format!(
-        "missing-worker-{}-{}.exe",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let spec = ProcessSpec::new(missing, Duration::from_secs(1));
-
-    let error = run_process(&spec).expect_err("missing worker must not start");
-
-    assert_eq!(error, ProcessError::StartFailed);
+    let value = ProcessSpec::new(
+        helper().with_file_name("nonexistent-fixture.exe"),
+        Duration::from_secs(1),
+    );
+    assert_eq!(run_process(&value).unwrap_err(), ProcessError::StartFailed);
 }
-
 #[test]
 fn embedded_nul_in_process_arguments_is_rejected_before_start() {
-    let program = std::env::current_exe().expect("test executable should exist");
-    let mut spec = ProcessSpec::new(program, Duration::from_secs(1));
-    spec.args = vec![OsString::from("invalid\0argument")];
-
-    let error = run_process(&spec).expect_err("NUL must never reach CreateProcess or exec");
-
-    assert_eq!(error, ProcessError::StartFailed);
+    let mut value = spec("fast");
+    value.args.push(OsString::from("invalid\0argument"));
+    assert_eq!(run_process(&value).unwrap_err(), ProcessError::StartFailed);
 }
-
 #[test]
 fn worker_stdout_stderr_and_exit_code_are_captured() {
-    let Some(python) = python_executable() else {
-        return;
-    };
-    let mut spec = ProcessSpec::new(python, Duration::from_secs(5));
-    spec.args = vec![
-        OsString::from("-c"),
-        OsString::from(
-            "import sys; data=sys.stdin.buffer.read(); sys.stdout.buffer.write(data); sys.stderr.write('audit'); raise SystemExit(7)",
-        ),
-    ];
-    spec.stdin = "中文 payload".as_bytes().to_vec();
-
-    let output = run_process(&spec).expect("worker should complete");
-
+    let mut value = spec("echo");
+    value.stdin = "中文 payload".as_bytes().to_vec();
+    let output = run_process(&value).unwrap();
     assert_eq!(output.exit_code, 7);
-    assert_eq!(output.stdout, "中文 payload".as_bytes());
+    assert_eq!(output.stdout, value.stdin);
     assert_eq!(output.stderr, b"audit");
 }
-
-#[cfg(windows)]
-#[test]
-fn windows_job_peak_is_recorded_in_the_shared_run_tracker() {
-    let Some(python) = python_executable() else {
-        return;
-    };
-    let tracker = WorkerRssTracker::default();
-    let mut spec = ProcessSpec::new(python, Duration::from_secs(5));
-    spec.args = vec![
-        OsString::from("-c"),
-        OsString::from("payload=bytearray(4*1024*1024); print(len(payload))"),
-    ];
-    spec.rss_tracker = Some(tracker.clone());
-
-    let output = run_process(&spec).expect("tracked worker should complete");
-
-    assert_eq!(output.exit_code, 0);
-    assert!(
-        tracker.peak_worker_rss_bytes().is_some_and(|peak| peak > 0),
-        "a started contained child must publish a non-zero Job peak"
-    );
-}
-
 #[test]
 fn empty_worker_input_is_an_immediate_eof() {
-    let Some(python) = python_executable() else {
-        return;
-    };
-    let mut spec = ProcessSpec::new(python, Duration::from_secs(5));
-    spec.args = vec![
-        OsString::from("-c"),
-        OsString::from("import sys; print(len(sys.stdin.buffer.read()))"),
-    ];
-
-    let output = run_process(&spec).expect("empty input should complete");
-
-    assert_eq!(output.exit_code, 0);
-    assert_eq!(output.stdout, b"0\r\n");
+    assert_eq!(run_process(&spec("eof")).unwrap().stdout, b"0\n");
 }
-
 #[test]
 fn windows_command_line_quoting_preserves_exact_arguments() {
-    let Some(python) = python_executable() else {
-        return;
-    };
     let expected = ["value with spaces", "quoted\"value", "trailing\\"];
-    let mut spec = ProcessSpec::new(python, Duration::from_secs(5));
-    spec.args = vec![
-        OsString::from("-c"),
-        OsString::from("import json,sys; print(json.dumps(sys.argv[1:]))"),
-        OsString::from(expected[0]),
-        OsString::from(expected[1]),
-        OsString::from(expected[2]),
-    ];
-
-    let output = run_process(&spec).expect("quoted arguments should reach the worker");
-    let actual: Vec<String> =
-        serde_json::from_slice(&output.stdout).expect("worker output should be JSON");
-
-    assert_eq!(actual, expected);
+    let mut value = spec("args");
+    value.args.extend(expected.iter().map(OsString::from));
+    let output = run_process(&value).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Vec<String>>(&output.stdout).unwrap(),
+        expected
+    );
 }
-
 #[test]
 fn worker_sleep_past_deadline_is_terminated() {
-    let Some(python) = python_executable() else {
-        return;
-    };
-    let mut spec = ProcessSpec::new(python, Duration::from_millis(100));
-    spec.args = vec![
-        OsString::from("-c"),
-        OsString::from("import time; time.sleep(30)"),
-    ];
-
-    let error = run_process(&spec).expect_err("sleeping worker must time out");
-
-    assert_eq!(error, ProcessError::TimedOut);
+    let mut value = spec("sleep");
+    value.timeout = Duration::from_millis(100);
+    assert_eq!(run_process(&value).unwrap_err(), ProcessError::TimedOut);
 }
-
 #[test]
 fn output_past_capture_limit_is_rejected_without_pipe_deadlock() {
-    let Some(python) = python_executable() else {
-        return;
-    };
-    let mut spec = ProcessSpec::new(python, Duration::from_secs(5));
-    spec.args = vec![
-        OsString::from("-c"),
-        OsString::from("import sys; sys.stdout.buffer.write(b'x' * 1048576)"),
-    ];
-    spec.capture_limit = 1024;
-
-    let error = run_process(&spec).expect_err("oversized output must be rejected");
-
-    assert_eq!(error, ProcessError::OutputTooLarge);
+    let mut value = spec("flood");
+    value.capture_limit = 1024;
+    assert_eq!(
+        run_process(&value).unwrap_err(),
+        ProcessError::OutputTooLarge
+    );
 }
-
+#[test]
+fn cancellation_terminates_an_inflight_worker() {
+    let mut value = spec("sleep");
+    let flag = Arc::new(AtomicBool::new(false));
+    value.cancel = Some(flag.clone());
+    let thread = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(100));
+        flag.store(true, Ordering::SeqCst);
+    });
+    assert_eq!(run_process(&value).unwrap_err(), ProcessError::Cancelled);
+    thread.join().unwrap();
+}
+#[cfg(windows)]
+#[test]
+fn windows_job_peak_is_recorded_and_memory_limit_is_enforced() {
+    let tracker = WorkerRssTracker::default();
+    let mut value = spec("memory");
+    value.args.push((4 * 1024 * 1024).to_string().into());
+    value.rss_tracker = Some(tracker.clone());
+    assert_eq!(run_process(&value).unwrap().exit_code, 0);
+    assert!(tracker.peak_worker_rss_bytes().unwrap() > 0);
+    let mut value = spec("memory");
+    value.args.push((128 * 1024 * 1024).to_string().into());
+    value.memory_limit_bytes = Some(32 * 1024 * 1024);
+    let output = run_process(&value).unwrap();
+    assert_ne!(output.exit_code, 0);
+}
 #[cfg(windows)]
 #[test]
 fn concurrent_workers_do_not_inherit_each_others_pipe_handles() {
-    let Some(python) = python_executable() else {
-        return;
-    };
-    const FAST_WORKERS: usize = 12;
-    let barrier = Arc::new(Barrier::new(FAST_WORKERS + 2));
+    let barrier = Arc::new(Barrier::new(14));
+    let slow_barrier = barrier.clone();
     let started = Instant::now();
-
-    let slow_barrier = Arc::clone(&barrier);
-    let slow_python = python.clone();
     let slow = thread::spawn(move || {
         slow_barrier.wait();
-        let mut spec = ProcessSpec::new(slow_python, Duration::from_secs(5));
-        spec.args = vec![
-            OsString::from("-c"),
-            OsString::from("import time; time.sleep(1.5); print('slow')"),
-        ];
-        run_process(&spec).expect("slow worker should complete")
+        run_process(&spec("slow")).unwrap()
     });
-
-    let fast = (0..FAST_WORKERS)
+    let fast: Vec<_> = (0..12)
         .map(|_| {
-            let worker_barrier = Arc::clone(&barrier);
-            let worker_python = python.clone();
+            let barrier = barrier.clone();
             thread::spawn(move || {
-                worker_barrier.wait();
-                let mut spec = ProcessSpec::new(worker_python, Duration::from_secs(5));
-                spec.args = vec![OsString::from("-c"), OsString::from("print('fast')")];
-                let output = run_process(&spec).expect("fast worker should complete");
+                barrier.wait();
+                let output = run_process(&spec("fast")).unwrap();
                 (started.elapsed(), output)
             })
         })
-        .collect::<Vec<_>>();
-
+        .collect();
     barrier.wait();
-    for worker in fast {
-        let (completed_at, output) = worker.join().expect("fast worker thread should join");
-        assert_eq!(output.stdout, b"fast\r\n");
+    for handle in fast {
+        let (time, output) = handle.join().unwrap();
+        assert_eq!(output.stdout, b"fast\n");
         assert!(
-            completed_at < Duration::from_millis(1_200),
-            "fast worker waited for an unrelated slow worker: {completed_at:?}"
+            time < Duration::from_millis(1200),
+            "unrelated pipe delayed fast child: {time:?}"
         );
     }
-    assert_eq!(
-        slow.join().expect("slow worker thread should join").stdout,
-        b"slow\r\n"
-    );
+    assert_eq!(slow.join().unwrap().stdout, b"slow\n");
 }
-
+#[cfg(windows)]
+fn assert_exited(pid: u32) {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, WAIT_OBJECT_0},
+        System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+        if !handle.is_null() {
+            let result = WaitForSingleObject(handle, 3000);
+            CloseHandle(handle);
+            assert_eq!(result, WAIT_OBJECT_0, "child process survived containment");
+        }
+    }
+}
 #[cfg(windows)]
 #[test]
 fn timeout_terminates_worker_grandchild() {
-    let Some(python) = python_executable() else {
-        return;
-    };
-    let directory = tempfile::tempdir().expect("temporary process root should exist");
-    let pid_path = directory.path().join("grandchild.pid");
-    let script = directory.path().join("spawn_grandchild.py");
-    fs::write(
-        &script,
-        "import pathlib, subprocess, sys, time\nchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\npathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')\ntime.sleep(30)\n",
-    )
-    .expect("worker script should be writable");
-    let mut spec = ProcessSpec::new(python, Duration::from_secs(1));
-    spec.args = vec![
-        OsString::from(script.as_os_str()),
-        OsString::from(pid_path.as_os_str()),
-    ];
-
-    let error = run_process(&spec).expect_err("worker tree must hit its deadline");
-
-    assert_eq!(error, ProcessError::TimedOut);
-    let pid: u32 = fs::read_to_string(&pid_path)
-        .expect("worker should record its grandchild")
-        .parse()
-        .expect("grandchild PID should be numeric");
-    assert_process_exited(pid);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("child.pid");
+    let mut value = spec("spawn");
+    value.args.push(path.clone().into_os_string());
+    value.timeout = Duration::from_secs(1);
+    assert_eq!(run_process(&value).unwrap_err(), ProcessError::TimedOut);
+    assert_exited(fs::read_to_string(path).unwrap().parse().unwrap());
 }
-
 #[cfg(windows)]
 #[test]
 fn nested_job_runner_can_contain_its_own_worker() {
-    let mut spec = ProcessSpec::new(
-        std::env::current_exe().expect("test executable should exist"),
-        Duration::from_secs(5),
-    );
-    spec.args = vec![
-        OsString::from("--exact"),
-        OsString::from("nested_job_helper"),
-        OsString::from("--nocapture"),
-    ];
-
-    let output = run_process(&spec).expect("nested runner should remain containable");
-
-    assert_eq!(
-        output.exit_code,
-        0,
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert_eq!(run_process(&spec("nested")).unwrap().exit_code, 0);
 }
-
 #[cfg(windows)]
 #[test]
-fn nested_job_helper() {
-    let invoked_as_helper = std::env::args()
-        .collect::<Vec<_>>()
-        .windows(2)
-        .any(|pair| pair == ["--exact", "nested_job_helper"]);
-    if !invoked_as_helper {
-        return;
+fn killed_owner_closes_job_and_terminates_grandchild() {
+    use std::os::windows::process::CommandExt;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("child.pid");
+    let mut child = std::process::Command::new(helper())
+        .args(["contain", path.to_str().unwrap()])
+        .creation_flags(0x08000000)
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !path.exists() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
     }
-    let Some(python) = python_executable() else {
-        return;
-    };
-    let mut spec = ProcessSpec::new(python, Duration::from_secs(2));
-    spec.args = vec![OsString::from("-c"), OsString::from("print('nested')")];
-    let output = run_process(&spec).expect("inner worker must join a nested Job");
-    assert_eq!(output.exit_code, 0);
-}
-
-#[cfg(windows)]
-#[test]
-fn python_outer_watchdog_closes_job_and_kills_grandchild() {
-    let Some(python) = python_executable() else {
-        return;
-    };
-    let directory = tempfile::tempdir().expect("temporary watchdog root should exist");
-    let pid_path = directory.path().join("watchdog-grandchild.pid");
-    let worker_script = directory.path().join("watchdog_worker.py");
-    let watchdog_script = directory.path().join("outer_watchdog.py");
-    fs::write(
-        &worker_script,
-        "import pathlib, subprocess, sys, time\nchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\npathlib.Path(sys.argv[1]).write_text(str(child.pid), encoding='ascii')\ntime.sleep(30)\n",
-    )
-    .expect("watchdog worker should be writable");
-    fs::write(
-        &watchdog_script,
-        "import os, pathlib, subprocess, sys, time\nhelper, python, worker, pid_path = sys.argv[1:]\nenv = os.environ.copy()\nenv['AI_DAILY_WATCHDOG_HELPER'] = '1'\nenv['AI_DAILY_WATCHDOG_PYTHON'] = python\nenv['AI_DAILY_WATCHDOG_WORKER'] = worker\nenv['AI_DAILY_WATCHDOG_PID'] = pid_path\nproc = subprocess.Popen([helper, '--exact', 'outer_watchdog_helper', '--nocapture'], env=env)\npid_file = pathlib.Path(pid_path)\ndef pid_recorded():\n    try:\n        return pid_file.read_text(encoding='ascii').strip().isdigit()\n    except OSError:\n        return False\ndeadline = time.monotonic() + 10\nwhile not pid_recorded() and time.monotonic() < deadline:\n    if proc.poll() is not None:\n        raise SystemExit('scanner helper exited before spawning worker')\n    time.sleep(0.02)\nif not pid_recorded():\n    proc.kill(); proc.wait(); raise SystemExit('grandchild PID was not recorded')\nproc.kill()\nproc.wait(timeout=5)\n",
-    )
-    .expect("outer watchdog should be writable");
-
-    let status = Command::new(&python)
-        .args([
-            watchdog_script.as_os_str(),
-            std::env::current_exe()
-                .expect("test executable should exist")
-                .as_os_str(),
-            python.as_os_str(),
-            worker_script.as_os_str(),
-            pid_path.as_os_str(),
-        ])
-        .status()
-        .expect("Python outer watchdog should run");
-
-    assert!(
-        status.success(),
-        "Python outer watchdog should kill the helper"
-    );
-    let pid: u32 = fs::read_to_string(&pid_path)
-        .expect("grandchild PID should remain as audit evidence")
-        .trim()
-        .parse()
-        .expect("grandchild PID should be numeric");
-    assert_process_exited(pid);
-}
-
-#[cfg(windows)]
-#[test]
-fn outer_watchdog_helper() {
-    if std::env::var_os("AI_DAILY_WATCHDOG_HELPER").is_none() {
-        return;
-    }
-    let python = PathBuf::from(
-        std::env::var_os("AI_DAILY_WATCHDOG_PYTHON")
-            .expect("watchdog helper Python path should be provided"),
-    );
-    let worker = std::env::var_os("AI_DAILY_WATCHDOG_WORKER")
-        .expect("watchdog worker path should be provided");
-    let pid_path =
-        std::env::var_os("AI_DAILY_WATCHDOG_PID").expect("watchdog PID path should be provided");
-    let mut spec = ProcessSpec::new(python, Duration::from_secs(30));
-    spec.args = vec![worker, pid_path];
-    let _ = run_process(&spec);
-}
-
-#[cfg(windows)]
-fn assert_process_exited(pid: u32) {
-    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
-    use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject};
-
-    const SYNCHRONIZE_PROCESS: u32 = 0x0010_0000;
-    let handle = unsafe { OpenProcess(SYNCHRONIZE_PROCESS, 0, pid) };
-    if handle.is_null() {
-        return;
-    }
-    let wait = unsafe { WaitForSingleObject(handle, 3_000) };
-    unsafe {
-        CloseHandle(handle);
-    }
-    assert_eq!(wait, WAIT_OBJECT_0, "process {pid} survived Job cleanup");
-}
-
-fn python_executable() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    let candidates = if cfg!(windows) {
-        vec![root.join(".venv").join("Scripts").join("python.exe")]
-    } else {
-        vec![root.join(".venv").join("bin").join("python")]
-    };
-    candidates.into_iter().find(|path| path.is_file())
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert_exited(fs::read_to_string(path).unwrap().parse().unwrap());
 }

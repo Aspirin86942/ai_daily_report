@@ -8,6 +8,7 @@ build = "../scanner_core/build.rs"
 ai-daily-discovery = { path = "../discovery" }
 ai-daily-worker-contract = { path = "../worker_contract" }
 office_oxide.workspace = true
+calamine.workspace = true
 quick-xml.workspace = true
 serde.workspace = true
 serde_json.workspace = true

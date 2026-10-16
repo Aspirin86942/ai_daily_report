@@ -187,19 +187,16 @@ impl ScannerStore {
             .execute(
                 "INSERT INTO scan_run_attempts(
                     scan_run_id, attempt_number, owner_id, normalized_scan_db_path,
-                    normalized_office_worker_path, normalized_python_executable,
-                    normalized_python_module_root, python_document_worker_module,
+                    normalized_office_worker_path, normalized_pdf_worker_path,
                     engine_fingerprint, started_at_ms, status
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'running')",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'running')",
                 params![
                     scan_run_id,
                     attempt_number,
                     owner_id,
                     runtime.normalized_scan_db_path,
                     runtime.normalized_office_worker_path,
-                    runtime.normalized_python_executable,
-                    runtime.normalized_python_module_root,
-                    runtime.python_document_worker_module,
+                    runtime.normalized_pdf_worker_path,
                     runtime.engine_fingerprint,
                     now_ms,
                 ],
@@ -218,13 +215,13 @@ impl ScannerStore {
         &mut self,
         active: &ActiveRun,
         office: Option<&WorkerFingerprint>,
-        python: Option<&WorkerFingerprint>,
+        pdf: Option<&WorkerFingerprint>,
         now_ms: u64,
     ) -> Result<(), StoreError> {
         if let Some(fingerprint) = office {
             fingerprint.validate()?;
         }
-        if let Some(fingerprint) = python {
+        if let Some(fingerprint) = pdf {
             fingerprint.validate()?;
         }
         let now_ms = checked_i64(now_ms, "worker fingerprint timestamp")?;
@@ -237,15 +234,15 @@ impl ScannerStore {
             .execute(
                 "UPDATE scan_run_attempts SET
                     office_worker_contract=?1, office_worker_version=?2, office_worker_build=?3,
-                    python_worker_contract=?4, python_worker_version=?5, python_worker_build=?6
+                    pdf_worker_contract=?4, pdf_worker_version=?5, pdf_worker_build=?6
                  WHERE scan_run_id=?7 AND attempt_number=?8 AND owner_id=?9 AND status='running'",
                 params![
                     office.map(|value| value.contract.as_str()),
                     office.map(|value| value.version.as_str()),
                     office.map(|value| value.build.as_str()),
-                    python.map(|value| value.contract.as_str()),
-                    python.map(|value| value.version.as_str()),
-                    python.map(|value| value.build.as_str()),
+                    pdf.map(|value| value.contract.as_str()),
+                    pdf.map(|value| value.version.as_str()),
+                    pdf.map(|value| value.build.as_str()),
                     active.scan_run_id,
                     active.attempt_number,
                     active.owner_id,

@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$ProjectRoot = (Join-Path $PSScriptRoot '..'), [switch]$Apply)
+param([string]$ProjectRoot = (Join-Path $PSScriptRoot '..'), [string]$ConfigDirectory, [switch]$Apply)
 . (Join-Path $PSScriptRoot 'daily_task_common.ps1')
-$plan = Get-ReportTaskPlan -ProjectRoot $ProjectRoot
+$plan = Get-ReportTaskPlan -ProjectRoot $ProjectRoot -ConfigDirectory $ConfigDirectory
 Remove-ReportDailyTask -Plan $plan -Apply:$Apply | ConvertTo-Json -Depth 6

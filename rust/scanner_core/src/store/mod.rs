@@ -53,7 +53,7 @@ pub use cache::{
 pub use inventory::{FileResultRecord, InventoryRecord};
 pub use schema::{BUSY_TIMEOUT_MS, LATEST_USER_VERSION};
 
-pub const SCAN_DB_FILENAME: &str = "scan_index_v3.sqlite3";
+pub const SCAN_DB_FILENAME: &str = "scan_index_rust_v3.sqlite3";
 pub const REQUEST_HASH_ALGORITHM: &str = "sha256-request-v1";
 pub const HEARTBEAT_INTERVAL_MS: u64 = 5_000;
 pub const LEASE_GRACE_MS: u64 = 20_000;
@@ -765,19 +765,13 @@ fn validate_database_path(path: &Path) -> Result<(), StoreError> {
 fn require_existing_v3(path: &Path) -> Result<(), StoreError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let connection = Connection::open_with_flags(path, flags).map_err(cache_open)?;
-    let found: i32 = connection
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(cache_open)?;
-    if found == LATEST_USER_VERSION {
-        Ok(())
-    } else {
-        Err(StoreError::SchemaMismatch { found })
-    }
+    schema::require_v3(&connection).map_err(schema_open)
 }
 
 fn schema_open(error: schema::SchemaError) -> StoreError {
     match error {
         schema::SchemaError::Mismatch(found) => StoreError::SchemaMismatch { found },
+        schema::SchemaError::LayoutMismatch => StoreError::SchemaLayoutMismatch,
         schema::SchemaError::Sql(error) => cache_open(error),
     }
 }

@@ -11,6 +11,7 @@ fn main() {
         .unwrap_or_else(local_source_fingerprint);
     println!("cargo:rustc-env=AI_DAILY_ENGINE_BUILD={build}");
     println!("cargo:rustc-env=AI_DAILY_OFFICE_WORKER_BUILD={build}");
+    println!("cargo:rustc-env=AI_DAILY_PDF_WORKER_BUILD={build}");
 }
 
 fn local_source_fingerprint() -> String {
@@ -23,7 +24,7 @@ fn local_source_fingerprint() -> String {
         "discovery/src",
         "office_parser/src",
         "worker_contract/src",
-        "scanner_native/src",
+        "pdf_parser/src",
     ] {
         collect_files(&workspace.join(relative), &mut files);
     }
@@ -34,7 +35,8 @@ fn local_source_fingerprint() -> String {
         "discovery/Cargo.toml",
         "office_parser/Cargo.toml",
         "worker_contract/Cargo.toml",
-        "scanner_native/Cargo.toml",
+        "pdf_parser/Cargo.toml",
+        "build-inputs.json",
     ] {
         files.push(workspace.join(relative));
     }

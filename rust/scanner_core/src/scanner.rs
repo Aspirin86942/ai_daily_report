@@ -87,20 +87,18 @@ pub(crate) struct ScannerResources {
 #[derive(Default)]
 pub(crate) struct ScannerWorkerPools {
     office: Option<Arc<WorkerPool>>,
-    python_document: Option<Arc<WorkerPool>>,
+    pdf: Option<Arc<WorkerPool>>,
 }
 
 impl ScannerWorkerPools {
     pub(crate) fn registered_workers(
         &self,
         office_command: &WorkerCommand,
-        python_command: &WorkerCommand,
+        pdf_command: &WorkerCommand,
     ) -> Option<(RegisteredWorker, RegisteredWorker)> {
         Some((
             self.office.as_ref()?.registered_worker(office_command)?,
-            self.python_document
-                .as_ref()?
-                .registered_worker(python_command)?,
+            self.pdf.as_ref()?.registered_worker(pdf_command)?,
         ))
     }
 
@@ -108,12 +106,12 @@ impl ScannerWorkerPools {
         &mut self,
         office_command: WorkerCommand,
         office_worker: RegisteredWorker,
-        python_command: WorkerCommand,
-        python_worker: RegisteredWorker,
+        pdf_command: WorkerCommand,
+        pdf_worker: RegisteredWorker,
         params: SessionParams,
     ) -> (Arc<WorkerPool>, Arc<WorkerPool>) {
         let office_hello = crate::parsers::worker_hello_from_registered(&office_worker);
-        let python_hello = crate::parsers::worker_hello_from_registered(&python_worker);
+        let pdf_hello = crate::parsers::worker_hello_from_registered(&pdf_worker);
         let office = resolve_pool(
             &mut self.office,
             office_command,
@@ -121,14 +119,8 @@ impl ScannerWorkerPools {
             office_worker,
             params,
         );
-        let python_document = resolve_pool(
-            &mut self.python_document,
-            python_command,
-            python_hello,
-            python_worker,
-            params,
-        );
-        (office, python_document)
+        let pdf = resolve_pool(&mut self.pdf, pdf_command, pdf_hello, pdf_worker, params);
+        (office, pdf)
     }
 }
 

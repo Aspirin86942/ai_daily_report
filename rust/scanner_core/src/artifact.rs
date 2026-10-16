@@ -219,9 +219,9 @@ struct WorkerCanonical<'a> {
     office_contract: Option<&'a str>,
     office_version: Option<&'a str>,
     office_build: Option<&'a str>,
-    python_contract: Option<&'a str>,
-    python_version: Option<&'a str>,
-    python_build: Option<&'a str>,
+    pdf_contract: Option<&'a str>,
+    pdf_version: Option<&'a str>,
+    pdf_build: Option<&'a str>,
 }
 
 #[derive(Serialize)]
@@ -262,9 +262,9 @@ pub fn snapshot_key_parts(
             office_contract: worker_ids.office_contract.as_deref(),
             office_version: worker_ids.office_version.as_deref(),
             office_build: worker_ids.office_build.as_deref(),
-            python_contract: worker_ids.python_contract.as_deref(),
-            python_version: worker_ids.python_version.as_deref(),
-            python_build: worker_ids.python_build.as_deref(),
+            pdf_contract: worker_ids.pdf_contract.as_deref(),
+            pdf_version: worker_ids.pdf_version.as_deref(),
+            pdf_build: worker_ids.pdf_build.as_deref(),
         },
         classifier: ClassifierCanonical {
             contract: &classifier_ids.contract,
@@ -482,9 +482,7 @@ mod tests {
             "scanner_settings": {},
             "adapters": {
                 "office_worker_path": "C:\\bin\\office.exe",
-                "python_executable": "C:\\venv\\python.exe",
-                "python_module_root": "C:\\repo",
-                "python_document_worker_module": "src.workers.document_parser_worker"
+                "pdf_worker_path": "C:\\venv\\python.exe",
             }
         }))
         .unwrap();

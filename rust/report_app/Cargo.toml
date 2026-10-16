@@ -1,0 +1,28 @@
+[package]
+name = "ai-daily-report"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ai-daily-scanner-core = { path = "../scanner_core" }
+ai-daily-scanner-contract = { path = "../scanner_contract" }
+ai-daily-worker-contract = { path = "../worker_contract" }
+ai-daily-discovery = { path = "../discovery" }
+chrono.workspace = true
+clap.workspace = true
+minijinja.workspace = true
+reqwest.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde-saphyr.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tempfile.workspace = true
+walkdir.workspace = true
+
+[build-dependencies]
+sha2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Com", "Win32_System_Console", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

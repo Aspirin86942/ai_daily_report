@@ -128,10 +128,9 @@ struct Harness {
 fn harness(request_id: &str) -> Harness {
     let directory = tempfile::tempdir().expect("temporary directory");
     let db_path = directory.path().join(SCAN_DB_FILENAME);
-    let mut request: BuildContextRequest = serde_json::from_str(include_str!(
-        "../../../../tests/fixtures/scanner_contract/v1/request.json"
-    ))
-    .expect("request fixture");
+    let mut request: BuildContextRequest =
+        serde_json::from_str(include_str!("../../tests/fixtures/request.json"))
+            .expect("request fixture");
     request.request_id = request_id.to_string();
     request.work_dir = directory.path().to_string_lossy().to_string();
     request.scan_db_path = db_path.to_string_lossy().to_string();
@@ -141,13 +140,11 @@ fn harness(request_id: &str) -> Harness {
             .join("office-worker.exe")
             .to_string_lossy()
             .to_string(),
-        python_executable: directory
+        pdf_worker_path: directory
             .path()
             .join("python.exe")
             .to_string_lossy()
             .to_string(),
-        python_module_root: directory.path().to_string_lossy().to_string(),
-        python_document_worker_module: "src.workers.document_parser_worker".to_string(),
     };
     let profile = normalize_scanner_settings(&request.scanner_settings, request.report_mode)
         .expect("normalized scanner profile");
@@ -497,12 +494,12 @@ fn insert_orphan_artifact(store: &ScannerStore, created_at_ms: i64) {
 
 fn record_both_workers(store: &mut ScannerStore, active: &ActiveRun, now_ms: u64) {
     let office = WorkerFingerprint {
-        contract: "ai_daily_worker_v2".to_string(),
+        contract: "ai_daily_worker_v3".to_string(),
         version: "0.1.0".to_string(),
         build: "office-build".to_string(),
     };
     let python = WorkerFingerprint {
-        contract: "ai_daily_worker_v2".to_string(),
+        contract: "ai_daily_worker_v3".to_string(),
         version: "0.1.0".to_string(),
         build: "python-build".to_string(),
     };
@@ -688,17 +685,12 @@ fn cache_aware_plan_consumes_pure_planner_output_without_reclassification() {
         text_like: RouteStackFingerprint::text("engine-build").unwrap(),
         modern_office: RouteStackFingerprint::modern_office(
             "engine-build",
-            "ai_daily_worker_v2",
+            "ai_daily_worker_v3",
             "office-build",
-            Some(("ai_daily_worker_v2", "python-build")),
         )
         .unwrap(),
-        python_document: RouteStackFingerprint::python_document(
-            "engine-build",
-            "ai_daily_worker_v2",
-            "python-build",
-        )
-        .unwrap(),
+        pdf: RouteStackFingerprint::pdf("engine-build", "ai_daily_worker_v3", "python-build")
+            .unwrap(),
     };
     let entries = harness
         .store
@@ -3019,7 +3011,7 @@ fn worker_fingerprints_and_run_diagnostics_round_trip() {
             .unwrap(),
     );
     let office = WorkerFingerprint {
-        contract: "ai_daily_worker_v2".to_string(),
+        contract: "ai_daily_worker_v3".to_string(),
         version: "0.1.0".to_string(),
         build: "office-build".to_string(),
     };
@@ -3035,7 +3027,7 @@ fn worker_fingerprints_and_run_diagnostics_round_trip() {
         .store
         .connection
         .query_row(
-            "SELECT office_worker_build, python_worker_build FROM scan_run_attempts
+            "SELECT office_worker_build, pdf_worker_build FROM scan_run_attempts
                  WHERE scan_run_id=?1 AND attempt_number=1",
             [active.scan_run_id],
             |row| Ok((row.get(0)?, row.get(1)?)),

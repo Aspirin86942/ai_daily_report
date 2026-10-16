@@ -1,0 +1,20 @@
+[package]
+name = "ai-daily-pdf-parser"
+version.workspace = true
+edition.workspace = true
+build = "../scanner_core/build.rs"
+
+[dependencies]
+pdfium-render.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+ai-daily-discovery = { path = "../discovery" }
+ai-daily-worker-contract = { path = "../worker_contract" }
+
+[build-dependencies]
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

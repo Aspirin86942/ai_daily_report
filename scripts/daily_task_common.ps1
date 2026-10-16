@@ -2,12 +2,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Get-ReportTaskPlan {
-    param([string]$ProjectRoot)
+    param([string]$ProjectRoot, [string]$ConfigDirectory)
     $root = (Resolve-Path -LiteralPath $ProjectRoot).Path
-    $python = Join-Path $root '.venv\Scripts\python.exe'
-    $helper = Join-Path $root 'scripts\daily_task_plan.py'
+    $program = Join-Path $root 'ai-daily-report.exe'
+    if (-not $ConfigDirectory) { $ConfigDirectory = Join-Path $root 'config' }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-    $text = & $python -X utf8 $helper --sid $sid
+    # A Windows GUI-subsystem executable needs a pipeline for PowerShell to
+    # wait for completion and capture its output and exit code.
+    $text = & $program --config-dir $ConfigDirectory task plan --sid $sid | Out-String
     if ($LASTEXITCODE -ne 0) { throw 'TASK_PLAN_FAILED' }
     return ($text | ConvertFrom-Json)
 }

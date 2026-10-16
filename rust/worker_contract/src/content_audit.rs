@@ -134,7 +134,7 @@ impl ParsedContentAudit {
             || self.detected_format.as_ref().is_some_and(|format| {
                 !matches!(
                     format.as_str(),
-                    "xls" | "xlsx" | "docx" | "pptx" | "pdf" | "text" | "csv"
+                    "xls" | "xlsx" | "doc" | "docx" | "ppt" | "pptx" | "pdf" | "text" | "csv"
                 )
             })
         {

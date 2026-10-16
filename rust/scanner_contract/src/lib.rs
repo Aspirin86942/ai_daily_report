@@ -3,7 +3,7 @@
 use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 mod pdf_audit;
 pub use pdf_audit::{pdf_sample_pages, PdfPageAudit, PdfPageObservation};
 
@@ -237,45 +237,17 @@ pub enum CompressionProfile {
     MonthlyBalancedV1,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum FallbackBackend {
-    #[serde(rename = "python_office_v2")]
-    PythonOfficeV2,
-    #[serde(rename = "python_sharepoint_text_v2")]
-    PythonSharepointTextV2,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterPaths {
     pub office_worker_path: String,
-    pub python_executable: String,
-    pub python_module_root: String,
-    pub python_document_worker_module: String,
+    pub pdf_worker_path: String,
 }
 
 impl Validate for AdapterPaths {
     fn validate(&self) -> Result<(), String> {
         require_absolute_path(&self.office_worker_path, "office_worker_path")?;
-        require_absolute_path(&self.python_executable, "python_executable")?;
-        require_absolute_path(&self.python_module_root, "python_module_root")?;
-        require_non_empty(
-            &self.python_document_worker_module,
-            1024,
-            "python_document_worker_module",
-        )?;
-        let mut parts = self.python_document_worker_module.split('.');
-        if parts.all(|part| {
-            let mut chars = part.chars();
-            chars
-                .next()
-                .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
-                && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
-        }) {
-            Ok(())
-        } else {
-            Err("python_document_worker_module must be dotted identifiers".to_string())
-        }
+        require_absolute_path(&self.pdf_worker_path, "pdf_worker_path")
     }
 }
 
@@ -379,12 +351,6 @@ pub struct ScannerSettings {
         deserialize_with = "deserialize_optional_non_null"
     )]
     pub excerpt_priority_paths: Option<Vec<String>>,
-    #[serde(
-        default,
-        skip_serializing_if = "Option::is_none",
-        deserialize_with = "deserialize_optional_non_null"
-    )]
-    pub fallback_after_timeout: Option<bool>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -864,10 +830,6 @@ fn validate_csv_encodings(encodings: &[String]) -> Result<(), String> {
 #[serde(deny_unknown_fields)]
 pub struct OfficeParseProfile {
     pub primary_backend: String,
-    pub fallback_enabled: bool,
-    pub fallback_order: Vec<FallbackBackend>,
-    pub fallback_after_timeout: bool,
-    pub fallback_policy_version: String,
     pub legacy_extensions_enabled: bool,
     pub excel_max_sheets: u64,
     pub excel_max_rows: u64,
@@ -884,16 +846,6 @@ pub struct OfficeParseProfile {
 impl Validate for OfficeParseProfile {
     fn validate(&self) -> Result<(), String> {
         require_non_empty(&self.primary_backend, 1024, "primary_backend")?;
-        require_non_empty(
-            &self.fallback_policy_version,
-            1024,
-            "fallback_policy_version",
-        )?;
-        if self.fallback_order.len() > 2
-            || self.fallback_order.iter().collect::<HashSet<_>>().len() != self.fallback_order.len()
-        {
-            return Err("fallback_order must be unique and contain at most two items".to_string());
-        }
         require_range(self.excel_max_sheets, 1, 1024, "excel_max_sheets")?;
         require_range(self.excel_max_rows, 1, 1_048_576, "excel_max_rows")?;
         require_range(self.excel_max_columns, 1, 16_384, "excel_max_columns")?;
@@ -1569,8 +1521,9 @@ pub enum ParseStatus {
 #[serde(rename_all = "snake_case")]
 pub enum AuditWorkerLane {
     RustCore,
-    RustOfficeProcessV2,
-    PythonDocumentProcessV2,
+    RustOfficeProcessV3,
+    RustPdfProcessV3,
+    LocalOcrPreflight,
     NotParsed,
 }
 
@@ -2036,16 +1989,13 @@ pub fn validate_v2_parse_provenance(
     let body_parser = matches!(
         (parser_backend, worker_lane),
         ("light_text_v2", AuditWorkerLane::RustCore)
-            | ("rust_office_oxide_v2", AuditWorkerLane::RustOfficeProcessV2)
-            | ("rust_xlsx_bounded_v2", AuditWorkerLane::RustOfficeProcessV2)
+            | ("rust_office_oxide_v2", AuditWorkerLane::RustOfficeProcessV3)
+            | ("rust_xlsx_bounded_v2", AuditWorkerLane::RustOfficeProcessV3)
+            | ("rust_pdfium_v3", AuditWorkerLane::RustPdfProcessV3)
+            | ("rust_xls_calamine_v3", AuditWorkerLane::RustOfficeProcessV3)
             | (
-                "python_pdf_text_v2",
-                AuditWorkerLane::PythonDocumentProcessV2
-            )
-            | ("python_office_v2", AuditWorkerLane::PythonDocumentProcessV2)
-            | (
-                "python_sharepoint_text_v2",
-                AuditWorkerLane::PythonDocumentProcessV2
+                "rust_legacy_office_v3",
+                AuditWorkerLane::RustOfficeProcessV3
             )
     );
     if !(metadata || not_parsed || body_parser) {
@@ -2661,13 +2611,7 @@ mod tests {
     }
 
     fn fixture_dir() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join("tests")
-            .join("fixtures")
-            .join("scanner_contract")
-            .join("v1")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
     }
 
     fn read_json<T: DeserializeOwned>(path: &Path) -> T {

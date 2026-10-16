@@ -1,34 +1,32 @@
 ﻿# Repository Guidelines
 
 ## Project Structure & Module Organization
-- `main.py` is the CLI entry point.
-- `src/` holds the Python application shell: `core/` (config, health checks, logging, LLM client), `models/` (Pydantic contracts), `services/` (Rust-core orchestration, report storage and generation), `workers/` (crash-isolated Python document worker), and `utils/` (text helpers).
-- `EvidenceDailyService` handles evidence daily reports, frozen inputs, audited model calls and recovery. `ReportRunner` preserves the historical daily API and orchestrates weekly/monthly reports.
-- `templates/` contains LLM prompts and Jinja2 report templates.
+- `rust/report_app` contains the Rust CLI and report application: `config`, `run`, `store`, `snapshots`, `model`, `reports`, `publish`, `maintenance`, and `operations`.
+- `run_report` handles daily, weekly and monthly reports; frozen inputs and raw model responses preserve recovery evidence. Daily v3 extracts facts and composes one report.
+- The live task uses `.releases/rust-20261016-02/ai-daily-report.exe` with `config-rust` after the 2026-10-16 capacity upgrade. Daily model plan v4 uses independent fact output limits, complete splits and grouped composition; report format stays v3. Retain the 2026-10-15 package and its saved config for unfinished model plan v3 runs. `main.py`, `src/`, the old Python tools, `scanner_native`, `.venv` and legacy workers remain available for rollback. Defer the planned source cleanup until the three real Rust scheduling windows pass; preserve the user environment, databases, reports and backups. See `docs/plans/2026-10-15-rust-cutover.md`.
+- `templates/` contains embedded LLM prompts and MiniJinja report templates. Packaged copies must match their compiled bytes.
 - `config/` stores YAML settings. Track only `settings.example.yaml`; keep `settings.windows.yaml` and `.secrets.yaml` local.
 - `data/` stores the SQLite database and generated Markdown reports; `logs/` holds runtime logs.
-- `rust/` is the Cargo workspace for the production scanner/context core: `scanner_core/`, the PyO3 `scanner_native` extension, shared domain types in `scanner_contract/`, the worker-v2 envelope in `worker_contract/`, the reusable `discovery/` library, and the crash-isolated `office_parser/` worker.
+- `rust/` contains `report_app`, `scanner_core`, `scanner_contract`, `worker_contract`, `discovery`, `office_parser`, and `pdf_parser`. Worker protocol is v3. PyO3 is outside the active workspace.
 - `scanner_core::store` keeps its public API in `mod.rs`; private `types`, `runs`, `lease`, `artifacts`, `retention` and `tests` modules separate persistence responsibilities.
-- `scripts/benchmark_scanner.py` runs the real scanner path and writes parser/discovery benchmark evidence.
-- `tests/` contains pytest test modules.
+- Rust integration tests live under each package's `tests/`; `tests/windows_operations.ps1` verifies operational scripts with scheduler doubles. Existing pytest modules are migration references.
 
 ## Build, Test, and Development Commands
-- The only supported runtime is CPython `3.13.13`; `.python-version` is the source of truth for development, release, and deployment.
-- `uv sync --frozen` installs dependencies from `pyproject.toml` / `uv.lock` into the project `.venv`.
-- `uv run python main.py doctor --strict` validates the production config, templates, dependencies, workers, and Rust core.
-- `uv run python main.py daily -i "..."` generates a daily report. Examples: add `--no-save` or `--date 2026-02-05` as needed.
+- The Rust release runs on Windows x64 without Python. The retained Python production environment is CPython `3.13.13`; do not replace it during migration.
+- `ai-daily-report.exe --config-dir <directory> doctor --strict` validates config, templates, databases, workers and the pinned PDFium DLL without network calls.
+- `ai-daily-report.exe --config-dir <directory> daily -i "..."` generates a daily report. Add `--no-save` for an audited preview.
 - Daily reports default to the previous completed calendar day. Prefer `--target-date YYYY-MM-DD`; `--date` remains a deprecated alias. `--dry-run` scans locally without model calls, while `--no-save` generates an audited preview.
-- `uv run python main.py weekly --source db` aggregates weekly reports; `--source scan` scans files instead.
-- `uv run python main.py monthly --source db` aggregates monthly reports.
-- `uv run pytest` runs the Python test suite.
+- `ai-daily-report.exe weekly --source db` aggregates weekly reports; `--source scan` scans files instead.
+- `ai-daily-report.exe monthly --source db` aggregates monthly reports.
 - `cargo test --manifest-path rust/Cargo.toml --workspace --locked` verifies the Rust workspace.
-- `cargo build --manifest-path rust/Cargo.toml --workspace --release --locked` builds both required production executables.
-- `uv run python scripts/benchmark_scanner.py --start-date YYYY-MM-DD --end-date YYYY-MM-DD --json-out .artifacts\scanner.json --markdown-out .artifacts\scanner.md` captures scanner performance and backend evidence.
+- Build debug workers and examples before integration tests; put the pinned `pdfium.dll` beside the PDF worker. Source identity changes require rebuilding both workers.
+- `scripts/build_windows_release.ps1` builds the three production executables with static CRT in an isolated target directory and verifies the complete manifest. Never use the live legacy worker directory as its output.
+- Final gates: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and the locked workspace tests, all with `--manifest-path rust/Cargo.toml`.
 
 ## Coding Style & Naming Conventions
-- Python style: follow PEP 8 with 4-space indentation.
+- Rust style: use `cargo fmt`, ordinary modules and explicit types; avoid alternate parsers or automatic recovery frameworks.
 - Use `snake_case` for functions/variables, `PascalCase` for classes, and `UPPER_SNAKE_CASE` for constants.
-- Keep modules focused; prefer adding new services under `src/services/` and schemas under `src/models/`.
+- Keep report business logic in `report_app`; reuse the native scanner and worker process controls.
 
 ### Architecture Naming Conventions
 - `Scheduler`: 表示一次运行中的策略编排，不表示后台常驻任务、定时器或 daemon。
@@ -42,13 +40,12 @@
 - `Decision`: 表示单个文件在一次 context run 中的策略选择和审计原因。
 - 产品讨论中可以把 scanner、parser、compressor 理解成“能力代理”，但代码命名优先使用 `Scheduler`、`Planner`、`Parser`、`Compressor`、`Store` 等确定性术语，避免把职责边界写虚。
 - Scanner backend changes must keep `parser_backend` separate from `worker_lane`; benchmark summaries should prove both the parser that produced content and the lane where it executed.
-- `.xlsx` reports the bounded `rust_xlsx_bounded_v2` backend; `.docx` / `.pptx` report `rust_office_oxide_v2`. PDF and explicitly enabled legacy document formats use the Python document worker. Keep `fallback_after_timeout` false unless the user explicitly chooses slower timeout fallback.
+- `.xlsx` reports `rust_xlsx_bounded_v2`; `.docx` / `.pptx` and explicitly enabled `.doc` / `.ppt` use `rust_office_oxide_v2`; true XLS uses calamine, and PDF uses `rust_pdfium_v3`. Each real format has one Rust path. Retired fallback options are rejected.
 - Backend, fallback, timeout, and parser-budget changes must participate in the Rust-normalized scanner profile and cache identity to prevent stale parse-cache reuse.
 
 ## Testing Guidelines
-- Framework: pytest.
-- Test files are named `tests/test_*.py`.
-- Add tests for new parsing logic, schema changes, and report templates; run `uv run pytest` before submitting.
+- Rust tests cover parsing, schemas, report templates, SQLite state transitions, actual bounded worker processes and local HTTP fixtures. No real model calls without explicit cost authorization.
+- Use isolated data/config for verification. Production task registration and three real daily windows are separate evidence from local tests.
 
 ## Commit & Pull Request Guidelines
 - Git history is minimal; no strict convention yet. Use short, imperative commit messages (e.g., "Add weekly scan limits").

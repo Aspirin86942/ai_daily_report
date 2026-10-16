@@ -15,7 +15,7 @@ fn strict_worker_request_parses_bounded_xlsx() {
     let response = parse_worker_request(&request).expect("xlsx should parse");
 
     assert_eq!(response.parser_backend, ParserBackend::RustXlsxBoundedV2);
-    assert_eq!(response.worker_lane, WorkerLane::RustOfficeProcessV2);
+    assert_eq!(response.worker_lane, WorkerLane::RustOfficeProcessV3);
     assert!(response.content.contains("XLSX strict worker"));
     assert_eq!(response.observed_source_version, source_version(&path));
 }
@@ -44,11 +44,163 @@ fn strict_worker_request_parses_valid_docx_and_pptx() {
         );
         assert_eq!(
             response.worker_lane,
-            WorkerLane::RustOfficeProcessV2,
+            WorkerLane::RustOfficeProcessV3,
             "{extension}"
         );
         assert!(response.content.contains(expected_text), "{extension}");
         assert_eq!(response.observed_source_version, source_version(&path));
+    }
+}
+
+#[test]
+fn native_worker_reads_binary_legacy_office_with_audited_ranges() {
+    for (name, extension, backend, expected) in [
+        (
+            "legacy_sample.doc",
+            ".doc",
+            ParserBackend::RustLegacyOfficeV3,
+            "Legacy DOC worker content",
+        ),
+        (
+            "legacy_sample.ppt",
+            ".ppt",
+            ParserBackend::RustLegacyOfficeV3,
+            "Legacy PPT worker content",
+        ),
+        (
+            "legacy_sample.xls",
+            ".xls",
+            ParserBackend::RustXlsCalamineV3,
+            "Legacy XLS worker content",
+        ),
+    ] {
+        let path = fixture_path(name);
+        let original = fs::read(&path).unwrap();
+        let mut request =
+            request_for_route(&path, extension, backend, source_version(&path), 1_000_000);
+        if let ParserLimits::Office {
+            excel_max_rows,
+            excel_max_columns,
+            excel_max_sheets,
+            ..
+        } = &mut request.parser_limits
+        {
+            *excel_max_rows = 1;
+            *excel_max_columns = 2;
+            *excel_max_sheets = 1;
+        }
+        let result = parse_worker_request(&request).unwrap();
+        result.validate().unwrap();
+        assert_eq!(result.parser_backend, backend);
+        assert_eq!(result.worker_lane, WorkerLane::RustOfficeProcessV3);
+        assert!(
+            result.content.contains(expected),
+            "{name}: {}",
+            result.content
+        );
+        assert!(!result.content.contains("Row beyond budget"));
+        let audit = result.evidence_audit.unwrap();
+        assert_eq!(
+            audit.detected_format.as_deref(),
+            Some(extension.trim_start_matches('.'))
+        );
+        assert!(!audit.read_ranges.unwrap().is_empty());
+        assert!(audit
+            .content_units
+            .unwrap()
+            .iter()
+            .all(|unit| !unit.ranges.is_empty()
+                || unit.kind == ai_daily_worker_contract::ContentUnitKind::Heading));
+        assert_eq!(fs::read(path).unwrap(), original);
+    }
+}
+
+#[test]
+fn format_detection_selects_one_native_parser_and_keeps_the_original_name() {
+    let directory = tempdir().unwrap();
+    let path = directory.path().join("mislabeled.xls");
+    write_minimal_xlsx(&path);
+    let request = request_for_route(
+        &path,
+        ".xls",
+        ParserBackend::RustXlsCalamineV3,
+        source_version(&path),
+        1_000_000,
+    );
+    let result = parse_worker_request(&request).unwrap();
+    result.validate().unwrap();
+    assert_eq!(result.file_type, ".xls");
+    assert_eq!(result.parser_backend, ParserBackend::RustXlsxBoundedV2);
+    assert_eq!(
+        result.evidence_audit.unwrap().detected_format.as_deref(),
+        Some("xlsx")
+    );
+    assert!(result.content.contains("XLSX strict worker"));
+
+    fs::copy(fixture_path("modern_sample.docx"), &path).unwrap();
+    let request = request_for_route(
+        &path,
+        ".xls",
+        ParserBackend::RustXlsCalamineV3,
+        source_version(&path),
+        1_000_000,
+    );
+    let result = parse_worker_request(&request).unwrap();
+    result.validate().unwrap();
+    assert_eq!(result.parser_backend, ParserBackend::RustOfficeOxideV2);
+    assert!(result.content.contains("Rust DOCX worker content"));
+}
+
+#[test]
+fn legacy_enablement_limits_and_corruption_are_enforced_by_the_worker() {
+    let directory = tempdir().unwrap();
+    for (name, extension) in [("legacy_sample.doc", ".doc"), ("legacy_sample.ppt", ".ppt")] {
+        let path = fixture_path(name);
+        let mut request = request_for_route(
+            &path,
+            extension,
+            ParserBackend::RustLegacyOfficeV3,
+            source_version(&path),
+            1_000_000,
+        );
+        if let ParserLimits::Office {
+            legacy_office_enabled,
+            ..
+        } = &mut request.parser_limits
+        {
+            *legacy_office_enabled = false;
+        }
+        assert_eq!(
+            parse_worker_request(&request).unwrap_err().error_code,
+            "UNSUPPORTED_EXTENSION"
+        );
+        if let ParserLimits::Office {
+            legacy_office_enabled,
+            document_excerpt_max_chars,
+            ..
+        } = &mut request.parser_limits
+        {
+            *legacy_office_enabled = true;
+            *document_excerpt_max_chars = 8;
+        }
+        let result = parse_worker_request(&request).unwrap();
+        assert!(result.truncated);
+        assert!(result.content.chars().count() <= 8);
+        result.validate().unwrap();
+
+        let corrupt = directory.path().join(name);
+        fs::write(&corrupt, b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1private-123456").unwrap();
+        let request = request_for_route(
+            &corrupt,
+            extension,
+            ParserBackend::RustLegacyOfficeV3,
+            source_version(&corrupt),
+            1_000_000,
+        );
+        let error = parse_worker_request(&request).unwrap_err();
+        assert_eq!(error.error_code, "PARSER_FAILED");
+        assert!(!error.retryable);
+        assert!(!error.message.contains("123456"));
     }
 }
 
@@ -133,6 +285,7 @@ fn request_for_route(
         remaining_timeout_ms: 30_000,
         max_file_size_bytes,
         parser_limits: ParserLimits::Office {
+            legacy_office_enabled: true,
             excel_max_sheets: 2,
             excel_max_rows: 10,
             excel_max_columns: 12,

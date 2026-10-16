@@ -1,0 +1,91 @@
+{
+  "report_mode": "daily",
+  "discovery": {
+    "allowed_extensions": [
+      ".csv",
+      ".docx",
+      ".json",
+      ".log",
+      ".md",
+      ".pdf",
+      ".pptx",
+      ".txt",
+      ".xls",
+      ".xlsx"
+    ],
+    "ignored_patterns": [
+      "*.tmp",
+      "~$*"
+    ],
+    "excluded_dirs": [],
+    "follow_symlinks": false,
+    "cloud_files_policy": "local_only"
+  },
+  "execution": {
+    "max_workers": 4,
+    "max_file_size_bytes": 52428800,
+    "discovery_timeout_ms": 30000,
+    "file_timeout_ms": 30000,
+    "file_timeout_by_extension_ms": {
+      ".pdf": 45000,
+      ".xls": 60000,
+      ".xlsx": 60000
+    }
+  },
+  "parse": {
+    "cache_payload_version": 1,
+    "excerpt_policy_version": "fair_semantic_v9",
+    "aggregate_max_chars": 500000,
+    "text": {
+      "csv_encodings": [
+        "utf-8",
+        "utf-8-sig"
+      ],
+      "backend": "light_text_v2",
+      "read_head_bytes": 262144,
+      "read_tail_bytes": 262144,
+      "max_chars": 6000,
+      "excerpt_max_chars": 6000
+    },
+    "office": {
+      "primary_backend": "rust_office_oxide_v2",
+      "legacy_extensions_enabled": false,
+      "excel_max_sheets": 5,
+      "excel_max_rows": 50,
+      "excel_max_columns": 20,
+      "docx_max_paragraphs": 200,
+      "docx_max_tables": 20,
+      "docx_table_max_rows": 50,
+      "docx_table_max_cols": 12,
+      "pptx_max_slides": 50,
+      "pptx_include_notes": true,
+      "document_excerpt_max_chars": 6000
+    },
+    "pdf": {
+      "backend": "rust_pdfium_v3",
+      "max_pages": 5,
+      "excerpt_max_chars": 6000,
+      "selection_policy_version": "pdf_text_presence_v2"
+    }
+  },
+  "context": {
+    "profile_name": "daily_balanced_v1",
+    "global_max_chars": 500000,
+    "per_file_max_chars": 100000,
+    "small_file_max_bytes": 65536,
+    "medium_file_max_bytes": 1048576,
+    "large_file_max_bytes": 10485760,
+    "priority_policy_version": "budget_nominal_v2",
+    "compression_policy_version": "markdown_context_v2"
+  },
+  "admission_policy_version": "budget_refill_v3",
+  "classifier_policy_version": "pdf_text_presence_v2",
+  "max_candidate_files": 96,
+  "max_pdf_text_extractions": 8,
+  "max_total_pdf_classification_pages": 80,
+  "pdf_classification_timeout_ms": 2000,
+  "total_deadline_ms": 10000,
+  "worker_max_requests": 128,
+  "worker_idle_ttl_ms": 30000,
+  "worker_rss_limit_bytes": 536870912
+}

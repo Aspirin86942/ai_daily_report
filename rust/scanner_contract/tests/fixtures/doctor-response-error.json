@@ -1,0 +1,24 @@
+{
+  "contract": "ai_daily_context",
+  "protocol_version": 1,
+  "request_id": "24242424-2424-4242-8242-242424242424",
+  "status": "error",
+  "engine_version": "0.1.0",
+  "engine_build": "fixture-engine-build-v1",
+  "checks": [
+    {
+      "name": "scan_db_parent",
+      "status": "error",
+      "message": "synthetic database parent is inaccessible"
+    }
+  ],
+  "warnings": [],
+  "error": {
+    "error_code": "CACHE_OPEN_FAILED",
+    "message": "synthetic database parent is inaccessible",
+    "retryable": false,
+    "stage": "doctor",
+    "file_path": null,
+    "backend": null
+  }
+}

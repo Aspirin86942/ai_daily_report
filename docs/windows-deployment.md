@@ -1,163 +1,72 @@
-# Windows x64 native release, deployment, and rollback
+# Windows 安装、任务与回退
 
-## Scope and authority
+Rust 程序包面向 Windows x64。三个 EXE 使用静态 C 运行库，PDFium 固定版本和 SHA-256；运行不需要 Python、uv、虚拟环境或 Rust 工具链。
 
-Only Windows x64 and exact CPython 3.13.13 are supported. Repository tools can
-build and verify a release bundle, make a read-only SQLite backup, and update a
-side-by-side release pointer. They do not authorize or automatically perform a
-production install, process stop, configuration switch, database archival, or
-deployment. Each production mutation requires a separate explicit approval.
+正式任务已于 2026 年 10 月 15 日 14:33（北京时间）按用户授权切到 Rust，生产自检、模型检查和实际任务回退演练通过。部署目录为 `.releases/rust-20261015-01`，配置位于 `config-rust`。以下步骤保留为安装与切换说明；当前结果见 [迁移证据](plans/2026-10-15-rust-migration-evidence.md) 和 [切换记录](plans/2026-10-15-rust-cutover.md)。
 
-The runtime chain is:
+## 目录与配置
 
 ```text
-CLI → ReportRunner → NativeScanner → PyO3 Scanner
-→ scanner_core → worker v2 pools
-```
-
-Only Office/PDF workers are child processes. The scanner itself runs in the
-Python process.
-
-## Build and verify a release bundle
-
-Use a clean Windows checkout and the repository `.venv`:
-
-```powershell
-.\.venv\Scripts\python.exe -m pytest tests -v
-cargo fmt --manifest-path rust/Cargo.toml --all -- --check
-cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked -- -D warnings
-cargo test --manifest-path rust/Cargo.toml --workspace --locked
-
-New-Item -ItemType Directory -Path .\dist -Force | Out-Null
-.\scripts\build_windows_release.ps1 `
-  -OutputDirectory .\dist\ai-daily-report-2026.08.12 `
-  -ReleaseVersion 2026.08.12
-```
-
-`build_windows_release.ps1` performs a locked release build, creates exactly
-one non-abi3 `cp313-win_amd64` wheel with pinned maturin, installs it into a
-disposable CPython 3.13.13 venv, imports it, and proves a wrong version is
-rejected. It then builds an allowlisted bundle containing:
-
-- the native wheel, including its repaired runtime DLLs;
-- `bin/ai-daily-office-parser.exe`;
-- the Python application, templates, example config, exact dependency lock,
-  and deployment helpers;
-- `manifest.json` with Git commit, target, Python/wheel identity, native and
-  Office-worker build identities, Cargo.lock hash, and per-file size/SHA-256.
-
-Verify an existing bundle without executing its application code:
-
-```powershell
-.\.venv\Scripts\python.exe scripts\windows_release.py verify-bundle `
-  --bundle-dir .\dist\ai-daily-report-2026.08.12
-```
-
-The manifest detects missing, extra, changed, duplicate, or unsafe payload
-paths. Hashes detect corruption; they do not authenticate a remote publisher.
-
-## Side-by-side layout
-
-An authorized deployment should keep releases immutable and state shared:
-
-```text
-<install-root>/
+D:/DailyReport/
   current.json
-  releases/<release-version>/
-  shared/config/
-  shared/data/reports/
-  shared/data/db/reports.sqlite3
-  shared/data/db/<legacy-scanner-db>.sqlite3
-  shared/data/db/scan_index_v3.sqlite3
-  shared/logs/
+  releases/<version>/
+    ai-daily-report.exe
+    ai-daily-office-parser.exe
+    ai-daily-pdf-parser.exe
+    pdfium.dll
+    templates/  config/settings.example.yaml  scripts/  licenses/
+    manifest.json
+  shared/
+    config/settings.yaml
+    data/db/reports.sqlite3
+    data/db/scan_index_rust_v3.sqlite3
+    reports/  logs/  backups/
 ```
 
-The application release contains the wheel and Office worker. The active
-release uses its own CPython 3.13.13 venv and must pass native import, worker
-hello, `doctor --strict`, and a daily `--no-save` smoke against a synthetic
-test directory before pointer activation.
+每个版本保存在独立目录。配置显式通过 `--config-dir` 传入；省略时只读取 EXE 旁的 `config`。配置中的相对路径始终以 EXE 目录为基准，正式安装建议全部填写绝对路径，避免升级后数据目录改变。
 
-Mutable config, report SQLite, scanner SQLite, Markdown, and logs never live
-inside a release directory. New and old releases must not share a scanner
-database across the schema reset.
+从包内示例生成新的 Rust 配置。旧配置中的 Python 路径、`fallback_after_timeout` 等废弃项会被拒绝，需要在准备阶段移除。保留业务模型、工作根目录、预算开关和扫描限制，扫描库使用独立的 `scan_index_rust_v3.sqlite3`。凭据继续使用当前用户环境变量，配置与凭据不进入发布包。
 
-## Scanner database cutover
-
-The current scanner schema is fresh-only `user_version=3`:
-
-- a missing file is created as v3;
-- an existing v3 file is opened;
-- any other version fails with `SCANNER_DB_SCHEMA_MISMATCH` and is not changed.
-
-Before an authorized cutover:
-
-1. Stop current report processes.
-2. Run `PRAGMA integrity_check` through the archival helper.
-3. Use the SQLite backup API to create a timestamped read-only archive and
-   hash manifest.
-4. Keep the original scanner database and report database untouched.
-5. Point the new release at a new `scan_index_v3.sqlite3` path.
-
-The repository helper for step 2–3 is:
+## 包校验与自检
 
 ```powershell
-.\scripts\archive_scanner_database.ps1 `
-  -SourceDatabase C:\ai-daily-report\shared\data\db\<legacy-scanner-db>.sqlite3 `
-  -ArchiveDirectory C:\ai-daily-report\scanner-db-archives
+./scripts/verify_windows_release.ps1 -BundleDirectory D:/DailyReport/releases/<version>
+./ai-daily-report.exe --config-dir D:/DailyReport/shared/config doctor --strict | Out-Host
+./ai-daily-report.exe --config-dir D:/DailyReport/shared/config daily --dry-run | Out-Host
 ```
 
-This is a production read and archive write, so run it only after explicit
-authorization and only against the resolved target paths. It never migrates,
-deletes, or modifies the source database.
+包校验检查完整文件清单、大小与哈希，拒绝缺失、额外或被修改的文件。严格自检检查工作目录、输出目录、模板版本、报告库、扫描库、Office/PDF 同版握手与 PDFium；不发送模型请求。
 
-## Pointer switch and rollback
+显式执行 `doctor --check-model` 会发送一批合成材料并把成功、失败及用量写入报告库。该动作产生模型费用。计划任务安装要求当前有效配置已有成功的模型检查记录；改变模型参数后需要重新检查。
 
-Pointer mutation is deliberately gated by `-Apply`:
+## 计划任务
 
 ```powershell
-.\scripts\update_release_pointer.ps1 `
-  -Mode Switch `
-  -PointerPath C:\ai-daily-report\current.json `
-  -ReleaseVersion 2026.08.12 `
-  -ScannerDatabasePath shared/data/db/scan_index_v3.sqlite3 `
-  -Apply
+./scripts/install_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config
+# 核对计划后，已获准的注册操作使用 -Apply。
+./scripts/install_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config -Apply
+./scripts/check_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config
 ```
 
-The tool atomically records both `current` and `previous`, including each
-release's scanner DB pointer. It rejects paths outside `shared/data/db`.
+任务直接运行 `ai-daily-report.exe --config-dir "..." daily --scheduled`。发布 EXE 使用 Windows 图形子系统，调度时不打开终端窗口；命令行调用保留标准输出与退出码。日志仅记录运行编号、日期、结果和错误码，位于 `log_dir/scheduled-YYYY-MM-DD.jsonl`。
 
-Rollback procedure:
+PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；接收 JSON 时使用 `| ConvertFrom-Json`。运维脚本已经使用管道等待并检查退出码。
 
-1. Stop new report processes.
-2. Verify the previous immutable release and its exact Python runtime.
-3. Confirm its old scanner database still exists and was never modified.
-4. Atomically swap the pointer.
-5. Run previous-release `doctor --strict` and a synthetic smoke.
+沿用当前用户、普通权限、每日上海时间、登录补触发和 `IgnoreNew` 单实例策略。安装先核对归属，保存原 XML，注册后重新读取比较。读取结果不符合计划时禁用该任务并返回错误。仅改写版本指针不会修改计划任务；任务升级必须显式更新并核对直接 EXE 路径。
+
+任务归属按持久配置的父目录生成。将配置从旧仓库移到新的安装根目录时，先保存并按原归属移除旧任务，再注册新任务，禁止绕过归属检查覆盖同名任务。
+
+## 备份与回退
 
 ```powershell
-.\scripts\update_release_pointer.ps1 `
-  -Mode Rollback `
-  -PointerPath C:\ai-daily-report\current.json `
-  -Apply
+./ai-daily-report.exe --config-dir D:/DailyReport/shared/config backup --output D:/DailyReport/shared/backups/reports-before-switch.sqlite3 | Out-Host
+./scripts/archive_scanner_database.ps1 -SourceDatabase <旧扫描库> -ArchiveDirectory <归档目录>
+./scripts/update_release_pointer.ps1 -Mode Switch -PointerPath D:/DailyReport/current.json -ReleaseVersion <version> -ScannerDatabasePath shared/data/db/scan_index_rust_v3.sqlite3 -Apply
+./scripts/update_release_pointer.ps1 -Mode Rollback -PointerPath D:/DailyReport/current.json -Apply
 ```
 
-The new v3 database remains for diagnosis. It is never converted backward.
-Report SQLite, report Markdown, local configuration, and secrets are not
-copied or rewritten by pointer changes.
+SQLite 备份使用一致快照，包含已经提交到 WAL 的数据，并验证完整性。目标必须不存在。版本指针原子替换，保留原指针备份及上一版本引用。回退切换程序及其扫描库，报告库、调用账本和新增快照继续保留，不用旧备份覆盖新业务数据。
 
-## Deployment success gates
+旧 Python 拒绝新的 v3 日报结构。按 2026-10-15 已确认的回退范围，旧任务可继续后续日期的旧格式生成；新格式日报的查询、周月汇总和未完成运行恢复继续使用保留的 Rust 包，不向旧格式转换。
 
-An authorized deployment is complete only when all of these pass on the
-selected release:
-
-- bundle manifest and all SHA-256 values;
-- CPython 3.13.13 native import and build identity;
-- Office and Python worker-v2 hello/capability checks;
-- `doctor --strict` against the selected new v3 database path;
-- daily `--no-save` smoke on a synthetic directory;
-- no scanner child process;
-- report SQLite and Markdown behavior unchanged.
-
-Pushes, tags, remote artifacts, production installs, process control, pointer
-changes, and real database operations are separate external actions and are
-never implied by a local build or test request.
+正式切换前保存旧源码、可运行环境、配置、快照、任务 XML 和文件哈希，核对未完成作业与正在执行的进程。切换后连续三个真实每日窗口核对目标日、退出码、数据库与正文哈希、来源和模型用量。模拟任务及手动运行分别记录，不能代替真实窗口。

@@ -1,0 +1,1 @@
+{"choices":[{"finish_reason":"stop","message":{"content":"{\"summary_items\": [{\"text\": \"材料记载了工作安排。\", \"source_ids\": [\"src_80b03778daecb9e7db7b91a3eeaa82b8fa147858afa681a29023a87ee0610443\"]}], \"verification_items\": [{\"text\": \"执行结果尚未确认。\", \"source_ids\": [\"src_80b03778daecb9e7db7b91a3eeaa82b8fa147858afa681a29023a87ee0610443\"]}]}"}}],"usage":null}

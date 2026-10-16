@@ -483,11 +483,11 @@ fn classify_candidate_v2(
         ".docx" | ".pptx" => {
             office_route(&profile.parse.office.primary_backend, RouteKind::RustOffice)
         }
-        ".xls" => Some(RouteKind::PythonOffice),
-        ".pdf" if profile.parse.pdf.backend == "python_pdf_text_v2" => Some(RouteKind::Pdf),
+        ".xls" => Some(RouteKind::RustXls),
+        ".pdf" if profile.parse.pdf.backend == "rust_pdfium_v3" => Some(RouteKind::Pdf),
         ".pdf" => None,
         ".doc" | ".ppt" if profile.parse.office.legacy_extensions_enabled => {
-            Some(RouteKind::PythonSharepointText)
+            Some(RouteKind::RustLegacyOffice)
         }
         ".doc" | ".ppt" => {
             return RouteDecision::PolicyNotParsed(NotParsedReason::LegacyExtensionDisabled);
@@ -503,7 +503,6 @@ fn classify_candidate_v2(
 fn office_route(primary_backend: &str, rust_route: RouteKind) -> Option<RouteKind> {
     match primary_backend {
         "rust_office_oxide_v2" => Some(rust_route),
-        "python_office_v2" => Some(RouteKind::PythonOffice),
         _ => None,
     }
 }

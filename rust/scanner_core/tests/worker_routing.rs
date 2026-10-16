@@ -12,8 +12,8 @@ use ai_daily_scanner_core::planner::{plan_candidates, PlanAction};
 use ai_daily_worker_contract::WorkerKind;
 
 #[test]
-fn office_and_python_worker_handshakes_overlap() {
-    let Some(python) = python_executable() else {
+fn office_and_pdf_worker_handshakes_overlap() {
+    let Some(python) = pdf_worker_path() else {
         return;
     };
     let directory = tempfile::tempdir().expect("temporary worker root should exist");
@@ -30,7 +30,7 @@ fn office_and_python_worker_handshakes_overlap() {
                 OsString::from("rendezvous"),
                 OsString::from(match kind {
                     WorkerKind::Office => "office",
-                    WorkerKind::PythonDocument => "python",
+                    WorkerKind::Pdf => "python",
                 }),
                 OsString::from(own.as_os_str()),
                 OsString::from(peer.as_os_str()),
@@ -42,18 +42,17 @@ fn office_and_python_worker_handshakes_overlap() {
         }
     };
     let office = command(WorkerKind::Office, &office_marker, &python_marker);
-    let python_document = command(WorkerKind::PythonDocument, &python_marker, &office_marker);
+    let pdf = command(WorkerKind::Pdf, &python_marker, &office_marker);
 
-    let (office_result, python_result) =
-        register_worker_pair(&office, &python_document, Duration::from_secs(5));
+    let (office_result, pdf_result) = register_worker_pair(&office, &pdf, Duration::from_secs(5));
 
     office_result.expect("office handshake should rendezvous");
-    python_result.expect("Python handshake should rendezvous");
+    pdf_result.expect("Python handshake should rendezvous");
 }
 
 #[test]
-fn explicitly_enabled_legacy_office_routes_are_planned_for_python_worker() {
-    let Some(python) = python_executable() else {
+fn explicitly_enabled_legacy_office_routes_are_planned_for_office_worker() {
+    let Some(python) = pdf_worker_path() else {
         return;
     };
     let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -65,9 +64,9 @@ fn explicitly_enabled_legacy_office_routes_are_planned_for_python_worker() {
     let profile = legacy_office_profile();
     let fixtures = project_root.join("tests/fixtures/worker_documents");
     let candidates = [
-        ("legacy_sample.xls", ".xls", "python_office_v2"),
-        ("legacy_sample.doc", ".doc", "python_sharepoint_text_v2"),
-        ("legacy_sample.ppt", ".ppt", "python_sharepoint_text_v2"),
+        ("legacy_sample.xls", ".xls", "rust_xls_calamine_v3"),
+        ("legacy_sample.doc", ".doc", "rust_legacy_office_v3"),
+        ("legacy_sample.ppt", ".ppt", "rust_legacy_office_v3"),
     ]
     .into_iter()
     .map(|(name, extension, _)| discovered_file_with_extension(&fixtures.join(name), extension))
@@ -80,22 +79,22 @@ fn explicitly_enabled_legacy_office_routes_are_planned_for_python_worker() {
         .collect::<std::collections::HashMap<_, _>>();
     assert!(matches!(
         action_by_extension[".xls"],
-        PlanAction::Parse(ParserRoute::PythonOffice)
+        PlanAction::Parse(ParserRoute::RustXls)
     ));
     for extension in [".doc", ".ppt"] {
         assert!(matches!(
             action_by_extension[extension],
-            PlanAction::Parse(ParserRoute::PythonSharepointText)
+            PlanAction::Parse(ParserRoute::RustLegacyOffice)
         ));
     }
 }
 
 #[test]
-fn missing_office_and_python_workers_are_environment_unavailable() {
+fn missing_office_and_pdf_workers_are_environment_unavailable() {
     let directory = tempfile::tempdir().expect("temporary root should exist");
     for (kind, backend, extension) in [
         (WorkerKind::Office, "rust_office_oxide_v2", ".docx"),
-        (WorkerKind::PythonDocument, "python_pdf_text_v2", ".pdf"),
+        (WorkerKind::Pdf, "rust_pdfium_v3", ".pdf"),
     ] {
         let command = WorkerCommand {
             program: directory.path().join("missing-worker.exe"),
@@ -130,11 +129,11 @@ fn capabilities(kind: WorkerKind) -> (Vec<String>, Vec<String>) {
                 ".xlsx".to_string(),
             ],
         ),
-        WorkerKind::PythonDocument => (
+        WorkerKind::Pdf => (
             vec![
-                "python_pdf_text_v2".to_string(),
-                "python_office_v2".to_string(),
-                "python_sharepoint_text_v2".to_string(),
+                "rust_pdfium_v3".to_string(),
+                "rust_xls_calamine_v3".to_string(),
+                "rust_legacy_office_v3".to_string(),
             ],
             vec![
                 ".doc".to_string(),
@@ -188,7 +187,7 @@ fn source_version(path: &Path) -> String {
     ai_daily_scanner_core::discovery::build_source_version(modified.as_nanos(), metadata.len())
 }
 
-fn python_executable() -> Option<PathBuf> {
+fn pdf_worker_path() -> Option<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     let candidates = if cfg!(windows) {
         vec![root.join(".venv").join("Scripts").join("python.exe")]
@@ -213,8 +212,8 @@ if kind == "office":
     backends = ["rust_office_oxide_v2", "rust_xlsx_bounded_v2"]
     extensions = [".docx", ".pptx", ".xlsx"]
 else:
-    worker_kind = "python_document"
-    backends = ["python_pdf_text_v2", "python_office_v2", "python_sharepoint_text_v2"]
+    worker_kind = "pdf"
+    backends = ["rust_pdfium_v3", "rust_xls_calamine_v3", "rust_legacy_office_v3"]
     extensions = [".doc", ".docx", ".pdf", ".ppt", ".pptx", ".xls", ".xlsx"]
 
 if operation == "hello":
@@ -230,13 +229,13 @@ if operation == "hello":
         if not os.path.exists(sys.argv[4]):
             raise SystemExit(7)
     operations = ["office_parse"] if kind == "office" else [
-        "pdf_classify", "pdf_parse", "python_office_parse", "python_sharepoint_parse"
+        "pdf_classify", "pdf_parse"
     ]
     print(json.dumps({
         "contract": "ai_daily_worker",
-        "protocol_version": 2,
+        "protocol_version": 3,
         "frame": "hello",
-        "worker_contract_version": "ai_daily_worker_v2",
+        "worker_contract_version": "ai_daily_worker_v3",
         "worker_kind": worker_kind,
         "worker_version": "0.1.0",
         "worker_build": "fake-build",
@@ -260,7 +259,7 @@ if mode == "valid_slow":
     time.sleep(1.3)
 
 backend = request["backend"]
-lane = "rust_office_process_v2" if backend.startswith("rust_") else "python_document_process_v2"
+lane = "rust_office_process_v3" if backend.startswith("rust_") else "rust_pdf_process_v3"
 error = None
 status = "ok"
 content = "parsed"
@@ -292,7 +291,7 @@ response = {
     "warnings": [],
     "error": error,
     "duration_ms": 1,
-    "worker_contract_version": "ai_daily_worker_v2",
+    "worker_contract_version": "ai_daily_worker_v3",
     "worker_version": "0.1.0",
     "worker_build": "changed-build" if mode == "wrong_build" else "fake-build",
     "observed_source_version": request["expected_source_version"],

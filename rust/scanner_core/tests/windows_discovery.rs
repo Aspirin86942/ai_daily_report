@@ -18,21 +18,15 @@ fn rust_defaults_match_all_frozen_normalized_profiles() {
     let cases = [
         (
             ReportMode::Daily,
-            include_str!(
-                "../../../tests/fixtures/scanner_contract/v1/normalized-settings-daily.json"
-            ),
+            include_str!("fixtures/normalized-settings-daily.json"),
         ),
         (
             ReportMode::Weekly,
-            include_str!(
-                "../../../tests/fixtures/scanner_contract/v1/normalized-settings-weekly.json"
-            ),
+            include_str!("fixtures/normalized-settings-weekly.json"),
         ),
         (
             ReportMode::Monthly,
-            include_str!(
-                "../../../tests/fixtures/scanner_contract/v1/normalized-settings-monthly.json"
-            ),
+            include_str!("fixtures/normalized-settings-monthly.json"),
         ),
     ];
 
@@ -229,10 +223,7 @@ fn planner_is_deterministic_and_rejects_large_files_before_parsing() {
         .windows(2)
         .all(|pair| pair[0].file.path <= pair[1].file.path));
     assert_eq!(plans[0].action, PlanAction::Parse(ParserRoute::LightText));
-    assert_eq!(
-        plans[1].action,
-        PlanAction::Parse(ParserRoute::PythonOffice)
-    );
+    assert_eq!(plans[1].action, PlanAction::Parse(ParserRoute::RustXls));
     assert_eq!(plans[2].action, PlanAction::Parse(ParserRoute::Pdf));
     assert_eq!(
         plans[3].action,
@@ -261,7 +252,7 @@ fn legacy_doc_and_ppt_routes_require_the_explicit_profile_switch() {
     );
     assert_eq!(
         classify_candidate(&file, &enabled),
-        Ok(ParserRoute::PythonSharepointText)
+        Ok(ParserRoute::RustLegacyOffice)
     );
 }
 

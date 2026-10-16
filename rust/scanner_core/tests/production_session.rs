@@ -1,4 +1,4 @@
-//! Public-boundary integration gate for the production Python session path.
+//! Public-boundary integration gate for the production native session path.
 
 #[cfg(windows)]
 mod windows {
@@ -13,23 +13,25 @@ mod windows {
     }
 
     fn local_runtime(root: &Path) -> Option<(PathBuf, PathBuf, PathBuf)> {
-        let python = root.join(".venv").join("Scripts").join("python.exe");
-        let office = root
-            .join("rust")
-            .join("target")
-            .join("release")
-            .join("ai-daily-office-parser.exe");
+        let directory = std::env::var_os("AI_DAILY_TEST_WORKER_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("rust/target/debug"));
+        let python = directory.join("ai-daily-pdf-parser.exe");
+        let office = directory.join("ai-daily-office-parser.exe");
         let fixture = root
             .join("tests")
             .join("fixtures")
             .join("pdf_classifier")
             .join("text_plain_01.pdf");
-        (python.is_file() && office.is_file() && fixture.is_file())
-            .then_some((python, office, fixture))
+        assert!(
+            python.is_file() && office.is_file() && fixture.is_file(),
+            "native worker test dependencies are required"
+        );
+        Some((python, office, fixture))
     }
 
     #[test]
-    fn build_context_uses_recyclable_python_session_for_pdf_work() {
+    fn build_context_uses_recyclable_native_session_for_pdf_work() {
         let root = repository_root();
         let Some((python, office, fixture)) = local_runtime(&root) else {
             return;
@@ -38,7 +40,7 @@ mod windows {
         let work_dir = temp.path().join("work");
         std::fs::create_dir(&work_dir).expect("work directory");
         std::fs::copy(fixture, work_dir.join("text.pdf")).expect("copy PDF fixture");
-        let db_path = temp.path().join("scan_index_v3.sqlite3");
+        let db_path = temp.path().join("scan_index_rust_v3.sqlite3");
 
         let request = json!({
             "contract": "ai_daily_context",
@@ -61,9 +63,7 @@ mod windows {
             },
             "adapters": {
                 "office_worker_path": office,
-                "python_executable": python,
-                "python_module_root": root,
-                "python_document_worker_module": "src.workers.document_parser_worker"
+                "pdf_worker_path": python,
             }
         });
         let request_typed: BuildContextRequest =
@@ -145,5 +145,81 @@ mod windows {
         assert_eq!(snapshot_metrics["classify_attempt_count"], 0);
         assert_eq!(snapshot_metrics["parse_attempt_count"], 0);
         assert_eq!(snapshot_metrics["peak_worker_rss_bytes"], 0);
+    }
+
+    #[test]
+    fn native_scan_covers_all_office_formats_and_continues_after_corrupt_input() {
+        let root = repository_root();
+        let (pdf, office, pdf_fixture) = local_runtime(&root).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let fixtures = root.join("tests/fixtures/worker_documents");
+        for name in [
+            "modern_sample.docx",
+            "modern_sample.pptx",
+            "legacy_sample.doc",
+            "legacy_sample.ppt",
+            "legacy_sample.xls",
+        ] {
+            std::fs::copy(fixtures.join(name), work.join(name)).unwrap();
+        }
+        std::fs::copy(pdf_fixture, work.join("text.pdf")).unwrap();
+        std::fs::write(
+            work.join("note.md"),
+            "采购审批方案待确认，金额 1234.56 元。\n",
+        )
+        .unwrap();
+        std::fs::write(work.join("broken.docx"), b"invalid Office container").unwrap();
+        let request: BuildContextRequest = serde_json::from_value(json!({
+            "contract": "ai_daily_context", "protocol_version": 1,
+            "request_id": "71111111-7111-4111-8111-711111111111", "work_dir": work,
+            "start_date": "2000-01-01", "end_date": "2099-12-31", "report_mode": "daily", "compression_profile": null,
+            "scan_db_path": temp.path().join("scan_index_rust_v3.sqlite3"),
+            "scanner_settings": { "allowed_extensions": [".md", ".docx", ".pptx", ".xls", ".doc", ".ppt", ".pdf"],
+                "legacy_office_enabled": true, "max_workers": 2, "total_deadline_ms": 60000 },
+            "adapters": { "office_worker_path": office, "pdf_worker_path": pdf }
+        })).unwrap();
+        let scanner = Scanner::open(ScannerConfig::from_build_request(&request)).unwrap();
+        let output = scanner
+            .build_context_with_request_id(
+                &ScanRequest::from_build_request(&request),
+                request.request_id.clone(),
+            )
+            .unwrap();
+        assert_eq!(output.exit_code, 0, "{:?}", output.value.envelope);
+        let evidence = serde_json::to_value(output.value.evidence.unwrap()).unwrap();
+        let files = evidence["files"].as_array().unwrap();
+        assert_eq!(files.len(), 8, "{evidence}");
+        for file in files {
+            let path = file["relative_path"].as_str().unwrap();
+            assert_eq!(file["parse_attempt_count"], 1, "{file}");
+            assert_eq!(file["fallback_backend"], "", "{file}");
+            if path == "broken.docx" {
+                assert_eq!(file["parse_status"], "error", "{file}");
+                continue;
+            }
+            assert_eq!(file["parse_status"], "success", "{file}");
+            let expected_lane = if path.ends_with(".pdf") {
+                "rust_pdf_process_v3"
+            } else if path.ends_with(".md") {
+                "rust_core"
+            } else {
+                "rust_office_process_v3"
+            };
+            assert_eq!(file["worker_lane"], expected_lane, "{file}");
+            assert!(!file["parser_backend"].as_str().unwrap().contains("python"));
+        }
+        assert_eq!(evidence["execution_metrics"]["session_fallback_count"], 0);
+        assert!(output
+            .value
+            .envelope
+            .file_context
+            .contains("Legacy DOC worker content"));
+        assert!(output
+            .value
+            .envelope
+            .file_context
+            .contains("Legacy PPT worker content"));
     }
 }

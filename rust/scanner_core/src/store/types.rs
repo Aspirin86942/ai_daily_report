@@ -22,6 +22,8 @@ pub enum StoreError {
     LeaseLost,
     #[error("scanner database schema mismatch: expected user_version=3, found {found}")]
     SchemaMismatch { found: i32 },
+    #[error("scanner database is not the native Rust v3 layout; use an independent database")]
+    SchemaLayoutMismatch,
     #[error("artifact is not dedup-compatible with the stored snapshot: {0}")]
     ArtifactMismatch(String),
     #[error("absolute deadline exhausted before terminal commit")]
@@ -45,7 +47,9 @@ impl StoreError {
             Self::RequestIdConflict => ErrorCode::RequestIdConflict,
             Self::RunCorrupt(_) => ErrorCode::RunCorrupt,
             Self::RunNotFound => ErrorCode::RunNotFound,
-            Self::SchemaMismatch { .. } => ErrorCode::ScannerDbSchemaMismatch,
+            Self::SchemaMismatch { .. } | Self::SchemaLayoutMismatch => {
+                ErrorCode::ScannerDbSchemaMismatch
+            }
             Self::ArtifactMismatch(_) => ErrorCode::BudgetModelMismatch,
             Self::AbsoluteDeadlineExhausted | Self::WorkDeadlineExhausted => {
                 ErrorCode::StageDeadlineExhausted
@@ -154,9 +158,7 @@ pub(super) struct CanonicalScannerSettings<'a> {
 pub struct AttemptRuntime {
     pub(super) normalized_scan_db_path: String,
     pub(super) normalized_office_worker_path: String,
-    pub(super) normalized_python_executable: String,
-    pub(super) normalized_python_module_root: String,
-    pub(super) python_document_worker_module: String,
+    pub(super) normalized_pdf_worker_path: String,
     pub(super) engine_fingerprint: String,
 }
 
@@ -183,7 +185,7 @@ impl AttemptRuntime {
         let engine_fingerprint = serde_json::to_string(&EngineFingerprint {
             contract: "ai_daily_context".to_string(),
             protocol_version: 1,
-            binary_name: "ai_daily_scanner_native".to_string(),
+            binary_name: "ai-daily-report".to_string(),
             engine_version: identity.engine_version.clone(),
             engine_build: identity.engine_build.clone(),
             target_triple: identity.target_triple.clone(),
@@ -194,13 +196,7 @@ impl AttemptRuntime {
             normalized_office_worker_path: normalize_runtime_path(
                 &request.adapters.office_worker_path,
             ),
-            normalized_python_executable: normalize_runtime_path(
-                &request.adapters.python_executable,
-            ),
-            normalized_python_module_root: normalize_runtime_path(
-                &request.adapters.python_module_root,
-            ),
-            python_document_worker_module: request.adapters.python_document_worker_module.clone(),
+            normalized_pdf_worker_path: normalize_runtime_path(&request.adapters.pdf_worker_path),
             engine_fingerprint,
         })
     }
@@ -210,12 +206,8 @@ impl AttemptRuntime {
             || !is_contract_absolute_text(&self.normalized_scan_db_path)
             || self.normalized_office_worker_path.is_empty()
             || !is_contract_absolute_text(&self.normalized_office_worker_path)
-            || self.normalized_python_executable.is_empty()
-            || !is_contract_absolute_text(&self.normalized_python_executable)
-            || self.normalized_python_module_root.is_empty()
-            || !is_contract_absolute_text(&self.normalized_python_module_root)
-            || self.python_document_worker_module.is_empty()
-            || self.python_document_worker_module.chars().count() > 1_024
+            || self.normalized_pdf_worker_path.is_empty()
+            || !is_contract_absolute_text(&self.normalized_pdf_worker_path)
             || self.engine_fingerprint.is_empty()
             || self.engine_fingerprint.chars().count() > 4_096
         {

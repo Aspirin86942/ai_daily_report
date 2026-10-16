@@ -626,8 +626,9 @@ pub(crate) fn parse_status_text(value: ParseStatus) -> &'static str {
 pub(crate) fn worker_lane_text(value: AuditWorkerLane) -> &'static str {
     match value {
         AuditWorkerLane::RustCore => "rust_core",
-        AuditWorkerLane::RustOfficeProcessV2 => "rust_office_process_v2",
-        AuditWorkerLane::PythonDocumentProcessV2 => "python_document_process_v2",
+        AuditWorkerLane::RustOfficeProcessV3 => "rust_office_process_v3",
+        AuditWorkerLane::RustPdfProcessV3 => "rust_pdf_process_v3",
+        AuditWorkerLane::LocalOcrPreflight => "local_ocr_preflight",
         AuditWorkerLane::NotParsed => "not_parsed",
     }
 }

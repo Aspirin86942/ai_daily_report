@@ -2,10 +2,11 @@
 members = [
     "discovery",
     "office_parser",
-    "scanner_native",
     "scanner_contract",
     "scanner_core",
     "worker_contract",
+    "report_app",
+    "pdf_parser",
 ]
 resolver = "2"
 
@@ -15,19 +16,25 @@ edition = "2021"
 
 [workspace.dependencies]
 assert_cmd = "2"
-chrono = { version = "0.4", features = ["serde"] }
-glob = "0.3"
-office_oxide = "0.1"
-quick-xml = "0.40"
-rayon = "1.10"
-rusqlite = { version = "0.40", features = ["bundled"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["arbitrary_precision"] }
-sha2 = "0.11"
-tempfile = "3"
-thiserror = "2"
-walkdir = "2"
-zip = { version = "8.1", features = ["deflate"], default-features = false }
+chrono = { version = "=0.4.44", features = ["serde"] }
+glob = "=0.3.3"
+office_oxide = "=0.1.2"
+quick-xml = "=0.40.1"
+rayon = "=1.12.0"
+rusqlite = { version = "=0.40.1", features = ["bundled"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["arbitrary_precision"] }
+sha2 = "=0.11.0"
+tempfile = "=3.27.0"
+thiserror = "=2.0.18"
+walkdir = "=2.5.0"
+zip = { version = "=8.6.0", features = ["deflate"], default-features = false }
+clap = { version = "=4.6.7", features = ["derive"] }
+serde-saphyr = { version = "=2.0.0", default-features = false, features = ["deserialize"] }
+reqwest = { version = "=0.13.5", default-features = false, features = ["blocking", "json", "native-tls"] }
+minijinja = { version = "=3.0.0", features = ["serde"] }
+pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
+calamine = { version = "=0.36.1", default-features = false, features = ["dates"] }
 
 [profile.release]
 codegen-units = 1

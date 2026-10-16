@@ -1,0 +1,16 @@
+{
+  "contract": "ai_daily_context",
+  "protocol_version": 1,
+  "request_id": "15151515-1515-4151-8151-151515151515",
+  "work_dir": "\\\\fixture-server\\scanner fixtures\\工作 目录",
+  "start_date": "2026-07-14",
+  "end_date": "2026-07-15",
+  "report_mode": "daily",
+  "compression_profile": "daily_balanced_v1",
+  "scan_db_path": "\\\\fixture-server\\scanner-state\\scan_index_rust_v3.sqlite3",
+  "scanner_settings": {},
+  "adapters": {
+    "office_worker_path": "\\\\fixture-server\\scanner-bin\\ai-daily-office-parser.exe",
+    "pdf_worker_path": "\\\\fixture-server\\scanner-runtime\\python.exe"
+  }
+}

@@ -1,6 +1,6 @@
 //! Long-lived streaming worker pool for crash-isolated parsers.
 //!
-//! `ai_daily_worker_v2` 是 Office/PDF worker 共用的 NDJSON 流式契约：首帧
+//! `ai_daily_worker_v3` 是 Office/PDF worker 共用的 NDJSON 流式契约：首帧
 //! hello，每行一个 request/response envelope，
 //! 单 in-flight、逐请求 deadline。每个 session child 拥有独立 Windows Job
 //! Object（见 [`crate::windows_job::SessionJob`]），杀一个超时请求不会连带
@@ -776,12 +776,8 @@ pub fn session_parse(
 
 fn worker_operation(backend: ParserBackend) -> WorkerOperation {
     match backend {
-        ParserBackend::RustOfficeOxideV2 | ParserBackend::RustXlsxBoundedV2 => {
-            WorkerOperation::OfficeParse
-        }
-        ParserBackend::PythonPdfTextV2 => WorkerOperation::PdfParse,
-        ParserBackend::PythonOfficeV2 => WorkerOperation::PythonOfficeParse,
-        ParserBackend::PythonSharepointTextV2 => WorkerOperation::PythonSharepointParse,
+        ParserBackend::RustPdfiumV3 => WorkerOperation::PdfParse,
+        _ => WorkerOperation::OfficeParse,
     }
 }
 
@@ -884,7 +880,7 @@ struct SessionSlot {
 pub struct WorkerPool {
     command: WorkerCommand,
     expected: WorkerHello,
-    python_worker: RegisteredWorker,
+    worker: RegisteredWorker,
     params: SessionParams,
     slots: Vec<Mutex<SessionSlot>>,
     available: Mutex<Vec<usize>>,
@@ -897,7 +893,7 @@ impl WorkerPool {
     pub fn new(
         command: WorkerCommand,
         expected: WorkerHello,
-        python_worker: RegisteredWorker,
+        worker: RegisteredWorker,
         params: SessionParams,
         rss_tracker: WorkerRssTracker,
     ) -> Arc<Self> {
@@ -905,7 +901,7 @@ impl WorkerPool {
         Arc::new(Self {
             command,
             expected,
-            python_worker,
+            worker,
             params,
             slots: (0..concurrency)
                 .map(|_| Mutex::new(SessionSlot::default()))
@@ -935,12 +931,12 @@ impl WorkerPool {
     ) -> bool {
         self.command == *command
             && self.expected == *expected
-            && self.python_worker == *worker
+            && self.worker == *worker
             && self.params == params
     }
 
     pub(crate) fn registered_worker(&self, command: &WorkerCommand) -> Option<RegisteredWorker> {
-        (self.command == *command).then(|| self.python_worker.clone())
+        (self.command == *command).then(|| self.worker.clone())
     }
 
     fn observe_rss(&self, value: Option<u64>) {
@@ -983,8 +979,7 @@ impl WorkerPool {
         request: &ParseOperation,
         timeout: Duration,
     ) -> Result<SessionOperationOutcome<ParseResult>, SessionOperationFailure> {
-        if let Err(failure) = crate::parsers::validate_worker_request(&self.python_worker, request)
-        {
+        if let Err(failure) = crate::parsers::validate_worker_request(&self.worker, request) {
             return Err(SessionOperationFailure {
                 failure,
                 transport: WorkerTransport::NotApplicable,
@@ -999,7 +994,7 @@ impl WorkerPool {
                 session_parse(session, &attempt_request, remaining)
             })?;
         let value = match crate::parsers::validate_session_worker_response(
-            &self.python_worker,
+            &self.worker,
             request,
             response.value,
         ) {
@@ -1021,8 +1016,7 @@ impl WorkerPool {
         request: &ParseOperation,
         timeout: Duration,
     ) -> Result<SessionOperationOutcome<ParseResult>, SessionOperationFailure> {
-        if let Err(failure) = crate::parsers::validate_worker_request(&self.python_worker, request)
-        {
+        if let Err(failure) = crate::parsers::validate_worker_request(&self.worker, request) {
             return Err(SessionOperationFailure {
                 failure,
                 transport: WorkerTransport::NotApplicable,
@@ -1036,17 +1030,14 @@ impl WorkerPool {
                 attempt_request.remaining_timeout_ms = duration_ms(remaining);
                 session_parse(session, &attempt_request, remaining)
             })?;
-        let value = crate::parsers::validate_session_worker_response(
-            &self.python_worker,
-            request,
-            response.value,
-        )
-        .map_err(|failure| SessionOperationFailure {
-            failure,
-            transport: response.transport,
-            attempt_count: response.attempt_count,
-            duration_ms: response.duration_ms,
-        })?;
+        let value =
+            crate::parsers::validate_session_worker_response(&self.worker, request, response.value)
+                .map_err(|failure| SessionOperationFailure {
+                    failure,
+                    transport: response.transport,
+                    attempt_count: response.attempt_count,
+                    duration_ms: response.duration_ms,
+                })?;
         Ok(SessionOperationOutcome { value, ..response })
     }
 
