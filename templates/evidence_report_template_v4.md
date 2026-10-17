@@ -1,6 +1,3 @@
-{% macro cite(item) -%}
-{{ item.text | evidence_text }} {% for id in item.source_ids %}[{{ report.source_labels[id] }}](#{{ report.source_labels[id] | lower }}){% if not loop.last %}、{% endif %}{% endfor %}
-{%- endmacro -%}
 # {{ report.date }} 工作日报
 
 {% if report.historical_reconstruction %}> 本报告为历史补录，根据冻结时可取得的材料整理；各事项的实际状态以材料中的日期和版本为准。
@@ -9,26 +6,33 @@
 
 {% endif %}{% if report.missed_dates %}> 待补日报日期：{{ report.missed_dates | join('、') }}。
 
+{% endif %}{% if report.quality != 'no_changes' and (report.speed.sources_total > 0 or report.speed.facts_total > 0) %}> 本报告基于 {{ report.speed.sources_total }} 份材料（读取成功 {{ report.speed.sources_usable }}、失败 {{ report.speed.sources_failed }}），提取事实 {{ report.speed.facts_total }} 条（确定 {{ report.speed.facts_confirmed }}、待确认 {{ report.speed.facts_pending }}）。{% if report.speed.gaps_total > 0 %}覆盖缺口 {{ report.speed.gaps_codes }} 类共 {{ report.speed.gaps_total }} 项。{% endif %}
+
 {% endif %}## 内容概览
 
 {% if report.quality == 'no_changes' %}本次没有待发布的实质变化，也未收到工作补充。已有内容仅用于归档统计。
 {% elif not report.content %}已读取的材料未形成可确认的具体事项，暂不扩写工作进展。
-{% else %}{% for item in report.content.overview %}- {{ cite(item) }}
+{% else %}{% for item in report.overview_view %}- {{ item.paragraphs[0] | evidence_text }} {{ item.refs }}
 {% endfor %}{% if not report.content.overview %}当前材料中的内容仍待确认，详见下方待确认事项。
 {% endif %}
-## 事项详情
+{% if report.toc %}## 事项目录
 
-{% for matter in report.content.matters %}### {{ matter.title | evidence_text }}
+{% for item in report.toc %}- [{{ item.title | evidence_text }}](#{{ item.anchor }})
+{% endfor %}
+{% endif %}## 事项详情
 
-{% if matter.background %}{{ cite(matter.background) }}
+{% for matter in report.matters_view %}<a id="{{ matter.anchor }}"></a>
+### {{ matter.title | evidence_text }}
 
-{% endif %}{% for detail in matter.details %}{{ cite(detail) }}
+{% if matter.background %}{% for paragraph in matter.background.paragraphs %}{{ paragraph | evidence_text }}{% if loop.last %} {{ matter.background.refs }}{% endif %}
 
-{% endfor %}{% if matter.status %}**当前状态：** {{ cite(matter.status) }}
+{% endfor %}{% endif %}{% for detail in matter.details %}{% for paragraph in detail.paragraphs %}{{ paragraph | evidence_text }}{% if loop.last %} {{ detail.refs }}{% endif %}
+
+{% endfor %}{% endfor %}{% if matter.status %}**当前状态：** {{ matter.status.paragraphs[0] | evidence_text }} {{ matter.status.refs }}
 
 {% endif %}{% endfor %}## 待确认
 
-{% for item in report.content.pending %}- {{ cite(item) }}
+{% for item in report.pending_view %}- {{ item.paragraphs[0] | evidence_text }} {{ item.refs }}
 {% else %}本次材料未列出其他待确认事项。
 {% endfor %}{% endif %}
 {% if report.user_notes %}## 补充说明
@@ -50,7 +54,7 @@
 {% else %}本次没有文件来源。
 {% endfor %}{% if report.gaps %}### 覆盖缺口
 
-{% for gap in report.gaps %}- {% if gap.source_id %}{{ report.source_labels[gap.source_id] }}：{% endif %}{{ gap.message | evidence_text }}（`{{ gap.code }}`）
+{% for gap in report.gaps_grouped %}- {% if gap.label_summary %}{{ gap.label_summary }}：{% endif %}{{ gap.message | evidence_text }}（`{{ gap.code }}`）
 {% endfor %}{% endif %}
 ## 变化依据
 
@@ -61,6 +65,6 @@
 {% endif %}{% for ref in fact.evidence %}- {% if ref.side == "before" %}修改前{% else %}本次版本{% endif %}；文件版本 `{{ ref.version_id }}`；解析版本 `{{ ref.extraction_id }}`；位置 `{{ ref.unit_id }}`{% for range in ref.ranges %}，{{ range.unit }} {{ range.start }}–{{ range.end }}{% if range.label %}（{{ range.label | evidence_text }}）{% endif %}{% endfor %}。
   原文：{{ ref.quote | evidence_text }}
   引用 SHA-256：`{{ ref.quote_sha256 }}`。
-{% endfor %}
-{% endfor %}---
+{% endfor %}{% if fact.evidence %}
+{% endif %}{% endfor %}---
 生成时间：{{ report.generated_at | shanghai_time }}。

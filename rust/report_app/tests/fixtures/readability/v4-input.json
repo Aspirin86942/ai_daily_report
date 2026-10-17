@@ -1,0 +1,249 @@
+{
+  "schema_version": 4,
+  "report_kind": "file_evidence",
+  "date": "2026-10-17",
+  "scope_id": "personal_work",
+  "root_alias": "合成评审材料",
+  "timezone": "Asia/Shanghai",
+  "window_start_utc": "2026-10-16T16:00:00Z",
+  "window_end_utc": "2026-10-17T16:00:00Z",
+  "quality": "partial",
+  "sources": [
+    {
+      "source_id": "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e",
+      "source_kind": "file",
+      "relative_path": "采购审批调整.txt",
+      "extension": ".txt",
+      "size_bytes": 1200,
+      "modified_at_utc": "2026-10-17T05:00:00Z",
+      "observed_at_utc": "2026-10-17T06:00:00Z",
+      "content_sha256": "263955b086a0c218e167821d7102bb58e3c80cd74a5d7c3827d043b7a0243519",
+      "excerpt_sha256": "263955b086a0c218e167821d7102bb58e3c80cd74a5d7c3827d043b7a0243519",
+      "excerpt_chars": 418,
+      "model_chars": 418,
+      "parser_backend": "light_text_v2",
+      "worker_lane": "in_process",
+      "parse_status": "success",
+      "parse_truncated": false,
+      "excerpt_truncated": false,
+      "model_truncated": false,
+      "coverage_limits": {},
+      "reason": null,
+      "snapshot_ref": null
+    },
+    {
+      "source_id": "src_fc849277637d545d41af51da9066b7c6a6bbfbe34e720100beb2a16ab40647ce",
+      "source_kind": "file",
+      "relative_path": "制度附件.pdf",
+      "extension": ".pdf",
+      "size_bytes": 2048,
+      "modified_at_utc": "2026-10-17T05:30:00Z",
+      "observed_at_utc": "2026-10-17T06:00:00Z",
+      "content_sha256": null,
+      "excerpt_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "excerpt_chars": 0,
+      "model_chars": 0,
+      "parser_backend": null,
+      "worker_lane": null,
+      "parse_status": "error",
+      "parse_truncated": false,
+      "excerpt_truncated": false,
+      "model_truncated": false,
+      "coverage_limits": {},
+      "reason": "PDF 解析失败",
+      "snapshot_ref": null
+    }
+  ],
+  "gaps": [
+    {
+      "code": "MATERIAL_INCOMPLETE",
+      "message": "材料存在覆盖缺口，相关附件内容待补齐",
+      "source_id": "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e",
+      "relative_path": "采购审批调整.txt",
+      "stage": "excerpt"
+    },
+    {
+      "code": "MATERIAL_INCOMPLETE",
+      "message": "制度附件读取失败，暂不纳入结论",
+      "source_id": "src_fc849277637d545d41af51da9066b7c6a6bbfbe34e720100beb2a16ab40647ce",
+      "relative_path": "制度附件.pdf",
+      "stage": "parse"
+    },
+    {
+      "code": "EFFECTIVE_DATE_UNCONFIRMED",
+      "message": "生效日期尚未确认",
+      "source_id": null,
+      "relative_path": null,
+      "stage": "model"
+    }
+  ],
+  "missed_dates": [],
+  "generated_at": "2026-10-18T01:00:00Z",
+  "user_notes": "",
+  "facts": [
+    {
+      "fact_id": "batch_000:000",
+      "pending": false,
+      "matter_id": "matter_1",
+      "fact": {
+        "topic": "采购审批方案调整",
+        "background": "对照现行职责核对审批依据。",
+        "detail": "采购审批方案(新)将现状与建议放在同一事项，金额变化为+38909%。",
+        "conditions": [
+          "审批条件与例外保持原文口径"
+        ],
+        "status": "待业务评审",
+        "source_ids": [
+          "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+        ],
+        "uncertainty": null
+      },
+      "evidence": [
+        {
+          "source_id": "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e",
+          "version_id": "ver_263955b086a0c218e167821d7102bb58e3c80cd74a5d7c3827d043b7a0243519",
+          "extraction_id": "extract_eb530bddae5cc1e0cf0f884c0faa025dffefcd9af448bd48004944e530a405ee",
+          "unit_id": "unit_eb530bddae5cc1e0cf0f884c0faa025dffefcd9af448bd48004944e530a405ee",
+          "side": "after",
+          "raw_sha256": "263955b086a0c218e167821d7102bb58e3c80cd74a5d7c3827d043b7a0243519",
+          "unit_sha256": "eb530bddae5cc1e0cf0f884c0faa025dffefcd9af448bd48004944e530a405ee",
+          "quote": "采购审批方案(新)将现状与建议放在同一事项，金额变化为+38909%。",
+          "quote_sha256": "eb530bddae5cc1e0cf0f884c0faa025dffefcd9af448bd48004944e530a405ee",
+          "unit_char_start": 0,
+          "input_start": 0,
+          "input_end": 35,
+          "ranges": [
+            {
+              "unit": "text_char",
+              "start": 0,
+              "end": 35,
+              "label": "方案正文(新)",
+              "column_start": null,
+              "column_end": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "fact_id": "batch_000:001",
+      "pending": false,
+      "matter_id": "matter_2",
+      "fact": {
+        "topic": "集团例外复核归并",
+        "background": null,
+        "detail": "集团例外复核已归入统一确认清单，报表中的错误值#N/A保留原样。",
+        "conditions": [],
+        "status": null,
+        "source_ids": [
+          "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+        ],
+        "uncertainty": null
+      },
+      "evidence": []
+    },
+    {
+      "fact_id": "batch_000:002",
+      "pending": true,
+      "matter_id": null,
+      "fact": {
+        "topic": "制度附件与字段口径",
+        "background": null,
+        "detail": "制度附件与空字段的业务含义需要统一确认。",
+        "conditions": [],
+        "status": null,
+        "source_ids": [
+          "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+        ],
+        "uncertainty": "生效日期和空字段含义未明确"
+      },
+      "evidence": []
+    }
+  ],
+  "content": {
+    "schema_version": 4,
+    "overview": [
+      {
+        "text": "采购审批方案(新)集中说明现状与建议，保留金额变化+38909%。",
+        "fact_ids": [
+          "batch_000:000"
+        ],
+        "source_ids": [
+          "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+        ]
+      },
+      {
+        "text": "[集团]例外复核归入统一确认清单，错误值#N/A保留原样。",
+        "fact_ids": [
+          "batch_000:001"
+        ],
+        "source_ids": [
+          "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+        ]
+      }
+    ],
+    "matters": [
+      {
+        "matter_id": "matter_1",
+        "title": "采购审批方案(新)调整",
+        "background": {
+          "text": "对照现行职责核对审批依据，现状与建议方案集中呈现。",
+          "fact_ids": [
+            "batch_000:000"
+          ],
+          "source_ids": [
+            "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+          ]
+        },
+        "details": [
+          {
+            "text": "采购审批调整先核对现行职责、金额口径与例外条件，将申请、复核和批准的依据分别列清，避免同一材料重复提交或反复解释。相关部门已经对照历史单据检查主要业务场景，保留涉及多部门协作的必要控制，并把当前做法与建议方案放在同一事项内，便于评审人员直接比较。本次修改保持原始数字+38909%不变，报表中的错误值#N/A仍需依据业务口径确认，任何统计结论都要能对应具体材料和引用位置；对尚未取得的制度附件记录覆盖缺口，并说明其影响范围，不根据缺失材料补写审批结论。下一步评审围绕责任分工、适用条件和审批依据展开，已明确的调整进入方案说明，待确认的信息集中列出；完成确认后再由业务负责人核对生效日期与通知范围，所有版本差异都保留对应来源，确保后续查阅可以追溯到本次变化。",
+            "fact_ids": [
+              "batch_000:000"
+            ],
+            "source_ids": [
+              "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+            ]
+          }
+        ],
+        "status": {
+          "text": "已形成评审材料，待业务负责人确认。",
+          "fact_ids": [
+            "batch_000:000"
+          ],
+          "source_ids": [
+            "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+          ]
+        }
+      },
+      {
+        "matter_id": "matter_2",
+        "title": "[集团]例外复核归并",
+        "background": null,
+        "details": [
+          {
+            "text": "集团例外复核已归入统一确认清单，报表中的错误值#N/A保留原样。",
+            "fact_ids": [
+              "batch_000:001"
+            ],
+            "source_ids": [
+              "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+            ]
+          }
+        ],
+        "status": null
+      }
+    ],
+    "pending": [
+      {
+        "text": "#制度附件与空字段口径：合并确认表头、字段和单元格缺失的业务含义及生效日期。",
+        "fact_ids": [
+          "batch_000:002"
+        ],
+        "source_ids": [
+          "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e"
+        ]
+      }
+    ]
+  }
+}
