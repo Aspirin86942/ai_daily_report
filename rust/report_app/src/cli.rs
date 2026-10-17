@@ -57,6 +57,8 @@ pub enum Command {
         #[arg(long, help = "发送计入审计与预算的合成模型请求")]
         check_model: bool,
     },
+    /// 只读检查任务、采集、日报发布、磁盘与数据库状态
+    Health(HealthArgs),
     /// 批量补跑或仅执行输入预检
     Backfill(BackfillArgs),
     /// 固定输入、生成候选、发布或恢复覆盖修复作业
@@ -128,6 +130,16 @@ pub struct PeriodArgs {
     pub input: Option<String>,
     #[arg(long)]
     pub no_save: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct HealthArgs {
+    #[arg(long, value_parser = types::parse_date)]
+    pub target_date: Option<NaiveDate>,
+    #[arg(long, value_enum, default_value = "json")]
+    pub format: crate::archive::cli::Format,
+    #[arg(long, help = "写入调度日志；供健康任务使用")]
+    pub scheduled: bool,
 }
 
 #[derive(Debug, Args)]

@@ -36,3 +36,26 @@ fn cli_dry_run_list_and_runs_use_isolated_config_without_model_credentials() {
     call(&["list"]);
     assert!(!dir.path().join("reports/daily/2026-10-11.md").exists());
 }
+
+#[test]
+fn health_command_reports_unhealthy_config_without_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    fs::create_dir(&config).unwrap();
+    let work = dir.path().join("work");
+    fs::create_dir(&work).unwrap();
+    let settings = serde_json::json!({"paths":{
+        "work_dir":work,"data_dir":dir.path().join("data"),"db_dir":dir.path().join("db"),
+        "reports_dir":dir.path().join("reports"),"log_dir":dir.path().join("logs")}});
+    fs::write(config.join("settings.yaml"), settings.to_string()).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_ai-daily-report"))
+        .arg("--config-dir")
+        .arg(&config)
+        .args(["health", "--format", "text"])
+        .env_remove("DEEPSEEK_API_KEY")
+        .env_remove("OPENAI_API_KEY")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(2), "缺少报告库时应返回 unhealthy");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("unhealthy"));
+}

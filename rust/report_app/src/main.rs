@@ -307,6 +307,31 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
             );
             Ok(())
         }
+        Command::Health(args) => {
+            let target = args.target_date.unwrap_or_else(|| {
+                (now.with_timezone(&ai_daily_report::types::shanghai()) - chrono::Days::new(1))
+                    .date_naive()
+            });
+            let started = std::time::Instant::now();
+            let report = ai_daily_report::health::check(&config, target, now)?;
+            if args.scheduled {
+                let value = serde_json::to_value(&report)?;
+                ai_daily_report::operations::append_scheduled_log(
+                    &config,
+                    "health",
+                    started.elapsed().as_millis() as u64,
+                    None,
+                    Some(&target.to_string()),
+                    &Ok(value),
+                )?;
+            }
+            println!("{}", ai_daily_report::health::render(&report, args.format));
+            let code = ai_daily_report::health::exit_code(&report);
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
         Command::Task {
             command: ai_daily_report::cli::TaskCommand::Plan { sid, kind },
         } => {
