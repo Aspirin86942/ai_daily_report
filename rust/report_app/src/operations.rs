@@ -126,13 +126,7 @@ fn collect_triggers(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> String
     )
 }
 
-fn task_plan_inner(
-    config: &AppConfig,
-    sid: &str,
-    task_name: &str,
-    arguments: &str,
-    triggers: &str,
-) -> Result<Value, ReportError> {
+fn validate_sid(sid: &str) -> Result<(), ReportError> {
     let pieces: Vec<_> = sid.split('-').collect();
     if pieces.len() < 4
         || pieces[0] != "S"
@@ -143,6 +137,17 @@ fn task_plan_inner(
     {
         return Err(ReportError::new("TASK_SID_INVALID", "用户 SID 无效"));
     }
+    Ok(())
+}
+
+fn task_plan_inner(
+    config: &AppConfig,
+    sid: &str,
+    task_name: &str,
+    arguments: &str,
+    triggers: &str,
+) -> Result<Value, ReportError> {
+    validate_sid(sid)?;
     let program = config.program_dir.join("ai-daily-report.exe");
     if !program.is_file() {
         return Err(ReportError::new(
@@ -202,6 +207,56 @@ pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Va
     task_plan_inner(config, sid, &config.schedule.task_name, &arguments, &triggers)
 }
 
+fn health_triggers(now: DateTime<Utc>) -> String {
+    let date = now.with_timezone(&types::shanghai()).date_naive();
+    format!(
+        "{}{}",
+        calendar_trigger("HealthMorning", date, "11:00"),
+        calendar_trigger("HealthEvening", date, "23:00")
+    )
+}
+
+pub fn task_plan_health(
+    config: &AppConfig,
+    sid: &str,
+    now: DateTime<Utc>,
+) -> Result<Value, ReportError> {
+    validate_sid(sid)?;
+    let program = config.program_dir.join("ai-daily-report.exe");
+    if !program.is_file() {
+        return Err(ReportError::new(
+            "TASK_RUNTIME_MISSING",
+            "程序目录缺少 ai-daily-report.exe",
+        ));
+    }
+    let root = display_path(&config.program_dir);
+    let config_dir = display_path(&config.config_dir);
+    if config_dir.contains(['"', '\r', '\n']) {
+        return Err(ReportError::new("TASK_PATH_INVALID", "配置路径无效"));
+    }
+    let owner = format!(
+        "AI Daily Report | checkout={}",
+        display_path(config.config_dir.parent().unwrap())
+    );
+    let script = display_path(&config.program_dir.join("scripts/health_notify.ps1"));
+    let arguments = format!(
+        "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File \"{script}\" -Program \"{}\" -ConfigDirectory \"{config_dir}\"",
+        display_path(&program)
+    );
+    let task_name = format!("{} Health", config.schedule.task_name);
+    let document = format!(
+        r#"<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>{owner}</Description><Author>{sid}</Author></RegistrationInfo><Triggers>{triggers}</Triggers><Principals><Principal id="DailyReportUser"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><ExecutionTimeLimit>PT10M</ExecutionTimeLimit></Settings><Actions Context="DailyReportUser"><Exec><Command>powershell.exe</Command><Arguments>{arguments}</Arguments><WorkingDirectory>{root}</WorkingDirectory></Exec></Actions></Task>"#,
+        owner = xml(&owner),
+        sid = xml(sid),
+        triggers = health_triggers(now),
+        arguments = xml(&arguments),
+        root = xml(&root)
+    );
+    Ok(
+        json!({"project_root":root,"program":display_path(&program),"config_dir":config_dir,"arguments":arguments,"schedule":config.schedule,"task_name":task_name,"task_path":"\\","user_sid":sid,"owner_marker":owner,"data_dir":display_path(&config.paths.data_dir),"work_dir":display_path(&config.paths.work_dir),"reports_dir":display_path(&config.paths.reports_dir),"credential_present":!config.api_key().is_empty(),"capabilities_configured":config.llm.context_window_tokens.is_some()&&config.llm.verified_max_output_tokens.is_some(),"model_check_verified":false,"kind":"health","xml":document}),
+    )
+}
+
 pub fn task_plan_kind(
     config: &AppConfig,
     sid: &str,
@@ -211,6 +266,7 @@ pub fn task_plan_kind(
     match kind {
         "daily" => task_plan(config, sid, now),
         "collect" => task_plan_collect(config, sid, now),
+        "health" => task_plan_health(config, sid, now),
         _ => Err(ReportError::new("TASK_KIND_INVALID", "任务类型无效")),
     }
 }

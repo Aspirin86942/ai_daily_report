@@ -71,4 +71,14 @@ $normalizedCollectXml = $collectPlan.xml.Replace('<StopAtDurationEnd>false</Stop
 Assert-Test (@(Get-ReportTaskDifferences -Plan $collectPlan -Xml $normalizedCollectXml).Count -eq 0) 'Windows omitted repetition default was rejected'
 $wrongIntervalXml = $normalizedCollectXml.Replace('<Interval>PT30M</Interval>', '<Interval>PT60M</Interval>')
 Assert-Test (@(Get-ReportTaskDifferences -Plan $collectPlan -Xml $wrongIntervalXml).Count -gt 0) 'Wrong collection interval was accepted'
-[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 12; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
+$healthPlan = Get-ReportTaskPlan -ProjectRoot (Split-Path -Parent $Program) -ConfigDirectory (Join-Path $root 'config') -Kind health
+Assert-Test ($healthPlan.kind -eq 'health') 'Health plan kind missing'
+Assert-Test ($healthPlan.task_name -like '* Health') 'Health task name missing'
+$healthFields = Get-ReportTaskXmlFields -Xml $healthPlan.xml
+Assert-Test ($healthFields['calendar_times'] -eq '11:00;23:00') ('Health trigger times: ' + $healthFields['calendar_times'])
+Assert-Test ($healthFields['/t:Task/t:Actions/t:Exec/t:Command'] -match 'powershell') 'Health action must use PowerShell'
+Assert-Test ($healthFields['/t:Task/t:Actions/t:Exec/t:Arguments'] -match 'health_notify.ps1') 'Health action must call health_notify.ps1'
+$script:task = $null; $script:taskXml = ''; $script:registered = 0; $script:badReadback = $false
+Install-ReportDailyTask -Plan $healthPlan -Apply | Out-Null
+Assert-Test ($script:registered -eq 1) 'Health task registration failed without credential check'
+[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 18; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')

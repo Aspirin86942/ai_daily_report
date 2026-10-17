@@ -2,7 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Get-ReportTaskPlan {
-    param([string]$ProjectRoot, [string]$ConfigDirectory, [ValidateSet("daily", "collect")][string]$Kind = "daily")
+    param([string]$ProjectRoot, [string]$ConfigDirectory, [ValidateSet("daily", "collect", "health")][string]$Kind = "daily")
     $root = (Resolve-Path -LiteralPath $ProjectRoot).Path
     $program = Join-Path $root 'ai-daily-report.exe'
     if (-not $ConfigDirectory) { $ConfigDirectory = Join-Path $root 'config' }
@@ -128,7 +128,8 @@ function Install-ReportDailyTask {
             Applied = $false; TaskName = $Plan.task_name; Plan = $Plan; Differences = $differences }
     }
     $collect = $Plan.PSObject.Properties.Name -contains 'kind' -and $Plan.kind -eq 'collect'
-    if (-not $collect) {
+    $health = $Plan.PSObject.Properties.Name -contains 'kind' -and $Plan.kind -eq 'health'
+    if (-not $collect -and -not $health) {
         if (-not $Plan.credential_present) { throw 'TASK_CREDENTIAL_NOT_VISIBLE' }
         if (-not $Plan.capabilities_configured -or -not $Plan.model_check_verified) { throw 'TASK_MODEL_ACCEPTANCE_REQUIRED' }
     }

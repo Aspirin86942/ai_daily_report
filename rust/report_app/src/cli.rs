@@ -258,7 +258,7 @@ pub enum OcrCommand {
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
     Plan {
-        #[arg(long,default_value="daily",value_parser=["daily","collect"])]
+        #[arg(long,default_value="daily",value_parser=["daily","collect","health"])]
         kind: String,
         #[arg(long)]
         sid: String,
