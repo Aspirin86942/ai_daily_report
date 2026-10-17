@@ -1,6 +1,6 @@
 # 历史报告检索设计（子项目 F1）
 
-- 状态：已实现，待用户验收（history-search 分支）
+- 状态：已随 rust-20261018-release-01 上线（提交 eaf2f68）
 - 日期：2026-10-18
 - 范围：报告库（日报/周报/月报）的只读全文检索；不含归档全文检索、模型问答、报告写路径改造
 - 关联：[产品能力范围方案](2026-10-18-product-capabilities-options.md)、[当前状态](../current-state.md)、[日报使用与恢复](../daily-report-operations.md)

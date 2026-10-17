@@ -17,6 +17,9 @@ function Assert-Test([bool]$Condition, [string]$Message) { if (-not $Condition) 
 $dailyFields = Get-ReportTaskXmlFields -Xml $plan.xml
 Assert-Test ($dailyFields['calendar_count'] -eq 3) 'Daily plan must have three calendar triggers'
 Assert-Test ($dailyFields['calendar_times'] -eq '09:00;09:30;10:30') ('Daily trigger times: ' + $dailyFields['calendar_times'])
+# Windows omits default-valued elements on export; the comparison must accept that for every trigger.
+$normalizedDailyXml = $plan.xml -replace '(<StartBoundary>[^<]+</StartBoundary>)<Enabled>true</Enabled>', '$1'
+Assert-Test (@(Get-ReportTaskDifferences -Plan $plan -Xml $normalizedDailyXml).Count -eq 0) 'Windows omission of calendar trigger defaults was rejected'
 # All scheduler calls are local function doubles. No task is registered on Windows.
 $script:task = $null
 $script:taskXml = ''

@@ -71,5 +71,6 @@ scripts/corpus/
 .artifacts/coverage-optimization/
 .artifacts/toolchain/
 .artifacts/rust-migration/
+.artifacts/windows-operations*/
 .releases/
 config-rust/

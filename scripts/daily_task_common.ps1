@@ -29,8 +29,6 @@ function Get-ReportTaskXmlFields {
         '/t:Task/t:Settings/t:Enabled',
         '/t:Task/t:Settings/t:AllowStartOnDemand', '/t:Task/t:Settings/t:ExecutionTimeLimit',
         '/t:Task/t:Settings/t:RestartOnFailure/t:Interval', '/t:Task/t:Settings/t:RestartOnFailure/t:Count',
-        '/t:Task/t:Triggers/t:CalendarTrigger/t:Enabled', '/t:Task/t:Triggers/t:CalendarTrigger/t:StartBoundary',
-        '/t:Task/t:Triggers/t:CalendarTrigger/t:ScheduleByDay/t:DaysInterval',
         '/t:Task/t:Triggers/t:CalendarTrigger/t:Repetition/t:Interval',
         '/t:Task/t:Triggers/t:CalendarTrigger/t:Repetition/t:Duration',
         '/t:Task/t:Triggers/t:CalendarTrigger/t:Repetition/t:StopAtDurationEnd',
@@ -44,7 +42,6 @@ function Get-ReportTaskXmlFields {
         '/t:Task/t:Settings/t:WakeToRun' = 'false'
         '/t:Task/t:Settings/t:AllowStartOnDemand' = 'true'
         '/t:Task/t:Settings/t:Enabled' = 'true'
-        '/t:Task/t:Triggers/t:CalendarTrigger/t:Enabled' = 'true'
         '/t:Task/t:Triggers/t:CalendarTrigger/t:Repetition/t:StopAtDurationEnd' = 'false'
         '/t:Task/t:Triggers/t:LogonTrigger/t:Enabled' = 'true'
     }
@@ -63,10 +60,6 @@ function Get-ReportTaskXmlFields {
                 # An unresolved account remains unequal; never accept it as the requested user.
             }
         }
-        if ($path.EndsWith('/t:StartBoundary') -and $value) {
-            $fields['start_day'] = ([DateTimeOffset]::Parse($value)).ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd')
-            $value = ([DateTimeOffset]::Parse($value)).ToOffset([TimeSpan]::FromHours(8)).ToString('HH:mm:sszzz')
-        }
         $fields[$path] = $value
     }
     $fields['action_count'] = @($document.SelectNodes('/t:Task/t:Actions/*', $ns)).Count
@@ -79,6 +72,20 @@ function Get-ReportTaskXmlFields {
             ([DateTimeOffset]::Parse($boundary.InnerText)).ToOffset([TimeSpan]::FromHours(8)).ToString('HH:mm')
         }
     }) | Sort-Object) -join ';'
+    $fields['calendar_days'] = (($calendar | ForEach-Object {
+        $days = $_.SelectSingleNode('t:ScheduleByDay/t:DaysInterval', $ns)
+        if ($null -eq $days -or $days.InnerText -eq '') { '1' } else { $days.InnerText }
+    }) | Sort-Object) -join ';'
+    $fields['calendar_dates'] = (($calendar | ForEach-Object {
+        $boundary = $_.SelectSingleNode('t:StartBoundary', $ns)
+        if ($null -eq $boundary) { '' } else {
+            ([DateTimeOffset]::Parse($boundary.InnerText)).ToOffset([TimeSpan]::FromHours(8)).ToString('yyyy-MM-dd')
+        }
+    }) | Sort-Object -Unique) -join ';'
+    $fields['calendar_enabled'] = if (@($calendar | Where-Object {
+        $enabled = $_.SelectSingleNode('t:Enabled', $ns)
+        $null -ne $enabled -and $enabled.InnerText -ne '' -and $enabled.InnerText -ne 'true'
+    }).Count -eq 0) { 'true' } else { 'false' }
     return $fields
 }
 
@@ -96,7 +103,7 @@ function Get-ReportTaskDifferences {
     $expected = Get-ReportTaskXmlFields -Xml $Plan.xml
     $differences = @()
     foreach ($key in $expected.Keys) {
-        if ($key -eq 'start_day' -and $actual[$key] -and [string]$actual[$key] -cle [string]$expected[$key]) { continue }
+        if ($key -eq 'calendar_dates' -and $actual[$key] -and [string]$actual[$key] -cle [string]$expected[$key]) { continue }
         if ([string]$actual[$key] -cne [string]$expected[$key]) {
             $differences += [pscustomobject]@{ Field = $key; Actual = $actual[$key]; Expected = $expected[$key] }
         }
