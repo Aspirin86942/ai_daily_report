@@ -39,7 +39,7 @@ Copy-Item -LiteralPath $dll -Destination (Join-Path $outputPath 'pdfium.dll')
 foreach ($folder in @('templates', 'config', 'scripts', 'docs', 'licenses/pdfium', 'licenses/rust')) { [IO.Directory]::CreateDirectory((Join-Path $outputPath $folder)) | Out-Null }
 foreach ($template in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'templates') -Filter '*.md' -File) { Copy-Item -LiteralPath $template.FullName -Destination (Join-Path $outputPath 'templates') }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'config/settings.example.yaml') -Destination (Join-Path $outputPath 'config/settings.example.yaml')
-foreach ($script in @('daily_task_common.ps1', 'install_daily_task.ps1', 'check_daily_task.ps1', 'remove_daily_task.ps1', 'archive_scanner_database.ps1', 'update_release_pointer.ps1', 'release_common.ps1', 'verify_windows_release.ps1')) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/$script") -Destination (Join-Path $outputPath 'scripts') }
+foreach ($script in @('daily_task_common.ps1', 'install_daily_task.ps1', 'check_daily_task.ps1', 'remove_daily_task.ps1', 'health_notify.ps1', 'archive_scanner_database.ps1', 'update_release_pointer.ps1', 'release_common.ps1', 'verify_windows_release.ps1')) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/$script") -Destination (Join-Path $outputPath 'scripts') }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'rust/build-inputs.json') -Destination (Join-Path $outputPath 'build-inputs.json')
 foreach ($document in @('README.md', 'CONTEXT.md', 'AGENTS.md', 'CLAUDE.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot $document) -Destination (Join-Path $outputPath $document) }
 $docsRoot = Join-Path $repoRoot 'docs'

@@ -81,4 +81,15 @@ Assert-Test ($healthFields['/t:Task/t:Actions/t:Exec/t:Arguments'] -match 'healt
 $script:task = $null; $script:taskXml = ''; $script:registered = 0; $script:badReadback = $false
 Install-ReportDailyTask -Plan $healthPlan -Apply | Out-Null
 Assert-Test ($script:registered -eq 1) 'Health task registration failed without credential check'
-[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 18; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
+$healthConfig = Join-Path $root 'health-config'
+[IO.Directory]::CreateDirectory($healthConfig) | Out-Null
+$healthWork = (Join-Path $root 'work').Replace('\','/')
+$healthData = (Join-Path $root 'health-data').Replace('\','/')
+[IO.File]::WriteAllText((Join-Path $healthConfig 'settings.yaml'), "paths:`n  work_dir: '$healthWork'`n  data_dir: '$healthData'`n  reports_dir: '$healthData/reports'`n  db_dir: '$healthData/db'`n  log_dir: '$healthData/logs'`n", [Text.UTF8Encoding]::new($false))
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts/health_notify.ps1') -Program $Program -ConfigDirectory $healthConfig -NoNotify | Out-Null
+$healthFile = Join-Path $healthData ('logs/health-' + (Get-Date -Format 'yyyy-MM-dd') + '.json')
+Assert-Test (Test-Path -LiteralPath $healthFile) 'Health file was not written'
+$healthJson = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
+Assert-Test ($healthJson.status -ne 'healthy') 'Empty data directory should not be healthy'
+Assert-Test (@($healthJson.tasks).Count -eq 3) 'Health report must include all three task readbacks'
+[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 21; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
