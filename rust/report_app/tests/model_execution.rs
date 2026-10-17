@@ -802,6 +802,71 @@ fn composition_must_cover_every_fact_and_match_sources() {
 }
 
 #[test]
+fn uncertain_facts_are_preserved_as_pending_without_retrying_the_model() {
+    let h = Harness::new();
+    let plan = h.plan(&[source("s1", "审批方案尚待确认。")]);
+    let mut uncertain = fact("s1");
+    uncertain["uncertainty"] = json!("材料没有确认生效日期。");
+    let content = json!({"schema_version":3,"facts":[fact("s1"),uncertain],"pending":[fact("s1")]});
+    let selected = serde_json::from_value::<FactsResponse>(content.clone())
+        .unwrap()
+        .select(
+            "batch_000",
+            &BTreeSet::from(["s1".into()]),
+            &BTreeSet::new(),
+            20_000,
+        )
+        .unwrap();
+    assert_eq!(selected.len(), 3);
+    assert!(!selected[0].pending);
+    assert!(selected[1].pending);
+    assert!(selected[2].pending);
+    assert_eq!(selected[1].fact_id, "batch_000:001");
+    assert_eq!(serde_json::to_value(&selected[1].fact).unwrap(), uncertain);
+    let network = Script::new(vec![
+        Ok(response(content)),
+        Ok(response(composed_for(&selected))),
+    ]);
+    let generated = h.runner(&network).generate_with_workers(&plan, 1).unwrap();
+    assert_eq!(generated.facts, selected);
+    assert_eq!(generated.report.unwrap().pending.len(), 2);
+    assert_eq!(network.count(), 2);
+    assert!(h.calls().iter().all(|call| call["status"] == "succeeded"));
+}
+
+#[test]
+fn uncertain_facts_still_require_valid_structure_and_source_references() {
+    for version in [3, 4] {
+        let mut valid = facts("s1");
+        valid["schema_version"] = json!(version);
+        valid["facts"][0]["uncertainty"] = json!("尚未确认。");
+        let select = |value| {
+            serde_json::from_value::<FactsResponse>(value)
+                .unwrap()
+                .select(
+                    "batch_000",
+                    &BTreeSet::from(["s1".into()]),
+                    &BTreeSet::new(),
+                    20_000,
+                )
+        };
+        assert!(select(valid.clone()).unwrap()[0].pending);
+        for (field, value) in [
+            ("source_ids", json!(["unknown"])),
+            ("source_ids", json!(["s1", "s1"])),
+            ("source_ids", json!([])),
+            ("uncertainty", json!("")),
+            ("detail", json!("")),
+            ("conditions", json!([""])),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["facts"][0][field] = value;
+            assert_eq!(select(invalid).unwrap_err().code, "MODEL_RESPONSE_INVALID");
+        }
+    }
+}
+
+#[test]
 fn disabled_cumulative_budgets_still_keep_audited_usage() {
     let mut h = Harness::new();
     h.config.recovery.max_tokens_per_run = Some(1);

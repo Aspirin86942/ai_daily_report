@@ -1,3 +1,4 @@
+mod daily;
 mod input;
 mod legacy;
 mod period;
@@ -300,44 +301,11 @@ pub fn run_daily(mut request: ReportRequest, app: &App) -> Result<ReportOutcome,
     if request.scheduled {
         app.store.activate(request.context.target_date)?;
     }
-    if request.save && !request.dry_run && request.regeneration_reason.is_none() {
-        let target = request.context.target_date.to_string();
-        for pending in app.store.pending(if request.scheduled {
-            None
-        } else {
-            Some(&target)
-        })? {
-            app.store.resume(&pending.run_id, now)?;
-            let recovered = finish_guarded(app, &pending.run_id, now, started, deadline)?;
-            if pending.target_date == target && request.input.trim().is_empty() {
-                return Ok(recovered);
-            }
-        }
+    if let Some(recovered) = daily::resume_pending(app, &request, now, started, deadline)? {
+        return Ok(recovered);
     }
-    if request.period.source == crate::types::ReportSource::Archive
-        && request.save
-        && !request.dry_run
-        && request.regeneration_reason.is_none()
-    {
-        if let Some(current) = app
-            .store
-            .current(&request.context.target_date.to_string())?
-        {
-            crate::archive::model_input::published(
-                &app.config,
-                &current.run_id,
-                current.markdown.as_deref().unwrap_or(""),
-            )?;
-            return Ok(ReportOutcome {
-                run_id: current.run_id,
-                target_date: current.target_date,
-                quality: current.quality.unwrap_or_else(|| "complete".into()),
-                markdown: current.markdown.unwrap_or_default(),
-                output_path: current.output_path.map(Into::into),
-                action: "existing".into(),
-                model_calls: 0,
-            });
-        }
+    if let Some(existing) = daily::existing_archive(app, &request)? {
+        return Ok(existing);
     }
     let run_id = &request.context.run_id;
     app.store.create(
@@ -351,140 +319,7 @@ pub fn run_daily(mut request: ReportRequest, app: &App) -> Result<ReportOutcome,
         request.regeneration_reason.as_deref(),
         now,
     )?;
-    let result = (|| {
-        app.store.set_scanning(run_id, now)?;
-        deadline_check(deadline)?;
-        let payload = if request.period.source == crate::types::ReportSource::Archive {
-            let payload = input::prepare_archive(app, &request)?;
-            if request.dry_run {
-                let reference = app.snapshots.put(
-                    run_id,
-                    "archive-preview",
-                    &serde_json::to_value(&payload)?,
-                )?;
-                app.store.prepare(
-                    run_id,
-                    &reference,
-                    &payload.input_fingerprint,
-                    &payload
-                        .sources
-                        .iter()
-                        .map(serde_json::to_value)
-                        .collect::<Result<Vec<_>, _>>()?,
-                    now,
-                )?;
-                app.store
-                    .finish_scan_preview(run_id, &payload.quality, now)?;
-                return Ok(ReportOutcome {
-                    run_id: run_id.clone(),
-                    target_date: request.context.target_date.to_string(),
-                    quality: "scan_only".into(),
-                    markdown: serde_json::to_string_pretty(&payload.sources)?,
-                    output_path: None,
-                    action: "dry_run".into(),
-                    model_calls: 0,
-                });
-            }
-            payload
-        } else {
-            let scan = scan_stable(app, &request, deadline)?;
-            if request.dry_run {
-                let metadata = serde_json::to_value(&scan)?;
-                let reference = app.snapshots.put(run_id, "scan-preview", &metadata)?;
-                let sources = scan
-                    .sources
-                    .iter()
-                    .map(serde_json::to_value)
-                    .collect::<Result<Vec<_>, _>>()?;
-                app.store
-                    .prepare(run_id, &reference, &reference.sha256, &sources, now)?;
-                app.store.finish_scan_preview(
-                    run_id,
-                    if scan.envelope.status == ai_daily_scanner_contract::EngineStatus::Ok {
-                        "complete"
-                    } else {
-                        "partial"
-                    },
-                    now,
-                )?;
-                return Ok(ReportOutcome {
-                    run_id: run_id.clone(),
-                    target_date: request.context.target_date.to_string(),
-                    quality: "scan_only".into(),
-                    markdown: scan.envelope.file_context,
-                    output_path: None,
-                    action: "dry_run".into(),
-                    model_calls: 0,
-                });
-            }
-            input::prepare(app, &request, &scan)?
-        };
-        crate::archive::model_input::pin(&app.config, &payload)?;
-        if payload.version == 4 {
-            crate::archive::stats::record_stage(
-                &app.config,
-                run_id,
-                &payload.context.target_date.to_string(),
-                "input_preparation",
-                started.elapsed().as_millis() as u64,
-            )?;
-        }
-        let reference = app
-            .snapshots
-            .put(run_id, "input", &serde_json::to_value(&payload)?)?;
-        let sources = payload
-            .sources
-            .iter()
-            .map(serde_json::to_value)
-            .collect::<Result<Vec<_>, _>>()?;
-        if payload.quality == "unavailable" {
-            app.store.save_scan_failure(run_id, &reference, &sources)?;
-            return Err(ReportError::new(
-                "SCAN_UNAVAILABLE",
-                "现有材料无法支持生成报告，覆盖诊断已保存",
-            ));
-        }
-        app.store.prepare(
-            run_id,
-            &reference,
-            &payload.input_fingerprint,
-            &sources,
-            now,
-        )?;
-        if request.save && request.regeneration_reason.is_none() {
-            if let Some(current) = app
-                .store
-                .current(&request.context.target_date.to_string())?
-                .filter(|r| r.input_fingerprint.as_deref() == Some(&payload.input_fingerprint))
-            {
-                if current.publication_fingerprint.as_deref()
-                    == Some(&payload.publication_fingerprint()?)
-                {
-                    let path = Publisher::new(&app.config.paths.reports_dir, &app.store)?
-                        .publish(&current.run_id, now)?;
-                    app.store.finish_observation(run_id, &current, now)?;
-                    return Ok(ReportOutcome {
-                        run_id: run_id.clone(),
-                        target_date: current.target_date,
-                        quality: current.quality.unwrap(),
-                        markdown: current.markdown.unwrap(),
-                        output_path: Some(path),
-                        action: "reused".into(),
-                        model_calls: 0,
-                    });
-                }
-                let mut report: DailyReport =
-                    serde_json::from_str(current.report_json.as_deref().ok_or_else(|| {
-                        ReportError::new("REPORT_NOT_STAGED", "正式报告正文缺失")
-                    })?)?;
-                report.user_notes = payload.notes.clone();
-                report.root_alias = payload.root_alias.clone();
-                report.missed_dates = payload.missed_dates.clone();
-                return stage(app, run_id, &payload, &report, now);
-            }
-        }
-        finish(app, run_id, now, started, deadline)
-    })();
+    let result = daily::run_new(app, &request, now, started, deadline);
     if let Err(error) = &result {
         app.store.fail(run_id, error.code, false, now)?;
     }

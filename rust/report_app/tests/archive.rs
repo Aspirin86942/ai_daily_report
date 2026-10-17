@@ -289,6 +289,348 @@ fn archive_daily_preview_publication_evidence_and_permissions() {
 }
 
 #[test]
+fn archive_dry_run_keeps_frozen_identity_and_existing_report_does_not_create_a_run() {
+    use ai_daily_report::{
+        run::{self, App},
+        snapshots::SnapshotRef,
+        types::RunPhase,
+    };
+    let (_dir, config) = setup();
+    collect::run(&config, true, Utc::now() - chrono::Duration::days(2)).unwrap();
+    let app = App::open(config, Utc::now()).unwrap();
+    let mut preview_request = request(&app, true);
+    preview_request.dry_run = true;
+    let preview = run::run_daily(preview_request, &app).unwrap();
+    let stored = app.store.get(&preview.run_id).unwrap();
+    let reference = SnapshotRef {
+        path: stored.snapshot_path.unwrap(),
+        sha256: stored.snapshot_sha256.unwrap(),
+    };
+    let snapshot = app.snapshots.read(&reference).unwrap();
+    assert!(reference.path.contains("archive-preview"));
+    assert_eq!(snapshot["version"], 4);
+    assert_eq!(snapshot["plan"]["version"], 5);
+    assert_eq!(
+        snapshot["input_fingerprint"],
+        stored.input_fingerprint.unwrap()
+    );
+    assert_eq!(snapshot["quality"], stored.quality.unwrap());
+    assert_eq!(stored.phase, RunPhase::Prepared);
+    assert!(matches!(
+        stored.status,
+        ai_daily_report::store::RunStatus::Succeeded
+    ));
+    assert_eq!(preview.quality, "scan_only");
+    assert_eq!(
+        preview.markdown,
+        serde_json::to_string_pretty(&snapshot["sources"]).unwrap()
+    );
+    assert!(app.store.calls(&preview.run_id).unwrap().is_empty());
+    assert!(app.store.current(&preview.target_date).unwrap().is_none());
+
+    let published = run::run_daily(request(&app, true), &app).unwrap();
+    let next_request = request(&app, true);
+    let unused_run_id = next_request.context.run_id.clone();
+    let existing = run::run_daily(next_request, &app).unwrap();
+    assert_eq!(existing.action, "existing");
+    assert_eq!(existing.run_id, published.run_id);
+    assert_eq!(existing.markdown, published.markdown);
+    assert_eq!(existing.model_calls, 0);
+    assert!(app.store.get(&unused_run_id).is_err());
+}
+
+#[test]
+fn failed_daily_input_preparation_preserves_the_error_and_failed_run_audit() {
+    use ai_daily_report::{
+        run::{self, App},
+        store::RunStatus,
+        types::RunPhase,
+    };
+    let (_dir, config) = setup();
+    ArchiveStore::open(&config, true).unwrap();
+    let app = App::open(config, Utc::now()).unwrap();
+    let mut request = request(&app, true);
+    request.dry_run = true;
+    let run_id = request.context.run_id.clone();
+    let error = run::run_daily(request, &app).unwrap_err();
+    let stored = app.store.get(&run_id).unwrap();
+    assert_eq!(error.code, "ARCHIVE_BASELINE_REQUIRED");
+    assert_eq!(stored.phase, RunPhase::Scanning);
+    assert!(matches!(stored.status, RunStatus::Failed));
+    assert_eq!(stored.error_code.as_deref(), Some(error.code));
+    assert!(stored.snapshot_path.is_none());
+    assert!(app.store.calls(&run_id).unwrap().is_empty());
+}
+
+#[test]
+fn archive_recovery_skips_old_scan_runs_and_preserves_their_evidence() {
+    use ai_daily_report::{
+        archive::model_input,
+        run::{self, App},
+        types::{new_run_id, RunContext},
+    };
+    let (_dir, config) = setup();
+    collect::run(&config, true, Utc::now() - chrono::Duration::days(2)).unwrap();
+    let mut app = App::open(config, Utc::now()).unwrap();
+    app.transport = Box::new(LocalModel);
+    let mut next = request(&app, true);
+    next.scheduled = true;
+    let old = RunContext::new(
+        new_run_id(),
+        Utc::now() - chrono::Duration::days(1),
+        next.context.target_date - chrono::Duration::days(1),
+        "old-config".into(),
+    )
+    .unwrap();
+    app.store
+        .create(&old, "report", &old.run_id, None, old.started_at)
+        .unwrap();
+    let reference = app
+        .snapshots
+        .put(&old.run_id, "input", &serde_json::json!({"version":3}))
+        .unwrap();
+    app.store
+        .prepare(
+            &old.run_id,
+            &reference,
+            &reference.sha256,
+            &[],
+            old.started_at,
+        )
+        .unwrap();
+    app.store
+        .fail(&old.run_id, "MODEL_RESPONSE_INVALID", false, old.started_at)
+        .unwrap();
+    let old_state = serde_json::to_value(app.store.get(&old.run_id).unwrap()).unwrap();
+
+    let pending_request = request(&app, true);
+    let frozen = run::prepare_archive_input(&app, &pending_request).unwrap();
+    let archived = &pending_request.context;
+    app.store
+        .create(
+            archived,
+            "report",
+            &archived.run_id,
+            None,
+            archived.started_at,
+        )
+        .unwrap();
+    model_input::pin(&app.config, &frozen).unwrap();
+    let reference = app
+        .snapshots
+        .put(
+            &archived.run_id,
+            "input",
+            &serde_json::to_value(&frozen).unwrap(),
+        )
+        .unwrap();
+    app.store
+        .prepare(
+            &archived.run_id,
+            &reference,
+            &frozen.input_fingerprint,
+            &[],
+            archived.started_at,
+        )
+        .unwrap();
+    app.store
+        .fail(
+            &archived.run_id,
+            "RUN_INTERRUPTED",
+            false,
+            archived.started_at,
+        )
+        .unwrap();
+    let pending = app.store.pending(None).unwrap();
+    assert_eq!(
+        model_input::recovery_runs(&app.config, pending.clone(), false)
+            .unwrap()
+            .iter()
+            .map(|r| &r.run_id)
+            .collect::<Vec<_>>(),
+        vec![&old.run_id]
+    );
+    assert_eq!(
+        model_input::recovery_runs(&app.config, pending, true)
+            .unwrap()
+            .iter()
+            .map(|r| &r.run_id)
+            .collect::<Vec<_>>(),
+        vec![&archived.run_id]
+    );
+
+    let result = run::run_report(next, &app).unwrap();
+    assert_eq!(result.run_id, archived.run_id);
+    assert_eq!(result.action, "published");
+    assert_eq!(result.model_calls, 0);
+    assert_eq!(
+        serde_json::to_value(app.store.get(&old.run_id).unwrap()).unwrap(),
+        old_state
+    );
+    assert_eq!(
+        app.snapshots
+            .read(&ai_daily_report::snapshots::SnapshotRef {
+                path: old_state["snapshot_path"].as_str().unwrap().into(),
+                sha256: old_state["snapshot_sha256"].as_str().unwrap().into(),
+            })
+            .unwrap(),
+        serde_json::json!({"version":3})
+    );
+}
+
+#[test]
+fn archive_reports_explain_the_baseline_boundary_without_model_calls() {
+    use ai_daily_report::run::{self, App};
+    let (_dir, config) = setup();
+    let mut app = App::open(config, Utc::now()).unwrap();
+    app.transport = Box::new(LocalModel);
+    let req = request(&app, true);
+    let baseline = req.context.window_start_utc + chrono::Duration::hours(6);
+    collect::run(&app.config, true, baseline).unwrap();
+    let result = run::run_report(req, &app).unwrap();
+    assert_eq!(result.model_calls, 0);
+    assert_eq!(result.quality, "partial");
+    assert!(result.markdown.contains("ARCHIVE_BASELINE_WINDOW"));
+    assert!(result.markdown.contains("已有内容不计为新增成果"));
+    assert!(result.markdown.contains(
+        &baseline
+            .with_timezone(&ai_daily_report::types::shanghai())
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    ));
+}
+
+#[test]
+fn archive_reports_require_an_initialized_baseline() {
+    use ai_daily_report::run::{self, App};
+    let (_dir, config) = setup();
+    ArchiveStore::open(&config, true).unwrap();
+    let app = App::open(config, Utc::now()).unwrap();
+    assert_eq!(
+        run::prepare_archive_input(&app, &request(&app, false))
+            .unwrap_err()
+            .code,
+        "ARCHIVE_BASELINE_REQUIRED"
+    );
+}
+
+#[test]
+fn archive_reports_expose_stopped_failed_and_unfinished_collection_without_model_calls() {
+    use ai_daily_report::run::{self, App};
+    for case in [
+        "stopped",
+        "resumed_later",
+        "failed",
+        "running",
+        "finishes_later",
+        "no_completed_round",
+    ] {
+        let (_dir, config) = setup();
+        let mut app = App::open(config, Utc::now()).unwrap();
+        app.transport = Box::new(LocalModel);
+        let req = request(&app, true);
+        let start = req.context.window_start_utc;
+        let store = ArchiveStore::open(&app.config, true).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO metadata VALUES('baseline',?)",
+                [(start - chrono::Duration::days(1)).to_rfc3339()],
+            )
+            .unwrap();
+        for slot in 0..48 {
+            if case == "no_completed_round"
+                || (matches!(case, "stopped" | "resumed_later") && slot > 28)
+            {
+                continue;
+            }
+            let at = start + chrono::Duration::minutes(slot * 30);
+            let status = match (case, slot) {
+                ("failed", 28) => "interrupted",
+                ("running", 28) => "running",
+                _ => "complete",
+            };
+            let finished = if case == "finishes_later" && slot == 47 {
+                req.context.started_at + chrono::Duration::seconds(1)
+            } else {
+                at + chrono::Duration::seconds(2)
+            };
+            store.conn.execute(
+                "INSERT INTO collections(id,started_at,finished_at,status,baseline) VALUES(?,?,?,?,0)",
+                rusqlite::params![slot.to_string(), at.to_rfc3339(), finished.to_rfc3339(), status],
+            ).unwrap();
+        }
+        if case == "resumed_later" {
+            store.conn.execute(
+                "INSERT INTO collections(id,started_at,finished_at,status,baseline) VALUES('recovered',?,?,'complete',0)",
+                rusqlite::params![req.context.window_end_utc.to_rfc3339(), (req.context.window_end_utc + chrono::Duration::seconds(2)).to_rfc3339()],
+            ).unwrap();
+        }
+        drop(store);
+        let result = run::run_report(req, &app).unwrap();
+        assert_eq!(result.model_calls, 0, "{case}");
+        assert_eq!(result.quality, "partial", "{case}");
+        assert!(result.markdown.contains("ARCHIVE_COLLECTION_GAP"), "{case}");
+        assert!(
+            !result.markdown.contains("在目标日期内未发现修改的文件"),
+            "{case}"
+        );
+        if matches!(case, "stopped" | "resumed_later") {
+            assert!(result.markdown.contains("14:30:00"), "{case}");
+        }
+        let saved = app.store.get(&result.run_id).unwrap();
+        let report: ai_daily_report::reports::data::DailyReport =
+            serde_json::from_str(saved.report_json.as_deref().unwrap()).unwrap();
+        assert!(
+            report
+                .gaps
+                .iter()
+                .any(|gap| gap.code == "ARCHIVE_COLLECTION_GAP"),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn archive_collection_coverage_uses_the_report_day_and_preserves_partial_rounds() {
+    use ai_daily_report::{archive::model_input, run::App};
+    let (_dir, config) = setup();
+    let app = App::open(config, Utc::now()).unwrap();
+    let req = request(&app, false);
+    let start = req.context.window_start_utc;
+    let store = ArchiveStore::open(&app.config, true).unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO metadata VALUES('baseline',?)",
+            [(start - chrono::Duration::days(1)).to_rfc3339()],
+        )
+        .unwrap();
+    // No collection has run today. Yesterday's completed half-hourly records still cover yesterday.
+    for slot in 0..48 {
+        let at = start + chrono::Duration::minutes(slot * 30);
+        let status = if slot == 28 { "partial" } else { "complete" };
+        store.conn.execute(
+            "INSERT INTO collections(id,started_at,finished_at,status,baseline) VALUES(?,?,?,?,0)",
+            rusqlite::params![slot.to_string(), at.to_rfc3339(), (at + chrono::Duration::seconds(2)).to_rfc3339(), status],
+        ).unwrap();
+    }
+    store
+        .gap("28", None, "ARCHIVE_PARSE_REJECTED", "unreadable file")
+        .unwrap();
+    drop(store);
+    let prepared = model_input::prepare(&app.config, &req).unwrap();
+    assert!(!prepared
+        .gaps
+        .iter()
+        .any(|gap| gap.code == "ARCHIVE_COLLECTION_GAP"));
+    assert!(prepared
+        .gaps
+        .iter()
+        .any(|gap| gap.code == "ARCHIVE_CAPTURE_GAP"));
+}
+
+#[test]
 fn offline_root_is_not_deletion_and_daily_audit_reads_without_parsing() {
     let (dir, config) = setup();
     let path = config.paths.work_dir.join("a.txt");

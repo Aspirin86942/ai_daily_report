@@ -81,7 +81,7 @@ Benchmark 不读取本机 `settings.yaml`，每组 cold/warm 使用独立的新�
 
 日报以已经结束的自然日为目标，默认处理昨日。`--target-date` 同时确定扫描范围和报告日期。
 `--dry-run` 执行本地扫描预检，模型调用为零；`--no-save` 生成预览并保留调用审计，正式报告版本保持原状。
-补跑、覆盖修复和调度操作见 [日报操作说明](docs/daily-report-operations.md)。
+补跑、覆盖修复和调度操作见 [日报操作说明](python-daily-operations-2026-10-15.md)。
 
 历史日报接口及周报、月报的报告运行接口保持为：
 
@@ -158,7 +158,7 @@ New-Item -ItemType Directory -Path .\dist -Force | Out-Null
 实际切换前必须另行授权停止报告进程、归档旧 scanner 数据库和修改 release
 pointer。旧数据库与报告 SQLite 不删除；新 release 使用新的
 `scan_index_v3.sqlite3`。回滚只切回旧 release/旧数据库指针，新 v3 数据库留作
-诊断，不做反向转换。详见 [Windows 部署说明](docs/windows-deployment.md)。
+诊断，不做反向转换。详见 [Windows 部署说明](python-windows-deployment-2026-10-15.md)。
 
 ## 项目结构
 

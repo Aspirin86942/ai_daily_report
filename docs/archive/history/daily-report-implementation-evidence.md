@@ -1,3 +1,5 @@
+> 历史记录：保留当时的数字、状态和结论；当前运行与验收以[当前状态](../../current-state.md)为准。
+
 # 自动文件证据日报实施验收记录
 
 日期：2026-10-12。代码基线：`main / 315eeb8a0ac7c2c88f380b5bf877ab3abf197642`。
@@ -28,13 +30,13 @@
 | 锁定依赖同步 | `uv sync --frozen` 成功 | 项目本地环境；随后重新安装原生扩展 |
 | Rust 格式检查 | 通过 | `cargo fmt --all -- --check` |
 | Rust 静态检查 | 通过，警告按错误处理 | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
-| Rust 工作区测试 | 281 通过，0 失败，0 忽略，共 25 组 | [原始日志](../.tmp/rust-workspace-tests.log) |
+| Rust 工作区测试 | 281 通过，0 失败，0 忽略，共 25 组 | [原始日志](../../../.tmp/rust-workspace-tests.log) |
 | Rust 发布构建 | 成功 | `cargo build --workspace --release --locked` |
 | 原生扩展安装 | 成功 | `maturin develop --release --locked` |
-| Python 整体测试 | 344 通过，耗时 17.18 秒 | [原始日志](../.tmp/python-full-tests.log) |
+| Python 整体测试 | 344 通过，耗时 17.18 秒 | [原始日志](../../../.tmp/python-full-tests.log) |
 | Git 差异空白检查 | 通过 | `git diff --check` |
 | Windows 任务 XML | 本机任务计划程序校验通过 | COM `TASK_VALIDATE_ONLY`；实际注册状态见文末 |
-| 本机严格诊断 | 通过 | [诊断日志](../.tmp/daily-doctor-strict.log) |
+| 本机严格诊断 | 通过 | [诊断日志](../../../.tmp/daily-doctor-strict.log) |
 
 严格诊断中的扫描数据库目录、Office 解析进程握手和 Python 文档解析进程握手全部通过。最新原生构建标识保存在严格诊断日志及 JSON 验收记录中。
 
@@ -56,15 +58,15 @@
 
 证据清单：
 
-- [2026-10-11 预检](../data/diagnostics/scan-preview-2026-10-11-2283e5a9e1c54c28a49aa9028e30ba3a.json)
-- [2026-10-09 最终预检](../data/diagnostics/scan-preview-2026-10-09-a173865c99754d928879ab0c3c28e7ee.json)
-- [2026-10-10 恢复后预检](../data/diagnostics/scan-preview-2026-10-10-3151be49a44e42a49d4ed37b88a4e865.json)
+- [2026-10-11 预检](../../../data/diagnostics/scan-preview-2026-10-11-2283e5a9e1c54c28a49aa9028e30ba3a.json)
+- [2026-10-09 最终预检](../../../data/diagnostics/scan-preview-2026-10-09-a173865c99754d928879ab0c3c28e7ee.json)
+- [2026-10-10 恢复后预检](../../../data/diagnostics/scan-preview-2026-10-10-3151be49a44e42a49d4ed37b88a4e865.json)
 
 历史日期预检读取当前文件版本，日期只限定文件修改时间。上述计数属于当前扫描结果。
 
 ## 真实空日报与重跑
 
-[2026-10-11 日报](../data/reports/2026-10/2026-10-11.md) 在任务启用前完成生成与恢复验收，初次发布运行 ID 为 `8913c9ed07204258ad664e06fc61cf3b`，质量为 `no_changes`。以下是当时的验证结果；09:00 自动发布后的当前版本见后文。
+[2026-10-11 日报](../../../data/reports/2026-10/2026-10-11.md) 在任务启用前完成生成与恢复验收，初次发布运行 ID 为 `8913c9ed07204258ad664e06fc61cf3b`，质量为 `no_changes`。以下是当时的验证结果；09:00 自动发布后的当前版本见后文。
 
 - 首次生成：数据库阶段 `published`，状态 `succeeded`，模型调用 0 次。
 - 同输入重跑：动作 `reused`，新增模型调用 0 次。
@@ -74,18 +76,18 @@
 
 ## 公司网关与非空日报
 
-认证后的模型能力接口确认 `deepseek-flash` 的 `max_input_tokens=1000000`、`max_output_tokens=393216`。接口未单列输入与输出合计窗口，本机保守地以 1,000,000 作为合计检查上限。原始能力字段见[认证查询记录](../data/diagnostics/gateway-authenticated-capabilities-2026-10-12.json)。
+认证后的模型能力接口确认 `deepseek-flash` 的 `max_input_tokens=1000000`、`max_output_tokens=393216`。接口未单列输入与输出合计窗口，本机保守地以 1,000,000 作为合计检查上限。原始能力字段见[认证查询记录](../../../data/diagnostics/gateway-authenticated-capabilities-2026-10-12.json)。
 
 合成检查在实际网关通过，运行 `6fafb55c779844889dc33687eb995ba4`，使用当前 8192 输出预算，调用 1 次，输入 245、输出 207、总计 452 tokens。仅验证路由、JSON、来源引用和用量记录；错误分类与重试由离线测试覆盖。
 
-[2026-10-09 日报](../data/reports/2026-10/2026-10-09.md) 已完成真实生成与内容核对：
+[2026-10-09 日报](../../../data/reports/2026-10/2026-10-09.md) 已完成真实生成与内容核对：
 
 - 运行 `cb89620586a147d7bc996f157be5803e`，正式发布，质量 `partial`。
 - 20 个来源，11 个可用摘录；38 条摘要、9 条待核实事项，引用均指向实际发送的来源。
 - 8 次调用全部成功，总耗时 153.932 秒；输入 39,597、输出 31,811、合计 71,408 tokens，输出中思考用量 25,978。
 - 摘要关键数值可在引用摘录中找到支持；部分金额换算为万元、亿元并取小数，比例按来源小数转为百分数。此项核对不重算业务原表。
 - 报告质量与摘录、解析和模型输入截断一致；文件字节与数据库精确正文一致。
-- 证据：[运行记录](../data/diagnostics/live-daily-2026-10-09-acceptance.json)、[内容核对](../data/diagnostics/live-daily-2026-10-09-content-check.json)。
+- 证据：[运行记录](../../../data/diagnostics/live-daily-2026-10-09-acceptance.json)、[内容核对](../../../data/diagnostics/live-daily-2026-10-09-content-check.json)。
 
 真实联调据此完成两项运行修正：输出预算由 2048 调整为 8192，避免思考过程占满预算；提示词限定摘要条数，并正确区分修改时间与内容变化。显式重新生成成功后，旧失败运行标记为 `RUN_SUPERSEDED`，保留调用审计并退出恢复队列。
 
@@ -93,15 +95,15 @@
 
 ## 真实恢复与任务启用
 
-[2026-10-10 日报](../data/reports/2026-10/2026-10-10.md) 在原扫描库恢复后成功生成，运行 `1b445e1db1ed43fda06fbabf5d711ed8`，9 份来源，质量 `partial`，8 次模型调用，耗时 129.935 秒。当前正文包含 31 条摘要、18 条待核实事项，来源引用有效。
+[2026-10-10 日报](../../../data/reports/2026-10/2026-10-10.md) 在原扫描库恢复后成功生成，运行 `1b445e1db1ed43fda06fbabf5d711ed8`，9 份来源，质量 `partial`，8 次模型调用，耗时 129.935 秒。当前正文包含 31 条摘要、18 条待核实事项，来源引用有效。
 
-该报告完成同输入重跑、附注更新、主文件缺失后的精确修复和附注恢复。验证过程禁止模型请求，实际新增调用 0 次；缺失文件修复扫描 0 次。原正文 SHA-256 为 `be6c86b0d9cf575db15abf4610000378ba47824820fbf01d58cf52dc9534014d`，恢复后字节完全一致。验证时将主文件移至受控备份目录，所有备份及原附注继续保留。见[恢复验收记录](../data/diagnostics/live-recovery-2026-10-10-acceptance.json)。
+该报告完成同输入重跑、附注更新、主文件缺失后的精确修复和附注恢复。验证过程禁止模型请求，实际新增调用 0 次；缺失文件修复扫描 0 次。原正文 SHA-256 为 `be6c86b0d9cf575db15abf4610000378ba47824820fbf01d58cf52dc9534014d`，恢复后字节完全一致。验证时将主文件移至受控备份目录，所有备份及原附注继续保留。见[恢复验收记录](../../../data/diagnostics/live-recovery-2026-10-10-acceptance.json)。
 
 Windows 任务 `AI Daily Report` 已注册并启用，回读为 `Ready`、`MatchesPlan=true`。真实手动触发时间为北京时间 2026-10-12 08:46:10，运行 `18cac900fc4242919b653f164584466d`，后台应用进程 25572 确认凭据可见；08:46:11 成功复用 2026-10-10 日报，新增调用 0 次，任务退出码 0。09:00 前的补执行采用最近已经到期的日期，因此本次处理 10 月 10 日；随后 09:00 的正常触发已处理 10 月 11 日。
 
 任务使用当前登录用户、项目 `pythonw.exe` 和固定工作目录，每天 09:00 及登录后 1 分钟触发；不唤醒电脑，允许电池运行，重复实例忽略，失败最多重启 2 次。读取回的默认字段与账户名称按有效设置进行核对，测试覆盖默认值省略、账户名称与 SID 等价，以及真正禁用任务时仍能发现差异。默认值依据 [Microsoft 任务架构](https://learn.microsoft.com/en-us/windows/win32/taskschd/task-scheduler-schema)，并在本机任务 API 中核实。
 
-证据：[任务定义](../data/diagnostics/daily-task-registered-2026-10-12.xml)、[任务回读](../data/diagnostics/daily-task-inspection-2026-10-12.json)、[真实触发记录](../data/diagnostics/daily-task-manual-acceptance-2026-10-12.json)。
+证据：[任务定义](../../../data/diagnostics/daily-task-registered-2026-10-12.xml)、[任务回读](../../../data/diagnostics/daily-task-inspection-2026-10-12.json)、[真实触发记录](../../../data/diagnostics/daily-task-manual-acceptance-2026-10-12.json)。
 
 ## 首个计划日与重启验收
 
@@ -111,7 +113,7 @@ Windows 任务 `AI Daily Report` 已注册并启用，回读为 `Ready`、`Match
 
 这次恢复覆盖登录后检查已存在日报并复用的场景。系统未启用任务计划程序的事件历史；运行成功由应用日志、数据库和任务返回值直接证明，触发类型由已注册触发器、执行时间和系统启动时间对应推断。此次未模拟错过 09:00 后首次新建日报。
 
-证据：[重启验收记录](../data/diagnostics/daily-task-post-reboot-acceptance-2026-10-12.json)、[重启后任务回读](../data/diagnostics/daily-task-post-reboot-inspection-2026-10-12.json)、[系统启动与事件历史状态](../data/diagnostics/daily-task-post-reboot-events-2026-10-12.json)、[重启后严格诊断](../.tmp/post-reboot-doctor-strict.log)。
+证据：[重启验收记录](../../../data/diagnostics/daily-task-post-reboot-acceptance-2026-10-12.json)、[重启后任务回读](../../../data/diagnostics/daily-task-post-reboot-inspection-2026-10-12.json)、[系统启动与事件历史状态](../../../data/diagnostics/daily-task-post-reboot-events-2026-10-12.json)、[重启后严格诊断](../../../.tmp/post-reboot-doctor-strict.log)。
 
 ## 完成状态与待观察项
 
@@ -131,14 +133,14 @@ Windows 任务 `AI Daily Report` 已注册并启用，回读为 `Ready`、`Match
 
 2026-10-12 02:45（北京时间）的早期检查直接访问公司网关，首页和 [OpenAPI 接口说明](https://ai-gateway.fsdev.cn/openapi.json) 均可读取。说明中同时列出 `/chat/completions` 和 `/v1/chat/completions`。后续认证能力查询和真实生成已证明本机采用根地址可以调用指定模型。
 
-网关提供 `/model_group/info?model_group=deepseek-flash` 查询模型能力。早期未认证请求返回 HTTP 401；用户配置凭据后，认证请求返回 HTTP 200 并取得上述上限。早期检查未发送模型生成请求或工作文件内容，见 [公开接口核验记录](../data/diagnostics/gateway-public-capabilities-2026-10-12.json)。
+网关提供 `/model_group/info?model_group=deepseek-flash` 查询模型能力。早期未认证请求返回 HTTP 401；用户配置凭据后，认证请求返回 HTTP 200 并取得上述上限。早期检查未发送模型生成请求或工作文件内容，见 [公开接口核验记录](../../../data/diagnostics/gateway-public-capabilities-2026-10-12.json)。
 
-汇总证据另存为 [JSON 验收记录](../data/diagnostics/implementation-acceptance-2026-10-12.json)，包含日志校验值、最终预检清单、发布状态、文件一致性和待完成项，不包含凭据或工作摘录。
+汇总证据另存为 [JSON 验收记录](../../../data/diagnostics/implementation-acceptance-2026-10-12.json)，包含日志校验值、最终预检清单、发布状态、文件一致性和待完成项，不包含凭据或工作摘录。
 
 ## 使用入口
 
-- [详细行动计划](plans/2026-10-12-daily-report-deepseek-action-plan.md)：阶段依赖与逐项完成状态。
-- [使用与恢复](daily-report-operations.md)：手动生成、查询、补跑、输出修复、冲突处理、任务管理与回退方法。
+- [详细行动计划](../plans/2026-10-12-daily-report-deepseek-action-plan.md)：阶段依赖与逐项完成状态。
+- [使用与恢复](../../daily-report-operations.md)：手动生成、查询、补跑、输出修复、冲突处理、任务管理与回退方法。
 
 ## 接续状态
 

@@ -36,15 +36,18 @@ $metadata = $metadataText | ConvertFrom-Json
 [IO.Directory]::CreateDirectory($outputPath) | Out-Null
 foreach ($name in @('ai-daily-report.exe', 'ai-daily-office-parser.exe', 'ai-daily-pdf-parser.exe')) { Copy-Item -LiteralPath (Join-Path $buildPath "x86_64-pc-windows-msvc/release/$name") -Destination (Join-Path $outputPath $name) }
 Copy-Item -LiteralPath $dll -Destination (Join-Path $outputPath 'pdfium.dll')
-foreach ($folder in @('templates', 'config', 'scripts', 'docs', 'docs/plans', 'docs/archive', 'licenses/pdfium', 'licenses/rust')) { [IO.Directory]::CreateDirectory((Join-Path $outputPath $folder)) | Out-Null }
+foreach ($folder in @('templates', 'config', 'scripts', 'docs', 'licenses/pdfium', 'licenses/rust')) { [IO.Directory]::CreateDirectory((Join-Path $outputPath $folder)) | Out-Null }
 foreach ($template in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'templates') -Filter '*.md' -File) { Copy-Item -LiteralPath $template.FullName -Destination (Join-Path $outputPath 'templates') }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'config/settings.example.yaml') -Destination (Join-Path $outputPath 'config/settings.example.yaml')
 foreach ($script in @('daily_task_common.ps1', 'install_daily_task.ps1', 'check_daily_task.ps1', 'remove_daily_task.ps1', 'archive_scanner_database.ps1', 'update_release_pointer.ps1', 'release_common.ps1', 'verify_windows_release.ps1')) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/$script") -Destination (Join-Path $outputPath 'scripts') }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'rust/build-inputs.json') -Destination (Join-Path $outputPath 'build-inputs.json')
-Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $outputPath 'README.md')
-foreach ($document in @('windows-deployment.md', 'daily-report-operations.md', 'change-archive.md', 'archive-performance-20261017.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot "docs/$document") -Destination (Join-Path $outputPath 'docs') }
-foreach ($document in @('2026-10-14-rust-product-plan.md', '2026-10-14-rust-execution-plan.md', '2026-10-15-rust-migration-evidence.md', '2026-10-15-rust-cutover.md', '2026-10-17-change-archive.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot "docs/plans/$document") -Destination (Join-Path $outputPath 'docs/plans') }
-foreach ($document in @('python-runtime-readme-2026-10-15.md', 'python-windows-deployment-2026-10-15.md', 'python-daily-operations-2026-10-15.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot "docs/archive/$document") -Destination (Join-Path $outputPath 'docs/archive') }
+foreach ($document in @('README.md', 'CONTEXT.md', 'AGENTS.md', 'CLAUDE.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot $document) -Destination (Join-Path $outputPath $document) }
+$docsRoot = Join-Path $repoRoot 'docs'
+foreach ($document in Get-ChildItem -LiteralPath $docsRoot -Recurse -File) {
+    $destination = Join-Path $outputPath ('docs/' + $document.FullName.Substring($docsRoot.Length + 1))
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
+    Copy-Item -LiteralPath $document.FullName -Destination $destination
+}
 Copy-Item -LiteralPath (Join-Path $PdfiumDirectory 'LICENSE') -Destination (Join-Path $outputPath 'licenses/pdfium/LICENSE')
 Copy-Item -LiteralPath (Join-Path $PdfiumDirectory 'licenses') -Destination (Join-Path $outputPath 'licenses/pdfium/notices') -Recurse
 $nodes = @{}; foreach ($node in $metadata.resolve.nodes) { $nodes[$node.id] = $node }

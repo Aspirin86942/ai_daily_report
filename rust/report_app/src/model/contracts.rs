@@ -103,6 +103,8 @@ impl FactsResponse {
         let mut selected = Vec::new();
         for (pending, facts) in [(false, self.facts), (true, self.pending)] {
             for fact in facts {
+                // Preserve a valid uncertain fact without presenting it as confirmed.
+                let pending = pending || fact.uncertainty.is_some();
                 if !bounded(&fact.topic, 120)
                     || !bounded(&fact.detail, 4000)
                     || !optional(&fact.background, 2000)
@@ -111,9 +113,7 @@ impl FactsResponse {
                     || fact.conditions.len() > 20
                     || fact.conditions.iter().any(|s| !bounded(s, 1000))
                     || !ids(&fact.source_ids, sources)
-                    || (!pending
-                        && (fact.uncertainty.is_some()
-                            || fact.source_ids.iter().any(|id| unverified.contains(id))))
+                    || (!pending && fact.source_ids.iter().any(|id| unverified.contains(id)))
                 {
                     return Err(invalid());
                 }

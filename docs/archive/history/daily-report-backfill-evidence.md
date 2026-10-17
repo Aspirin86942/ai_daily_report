@@ -1,3 +1,5 @@
+> 历史记录：保留当时的数字、状态和结论；当前运行与验收以[当前状态](../../current-state.md)为准。
+
 # 六个月历史日报补录验收记录
 
 2026-04-12 至 2026-10-11 的 183 天日报已全部保存并核验，包含周末。新增 178 份，保留原有 5 份正文。累计模型调用 587/650 次，失败和重试均计入同一份额度。
@@ -6,11 +8,11 @@
 
 ## 交付入口
 
-- [183 天日报统一索引](../data/reports/历史日报补录_2026-04-12_2026-10-11.md)。
-- [补录行动计划](plans/2026-10-12-six-month-daily-backfill.md)。
-- [数据库、文件、来源与额度核验](../data/diagnostics/backfill-2026-04-12_2026-10-11-verification.json)。
-- [组件、测试、日常配置与任务核验](../data/diagnostics/backfill-2026-04-12_2026-10-11-runtime-verification.json)。
-- [执行检查点](../data/backfill/2026-04-12_2026-10-11/state.json)。
+- [183 天日报统一索引](../../../data/reports/历史日报补录_2026-04-12_2026-10-11.md)。
+- [补录行动计划](../plans/2026-10-12-six-month-daily-backfill.md)。
+- [数据库、文件、来源与额度核验](../../../data/diagnostics/backfill-2026-04-12_2026-10-11-verification.json)。
+- [组件、测试、日常配置与任务核验](../../../data/diagnostics/backfill-2026-04-12_2026-10-11-runtime-verification.json)。
+- [执行检查点](../../../data/backfill/2026-04-12_2026-10-11/state.json)。
 
 ## 保存结果
 

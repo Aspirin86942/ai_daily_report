@@ -169,6 +169,34 @@ fn empty_day_needs_neither_credentials_nor_model_capacity_confirmation() {
 }
 
 #[test]
+fn scan_dry_run_preserves_snapshot_identity_and_finishes_without_publication() {
+    let f = Fixture::new(true, vec![]);
+    let mut request = f.request('a', true);
+    request.dry_run = true;
+    let output = run_daily(request, &f.app).unwrap();
+    let stored = f.app.store.get(&output.run_id).unwrap();
+    let reference = ai_daily_report::snapshots::SnapshotRef {
+        path: stored.snapshot_path.unwrap(),
+        sha256: stored.snapshot_sha256.unwrap(),
+    };
+    let snapshot = f.app.snapshots.read(&reference).unwrap();
+    assert!(reference.path.contains("scan-preview"));
+    assert_eq!(
+        stored.input_fingerprint.as_deref(),
+        Some(reference.sha256.as_str())
+    );
+    assert_eq!(snapshot["envelope"]["file_context"], output.markdown);
+    assert_eq!(output.quality, "scan_only");
+    assert_eq!(stored.phase, RunPhase::Prepared);
+    assert!(matches!(
+        stored.status,
+        ai_daily_report::store::RunStatus::Succeeded
+    ));
+    assert_eq!(f.calls(), 0);
+    assert!(f.app.store.current("2026-10-11").unwrap().is_none());
+}
+
+#[test]
 fn failed_composition_recovers_frozen_inputs_without_rescanning_changed_file() {
     let mut responses = replies();
     let compose = responses.pop().unwrap();

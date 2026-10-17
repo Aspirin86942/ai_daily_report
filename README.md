@@ -4,9 +4,9 @@
 
 日报按“内容概览 → 事项详情 → 待确认 → 来源与覆盖附录”呈现。同一事项集中说明，保留关键数字、条件、例外及方案状态。来源引用紧邻事实；技术统计集中放在附录。历史日报继续保留原正文。
 
-## 当前交付状态
+## 当前状态
 
-Rust 实现与验收依据 [执行计划](docs/plans/2026-10-14-rust-execution-plan.md) 推进，结果见 [验收证据](docs/plans/2026-10-15-rust-migration-evidence.md)。正式任务已于 2026 年 10 月 15 日 14:33（北京时间）切到 `.releases/rust-20261015-01/ai-daily-report.exe`，使用 `config-rust`。严格自检、合成模型检查和实际任务回退演练通过；三个真实调度窗口从 10 月 16 日 09:00 开始验收。旧运行文件已备份，待三个窗口通过后清理已替代源码；它们不进入 Rust 程序包。
+正式任务、配置、已完成事项及待验收结果见[当前状态](docs/current-state.md)。
 
 ## 使用
 
@@ -20,7 +20,7 @@ Rust 实现与验收依据 [执行计划](docs/plans/2026-10-14-rust-execution-p
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config monthly 2026-10 --source db | Out-Host
 ```
 
-`daily` 默认报告上一个已结束的自然日，时区固定为 `Asia/Shanghai`。`--dry-run` 只扫描，不调用模型；`--no-save` 生成有审计记录的预览。`doctor --strict` 不联网；`doctor --check-model` 明确发送一批合成材料并记录用量。
+`daily` 默认报告上一个已结束的自然日，时区固定为 `Asia/Shanghai`。日报来源由 `archive.daily_source` 决定，也可用 `--source archive` 或 `--source scan` 显式指定。`--dry-run` 仅准备输入，不调用模型：归档来源读取已有归档，扫描来源扫描原目录。`--no-save` 生成有审计记录的预览。`doctor --strict` 不联网；`doctor --check-model` 明确发送一批合成材料并记录用量。
 
 ```powershell
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config runs --target-date 2026-10-11 | Out-Host
@@ -36,6 +36,7 @@ Rust 实现与验收依据 [执行计划](docs/plans/2026-10-14-rust-execution-p
 ```text
 ai-daily-report.exe
   ├─ report_app：配置、命令、模型调用、报告、恢复及维护
+  ├─ archive：持续采集、全文、差异和报告依据
   └─ scanner_core：发现、选择、解析调度、缓存及覆盖审计
        ├─ ai-daily-office-parser.exe：Office 文件
        └─ ai-daily-pdf-parser.exe + pdfium.dll：PDF 文件
@@ -63,7 +64,8 @@ cargo test --manifest-path rust/Cargo.toml --workspace --locked
 
 - [使用与恢复](docs/daily-report-operations.md)：补跑、覆盖修复、OCR、预算和保留策略。
 - [Windows 安装与回退](docs/windows-deployment.md)：独立目录、计划任务、自检和回退。
-- [产品计划书](docs/plans/2026-10-14-rust-product-plan.md)：功能与验收标准。
+- [扫描与解析后端](docs/scanner-backends.md)：当前调用关系、格式路由和工作进程。
+- [历史归档索引](docs/archive/README.md)：历次设计、迁移与验收材料。
 - [旧 Python 操作说明归档](docs/archive/python-runtime-readme-2026-10-15.md)：切换前的运行参考。
 
-变化归档、版本差异、引用证据、采集任务与统计命令见 [变化归档操作说明](docs/change-archive.md)。2,648 文件测量、并发配置和覆盖限制见 [归档性能验收](docs/archive-performance-20261017.md)。
+变化归档、版本差异、引用证据、采集任务与统计命令见 [变化归档操作说明](docs/change-archive.md)。2,648 文件测量、并发配置和覆盖限制见 [归档性能验收](docs/archive/history/archive-performance-20261017.md)。

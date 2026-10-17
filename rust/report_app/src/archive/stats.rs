@@ -87,91 +87,7 @@ pub fn query(
         let mut stmt=store.conn.prepare("SELECT g.collection_id,g.path,g.code,g.detail,g.resolved_at FROM gaps g JOIN collections c ON c.id=g.collection_id WHERE (?1 IS NULL OR substr(datetime(c.started_at,'+8 hours'),1,10)>=?1) AND (?2 IS NULL OR substr(datetime(c.started_at,'+8 hours'),1,10)<=?2) AND (?3 IS NULL OR c.id=?3) ORDER BY g.id")?;
         for row in stmt.query_map(params![from,to,run_id],|r|Ok(json!({"run_id":r.get::<_,String>(0)?,"path":r.get::<_,Option<String>>(1)?,"code":r.get::<_,String>(2)?,"detail":r.get::<_,String>(3)?,"resolved_at":r.get::<_,Option<String>>(4)?})))?{gaps.push(row?);}
     }
-    let db = config.paths.db_dir.join("reports.sqlite3");
-    let mut model = Value::Null;
-    if db.is_file() {
-        let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        let mut stmt=conn.prepare("SELECT * FROM report_model_calls WHERE (?1 IS NULL OR call_date>=?1) AND (?2 IS NULL OR call_date<=?2) AND (?3 IS NULL OR run_id=?3) ORDER BY call_id")?;
-        let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
-        let rows = stmt
-            .query_map(params![from, to, run_id], |row| {
-                let mut value = serde_json::Map::new();
-                for (i, name) in names.iter().enumerate() {
-                    use rusqlite::types::ValueRef;
-                    let field = match row.get_ref(i)? {
-                        ValueRef::Null => Value::Null,
-                        ValueRef::Integer(n) => json!(n),
-                        ValueRef::Real(n) => json!(n),
-                        ValueRef::Text(s) => json!(String::from_utf8_lossy(s)),
-                        ValueRef::Blob(_) => Value::Null,
-                    };
-                    // Statistics expose usage and timing, never prompts or raw responses.
-                    if [
-                        "run_id",
-                        "call_id",
-                        "call_date",
-                        "logical_step",
-                        "attempt",
-                        "status",
-                        "duration_ms",
-                        "prompt_tokens",
-                        "completion_tokens",
-                        "total_tokens",
-                        "usage_json",
-                        "error_code",
-                    ]
-                    .contains(&name.as_str())
-                    {
-                        value.insert(name.clone(), field);
-                    }
-                }
-                Ok(Value::Object(value))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut stages = std::collections::BTreeMap::<String, u64>::new();
-        let mut tokens = 0u64;
-        let mut unknown = 0;
-        let mut retries = 0;
-        let mut rows = rows;
-        for row in &mut rows {
-            let usage: Value = serde_json::from_str(row["usage_json"].as_str().unwrap_or("{}"))?;
-            let mut safe = serde_json::Map::new();
-            for key in [
-                "prompt_tokens",
-                "completion_tokens",
-                "total_tokens",
-                "prompt_cache_hit_tokens",
-                "prompt_cache_miss_tokens",
-            ] {
-                if let Some(value) = usage.get(key) {
-                    safe.insert(key.into(), value.clone());
-                }
-            }
-            row["usage"] = Value::Object(safe);
-            row.as_object_mut().unwrap().remove("usage_json");
-            if let Some(total) = usage["total_tokens"].as_u64() {
-                tokens += total;
-            } else {
-                unknown += 1;
-            }
-            if row["attempt"].as_u64().unwrap_or(0) > 1 {
-                retries += 1;
-            }
-            let stage = if row["logical_step"]
-                .as_str()
-                .unwrap_or("")
-                .starts_with("compose")
-            {
-                "composition"
-            } else {
-                "fact_extraction"
-            };
-            if let Some(duration) = row["duration_ms"].as_u64() {
-                *stages.entry(stage.into()).or_default() += duration;
-            }
-        }
-        model = json!({"calls":rows,"summed_parallel_work_ms":stages,"known_total_tokens":tokens,"calls_with_unknown_tokens":unknown,"retries":retries,"wall_ms":null});
-    }
+    let model = model_statistics(config, from, to, run_id)?;
     let total_work = |field: &str| -> Option<u64> {
         if collections.is_empty() {
             return None;
@@ -264,4 +180,100 @@ fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(
         json!({"run_id":r.get::<_,String>(0)?,"path":r.get::<_,String>(1)?,"version_id":r.get::<_,Option<String>>(2)?,"extension":r.get::<_,Option<String>>(3)?,"size_bytes":r.get::<_,Option<i64>>(4)?,"capture_ms":r.get::<_,Option<i64>>(5)?,"bytes_read":r.get::<_,i64>(6)?,"parse_ms":r.get::<_,Option<i64>>(7)?,"diff_ms":r.get::<_,Option<i64>>(8)?,"queue_ms":r.get::<_,Option<i64>>(9)?,"parser_backend":r.get::<_,Option<String>>(10)?,"worker_lane":r.get::<_,Option<String>>(11)?,"status":r.get::<_,String>(12)?}),
     )
+}
+
+fn model_statistics(
+    config: &AppConfig,
+    from: Option<&str>,
+    to: Option<&str>,
+    run_id: Option<&str>,
+) -> Result<Value, ReportError> {
+    let db = config.paths.db_dir.join("reports.sqlite3");
+    if !db.is_file() {
+        return Ok(Value::Null);
+    }
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut stmt=conn.prepare("SELECT * FROM report_model_calls WHERE (?1 IS NULL OR call_date>=?1) AND (?2 IS NULL OR call_date<=?2) AND (?3 IS NULL OR run_id=?3) ORDER BY call_id")?;
+    let names: Vec<String> = stmt.column_names().into_iter().map(str::to_owned).collect();
+    let mut calls = stmt
+        .query_map(params![from, to, run_id], |row| model_call_row(row, &names))?
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut stages = std::collections::BTreeMap::<String, u64>::new();
+    let mut tokens = 0u64;
+    let mut unknown = 0;
+    let mut retries = 0;
+    for row in &mut calls {
+        let usage: Value = serde_json::from_str(row["usage_json"].as_str().unwrap_or("{}"))?;
+        let mut safe = serde_json::Map::new();
+        for key in [
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "prompt_cache_hit_tokens",
+            "prompt_cache_miss_tokens",
+        ] {
+            if let Some(value) = usage.get(key) {
+                safe.insert(key.into(), value.clone());
+            }
+        }
+        row["usage"] = Value::Object(safe);
+        row.as_object_mut().unwrap().remove("usage_json");
+        if let Some(total) = usage["total_tokens"].as_u64() {
+            tokens += total;
+        } else {
+            unknown += 1;
+        }
+        if row["attempt"].as_u64().unwrap_or(0) > 1 {
+            retries += 1;
+        }
+        let stage = if row["logical_step"]
+            .as_str()
+            .unwrap_or("")
+            .starts_with("compose")
+        {
+            "composition"
+        } else {
+            "fact_extraction"
+        };
+        if let Some(duration) = row["duration_ms"].as_u64() {
+            *stages.entry(stage.into()).or_default() += duration;
+        }
+    }
+    Ok(
+        json!({"calls":calls,"summed_parallel_work_ms":stages,"known_total_tokens":tokens,"calls_with_unknown_tokens":unknown,"retries":retries,"wall_ms":null}),
+    )
+}
+
+fn model_call_row(row: &rusqlite::Row<'_>, names: &[String]) -> rusqlite::Result<Value> {
+    let mut value = serde_json::Map::new();
+    for (i, name) in names.iter().enumerate() {
+        use rusqlite::types::ValueRef;
+        let field = match row.get_ref(i)? {
+            ValueRef::Null => Value::Null,
+            ValueRef::Integer(n) => json!(n),
+            ValueRef::Real(n) => json!(n),
+            ValueRef::Text(s) => json!(String::from_utf8_lossy(s)),
+            ValueRef::Blob(_) => Value::Null,
+        };
+        // Statistics expose usage and timing, never prompts or raw responses.
+        if [
+            "run_id",
+            "call_id",
+            "call_date",
+            "logical_step",
+            "attempt",
+            "status",
+            "duration_ms",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "usage_json",
+            "error_code",
+        ]
+        .contains(&name.as_str())
+        {
+            value.insert(name.clone(), field);
+        }
+    }
+    Ok(Value::Object(value))
 }

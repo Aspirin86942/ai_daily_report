@@ -1,3 +1,5 @@
+> 历史记录：保留当时的数字、状态和结论；当前运行与验收以[当前状态](../../current-state.md)为准。
+
 # AI Daily Report Rust 统一实现产品计划书
 
 文档版本：1.4
@@ -292,11 +294,11 @@ A04 的内容验收在 T07 使用通用合成材料实际生成候选日报，�
 
 ## 依据与关联资料
 
-- [当前架构与命令约定](../../README.md)：Rust 入口、扫描路由、数据边界及切换前保留的旧运行环境。
-- [日报操作与恢复](../daily-report-operations.md)：日期、补跑、模型调用、覆盖修复及恢复语义。
-- [Windows 部署约定](../windows-deployment.md)：发布包、自检、切换与回退要求。
-- [当前覆盖优化状态](../coverage-optimization-v27-status.md)：已部署预算开关与通用能力验收口径。
-- [报告运行与发布实现](../../src/services/report_runner/evidence_daily.py)：冻结输入、响应复用、报告阶段及输出修复。
-- [快照与指纹实现](../../src/services/report_runner/snapshots.py)：规范 JSON、原字节哈希及快照保护。
-- [恢复行为测试](../../tests/test_report_recovery.py)：中断、预算、模板与发布等关键对照案例。
-- [历史 PDF 候选测试](../archive/specs/2026-08-07-pdf-rust-gate-evidence.md)：特定历史候选与合成语料结果，不代表当前所有 Rust PDF 实现。
+- [当前架构与命令约定](../../../README.md)：Rust 入口、扫描路由、数据边界及切换前保留的旧运行环境。
+- [日报操作与恢复](../../daily-report-operations.md)：日期、补跑、模型调用、覆盖修复及恢复语义。
+- [Windows 部署约定](../../windows-deployment.md)：发布包、自检、切换与回退要求。
+- [当前覆盖优化状态](../history/coverage-optimization-v27-status.md)：已部署预算开关与通用能力验收口径。
+- [报告运行与发布实现](../../../src/services/report_runner/evidence_daily.py)：冻结输入、响应复用、报告阶段及输出修复。
+- [快照与指纹实现](../../../src/services/report_runner/snapshots.py)：规范 JSON、原字节哈希及快照保护。
+- [恢复行为测试](../../../tests/test_report_recovery.py)：中断、预算、模板与发布等关键对照案例。
+- [历史 PDF 候选测试](../specs/2026-08-07-pdf-rust-gate-evidence.md)：特定历史候选与合成语料结果，不代表当前所有 Rust PDF 实现。

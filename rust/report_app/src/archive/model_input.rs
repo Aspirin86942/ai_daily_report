@@ -13,6 +13,7 @@ use crate::{
     reports::data::{CoverageGap, ReportSource},
     run::FrozenInput,
     snapshots::digest,
+    store::RunRecord,
     types::ReportRequest,
     ReportError,
 };
@@ -21,7 +22,7 @@ use ai_daily_worker_contract::{
     SourceRange,
 };
 use chrono::DateTime;
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -109,6 +110,15 @@ pub fn permitted(config: &AppConfig, path: &Path) -> bool {
 
 pub fn prepare(config: &AppConfig, request: &ReportRequest) -> Result<Prepared, ReportError> {
     let store = ArchiveStore::open(config, false)?;
+    let baseline: String = store
+        .conn
+        .query_row("SELECT value FROM metadata WHERE key='baseline'", [], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .ok_or_else(|| error("ARCHIVE_BASELINE_REQUIRED"))?;
+    let baseline =
+        DateTime::parse_from_rfc3339(&baseline).map_err(|_| error("ARCHIVE_TIME_INVALID"))?;
     let profile = parse::profile(config)?;
     let mut statement=store.conn.prepare("SELECT c.id,c.version_id,c.before_version,c.extraction_id,c.before_extraction,c.observed_at,c.manifest_json FROM changes c JOIN extractions e ON e.id=c.extraction_id WHERE e.profile=? AND c.rowid=(SELECT max(newer.rowid) FROM changes newer WHERE newer.version_id=c.version_id AND newer.extraction_id=c.extraction_id) AND c.observed_at<? AND c.ready_at<=? AND NOT EXISTS(SELECT 1 FROM report_changes rc JOIN report_evidence r ON r.run_id=rc.run_id JOIN changes published_change ON published_change.id=rc.change_id WHERE published_change.version_id=c.version_id AND r.status='published') ORDER BY c.observed_at,c.rowid")?;
     let rows = statement
@@ -363,6 +373,20 @@ pub fn prepare(config: &AppConfig, request: &ReportRequest) -> Result<Prepared, 
             }
         }
     }
+    if baseline > request.context.window_start_utc {
+        out.gaps.push(CoverageGap::new(
+            "ARCHIVE_BASELINE_WINDOW",
+            "discovery",
+            None,
+            &format!(
+                "归档采集始于 {}（Asia/Shanghai），此前的变化无法还原；首次基线中的已有内容不计为新增成果。",
+                baseline.with_timezone(&crate::types::shanghai()).format("%Y-%m-%d %H:%M:%S")
+            ),
+        ));
+    }
+    if let Some(gap) = collection_coverage(&store, request, baseline.with_timezone(&chrono::Utc))? {
+        out.gaps.push(gap);
+    }
     let pending:i64=store.conn.query_row("SELECT count(*) FROM versions v WHERE v.baseline=0 AND v.pruned_at IS NULL AND v.observed_at<? AND NOT EXISTS(SELECT 1 FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=v.id AND e.profile=? AND e.status IN('complete','partial'))",params![request.context.window_end_utc.to_rfc3339(),profile],|r|r.get(0))?;
     if pending > 0 {
         out.gaps.push(CoverageGap::new(
@@ -390,6 +414,118 @@ pub fn prepare(config: &AppConfig, request: &ReportRequest) -> Result<Prepared, 
     out.gaps
         .dedup_by(|a, b| a.code == b.code && a.source_id == b.source_id);
     Ok(out)
+}
+
+fn collection_coverage(
+    store: &ArchiveStore,
+    request: &ReportRequest,
+    baseline: DateTime<chrono::Utc>,
+) -> Result<Option<CoverageGap>, ReportError> {
+    let start = request.context.window_start_utc.max(baseline);
+    let end = request
+        .context
+        .window_end_utc
+        .min(request.context.started_at);
+    if start >= end {
+        return Ok(None);
+    }
+    // Partial rounds have finished capture; their per-file gaps remain visible separately.
+    // A later recovery must not erase a missed interval in the report's own day.
+    let mut statement = store.conn.prepare(
+        "WITH completed AS (
+            SELECT started_at FROM collections
+            WHERE status IN ('complete','partial') AND started_at<?2 AND finished_at<=?3
+        ) SELECT started_at FROM completed
+          WHERE started_at>=?1 OR started_at=(SELECT max(started_at) FROM completed WHERE started_at<?1)
+          ORDER BY started_at",
+    )?;
+    let rows = statement.query_map(
+        params![
+            start.to_rfc3339(),
+            end.to_rfc3339(),
+            request.context.started_at.to_rfc3339()
+        ],
+        |row| row.get::<_, String>(0),
+    )?;
+    let interval = chrono::Duration::minutes(30);
+    let tolerance = chrono::Duration::minutes(1);
+    let mut previous = start - interval;
+    let mut completed = false;
+    let mut count = 0usize;
+    let mut ranges = Vec::new();
+    let mut record = |from: DateTime<chrono::Utc>, to: DateTime<chrono::Utc>| {
+        if to - from > interval + tolerance {
+            count += 1;
+            if ranges.len() < 5 {
+                ranges.push(format!(
+                    "{} 至 {}",
+                    (from + interval)
+                        .max(start)
+                        .with_timezone(&crate::types::shanghai())
+                        .format("%Y-%m-%d %H:%M:%S"),
+                    to.with_timezone(&crate::types::shanghai())
+                        .format("%Y-%m-%d %H:%M:%S")
+                ));
+            }
+        }
+    };
+    for row in rows {
+        let at = DateTime::parse_from_rfc3339(&row?)
+            .map_err(|_| error("ARCHIVE_TIME_INVALID"))?
+            .with_timezone(&chrono::Utc);
+        if at >= start {
+            record(previous, at);
+        }
+        previous = at;
+        completed = true;
+    }
+    record(previous, end);
+    if completed && count == 0 {
+        return Ok(None);
+    }
+    let detail = if completed {
+        format!(
+            "按每 30 分钟采集检查（允许 1 分钟调度偏差），发现 {count} 段缺少已完成采集记录的时间，以下列出前 {} 段（Asia/Shanghai）：{}。这些时间内是否有变化无法判断。",
+            ranges.len(), ranges.join("；")
+        )
+    } else {
+        "目标范围尚无可核对的已完成采集记录，无法判断是否有变化。".into()
+    };
+    Ok(Some(CoverageGap::new(
+        "ARCHIVE_COLLECTION_GAP",
+        "discovery",
+        None,
+        &detail,
+    )))
+}
+
+pub fn recovery_runs(
+    config: &AppConfig,
+    runs: Vec<RunRecord>,
+    archive_source: bool,
+) -> Result<Vec<RunRecord>, ReportError> {
+    if runs.is_empty() {
+        return Ok(runs);
+    }
+    let store = match ArchiveStore::open(config, false) {
+        Ok(store) => store,
+        Err(error) if error.code == "ARCHIVE_NOT_INITIALIZED" && !archive_source => {
+            return Ok(runs)
+        }
+        Err(error) => return Err(error),
+    };
+    // Every archive input is pinned before its run becomes recoverable, even with no changes.
+    let mut statement = store
+        .conn
+        .prepare("SELECT EXISTS(SELECT 1 FROM report_evidence WHERE run_id=?)")?;
+    let mut selected = Vec::with_capacity(runs.len());
+    for run in runs {
+        let archived: bool = statement.query_row([&run.run_id], |row| row.get(0))?;
+        if archived == archive_source {
+            selected.push(run);
+        }
+    }
+    Ok(selected)
 }
 
 pub fn pin(config: &AppConfig, input: &FrozenInput) -> Result<(), ReportError> {

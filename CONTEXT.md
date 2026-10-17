@@ -1,29 +1,18 @@
-# AI Daily Report
+# 项目术语
 
-AI-assisted audit report generator context. This glossary keeps project-specific runtime and scanner terms precise so design documents, benchmarks, and implementation plans use the same language.
+- **归档**：保存实际观察到的原件版本、全文、位置与报告依据。首次采集建立基线；后续变化按首次观察的上海日期归属。
+- **扫描**：按报告范围发现和选择文件，组织解析与上下文。归档日报直接读取已保存的证据。
+- **Parser（解析器）**：读取特定格式，输出正文、位置和覆盖诊断。parser_backend 记录实际解析器，worker_lane 记录执行位置。
+- **Worker（工作进程）**：隔离运行 Office/PDF 解析的独立程序。当前协议为 v4；同一包内构建身份必须匹配。
+- **Scheduler（单次运行策略编排）**：安排本次扫描的选择、预算和解析顺序。Windows 计划任务负责定时启动整个程序。
+- **Planner（计划生成器）**：生成预算、批次或配置计划，不执行重 I/O、解析或持久化副作用。
+- **Classifier（分类器）**：根据已知输入确定文件或工作量类别，不执行 I/O 副作用。
+- **Compressor（上下文压缩器）**：确定性压缩已有上下文，不重新解析文件或调用模型。
+- **Store / IndexStore（持久化与索引）**：保存 SQLite 状态、索引和缓存，不决定业务流程。
+- **Run（一次运行）**：一次 CLI、扫描或上下文构建。Decision 记录某文件在本次运行中的策略与原因。
+- **冻结输入**：模型执行前保存的完整输入、计划、配置身份及哈希；失败恢复据此补齐缺失步骤。
+- **发布**：先保存数据库正文，再原子写入 Markdown，最后维护发布指针。恢复保留原始响应、账本和人工编辑。
+- **冷扫描 / 热扫描**：分别表示目标解析缓存不可复用或可复用；不表示操作系统文件缓存已经清空。
+- **覆盖缺口**：未能确认的时间范围、来源或正文部分。部分解析、采集漏跑和未知结果须保留在报告中。
 
-## Language
-
-**Cold scanner run**:
-A scanner run where parse cache is intentionally unavailable for the target date range, so discovered files that need content must be parsed again. It does not require clearing the operating system file cache, and it excludes LLM calls and report rendering.
-_Avoid_: Absolute cold start, OS-cache cold run, uncached app startup
-
-**Hybrid Office fallback policy**:
-A rule set that decides whether a Rust Office parser failure should fall back to Python by error category first, with file extension used only as a secondary condition.
-_Avoid_: Extension-only fallback, always fallback, Rust-only failure mode
-
-**Deterministic Office parse failure**:
-An Office parse failure class that should be treated as repeatable for the current scanner run, so the scanner records an auditable failure instead of spending cold-run budget on fallback parsing. Timeout belongs to this class by default because scanner performance is the primary requirement for cold Office parsing.
-_Avoid_: Retryable parse failure, fallback candidate
-
-**Environment-unavailable Office parse failure**:
-A Rust Office parser failure caused by the parser binary or runtime environment being unavailable, not by the Office file content. It may fall back to Python for report usefulness, but it must not be interpreted as Rust parser performance evidence.
-_Avoid_: Rust parser slow case, file parse failure
-
-**Office parser contract failure**:
-A Rust Office parser failure where the CLI completed but its stdout or `FileContext` payload does not satisfy the Python scanner contract. It may fall back to Python for report usefulness, but it should be treated as a Rust-Python boundary defect rather than an Office file content problem.
-_Avoid_: File content failure, environment-unavailable failure
-
-**Rust CLI JSON contract**:
-The stdin/stdout JSON contract shared by Rust helper CLIs and Python adapters, including binary path resolution, request payload shape, timeout handling, stdout JSON decoding, stderr/error mapping, and response payload validation. It is the seam where Rust helper execution becomes trusted Python scanner data.
-_Avoid_: Raw subprocess call, Rust helper wrapper, CLI glue
+调用关系与格式路由见[扫描说明](docs/scanner-backends.md)，当前部署见[当前状态](docs/current-state.md)。旧 Python 回退术语保存在[历史术语表](docs/archive/python-context-2026-10-17.md)。
