@@ -39,6 +39,12 @@ pub struct Llm {
     pub verified_max_output_tokens: Option<u64>,
     pub truncation_policy: String,
     pub max_strategy_changes: u32,
+    #[serde(default = "default_invalid_response_retries")]
+    pub invalid_response_retries: u32,
+}
+
+fn default_invalid_response_retries() -> u32 {
+    1
 }
 
 impl Llm {
@@ -571,6 +577,7 @@ impl AppConfig {
             || llm.verified_max_output_tokens == Some(0)
             || !["reduce_once", "stop"].contains(&llm.truncation_policy.as_str())
             || llm.max_strategy_changes > 1
+            || llm.invalid_response_retries > 2
         {
             return Err(invalid("llm 容量与截断设置"));
         }

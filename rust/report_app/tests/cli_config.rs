@@ -226,3 +226,26 @@ fn request_creation_keeps_preview_and_reason_semantics() {
         Some(Command::Doctor { .. })
     ));
 }
+
+#[test]
+fn invalid_response_retries_defaults_and_is_bounded() {
+    let (_directory, config) = test_config("");
+    assert_eq!(config.llm.invalid_response_retries, 1);
+
+    let invalid = tempfile::tempdir().unwrap();
+    fs::create_dir(invalid.path().join("config")).unwrap();
+    fs::write(
+        invalid.path().join("config/settings.yaml"),
+        "paths:\n  work_dir: work\nllm:\n  invalid_response_retries: 5\n",
+    )
+    .unwrap();
+    assert_eq!(
+        AppConfig::load_with_env(invalid.path(), None, &BTreeMap::new())
+            .unwrap_err()
+            .code,
+        "CONFIG_INVALID"
+    );
+
+    let (_directory, zero) = test_config("llm:\n  invalid_response_retries: 0\n");
+    assert_eq!(zero.llm.invalid_response_retries, 0);
+}

@@ -34,6 +34,8 @@ llm:
   max_sources_per_batch: 8
   # 完整摘录的初始分批上限；容量不足时明确停止，不丢弃剩余内容。
   max_batches: 32
+  # 模型响应结构或引用无效时的额外重试次数；与 max_retries 共享单步骤总尝试上限。
+  invalid_response_retries: 1
   # 公司网关的模型能力经联调确认后填写；空值禁止发送业务正文。
   context_window_tokens: null
   verified_max_output_tokens: null
