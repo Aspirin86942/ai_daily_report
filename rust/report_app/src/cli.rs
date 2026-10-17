@@ -37,6 +37,8 @@ pub enum Command {
     Monthly(PeriodArgs),
     /// 查看历史报告
     List,
+    #[command(about = "只读检索日报、周报和月报正文")]
+    Search(SearchArgs),
     /// 查看报告运行及调用状态
     Runs {
         #[arg(long, value_parser = types::parse_date)]
@@ -130,6 +132,49 @@ pub struct PeriodArgs {
     pub input: Option<String>,
     #[arg(long)]
     pub no_save: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum SearchKind {
+    All,
+    Daily,
+    Weekly,
+    Monthly,
+}
+
+#[derive(Debug, Args)]
+pub struct SearchArgs {
+    #[arg(
+        long,
+        required_unless_present = "reindex",
+        conflicts_with = "reindex",
+        help = "检索关键词"
+    )]
+    pub query: Option<String>,
+    #[arg(long, value_parser = types::parse_date, help = "日报起始日期（含当天）；排除周月报")]
+    pub from: Option<NaiveDate>,
+    #[arg(long, value_parser = types::parse_date, help = "日报结束日期（含当天）；排除周月报")]
+    pub to: Option<NaiveDate>,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "all",
+        help = "报告类型：全部、日报、周报或月报"
+    )]
+    pub kind: SearchKind,
+    #[arg(long, help = "来源标签，如 S001；大小写不敏感")]
+    pub source: Option<String>,
+    #[arg(long, default_value_t = 20, value_parser = clap::value_parser!(u32).range(1..=500), help = "最多返回的片段数（1 至 500）")]
+    pub limit: u32,
+    #[arg(
+        long,
+        value_enum,
+        default_value = "text",
+        help = "输出格式：文本或 JSON"
+    )]
+    pub format: crate::archive::cli::Format,
+    #[arg(long, help = "强制重建独立索引并输出摘要，不执行检索")]
+    pub reindex: bool,
 }
 
 #[derive(Debug, Args)]

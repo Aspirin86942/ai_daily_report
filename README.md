@@ -26,9 +26,10 @@
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config runs --target-date 2026-10-11 | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config repair-output --target-date 2026-10-11 | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config health --format text | Out-Host
+./ai-daily-report.exe --config-dir D:/DailyReport/shared/config search --query 审批 --kind daily --limit 20 | Out-Host
 ```
 
-修复输出直接读取数据库中的正文，零扫描、零模型调用。检测到人工编辑时停止覆盖。`health` 只读检查采集连续性、日报发布与哈希、运行状态、磁盘与数据库完整性，不调用模型；退出码 0/1/2 分别表示健康/警告/不健康。
+修复输出直接读取数据库中的正文，零扫描、零模型调用。检测到人工编辑时停止覆盖。`health` 只读检查采集连续性、日报发布与哈希、运行状态、磁盘与数据库完整性，不调用模型；退出码 0/1/2 分别表示健康/警告/不健康。`search` 只读检索历史日报、周报和月报正文，命中到具体事项，支持日期、类型和来源过滤；索引保存在独立的 `report_search.sqlite3`，可删除重建，报告库不被修改。
 
 ## 文件与实现
 

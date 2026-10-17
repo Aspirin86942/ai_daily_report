@@ -8,6 +8,7 @@ pub mod operations;
 pub mod publish;
 pub mod reports;
 pub mod run;
+pub mod search;
 pub mod snapshots;
 pub mod store;
 pub mod types;

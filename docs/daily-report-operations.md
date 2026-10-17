@@ -28,6 +28,16 @@ ai-daily-report.exe list | Out-Host
 - 来源与覆盖附录中的缺口按错误码聚合，同一错误码只占一行并列出涉及来源；“变化依据”逐条保留事项标识、版本、解析版本、位置、原文与引用 SHA-256。
 - 以上排版调整只改变呈现方式，不删减来源标签、引用、SHA-256、缺口原因或质量标记；历史日报正文存储在报告中，不因模板调整重新渲染。
 
+## 历史检索
+
+```powershell
+ai-daily-report.exe search --query 审批 --from 2026-10-01 --to 2026-10-18 --kind daily --limit 20 | Out-Host
+ai-daily-report.exe search --query 供应商 --source S001 --format json | Out-Host
+ai-daily-report.exe search --reindex | Out-Host
+```
+
+`search` 只读报告库 `reports.sqlite3`，在独立索引库 `report_search.sqlite3` 上检索日报、周报和月报正文，命中到具体事项片段。关键词不少于 3 个字符时使用 FTS5 trigram 短语匹配，更短的词回退为包含匹配；`--from`/`--to` 只作用于日报（周月报没有自然日标签，带日期过滤时自动排除），`--source` 接受 `S001` 形式的来源标签，`--limit` 默认 20。索引按源库行数与最大更新时间自动重建，`--reindex` 强制重建并输出摘要；索引库可随时删除，下次检索自动重建。该命令不调用模型，报告库字节不变；参数用法错误沿用 CLI 的退出码 2，运行错误（数据库缺失、索引失败、空查询）退出码 1。
+
 ## 调用与配置
 
 配置顺序为 `settings.yaml`、`settings.windows.yaml`、`.secrets.yaml`，再应用 `DAILY_REPORT_<SECTION>__<FIELD>` 环境变量。配置目录父目录下的 `.env` 支持单行 `KEY=value`、引号和注释；不展开变量，进程环境优先。未知配置及退休选项明确报错。

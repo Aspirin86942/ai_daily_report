@@ -145,6 +145,11 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
             println!("{}", serde_json::to_string_pretty(&result?)?);
             Ok(())
         }
+        Command::Search(args) => {
+            let value = ai_daily_report::search::execute(&config, &args)?;
+            println!("{}", ai_daily_report::search::render(&value, args.format));
+            Ok(())
+        }
         Command::List => {
             let app = App::open(config, now)?;
             println!(
