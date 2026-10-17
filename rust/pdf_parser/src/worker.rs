@@ -15,11 +15,93 @@ pub fn worker_hello() -> WorkerHello {
         worker_kind: WorkerKind::Pdf,
         worker_version: env!("CARGO_PKG_VERSION").into(),
         worker_build: env!("AI_DAILY_PDF_WORKER_BUILD").into(),
-        supported_operations: vec![WorkerOperation::PdfClassify, WorkerOperation::PdfParse],
+        supported_operations: vec![
+            WorkerOperation::PdfClassify,
+            WorkerOperation::PdfParse,
+            WorkerOperation::ArchivePdfParse,
+        ],
     }
 }
 
 impl PdfReader {
+    pub fn archive_request(
+        &self,
+        request: &archive::ArchiveRequest,
+    ) -> Result<archive::ArchiveArtifact, Box<WorkerDiagnostic>> {
+        let started = Instant::now();
+        let path = &request.source.file_path;
+        request
+            .validate()
+            .map_err(|_| diagnostic(path, "PARSER_INVALID_PAYLOAD", false))?;
+        let before = source(path)?;
+        if before.0 != request.source.expected_source_version {
+            return Err(diagnostic(path, "SOURCE_VERSION_CHANGED", true));
+        }
+        if before.1 > request.source.max_file_size_bytes {
+            return Err(diagnostic(path, "FILE_TOO_LARGE", false));
+        }
+        let mut writer = archive::ArchiveWriter::new(&request.output_dir, request.max_output_bytes)
+            .map_err(|_| diagnostic(path, "ARCHIVE_OUTPUT_FAILED", true))?;
+        let mut no_text_pages = vec![];
+        let mut image_pages = vec![];
+        let mut unchecked_pages = vec![];
+        let (pages, truncated) = self
+            .visit_pages_with_audit(
+                Path::new(path),
+                None,
+                u32::MAX,
+                usize::MAX,
+                true,
+                |page, images| {
+                    match images {
+                        Some(true) => {
+                            image_pages.push(page.page);
+                            writer.gap("PDF_IMAGE_CONTENT_NOT_EXTRACTED");
+                        }
+                        None => {
+                            unchecked_pages.push(page.page);
+                            writer.gap("PDF_IMAGE_INSPECTION_BOUNDED");
+                        }
+                        _ => {}
+                    }
+                    let range = SourceRange::new(
+                        SourceRangeUnit::PdfPage,
+                        u64::from(page.page),
+                        u64::from(page.page) + 1,
+                        None,
+                    );
+                    if !page.text.chars().any(is_valid_text_char) {
+                        no_text_pages.push(page.page);
+                        writer.gap("PDF_PAGE_WITHOUT_TEXT");
+                    }
+                    for line in page.text.lines() {
+                        if !writer.push(line, ContentUnitKind::Text, vec![range.clone()]) {
+                            return false;
+                        }
+                    }
+                    true
+                },
+            )
+            .map_err(|e| parse_error(path, &e))?;
+        if source(path)?.0 != before.0 {
+            return Err(diagnostic(path, "SOURCE_VERSION_CHANGED", true));
+        }
+        let mut artifact = writer.finish();
+        artifact.coverage = serde_json::json!({"pages_total":pages,"no_text_pages":no_text_pages,"image_pages":image_pages,"image_inspection_bounded_pages":unchecked_pages});
+        if artifact.error.is_some() {
+            return Err(diagnostic(path, "ARCHIVE_OUTPUT_FAILED", true));
+        }
+        artifact.truncated |= truncated;
+        if artifact.usable_chars == 0 {
+            artifact.gaps.push("NO_USABLE_TEXT".into());
+        }
+        artifact.parser_backend = "rust_pdfium_v3".into();
+        artifact.worker_lane = "rust_pdf_archive_process_v4".into();
+        artifact.raw_sha256 = request.raw_sha256.clone();
+        artifact.duration_ms = started.elapsed().as_millis() as u64;
+        Ok(artifact)
+    }
+
     pub fn parse_request(
         &self,
         request: &ParseRequest,

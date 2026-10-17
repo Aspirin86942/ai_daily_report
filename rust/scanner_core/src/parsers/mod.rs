@@ -258,7 +258,7 @@ fn register_worker_inner(
     })
 }
 
-/// Shared pre-dispatch validation for worker-v3 sessions.
+/// Shared pre-dispatch validation for worker-v4 sessions.
 pub(crate) fn validate_worker_request(
     worker: &RegisteredWorker,
     request: &ParseOperation,
@@ -311,17 +311,7 @@ fn supports_required_operations(
 pub fn worker_hello_from_registered(
     worker: &RegisteredWorker,
 ) -> ai_daily_worker_contract::WorkerHello {
-    let supported_operations = match worker.command.expected_kind {
-        WorkerKind::Office => vec![ai_daily_worker_contract::WorkerOperation::OfficeParse],
-        WorkerKind::Pdf => vec![
-            ai_daily_worker_contract::WorkerOperation::PdfClassify,
-            ai_daily_worker_contract::WorkerOperation::PdfParse,
-        ],
-    };
-    WorkerHello {
-        supported_operations,
-        ..worker.identity.clone()
-    }
+    worker.identity.clone()
 }
 
 /// Validates a worker-v3 session response and applies source, identity, and

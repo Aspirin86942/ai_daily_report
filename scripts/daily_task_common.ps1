@@ -2,14 +2,14 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Get-ReportTaskPlan {
-    param([string]$ProjectRoot, [string]$ConfigDirectory)
+    param([string]$ProjectRoot, [string]$ConfigDirectory, [ValidateSet("daily", "collect")][string]$Kind = "daily")
     $root = (Resolve-Path -LiteralPath $ProjectRoot).Path
     $program = Join-Path $root 'ai-daily-report.exe'
     if (-not $ConfigDirectory) { $ConfigDirectory = Join-Path $root 'config' }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     # A Windows GUI-subsystem executable needs a pipeline for PowerShell to
     # wait for completion and capture its output and exit code.
-    $text = & $program --config-dir $ConfigDirectory task plan --sid $sid | Out-String
+    $text = & $program --config-dir $ConfigDirectory task plan --sid $sid --kind $Kind | Out-String
     if ($LASTEXITCODE -ne 0) { throw 'TASK_PLAN_FAILED' }
     return ($text | ConvertFrom-Json)
 }
@@ -31,6 +31,9 @@ function Get-ReportTaskXmlFields {
         '/t:Task/t:Settings/t:RestartOnFailure/t:Interval', '/t:Task/t:Settings/t:RestartOnFailure/t:Count',
         '/t:Task/t:Triggers/t:CalendarTrigger/t:Enabled', '/t:Task/t:Triggers/t:CalendarTrigger/t:StartBoundary',
         '/t:Task/t:Triggers/t:CalendarTrigger/t:ScheduleByDay/t:DaysInterval',
+        '/t:Task/t:Triggers/t:CalendarTrigger/t:Repetition/t:Interval',
+        '/t:Task/t:Triggers/t:CalendarTrigger/t:Repetition/t:Duration',
+        '/t:Task/t:Triggers/t:CalendarTrigger/t:Repetition/t:StopAtDurationEnd',
         '/t:Task/t:Triggers/t:LogonTrigger/t:Enabled', '/t:Task/t:Triggers/t:LogonTrigger/t:UserId',
         '/t:Task/t:Triggers/t:LogonTrigger/t:Delay'
     )
@@ -42,6 +45,7 @@ function Get-ReportTaskXmlFields {
         '/t:Task/t:Settings/t:AllowStartOnDemand' = 'true'
         '/t:Task/t:Settings/t:Enabled' = 'true'
         '/t:Task/t:Triggers/t:CalendarTrigger/t:Enabled' = 'true'
+        '/t:Task/t:Triggers/t:CalendarTrigger/t:Repetition/t:StopAtDurationEnd' = 'false'
         '/t:Task/t:Triggers/t:LogonTrigger/t:Enabled' = 'true'
     }
     foreach ($path in $paths) {
@@ -115,8 +119,11 @@ function Install-ReportDailyTask {
         return [pscustomobject]@{ Action = $(if ($null -eq $existing) { 'create' } else { 'update-or-reuse' });
             Applied = $false; TaskName = $Plan.task_name; Plan = $Plan; Differences = $differences }
     }
-    if (-not $Plan.credential_present) { throw 'TASK_CREDENTIAL_NOT_VISIBLE' }
-    if (-not $Plan.capabilities_configured -or -not $Plan.model_check_verified) { throw 'TASK_MODEL_ACCEPTANCE_REQUIRED' }
+    $collect = $Plan.PSObject.Properties.Name -contains 'kind' -and $Plan.kind -eq 'collect'
+    if (-not $collect) {
+        if (-not $Plan.credential_present) { throw 'TASK_CREDENTIAL_NOT_VISIBLE' }
+        if (-not $Plan.capabilities_configured -or -not $Plan.model_check_verified) { throw 'TASK_MODEL_ACCEPTANCE_REQUIRED' }
+    }
     if ($null -ne $existing -and $differences.Count -eq 0) {
         return [pscustomobject]@{ Action = 'unchanged'; Applied = $false; TaskName = $Plan.task_name }
     }

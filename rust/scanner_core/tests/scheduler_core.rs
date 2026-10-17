@@ -839,7 +839,7 @@ impl TestCache {
             parser_backend: "light_text_v2".to_string(),
             worker_lane: "rust_core".to_string(),
             truncated: false,
-            worker_contract_version: "ai_daily_worker_v3".to_string(),
+            worker_contract_version: "ai_daily_worker_v4".to_string(),
             worker_version: "0.1.0".to_string(),
             worker_build: "engine-test".to_string(),
         }

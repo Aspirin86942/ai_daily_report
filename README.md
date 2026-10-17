@@ -65,3 +65,5 @@ cargo test --manifest-path rust/Cargo.toml --workspace --locked
 - [Windows 安装与回退](docs/windows-deployment.md)：独立目录、计划任务、自检和回退。
 - [产品计划书](docs/plans/2026-10-14-rust-product-plan.md)：功能与验收标准。
 - [旧 Python 操作说明归档](docs/archive/python-runtime-readme-2026-10-15.md)：切换前的运行参考。
+
+变化归档、版本差异、引用证据、采集任务与统计命令见 [变化归档操作说明](docs/change-archive.md)。2,648 文件测量、并发配置和覆盖限制见 [归档性能验收](docs/archive-performance-20261017.md)。

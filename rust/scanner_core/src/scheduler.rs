@@ -1801,7 +1801,7 @@ impl BudgetedContextScheduler {
                 self.stored_workers
                     .office_contract
                     .clone()
-                    .unwrap_or_else(|| "ai_daily_worker_v3".to_string()),
+                    .unwrap_or_else(|| ai_daily_worker_contract::CONTRACT_VERSION.to_string()),
                 self.stored_workers
                     .office_version
                     .clone()
@@ -1815,7 +1815,7 @@ impl BudgetedContextScheduler {
                 self.stored_workers
                     .pdf_contract
                     .clone()
-                    .unwrap_or_else(|| "ai_daily_worker_v3".to_string()),
+                    .unwrap_or_else(|| ai_daily_worker_contract::CONTRACT_VERSION.to_string()),
                 self.stored_workers
                     .pdf_version
                     .clone()

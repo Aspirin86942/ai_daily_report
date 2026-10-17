@@ -272,6 +272,25 @@ pub(crate) struct SessionJob(OwnedHandle);
 unsafe impl Send for SessionJob {}
 
 impl SessionJob {
+    pub(crate) fn limit_memory(&self, bytes: u64) -> Result<(), ProcessError> {
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { zeroed() };
+        limits.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_JOB_MEMORY;
+        limits.JobMemoryLimit =
+            usize::try_from(bytes).map_err(|_| ProcessError::ContainmentFailed)?;
+        if unsafe {
+            SetInformationJobObject(
+                self.0.raw(),
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast::<c_void>(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        } == 0
+        {
+            return Err(ProcessError::ContainmentFailed);
+        }
+        Ok(())
+    }
     /// Assigns an already-spawned child process to a fresh kill-on-close job.
     pub(crate) fn assign(process: std::os::windows::io::RawHandle) -> Result<Self, ProcessError> {
         let job = create_kill_on_close_job()?;

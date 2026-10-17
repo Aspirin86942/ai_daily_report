@@ -10,6 +10,12 @@ pub fn prepare_daily_input(
     input::prepare(app, request, scan)
 }
 pub use period::run_period;
+pub fn prepare_archive_input(
+    app: &App,
+    request: &ReportRequest,
+) -> Result<FrozenInput, ReportError> {
+    input::prepare_archive(app, request)
+}
 
 use crate::{
     config::AppConfig,
@@ -161,7 +167,7 @@ pub fn prepare_snapshot(
         .as_str()
         .filter(|s| crate::snapshots::valid_hash(s))
         .ok_or_else(|| ReportError::new("SNAPSHOT_CONTEXT_MISMATCH", "冻结输入缺少有效指纹"))?;
-    if !(input["version"] == 3
+    if !(matches!(input["version"].as_u64(), Some(3 | 4))
         || matches!(input["version"].as_u64(), Some(1 | 2)) && input["rust_recovery_version"] == 3)
         || context.config_fingerprint != app.fingerprint(false)?
     {
@@ -192,6 +198,9 @@ pub fn prepare_snapshot(
     } else {
         app.store
             .create(&context, kind, id, Some(reason), context.started_at)?;
+    }
+    if input["version"] == 4 {
+        crate::archive::model_input::pin(&app.config, &serde_json::from_value(input.clone())?)?;
     }
     let reference = app.snapshots.put(id, "input", input)?;
     if let Some(run) = existing {
@@ -305,6 +314,31 @@ pub fn run_daily(mut request: ReportRequest, app: &App) -> Result<ReportOutcome,
             }
         }
     }
+    if request.period.source == crate::types::ReportSource::Archive
+        && request.save
+        && !request.dry_run
+        && request.regeneration_reason.is_none()
+    {
+        if let Some(current) = app
+            .store
+            .current(&request.context.target_date.to_string())?
+        {
+            crate::archive::model_input::published(
+                &app.config,
+                &current.run_id,
+                current.markdown.as_deref().unwrap_or(""),
+            )?;
+            return Ok(ReportOutcome {
+                run_id: current.run_id,
+                target_date: current.target_date,
+                quality: current.quality.unwrap_or_else(|| "complete".into()),
+                markdown: current.markdown.unwrap_or_default(),
+                output_path: current.output_path.map(Into::into),
+                action: "existing".into(),
+                model_calls: 0,
+            });
+        }
+    }
     let run_id = &request.context.run_id;
     app.store.create(
         &request.context,
@@ -320,37 +354,81 @@ pub fn run_daily(mut request: ReportRequest, app: &App) -> Result<ReportOutcome,
     let result = (|| {
         app.store.set_scanning(run_id, now)?;
         deadline_check(deadline)?;
-        let scan = scan_stable(app, &request, deadline)?;
-        if request.dry_run {
-            let metadata = serde_json::to_value(&scan)?;
-            let reference = app.snapshots.put(run_id, "scan-preview", &metadata)?;
-            let sources = scan
-                .sources
-                .iter()
-                .map(serde_json::to_value)
-                .collect::<Result<Vec<_>, _>>()?;
-            app.store
-                .prepare(run_id, &reference, &reference.sha256, &sources, now)?;
-            app.store.finish_scan_preview(
+        let payload = if request.period.source == crate::types::ReportSource::Archive {
+            let payload = input::prepare_archive(app, &request)?;
+            if request.dry_run {
+                let reference = app.snapshots.put(
+                    run_id,
+                    "archive-preview",
+                    &serde_json::to_value(&payload)?,
+                )?;
+                app.store.prepare(
+                    run_id,
+                    &reference,
+                    &payload.input_fingerprint,
+                    &payload
+                        .sources
+                        .iter()
+                        .map(serde_json::to_value)
+                        .collect::<Result<Vec<_>, _>>()?,
+                    now,
+                )?;
+                app.store
+                    .finish_scan_preview(run_id, &payload.quality, now)?;
+                return Ok(ReportOutcome {
+                    run_id: run_id.clone(),
+                    target_date: request.context.target_date.to_string(),
+                    quality: "scan_only".into(),
+                    markdown: serde_json::to_string_pretty(&payload.sources)?,
+                    output_path: None,
+                    action: "dry_run".into(),
+                    model_calls: 0,
+                });
+            }
+            payload
+        } else {
+            let scan = scan_stable(app, &request, deadline)?;
+            if request.dry_run {
+                let metadata = serde_json::to_value(&scan)?;
+                let reference = app.snapshots.put(run_id, "scan-preview", &metadata)?;
+                let sources = scan
+                    .sources
+                    .iter()
+                    .map(serde_json::to_value)
+                    .collect::<Result<Vec<_>, _>>()?;
+                app.store
+                    .prepare(run_id, &reference, &reference.sha256, &sources, now)?;
+                app.store.finish_scan_preview(
+                    run_id,
+                    if scan.envelope.status == ai_daily_scanner_contract::EngineStatus::Ok {
+                        "complete"
+                    } else {
+                        "partial"
+                    },
+                    now,
+                )?;
+                return Ok(ReportOutcome {
+                    run_id: run_id.clone(),
+                    target_date: request.context.target_date.to_string(),
+                    quality: "scan_only".into(),
+                    markdown: scan.envelope.file_context,
+                    output_path: None,
+                    action: "dry_run".into(),
+                    model_calls: 0,
+                });
+            }
+            input::prepare(app, &request, &scan)?
+        };
+        crate::archive::model_input::pin(&app.config, &payload)?;
+        if payload.version == 4 {
+            crate::archive::stats::record_stage(
+                &app.config,
                 run_id,
-                if scan.envelope.status == ai_daily_scanner_contract::EngineStatus::Ok {
-                    "complete"
-                } else {
-                    "partial"
-                },
-                now,
+                &payload.context.target_date.to_string(),
+                "input_preparation",
+                started.elapsed().as_millis() as u64,
             )?;
-            return Ok(ReportOutcome {
-                run_id: run_id.clone(),
-                target_date: request.context.target_date.to_string(),
-                quality: "scan_only".into(),
-                markdown: scan.envelope.file_context,
-                output_path: None,
-                action: "dry_run".into(),
-                model_calls: 0,
-            });
         }
-        let payload = input::prepare(app, &request, &scan)?;
         let reference = app
             .snapshots
             .put(run_id, "input", &serde_json::to_value(&payload)?)?;
@@ -491,11 +569,14 @@ fn finish(
             .clone()
             .ok_or_else(|| ReportError::new("SNAPSHOT_MISSING", "冻结输入哈希缺失"))?,
     };
-    let value = app.snapshots.read(&reference)?;
+    let value = app.snapshots.read(&reference).or_else(|original| {
+        crate::archive::model_input::read_frozen(&app.config, run_id, &reference.sha256)
+            .map_err(|_| original)
+    })?;
     if matches!(value["version"].as_u64(), Some(1 | 2)) {
         return legacy::finish(app, &run, value, now, started, deadline);
     }
-    if value["version"] != 3 {
+    if !matches!(value["version"].as_u64(), Some(3 | 4)) {
         return Err(ReportError::new(
             "SNAPSHOT_VERSION_UNSUPPORTED",
             "冻结输入版本不支持",
@@ -520,10 +601,15 @@ fn finish(
     }
     let mut limits = app.config.recovery.clone();
     limits.model_pricing = payload.model_pricing.clone();
+    let transport = crate::archive::model_input::ProtectedTransport {
+        config: &app.config,
+        input: &payload,
+        inner: app.transport.as_ref(),
+    };
     let runner = ModelRunner {
         store: &app.store,
         snapshots: &app.snapshots,
-        transport: app.transport.as_ref(),
+        transport: &transport,
         llm: &app.config.llm,
         recovery: &limits,
         recovery_inputs: payload.recovery_inputs.as_ref(),
@@ -534,7 +620,24 @@ fn finish(
         deadline,
     };
     let generated = runner.generate_with_workers(&payload.plan, app.model_workers)?;
+    if payload.version == 4 {
+        for (stage, elapsed) in [
+            ("fact_extraction", generated.fact_wall_ms),
+            ("composition", generated.composition_wall_ms),
+        ] {
+            crate::archive::stats::record_stage(
+                &app.config,
+                run_id,
+                &payload.context.target_date.to_string(),
+                stage,
+                elapsed,
+            )?;
+        }
+    }
     let calls = runner.audited_calls()?;
+    if payload.version == 4 {
+        crate::archive::model_input::validate_evidence(&app.config, &generated.facts)?;
+    }
     input::apply_coverage(&mut payload, &generated.steps, &calls)?;
     if !payload.sources.is_empty() && generated.facts.is_empty() {
         payload.gaps.push(reports::data::CoverageGap::new(
@@ -546,7 +649,7 @@ fn finish(
         payload.quality = "partial".into();
     }
     let report = DailyReport {
-        schema_version: 3,
+        schema_version: payload.version,
         report_kind: "file_evidence".into(),
         date: payload.context.target_date.to_string(),
         scope_id: payload.context.scope_id.clone(),
@@ -565,7 +668,17 @@ fn finish(
         content: generated.report,
     };
     deadline_check(deadline)?;
-    stage(app, run_id, &payload, &report, now)
+    let outcome = stage(app, run_id, &payload, &report, now)?;
+    if payload.version == 4 {
+        crate::archive::stats::record_stage(
+            &app.config,
+            run_id,
+            &payload.context.target_date.to_string(),
+            "run_completion",
+            started.elapsed().as_millis() as u64,
+        )?;
+    }
+    Ok(outcome)
 }
 
 fn stage(
@@ -575,6 +688,7 @@ fn stage(
     report: &DailyReport,
     now: DateTime<Utc>,
 ) -> Result<ReportOutcome, ReportError> {
+    let stage_started = Instant::now();
     let markdown = reports::render_daily(report, &input.template)?;
     let value = serde_json::to_value(report)?;
     let run = app.store.get(run_id)?;
@@ -596,6 +710,18 @@ fn stage(
         )?;
         (Some(publisher.publish(run_id, now)?), "published")
     };
+    if action == "published" {
+        crate::archive::model_input::published(&app.config, run_id, &markdown)?;
+    }
+    if input.version == 4 {
+        crate::archive::stats::record_stage(
+            &app.config,
+            run_id,
+            &report.date,
+            "publication",
+            stage_started.elapsed().as_millis() as u64,
+        )?;
+    }
     Ok(ReportOutcome {
         run_id: run_id.into(),
         target_date: report.date.clone(),
@@ -610,6 +736,7 @@ fn stage(
 pub fn repair_run(app: &App, id: &str, now: DateTime<Utc>) -> Result<ReportOutcome, ReportError> {
     let path = Publisher::new(&app.config.paths.reports_dir, &app.store)?.publish(id, now)?;
     let run = app.store.get(id)?;
+    crate::archive::model_input::published(&app.config, id, run.markdown.as_deref().unwrap_or(""))?;
     Ok(ReportOutcome {
         run_id: id.into(),
         target_date: run.target_date,

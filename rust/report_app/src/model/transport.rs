@@ -16,6 +16,7 @@ pub enum TransportFailure {
     Interrupted,
     InvalidResponse,
     Configuration,
+    PermissionDenied,
 }
 
 impl TransportFailure {
@@ -26,6 +27,7 @@ impl TransportFailure {
             Self::Interrupted => "MODEL_RESPONSE_INTERRUPTED",
             Self::InvalidResponse => "MODEL_RESPONSE_TOO_LARGE",
             Self::Configuration => "MODEL_TRANSPORT_INVALID",
+            Self::PermissionDenied => "ARCHIVE_MODEL_PERMISSION_DENIED",
         }
     }
     pub fn retryable(self) -> bool {

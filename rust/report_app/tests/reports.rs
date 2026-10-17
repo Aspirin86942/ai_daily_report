@@ -37,6 +37,8 @@ fn report() -> DailyReport {
         generated_at: now.to_rfc3339(),
         user_notes: String::new(),
         facts: vec![SelectedFact {
+            matter_id: None,
+            evidence: vec![],
             fact_id: "batch_000:000".into(),
             pending: false,
             fact: Fact {
@@ -56,6 +58,7 @@ fn report() -> DailyReport {
                 ..detail.clone()
             }],
             matters: vec![Matter {
+                matter_id: None,
                 title: "采购审批调整".into(),
                 background: None,
                 details: vec![detail],

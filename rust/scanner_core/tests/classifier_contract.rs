@@ -239,7 +239,7 @@ fn pdf_worker_path() -> Option<PathBuf> {
 
 #[test]
 fn session_contract_version_is_frozen() {
-    assert_eq!(SESSION_CONTRACT_VERSION, "ai_daily_worker_v3");
+    assert_eq!(SESSION_CONTRACT_VERSION, "ai_daily_worker_v4");
 }
 
 #[test]
@@ -265,7 +265,7 @@ fn session_recycles_on_idle_ttl_not_process_age() {
         required_extensions: vec![".pdf".to_string()],
     };
     let registered =
-        register_worker(&command, Duration::from_secs(20)).expect("worker-v3 hello preflight");
+        register_worker(&command, Duration::from_secs(20)).expect("worker-v4 hello preflight");
     let expected = worker_hello_from_registered(&registered);
     let params = SessionParams {
         idle_ttl: Duration::from_millis(60),
@@ -304,7 +304,7 @@ fn session_recycles_on_idle_ttl_not_process_age() {
 }
 
 #[test]
-fn worker_v3_hello_registers_only_pdf_operations() {
+fn worker_v4_hello_registers_pdf_and_archive_operations() {
     let Some(python) = pdf_worker_path() else {
         return;
     };
@@ -318,14 +318,15 @@ fn worker_v3_hello_registers_only_pdf_operations() {
         required_extensions: vec![".pdf".to_string()],
     };
     let worker =
-        register_worker(&command, Duration::from_secs(20)).expect("worker-v3 hello preflight");
+        register_worker(&command, Duration::from_secs(20)).expect("worker-v4 hello preflight");
     let hello = worker_hello_from_registered(&worker);
-    assert_eq!(hello.worker_contract_version, "ai_daily_worker_v3");
+    assert_eq!(hello.worker_contract_version, "ai_daily_worker_v4");
     assert_eq!(
         hello.supported_operations,
         vec![
             ai_daily_worker_contract::WorkerOperation::PdfClassify,
             ai_daily_worker_contract::WorkerOperation::PdfParse,
+            ai_daily_worker_contract::WorkerOperation::ArchivePdfParse,
         ]
     );
     assert!(hello.worker_build.starts_with("sha256-source-v1:"));
@@ -354,7 +355,7 @@ fn session_process_classifies_and_parses_text_pdf() {
         required_extensions: vec![".pdf".to_string()],
     };
     let registered =
-        register_worker(&command, Duration::from_secs(20)).expect("worker-v3 hello preflight");
+        register_worker(&command, Duration::from_secs(20)).expect("worker-v4 hello preflight");
     let expected = worker_hello_from_registered(&registered);
 
     let metadata = std::fs::metadata(&fixture).expect("fixture metadata");

@@ -129,6 +129,7 @@ pub struct AppConfig {
     pub retention: Retention,
     pub schedule: Schedule,
     pub scanner: ScannerSettings,
+    pub archive: crate::archive::config::ArchiveSettings,
     pub index_db_path: PathBuf,
     pub office_worker_path: PathBuf,
     pub pdf_worker_path: PathBuf,
@@ -309,6 +310,7 @@ impl AppConfig {
                 "retention",
                 "schedule",
                 "scanner",
+                "archive",
                 "proxy",
             ]
             .contains(&path[0])
@@ -331,6 +333,7 @@ impl AppConfig {
                 "retention",
                 "schedule",
                 "scanner",
+                "archive",
             ]
             .contains(&key.as_str())
             {
@@ -449,12 +452,18 @@ impl AppConfig {
             .unwrap_or_else(|| program_dir.join("ai-daily-pdf-parser.exe"));
         let scanner: ScannerSettings =
             serde_json::from_value(scanner).map_err(|_| invalid("scanner"))?;
-        let config = Self {
+        let mut config = Self {
             program_dir: program_dir.clone(),
             config_dir,
             paths,
             report,
             scanner,
+            archive: serde_json::from_value(
+                settings
+                    .get("archive")
+                    .cloned()
+                    .unwrap_or_else(|| json!({})),
+            )?,
             llm: section(&settings, "llm")?,
             recovery: section(&settings, "recovery")?,
             retention: section(&settings, "retention")?,
@@ -472,7 +481,16 @@ impl AppConfig {
                 .to_owned(),
             api_key,
         };
+        for path in config
+            .archive
+            .roots
+            .iter_mut()
+            .chain(&mut config.archive.model_roots)
+        {
+            *path = absolute(&program_dir, path);
+        }
         config.validate()?;
+        config.archive.validate()?;
         Ok(config)
     }
 

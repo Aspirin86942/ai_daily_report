@@ -42,8 +42,8 @@ Copy-Item -LiteralPath (Join-Path $repoRoot 'config/settings.example.yaml') -Des
 foreach ($script in @('daily_task_common.ps1', 'install_daily_task.ps1', 'check_daily_task.ps1', 'remove_daily_task.ps1', 'archive_scanner_database.ps1', 'update_release_pointer.ps1', 'release_common.ps1', 'verify_windows_release.ps1')) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/$script") -Destination (Join-Path $outputPath 'scripts') }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'rust/build-inputs.json') -Destination (Join-Path $outputPath 'build-inputs.json')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'README.md') -Destination (Join-Path $outputPath 'README.md')
-foreach ($document in @('windows-deployment.md', 'daily-report-operations.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot "docs/$document") -Destination (Join-Path $outputPath 'docs') }
-foreach ($document in @('2026-10-14-rust-product-plan.md', '2026-10-14-rust-execution-plan.md', '2026-10-15-rust-migration-evidence.md', '2026-10-15-rust-cutover.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot "docs/plans/$document") -Destination (Join-Path $outputPath 'docs/plans') }
+foreach ($document in @('windows-deployment.md', 'daily-report-operations.md', 'change-archive.md', 'archive-performance-20261017.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot "docs/$document") -Destination (Join-Path $outputPath 'docs') }
+foreach ($document in @('2026-10-14-rust-product-plan.md', '2026-10-14-rust-execution-plan.md', '2026-10-15-rust-migration-evidence.md', '2026-10-15-rust-cutover.md', '2026-10-17-change-archive.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot "docs/plans/$document") -Destination (Join-Path $outputPath 'docs/plans') }
 foreach ($document in @('python-runtime-readme-2026-10-15.md', 'python-windows-deployment-2026-10-15.md', 'python-daily-operations-2026-10-15.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot "docs/archive/$document") -Destination (Join-Path $outputPath 'docs/archive') }
 Copy-Item -LiteralPath (Join-Path $PdfiumDirectory 'LICENSE') -Destination (Join-Path $outputPath 'licenses/pdfium/LICENSE')
 Copy-Item -LiteralPath (Join-Path $PdfiumDirectory 'licenses') -Destination (Join-Path $outputPath 'licenses/pdfium/notices') -Recurse
@@ -82,8 +82,8 @@ $office = & (Join-Path $outputPath 'ai-daily-office-parser.exe') hello | Convert
 if ($LASTEXITCODE -ne 0) { throw 'Office worker self-check failed' }
 $pdf = & (Join-Path $outputPath 'ai-daily-pdf-parser.exe') hello | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'PDF worker self-check failed' }
-if ($office.worker_build -cne $pdf.worker_build -or $office.protocol_version -ne 3 -or $pdf.protocol_version -ne 3) { throw 'Mixed worker builds' }
-$manifest = [ordered]@{ schema_version = 'ai_daily_rust_release_v1'; release_version = $ReleaseVersion; git_commit = $GitCommit; source_dirty = $dirty; target = 'x86_64-pc-windows-msvc'; created_at_utc = [DateTime]::UtcNow.ToString('o'); engine_build = $office.worker_build; worker_protocol = 3; pdfium_version = $inputs.pdfium.version; files = @($files) }
+if ($office.worker_build -cne $pdf.worker_build -or $office.protocol_version -ne 4 -or $pdf.protocol_version -ne 4) { throw 'Mixed worker builds' }
+$manifest = [ordered]@{ schema_version = 'ai_daily_rust_release_v1'; release_version = $ReleaseVersion; git_commit = $GitCommit; source_dirty = $dirty; target = 'x86_64-pc-windows-msvc'; created_at_utc = [DateTime]::UtcNow.ToString('o'); engine_build = $office.worker_build; worker_protocol = $office.protocol_version; pdfium_version = $inputs.pdfium.version; files = @($files) }
 Write-ReleaseJson -Path (Join-Path $outputPath 'manifest.json') -Value $manifest
 $verified = Test-RustReleaseBundle $outputPath
 [ordered]@{ status = 'verified'; output_directory = $outputPath; release_version = $verified.release_version; files = @($verified.files).Count; bytes = ($verified.files | Measure-Object -Property size -Sum).Sum } | ConvertTo-Json

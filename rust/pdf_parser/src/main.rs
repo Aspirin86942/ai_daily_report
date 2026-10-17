@@ -39,6 +39,16 @@ fn dispatch() -> i32 {
             return 2;
         }
         let result = match request.operation {
+            WorkerOperation::ArchivePdfParse => {
+                serde_json::from_value::<archive::ArchiveRequest>(request.payload.clone())
+                    .ok()
+                    .filter(|v| v.validate().is_ok())
+                    .map(|v| {
+                        reader
+                            .archive_request(&v)
+                            .map(|a| serde_json::to_value(a).unwrap())
+                    })
+            }
             WorkerOperation::PdfParse => {
                 serde_json::from_value::<ParseRequest>(request.payload.clone())
                     .ok()

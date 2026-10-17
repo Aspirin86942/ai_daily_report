@@ -63,4 +63,9 @@ Assert-Test ((Get-FileHash -LiteralPath $database).Hash -eq $hash) 'Rollback cha
 $unsafe = $false
 try { & $pointerScript -Mode Switch -PointerPath $pointer -ReleaseVersion x -ScannerDatabasePath shared/data/db/../../outside.sqlite3 -Apply | Out-Null } catch { $unsafe = $true }
 Assert-Test $unsafe 'Pointer path escape was accepted'
-[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 10; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
+$collectPlan = Get-ReportTaskPlan -ProjectRoot (Split-Path -Parent $Program) -ConfigDirectory (Join-Path $root 'config') -Kind collect
+$normalizedCollectXml = $collectPlan.xml.Replace('<StopAtDurationEnd>false</StopAtDurationEnd>', '')
+Assert-Test (@(Get-ReportTaskDifferences -Plan $collectPlan -Xml $normalizedCollectXml).Count -eq 0) 'Windows omitted repetition default was rejected'
+$wrongIntervalXml = $normalizedCollectXml.Replace('<Interval>PT30M</Interval>', '<Interval>PT60M</Interval>')
+Assert-Test (@(Get-ReportTaskDifferences -Plan $collectPlan -Xml $wrongIntervalXml).Count -gt 0) 'Wrong collection interval was accepted'
+[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 12; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')

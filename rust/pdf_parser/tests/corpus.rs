@@ -179,3 +179,39 @@ fn missing_or_different_dll_fails_without_system_lookup() {
         Err(PdfError::LibraryIdentity)
     ));
 }
+
+#[test]
+fn archive_pdf_reads_beyond_excerpt_page_window() {
+    use ai_daily_worker_contract::*;
+    let path = corpus("pdf_classifier/no_text_beyond_max_pages_01.pdf");
+    let directory = tempfile::tempdir().unwrap();
+    let request = archive::ArchiveRequest {
+        source: ParseRequest {
+            file_path: path.to_string_lossy().into_owned(),
+            file_type: ".pdf".into(),
+            backend: ParserBackend::RustPdfiumV3,
+            remaining_timeout_ms: 30000,
+            max_file_size_bytes: 512 * 1024 * 1024,
+            parser_limits: ParserLimits::Pdf {
+                max_pages: 5,
+                excerpt_max_chars: 1000,
+                selected_pages: None,
+            },
+            expected_source_version: source(&path),
+        },
+        raw_sha256: "a".repeat(64),
+        output_dir: directory.path().to_owned(),
+        max_output_bytes: 16 * 1024 * 1024,
+    };
+    let result = reader().archive_request(&request).unwrap();
+    assert!(!result.truncated);
+    assert!(result.usable_chars > 0);
+    let units = std::fs::read_to_string(directory.path().join("units.jsonl")).unwrap();
+    assert!(units
+        .lines()
+        .any(|line| serde_json::from_str::<archive::ArchiveUnit>(line)
+            .unwrap()
+            .ranges
+            .iter()
+            .any(|range| range.start > 5)));
+}

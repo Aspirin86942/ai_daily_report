@@ -38,6 +38,8 @@ pub struct StepResult {
 }
 #[derive(Debug)]
 pub struct GeneratedContent {
+    pub fact_wall_ms: u64,
+    pub composition_wall_ms: u64,
     pub facts: Vec<SelectedFact>,
     pub report: Option<ComposedReport>,
     pub steps: Vec<StepResult>,
@@ -102,16 +104,24 @@ fn validate_response(step: &PlannedStep, body: &[u8]) -> Result<StepOutput, Repo
                 .filter(|e| e.text_unverified)
                 .map(|e| e.source_id.clone())
                 .collect();
-            Ok(StepOutput::Facts(response.select(
+            if response.schema_version != if step.version == 5 { 4 } else { 3 } {
+                return Err(contracts::invalid());
+            }
+            let mut selected = response.select(
                 &step.logical_step,
                 &step.source_ids(),
                 &unverified,
                 step.output_capacity_bytes,
-            )?))
+            )?;
+            crate::archive::model_input::bind_facts(step, &mut selected)?;
+            Ok(StepOutput::Facts(selected))
         }
         StepKind::Compose => {
             let report: ComposedReport =
                 serde_json::from_value(content).map_err(|_| contracts::invalid())?;
+            if report.schema_version != if step.version == 5 { 4 } else { 3 } {
+                return Err(contracts::invalid());
+            }
             report.validate_part(&step.facts)?;
             Ok(StepOutput::Compose(report))
         }
@@ -550,6 +560,7 @@ impl ModelRunner<'_> {
         self.audited_calls()?;
         let mut steps = Vec::new();
         let mut facts = Vec::new();
+        let fact_started = Instant::now();
         for batches in plan.batches.chunks(usize::from(workers)) {
             let results = std::thread::scope(|scope| {
                 let handles: Vec<_> = batches
@@ -578,13 +589,17 @@ impl ModelRunner<'_> {
                 }
             }
         }
+        let fact_wall_ms = fact_started.elapsed().as_millis() as u64;
         if facts.is_empty() {
             return Ok(GeneratedContent {
+                fact_wall_ms,
+                composition_wall_ms: 0,
                 facts,
                 report: None,
                 steps,
             });
         }
+        let composition_started = Instant::now();
         let mut parts = Vec::new();
         for group in plan.compose_groups(self.llm, facts.clone())? {
             for result in self.execute_complete(&group)? {
@@ -596,6 +611,8 @@ impl ModelRunner<'_> {
         }
         let report = Some(ComposedReport::merge(parts, &facts)?);
         Ok(GeneratedContent {
+            fact_wall_ms,
+            composition_wall_ms: composition_started.elapsed().as_millis() as u64,
             facts,
             report,
             steps,

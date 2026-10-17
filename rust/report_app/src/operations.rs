@@ -153,7 +153,50 @@ pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Va
     )
 }
 
+pub fn task_plan_kind(
+    config: &AppConfig,
+    sid: &str,
+    now: DateTime<Utc>,
+    kind: &str,
+) -> Result<Value, ReportError> {
+    if kind == "daily" {
+        return task_plan(config, sid, now);
+    }
+    if kind != "collect" {
+        return Err(ReportError::new("TASK_KIND_INVALID", "任务类型无效"));
+    }
+    let mut collection = config.clone();
+    collection.schedule.task_name = format!("{} Collect", config.schedule.task_name);
+    collection.schedule.local_time = "00:00".into();
+    collection.schedule.wake_to_run = false;
+    collection.schedule.execution_limit_minutes = 20;
+    let mut value = task_plan(&collection, sid, now)?;
+    let arguments = value["arguments"]
+        .as_str()
+        .unwrap()
+        .replace("daily --scheduled", "collect --scheduled");
+    let document=value["xml"].as_str().unwrap().replace("daily --scheduled","collect --scheduled")
+        .replace("<CalendarTrigger id=\"DailyShanghai\">","<CalendarTrigger id=\"Collect30Minutes\"><Repetition><Interval>PT30M</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>");
+    value["kind"] = json!("collect");
+    value["interval_minutes"] = json!(30);
+    value["arguments"] = json!(arguments);
+    value["xml"] = json!(document);
+    Ok(value)
+}
+
 pub const TEMPLATES: &[(&str, &str)] = &[
+    (
+        "evidence_facts_prompt_v4.md",
+        include_str!("../../../templates/evidence_facts_prompt_v4.md"),
+    ),
+    (
+        "evidence_compose_prompt_v4.md",
+        include_str!("../../../templates/evidence_compose_prompt_v4.md"),
+    ),
+    (
+        "evidence_report_template_v4.md",
+        include_str!("../../../templates/evidence_report_template_v4.md"),
+    ),
     (
         "evidence_facts_prompt_v3.md",
         include_str!("../../../templates/evidence_facts_prompt_v3.md"),

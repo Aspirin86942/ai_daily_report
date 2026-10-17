@@ -274,12 +274,36 @@ pub(super) fn prepare(
     request: &ReportRequest,
     scan: &ContextResult,
 ) -> Result<FrozenInput, ReportError> {
-    let (mut sources, mut gaps) = scan_sources(scan)?;
+    let (sources, gaps) = scan_sources(scan)?;
     let texts: BTreeMap<_, _> = scan
         .sources
         .iter()
-        .map(|s| (&s.source_id, &s.excerpt))
+        .map(|s| (s.source_id.clone(), s.excerpt.clone()))
         .collect();
+    prepare_sources(app, request, sources, gaps, texts, None)
+}
+
+pub fn prepare_archive(app: &App, request: &ReportRequest) -> Result<FrozenInput, ReportError> {
+    let prepared = crate::archive::model_input::prepare(&app.config, request)?;
+    let target = json!({"archive_format":4,"archive_changes":prepared.changes,"continued":prepared.continued});
+    prepare_sources(
+        app,
+        request,
+        prepared.sources,
+        prepared.gaps,
+        prepared.texts,
+        Some(target),
+    )
+}
+
+fn prepare_sources(
+    app: &App,
+    request: &ReportRequest,
+    mut sources: Vec<ReportSource>,
+    mut gaps: Vec<CoverageGap>,
+    texts: BTreeMap<String, String>,
+    archive: Option<Value>,
+) -> Result<FrozenInput, ReportError> {
     let mut inputs = Vec::new();
     for source in &sources {
         if let Some(input) = source.input(
@@ -302,12 +326,31 @@ pub(super) fn prepare(
         inputs.push(source.input(&request.input)?.unwrap());
         sources.push(source);
     }
-    let plan = plan::prepare(
+    let version = if archive.is_some() { 4 } else { 3 };
+    let mut target = json!({"date":request.context.target_date,"window_start_utc":request.context.window_start_utc,"window_end_utc":request.context.window_end_utc});
+    if let Some(archive) = archive {
+        target
+            .as_object_mut()
+            .unwrap()
+            .extend(archive.as_object().unwrap().clone());
+    }
+    let mut plan = plan::prepare(
         &app.config.llm,
-        json!({"date":request.context.target_date,"window_start_utc":request.context.window_start_utc,"window_end_utc":request.context.window_end_utc}),
+        target,
         &inputs,
         serde_json::to_value(&gaps)?,
     )?;
+    if version == 4 {
+        for source in &sources {
+            if source.coverage_limits["archive"].is_object() {
+                plan.source_map[&source.source_id]["archive"] =
+                    source.coverage_limits["archive"].clone();
+            }
+        }
+        for batch in &mut plan.batches {
+            batch.source_map = plan.source_map.clone();
+        }
+    }
     let mut ranges: BTreeMap<String, Vec<TextRange>> = BTreeMap::new();
     for batch in &plan.batches {
         for entry in &batch.entries {
@@ -337,6 +380,8 @@ pub(super) fn prepare(
     let quality = if inputs.is_empty() {
         if sources.is_empty() && gaps.is_empty() {
             "no_changes"
+        } else if version == 4 {
+            "partial"
         } else {
             "unavailable"
         }
@@ -352,16 +397,20 @@ pub(super) fn prepare(
         }
     }
     let input_fingerprint = hash(
-        &json!({"version":3,"scope_id":request.context.scope_id,"sources":stable,"plan":plan,"config_fingerprint":request.context.config_fingerprint}),
+        &json!({"version":version,"scope_id":request.context.scope_id,"sources":stable,"plan":plan,"config_fingerprint":request.context.config_fingerprint}),
     )?;
     Ok(FrozenInput {
-        version: 3,
+        version,
         context: request.context.clone(),
         quality: quality.into(),
         sources,
         gaps,
         plan,
-        template: DAILY_TEMPLATE_V3.into(),
+        template: if version == 4 {
+            crate::reports::DAILY_TEMPLATE_V4.into()
+        } else {
+            DAILY_TEMPLATE_V3.into()
+        },
         root_alias: app.config.report.root_alias.clone(),
         notes: notes(app, &request.context)?,
         missed_dates: app.store.missed_dates(request.context.target_date)?,

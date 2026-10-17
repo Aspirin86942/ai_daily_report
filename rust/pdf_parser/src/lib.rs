@@ -64,6 +64,45 @@ impl PdfReader {
         max_pages: u32,
         max_chars: usize,
     ) -> Result<PdfText, PdfError> {
+        let mut output = Vec::new();
+        let (total, truncated) =
+            self.visit_pages(path, selected_pages, max_pages, max_chars, |page| {
+                output.push(page);
+                true
+            })?;
+        Ok(PdfText {
+            pages_total: total,
+            pages: output,
+            truncated,
+        })
+    }
+
+    pub fn visit_pages(
+        &self,
+        path: &Path,
+        selected_pages: Option<&[u32]>,
+        max_pages: u32,
+        max_chars: usize,
+        mut visit: impl FnMut(PageText) -> bool,
+    ) -> Result<(u32, bool), PdfError> {
+        self.visit_pages_with_audit(
+            path,
+            selected_pages,
+            max_pages,
+            max_chars,
+            false,
+            |page, _| visit(page),
+        )
+    }
+    pub(crate) fn visit_pages_with_audit(
+        &self,
+        path: &Path,
+        selected_pages: Option<&[u32]>,
+        max_pages: u32,
+        max_chars: usize,
+        inspect_images: bool,
+        mut visit: impl FnMut(PageText, Option<bool>) -> bool,
+    ) -> Result<(u32, bool), PdfError> {
         if max_pages == 0 || max_chars == 0 {
             return Err(PdfError::Pages);
         }
@@ -80,7 +119,6 @@ impl PdfReader {
             return Err(PdfError::Pages);
         }
         let mut remaining = max_chars;
-        let mut output = Vec::new();
         let mut truncated = pages.len() < total as usize;
         for number in pages {
             if remaining == 0 {
@@ -95,17 +133,40 @@ impl PdfReader {
             remaining -= excerpt_chars;
             let page_truncated = chars_total > excerpt_chars;
             truncated |= page_truncated;
-            output.push(PageText {
-                page: number,
-                text: excerpt,
-                chars_total,
-                truncated: page_truncated,
-            });
+            let images = if inspect_images {
+                page_images(&page)
+            } else {
+                None
+            };
+            if !visit(
+                PageText {
+                    page: number,
+                    text: excerpt,
+                    chars_total,
+                    truncated: page_truncated,
+                },
+                images,
+            ) {
+                truncated = true;
+                break;
+            }
         }
-        Ok(PdfText {
-            pages_total: total,
-            pages: output,
-            truncated,
-        })
+        Ok((total, truncated))
     }
+}
+
+pub(crate) fn page_images(page: &PdfPage<'_>) -> Option<bool> {
+    let mut found = Some(false);
+    for (index, object) in page.objects().iter().enumerate() {
+        if index >= 2048 {
+            return None;
+        }
+        if object.as_image_object().is_some() {
+            return Some(true);
+        }
+        if object.as_x_object_form_object().is_some() {
+            found = None;
+        }
+    }
+    found
 }

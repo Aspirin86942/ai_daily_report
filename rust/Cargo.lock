@@ -26,6 +26,7 @@ name = "ai-daily-office-parser"
 version = "0.1.0"
 dependencies = [
  "ai-daily-discovery",
+ "ai-daily-scanner-core",
  "ai-daily-worker-contract",
  "calamine",
  "office_oxide",
@@ -109,6 +110,7 @@ dependencies = [
  "ai-daily-scanner-contract",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

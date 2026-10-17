@@ -353,7 +353,7 @@ pub fn source_guard_kind_from_text(value: &str) -> Option<SourceGuardKind> {
 /// the full-content hash.
 #[cfg(windows)]
 #[allow(non_snake_case)]
-fn windows_identity(path: &Path) -> io::Result<Option<String>> {
+fn windows_identity_parts(path: &Path) -> io::Result<Option<(String, String)>> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
@@ -435,10 +435,39 @@ fn windows_identity(path: &Path) -> io::Result<Option<String>> {
         hasher.update(size.to_le_bytes());
         hasher.update(last_write_time.to_le_bytes());
         hasher.update(change_time.to_le_bytes());
-        Ok(Some(hex(&hasher.finalize())))
+        Ok(Some((
+            format!("{volume_serial}:{}", hex(&identifier)),
+            hex(&hasher.finalize()),
+        )))
     })();
     unsafe { CloseHandle(handle) };
     result
+}
+
+#[cfg(windows)]
+fn windows_identity(path: &Path) -> io::Result<Option<String>> {
+    Ok(windows_identity_parts(path)?.map(|(_, guard)| guard))
+}
+
+/// Fresh metadata only: stable filesystem identity plus change-sensitive guard.
+/// Archive callers stream and hash when this is unavailable, without hashing twice.
+pub fn archive_identity(path: &Path) -> io::Result<Option<(String, String)>> {
+    #[cfg(windows)]
+    {
+        windows_identity_parts(path)
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = std::fs::metadata(path)?;
+        Ok(unix_identity(path)?
+            .map(|guard| (format!("{}:{}", metadata.dev(), metadata.ino()), guard)))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = path;
+        Ok(None)
+    }
 }
 
 /// Unix identity: device/inode/size/mtime_ns/ctime_ns under the domain

@@ -114,3 +114,27 @@ scanner:
   worker_max_requests: 128
   worker_idle_ttl_ms: 30000
   worker_rss_limit_bytes: 536870912
+
+# 长期归档与模型缓存独立；以下目录不受缓存保留天数影响。
+archive:
+  # work_dir 始终在采集范围内，其他目录默认仅供本地归档。
+  roots: []
+  model_roots: []
+  allow_work_dir_for_model: true
+  # 日报来源切换前须完成真实基线和跨日验收。
+  daily_source: scan
+  read_workers: 2
+  parse_workers: 5
+  memory_mib: 3072
+  system_reserve_mib: 2048
+  parent_memory_mib: 512
+  worker_memory_mib: 512
+  run_seconds: 1200
+  copy_seconds: 120
+  parse_seconds: 300
+  max_input_mib: 512
+  max_output_mib: 256
+  warn_free_mib: 20480
+  reserve_free_mib: 5120
+  # 工作表标签 -> 唯一业务主键列；没有配置时仅推断两版均唯一的编号列。
+  table_keys: {}

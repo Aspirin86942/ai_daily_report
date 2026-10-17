@@ -268,6 +268,14 @@ impl SessionChild {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // Reuse an existing console; GUI/scheduled callers must not allocate one.
+            if unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null() {
+                builder.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
+            }
+        }
         if let Some(directory) = &command.current_dir {
             builder.current_dir(directory);
         }
@@ -492,6 +500,103 @@ pub struct WorkerSession {
 }
 
 impl WorkerSession {
+    pub fn limit_memory(&self, bytes: u64) -> Result<(), SessionError> {
+        #[cfg(windows)]
+        {
+            self.child
+                .as_ref()
+                .and_then(|c| c.job.as_ref())
+                .ok_or(SessionError::StartFailed)?
+                .limit_memory(bytes)
+                .map_err(|_| SessionError::StartFailed)?;
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = bytes;
+        }
+        Ok(())
+    }
+    pub fn archive_text(
+        &mut self,
+        request_id: &str,
+        request: &ai_daily_worker_contract::archive::ArchiveTextRequest,
+        timeout: Duration,
+    ) -> Result<ai_daily_worker_contract::archive::ArchiveArtifact, SessionError> {
+        request
+            .validate()
+            .map_err(SessionError::ProtocolCorruption)?;
+        self.dispatch_archive(
+            request_id,
+            WorkerOperation::ArchiveTextParse,
+            serde_json::to_value(request).map_err(|_| SessionError::IoFailed)?,
+            timeout,
+        )
+    }
+    pub fn archive_parse(
+        &mut self,
+        request_id: &str,
+        request: &ai_daily_worker_contract::archive::ArchiveRequest,
+        timeout: Duration,
+    ) -> Result<ai_daily_worker_contract::archive::ArchiveArtifact, SessionError> {
+        request
+            .validate()
+            .map_err(SessionError::ProtocolCorruption)?;
+        let operation = if request.source.backend == ParserBackend::RustPdfiumV3 {
+            WorkerOperation::ArchivePdfParse
+        } else {
+            WorkerOperation::ArchiveOfficeParse
+        };
+        self.dispatch_archive(
+            request_id,
+            operation,
+            serde_json::to_value(request).map_err(|_| SessionError::IoFailed)?,
+            timeout,
+        )
+    }
+    fn dispatch_archive(
+        &mut self,
+        request_id: &str,
+        operation: WorkerOperation,
+        payload: serde_json::Value,
+        timeout: Duration,
+    ) -> Result<ai_daily_worker_contract::archive::ArchiveArtifact, SessionError> {
+        let envelope = WorkerRequest {
+            contract: CONTRACT.into(),
+            protocol_version: SESSION_PROTOCOL_VERSION,
+            request_id: request_id.into(),
+            operation,
+            payload,
+        };
+        envelope
+            .validate()
+            .map_err(SessionError::ProtocolCorruption)?;
+        self.write_request(&serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?)?;
+        let line = self
+            .child
+            .as_ref()
+            .ok_or(SessionError::Eof)?
+            .read_line(timeout)?;
+        if line.len() > 1024 * 1024 {
+            return Err(SessionError::FrameTooLarge);
+        }
+        let response = self.parse_response(line, operation, request_id)?;
+        self.mark_request_complete();
+        match response {
+            WorkerResponse {
+                status: WorkerResponseStatus::Ok,
+                result: Some(value),
+                ..
+            } => serde_json::from_value(value)
+                .map_err(|_| SessionError::ProtocolCorruption("archive result is invalid".into())),
+            WorkerResponse {
+                error: Some(value), ..
+            } => Err(SessionError::Rejected(Box::new(value))),
+            _ => Err(SessionError::ProtocolCorruption(
+                "archive result is missing".into(),
+            )),
+        }
+    }
+
     /// 启动会话并严格校验首帧 hello；build 必须与 preflight 完全一致。
     pub fn start(
         command: &WorkerCommand,

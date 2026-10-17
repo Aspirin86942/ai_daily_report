@@ -39,6 +39,69 @@ fn worker_session() -> i32 {
             Ok(request) => request,
             Err(_) => return 2,
         };
+        if request.operation == WorkerOperation::ArchiveTextParse {
+            let result = serde_json::from_value::<
+                ai_daily_worker_contract::archive::ArchiveTextRequest,
+            >(request.payload.clone())
+            .ok()
+            .filter(|r| r.validate().is_ok());
+            let response = match result {
+                Some(value) => {
+                    match ai_daily_scanner_core::parsers::light_text::parse_archive_text(&value) {
+                        Ok(artifact) => WorkerResponse {
+                            contract: CONTRACT.into(),
+                            protocol_version: PROTOCOL_VERSION,
+                            request_id: request.request_id.clone(),
+                            operation: request.operation,
+                            status: WorkerResponseStatus::Ok,
+                            result: Some(serde_json::to_value(artifact).unwrap()),
+                            error: None,
+                        },
+                        Err(code) => session_error(&request, code, false),
+                    }
+                }
+                None => session_error(&request, "INVALID_REQUEST", false),
+            };
+            if emit(&response).is_err() {
+                return 1;
+            }
+            continue;
+        }
+        if request.operation == WorkerOperation::ArchiveOfficeParse {
+            let result =
+                serde_json::from_value::<ai_daily_worker_contract::archive::ArchiveRequest>(
+                    request.payload.clone(),
+                )
+                .ok()
+                .filter(|value| value.validate().is_ok());
+            let response = match result {
+                Some(value) => match ai_daily_office_parser::parse_archive_request(&value) {
+                    Ok(artifact) => WorkerResponse {
+                        contract: CONTRACT.into(),
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id: request.request_id.clone(),
+                        operation: request.operation,
+                        status: WorkerResponseStatus::Ok,
+                        result: Some(serde_json::to_value(artifact).unwrap()),
+                        error: None,
+                    },
+                    Err(error) => WorkerResponse {
+                        contract: CONTRACT.into(),
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id: request.request_id.clone(),
+                        operation: request.operation,
+                        status: WorkerResponseStatus::Error,
+                        result: None,
+                        error: Some(*error),
+                    },
+                },
+                None => session_error(&request, "INVALID_REQUEST", false),
+            };
+            if emit(&response).is_err() {
+                return 1;
+            }
+            continue;
+        }
         if request.operation != WorkerOperation::OfficeParse {
             if emit(&session_error(&request, "UNSUPPORTED_OPERATION", false)).is_err() {
                 return 1;

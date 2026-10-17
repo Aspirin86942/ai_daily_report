@@ -507,6 +507,41 @@ fn compile_patterns(patterns: &[String]) -> io::Result<Vec<Pattern>> {
         .collect()
 }
 
+/// Apply the discovery permission boundary to an already archived path without reading it.
+pub fn archived_path_allowed(
+    path: &Path,
+    root: &Path,
+    extensions: &[String],
+    patterns: &[String],
+    excluded: &[PathBuf],
+) -> io::Result<bool> {
+    let patterns = compile_patterns(patterns)?;
+    let excluded_dirs = resolve_excluded_dirs(excluded, Some(root));
+    let extension = path
+        .extension()
+        .map(|s| format!(".{}", s.to_string_lossy().to_lowercase()))
+        .unwrap_or_default();
+    let excluded_name = excluded
+        .iter()
+        .filter(|p| p.components().count() == 1)
+        .any(|p| {
+            path.components().any(|part| {
+                part.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&p.to_string_lossy())
+            })
+        });
+    Ok(extensions.contains(&extension)
+        && !excluded_name
+        && !is_excluded_dir(path, &excluded_dirs)
+        && !path.components().any(|part| {
+            matches_ignored_pattern(
+                &part.as_os_str().to_string_lossy().to_lowercase(),
+                &patterns,
+            )
+        }))
+}
+
 fn matches_ignored_pattern(file_name_lower: &str, patterns: &[Pattern]) -> bool {
     patterns
         .iter()

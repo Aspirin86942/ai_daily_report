@@ -94,6 +94,8 @@ pub struct ContentUnit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ParsedContentAudit {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<crate::archive::ArchiveArtifact>,
     pub version: u64,
     pub read_ranges: Option<Vec<SourceRange>>,
     pub content_units: Option<Vec<ContentUnit>>,
@@ -105,6 +107,7 @@ pub struct ParsedContentAudit {
 impl Default for ParsedContentAudit {
     fn default() -> Self {
         Self {
+            archive: None,
             version: 1,
             read_ranges: None,
             content_units: None,
@@ -117,6 +120,9 @@ impl Default for ParsedContentAudit {
 
 impl ParsedContentAudit {
     pub fn validate(&self, content: &str) -> Result<(), String> {
+        if self.archive.is_some() {
+            return Err("archive artifacts require the archive operation".into());
+        }
         let text_chars = content.chars().count() as u64;
         if self.version != 1
             || self.usable_chars.is_some_and(|chars| chars > text_chars)
@@ -179,6 +185,7 @@ pub struct AuditTextBuilder {
     max_chars: u64,
     audit: ParsedContentAudit,
     truncated: bool,
+    archive: Option<crate::archive::ArchiveWriter>,
 }
 
 impl AuditTextBuilder {
@@ -195,10 +202,30 @@ impl AuditTextBuilder {
                 ..Default::default()
             },
             truncated: false,
+            archive: None,
+        }
+    }
+
+    pub fn for_archive(
+        directory: &std::path::Path,
+        max_bytes: u64,
+        format: &str,
+    ) -> std::io::Result<Self> {
+        let mut builder = Self::new(u64::MAX, format);
+        builder.archive = Some(crate::archive::ArchiveWriter::new(directory, max_bytes)?);
+        Ok(builder)
+    }
+
+    pub fn gap(&mut self, code: &str) {
+        if let Some(archive) = &mut self.archive {
+            archive.gap(code);
         }
     }
 
     pub fn read(&mut self, range: SourceRange) {
+        if self.archive.is_some() {
+            return;
+        }
         let Some(ranges) = self.audit.read_ranges.as_mut() else {
             return;
         };
@@ -213,6 +240,9 @@ impl AuditTextBuilder {
     }
 
     pub fn push(&mut self, text: &str, kind: ContentUnitKind, ranges: Vec<SourceRange>) -> bool {
+        if let Some(writer) = &mut self.archive {
+            return writer.push(text, kind, ranges);
+        }
         let text = text.trim();
         if text.is_empty() {
             return true;
@@ -253,6 +283,12 @@ impl AuditTextBuilder {
     }
 
     pub fn finish(mut self) -> (String, ParsedContentAudit, bool) {
+        if let Some(writer) = self.archive.take() {
+            let artifact = writer.finish();
+            let truncated = artifact.truncated;
+            self.audit.archive = Some(artifact);
+            return (String::new(), self.audit, truncated);
+        }
         if self.audit.usable_chars == Some(0) {
             self.content.clear();
             self.audit.content_units = Some(Vec::new());

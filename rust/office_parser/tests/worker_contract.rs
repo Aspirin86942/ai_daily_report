@@ -359,3 +359,52 @@ fn write_minimal_xlsx(path: &std::path::Path) {
     }
     zip.finish().expect("xlsx fixture should finish");
 }
+
+#[test]
+fn archive_xlsx_streams_all_rows_and_preserves_formulas_and_cached_values() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("full.xlsx");
+    let rows=(1..=900).map(|row|format!(r#"<row r="{row}"><c r="A{row}" t="inlineStr"><is><t>ID{row}</t></is></c><c r="B{row}"><f>A{row}*2</f><v>{}</v></c></row>"#,row*2)).collect::<String>();
+    let file = File::create(&path).unwrap();
+    let mut zip = zip::ZipWriter::new(file);
+    let workbook = r#"<workbook xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Data" r:id="s1"/></sheets></workbook>"#;
+    let rels =
+        r#"<Relationships><Relationship Id="s1" Target="worksheets/sheet1.xml"/></Relationships>"#;
+    for (name, body) in [
+        ("xl/workbook.xml", workbook.to_owned()),
+        ("xl/_rels/workbook.xml.rels", rels.to_owned()),
+        (
+            "xl/worksheets/sheet1.xml",
+            format!("<worksheet><sheetData>{rows}</sheetData></worksheet>"),
+        ),
+    ] {
+        zip.start_file(name, zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    let mut source = request_for(&path, source_version(&path), 1_000_000);
+    if let ParserLimits::Office { excel_max_rows, .. } = &mut source.parser_limits {
+        *excel_max_rows = 10000;
+    }
+    let out = dir.path().join("out");
+    fs::create_dir(&out).unwrap();
+    let request = ai_daily_worker_contract::archive::ArchiveRequest {
+        source,
+        raw_sha256: "a".repeat(64),
+        output_dir: out.clone(),
+        max_output_bytes: 16 * 1024 * 1024,
+    };
+    let artifact = ai_daily_office_parser::parse_archive_request(&request).unwrap();
+    assert!(artifact.units > 900);
+    assert!(!artifact.truncated);
+    let body = fs::read_to_string(out.join("body.md")).unwrap();
+    assert!(body.contains("公式：=A900*2；缓存值：1800"));
+    assert_eq!(
+        fs::read_to_string(out.join("units.jsonl"))
+            .unwrap()
+            .lines()
+            .count() as u64,
+        artifact.units
+    );
+}

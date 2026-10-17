@@ -7,6 +7,7 @@ build = "../scanner_core/build.rs"
 [dependencies]
 ai-daily-discovery = { path = "../discovery" }
 ai-daily-worker-contract = { path = "../worker_contract" }
+ai-daily-scanner-core = { path = "../scanner_core" }
 office_oxide.workspace = true
 calamine.workspace = true
 quick-xml.workspace = true

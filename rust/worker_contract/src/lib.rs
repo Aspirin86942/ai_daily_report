@@ -8,6 +8,7 @@
 pub use ai_daily_scanner_contract::{pdf_sample_pages, PdfPageAudit, PdfPageObservation};
 use serde::{Deserialize, Serialize};
 
+pub mod archive;
 mod content_audit;
 pub use content_audit::{
     AuditTextBuilder, ContentUnit, ContentUnitKind, ParsedContentAudit, SourceRange,
@@ -15,8 +16,8 @@ pub use content_audit::{
 };
 
 pub const CONTRACT: &str = "ai_daily_worker";
-pub const CONTRACT_VERSION: &str = "ai_daily_worker_v3";
-pub const PROTOCOL_VERSION: u64 = 3;
+pub const CONTRACT_VERSION: &str = "ai_daily_worker_v4";
+pub const PROTOCOL_VERSION: u64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,6 +32,9 @@ pub enum WorkerOperation {
     OfficeParse,
     PdfClassify,
     PdfParse,
+    ArchiveOfficeParse,
+    ArchivePdfParse,
+    ArchiveTextParse,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

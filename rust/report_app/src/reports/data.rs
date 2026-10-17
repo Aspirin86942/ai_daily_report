@@ -233,7 +233,7 @@ impl DailyReport {
     pub fn validate(&self) -> Result<(), ReportError> {
         let day = parse_date(&self.date)?;
         let (start, end) = utc_window(day)?;
-        if self.schema_version != 3
+        if !matches!(self.schema_version, 3 | 4)
             || self.report_kind != "file_evidence"
             || self.scope_id != "personal_work"
             || self.timezone != "Asia/Shanghai"
@@ -296,7 +296,7 @@ impl DailyReport {
         {
             return Err(invalid());
         }
-        if self.quality != "no_changes" && available.is_empty() {
+        if self.schema_version == 3 && self.quality != "no_changes" && available.is_empty() {
             return Err(invalid());
         }
         if self.quality == "complete"

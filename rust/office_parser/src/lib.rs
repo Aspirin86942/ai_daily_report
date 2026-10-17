@@ -27,7 +27,11 @@ pub fn worker_hello() -> WorkerHello {
         worker_kind: WorkerKind::Office,
         worker_version: env!("CARGO_PKG_VERSION").to_string(),
         worker_build: env!("AI_DAILY_OFFICE_WORKER_BUILD").to_string(),
-        supported_operations: vec![WorkerOperation::OfficeParse],
+        supported_operations: vec![
+            WorkerOperation::OfficeParse,
+            WorkerOperation::ArchiveOfficeParse,
+            WorkerOperation::ArchiveTextParse,
+        ],
     }
 }
 
@@ -153,21 +157,49 @@ fn audited_office_content(
 ) -> (String, ParsedContentAudit, bool) {
     use office_oxide::docx::BlockElement;
     let format = normalize_file_type(&request.file_type);
-    let mut builder = AuditTextBuilder::new(max_chars as u64, format.trim_start_matches('.'));
+    let mut builder = content_builder(request, max_chars, format.trim_start_matches('.'));
     let mut bounded = false;
     if let Some(docx) = document.as_docx() {
         // office_oxide opens the document once. Record all logical positions it parsed;
         // output units obey the existing paragraph/table limits independently.
-        let mut stub = docx.clone();
-        stub.headers_footers.clear();
-        stub.body.elements.clear();
+        let mut stub = office_oxide::docx::DocxDocument {
+            body: Default::default(),
+            styles: docx.styles.clone(),
+            numbering: docx.numbering.clone(),
+            theme: None,
+            sections: vec![],
+            headers_footers: vec![],
+            embedded_fonts: vec![],
+            images: Default::default(),
+        };
+        let archival = request.limits.contains_key("archive_output");
+        if archival && !docx.images.is_empty() {
+            builder.gap("DOCX_IMAGE_CONTENT_NOT_EXTRACTED");
+        }
         let mut paragraph_number = 0;
         let mut table_number = 0;
         let max_paragraphs = positive_limit(&request.limits, "docx_max_paragraphs", 200);
         let max_tables = positive_limit(&request.limits, "docx_max_tables", 20);
         let max_rows = positive_limit(&request.limits, "docx_table_max_rows", 50);
         let max_cols = positive_limit(&request.limits, "docx_table_max_cols", 12);
-        for element in &docx.body.elements {
+        for (element, area) in docx.body.elements.iter().map(|e| (e, None)).chain(
+            docx.headers_footers
+                .iter()
+                .enumerate()
+                .filter(|_| archival)
+                .flat_map(|(index, hf)| {
+                    hf.content.iter().map(move |e| {
+                        (
+                            e,
+                            Some(format!(
+                                "{} {}",
+                                if hf.is_header { "header" } else { "footer" },
+                                index + 1
+                            )),
+                        )
+                    })
+                }),
+        ) {
             match element {
                 BlockElement::Paragraph(paragraph) => {
                     paragraph_number += 1;
@@ -175,7 +207,7 @@ fn audited_office_content(
                         SourceRangeUnit::Paragraph,
                         paragraph_number as u64,
                         paragraph_number as u64 + 1,
-                        None,
+                        area.clone(),
                     );
                     builder.read(range.clone());
                     if paragraph_number > max_paragraphs {
@@ -197,7 +229,11 @@ fn audited_office_content(
                 }
                 BlockElement::Table(table) => {
                     table_number += 1;
-                    let label = format!("Table {table_number}");
+                    let label = if let Some(area) = &area {
+                        format!("{area}/Table {table_number}")
+                    } else {
+                        format!("Table {table_number}")
+                    };
                     if table_number <= max_tables {
                         builder.push(&format!("## {label}"), ContentUnitKind::Heading, vec![]);
                     }
@@ -256,9 +292,9 @@ fn audited_office_content(
             .get("pptx_include_notes")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
-        let mut selected = pptx.clone();
+        let mut selected = std::borrow::Cow::Borrowed(pptx);
         if !include_notes {
-            for slide in &mut selected.slides {
+            for slide in &mut selected.to_mut().slides {
                 slide.notes = None;
             }
         }
@@ -352,6 +388,81 @@ fn audited_office_content(
 }
 
 pub fn parse_worker_request(request: &ParseRequest) -> Result<ParseResult, Box<WorkerDiagnostic>> {
+    parse_request_inner(request, None)
+}
+
+pub fn parse_archive_request(
+    request: &ai_daily_worker_contract::archive::ArchiveRequest,
+) -> Result<ai_daily_worker_contract::archive::ArchiveArtifact, Box<WorkerDiagnostic>> {
+    request.validate().map_err(|message| {
+        Box::new(worker_error(
+            &request.source,
+            "PARSER_INVALID_PAYLOAD",
+            message,
+            false,
+        ))
+    })?;
+    let parsed = parse_request_inner(&request.source, Some(request))?;
+    let mut artifact = parsed
+        .evidence_audit
+        .and_then(|audit| audit.archive)
+        .ok_or_else(|| {
+            Box::new(worker_error(
+                &request.source,
+                "ARCHIVE_OUTPUT_FAILED",
+                "archive output could not be created".into(),
+                true,
+            ))
+        })?;
+    if artifact.error.is_some() {
+        return Err(Box::new(worker_error(
+            &request.source,
+            "ARCHIVE_OUTPUT_FAILED",
+            "archive output could not be persisted".into(),
+            true,
+        )));
+    }
+    artifact.truncated |= parsed.truncated;
+    if artifact.truncated && artifact.gaps.is_empty() {
+        artifact.gaps.push("PARSER_LIMIT".into());
+    }
+    if artifact.usable_chars == 0 {
+        artifact.gaps.push("NO_USABLE_TEXT".into());
+    }
+    artifact.parser_backend = parsed.parser_backend.as_str().into();
+    artifact.worker_lane = "rust_office_archive_process_v4".into();
+    artifact.raw_sha256 = request.raw_sha256.clone();
+    artifact.duration_ms = parsed.duration_ms;
+    if let Ok(file) = std::fs::File::open(&request.source.file_path) {
+        if let Ok(package) = zip::ZipArchive::new(file) {
+            for name in package.file_names() {
+                let gap = if name.contains("/media/") {
+                    Some("OFFICE_IMAGE_CONTENT_NOT_EXTRACTED")
+                } else if name.contains("/embeddings/") {
+                    Some("OFFICE_EMBEDDED_CONTENT_NOT_EXTRACTED")
+                } else if matches!(
+                    name,
+                    "word/footnotes.xml" | "word/endnotes.xml" | "word/comments.xml"
+                ) {
+                    Some("DOCX_ANNOTATIONS_NOT_EXTRACTED")
+                } else {
+                    None
+                };
+                if let Some(gap) = gap {
+                    if !artifact.gaps.iter().any(|v| v == gap) {
+                        artifact.gaps.push(gap.into());
+                    }
+                }
+            }
+        }
+    }
+    Ok(artifact)
+}
+
+fn parse_request_inner(
+    request: &ParseRequest,
+    archive: Option<&ai_daily_worker_contract::archive::ArchiveRequest>,
+) -> Result<ParseResult, Box<WorkerDiagnostic>> {
     let started_at = Instant::now();
     if let Err(message) = request.validate() {
         return Err(Box::new(worker_error(
@@ -437,7 +548,7 @@ pub fn parse_worker_request(request: &ParseRequest) -> Result<ParseResult, Box<W
     }
     detected_request.file_type = format.into();
     detected_request.backend = backend;
-    let (context, retryable) = parse_strict_office_context(&detected_request);
+    let (context, retryable) = parse_strict_office_context(&detected_request, archive);
     let observed_after =
         match std::fs::metadata(&path).and_then(|value| metadata_source_version(&value)) {
             Ok(value) => value,
@@ -480,8 +591,21 @@ pub fn parse_worker_request(request: &ParseRequest) -> Result<ParseResult, Box<W
     })
 }
 
-fn parse_strict_office_context(request: &ParseRequest) -> (FileContextOut, bool) {
-    let limits = office_limits_map(&request.parser_limits);
+fn parse_strict_office_context(
+    request: &ParseRequest,
+    archive: Option<&ai_daily_worker_contract::archive::ArchiveRequest>,
+) -> (FileContextOut, bool) {
+    let mut limits = office_limits_map(&request.parser_limits);
+    if let Some(archive) = archive {
+        limits.insert(
+            "archive_output".into(),
+            serde_json::to_value(archive).unwrap(),
+        );
+        limits.insert(
+            "document_excerpt_max_chars".into(),
+            serde_json::json!(archive.max_output_bytes),
+        );
+    }
     let office_request = OfficeParseRequest {
         file_path: PathBuf::from(&request.file_path),
         file_type: request.file_type.clone(),
@@ -541,6 +665,28 @@ fn parse_strict_office_context(request: &ParseRequest) -> (FileContextOut, bool)
         );
     }
     (parse_office_file(&office_request), true)
+}
+
+fn content_builder(
+    request: &OfficeParseRequest,
+    max_chars: usize,
+    format: &str,
+) -> AuditTextBuilder {
+    if let Some(value) = request.limits.get("archive_output") {
+        if let Ok(output) = serde_json::from_value::<
+            ai_daily_worker_contract::archive::ArchiveRequest,
+        >(value.clone())
+        {
+            // Missing artifact is rejected by the archive operation, never accepted as an excerpt.
+            return AuditTextBuilder::for_archive(
+                &output.output_dir,
+                output.max_output_bytes,
+                format,
+            )
+            .unwrap_or_else(|_| AuditTextBuilder::new(0, format));
+        }
+    }
+    AuditTextBuilder::new(max_chars as u64, format)
 }
 
 fn validate_ooxml_zip(file_path: &PathBuf) -> Result<(), (String, bool)> {
@@ -676,12 +822,17 @@ mod tests {
     }
 
     fn write_test_xlsx(parts: &[(&str, &str)]) -> PathBuf {
+        static NEXT_FILE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system time should be after epoch")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("bounded-xlsx-{unique}.xlsx"));
-        let file = File::create(&path).expect("test xlsx should be creatable");
+        let sequence = NEXT_FILE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "bounded-xlsx-{}-{unique}-{sequence}.xlsx",
+            std::process::id()
+        ));
+        let file = File::create_new(&path).expect("test xlsx should be creatable");
         let mut zip = zip::ZipWriter::new(file);
         let options = zip::write::SimpleFileOptions::default();
 
@@ -914,7 +1065,7 @@ mod tests {
             .insert("document_excerpt_max_chars".into(), serde_json::json!(600));
         let parsed = parse_office_file(&request);
         std::fs::remove_file(path).ok();
-        assert!(parsed.error.is_none() && parsed.truncated);
+        assert!(parsed.error.is_none() && parsed.truncated, "{parsed:?}");
         assert!(parsed.content.chars().count() <= 600);
         assert!(parsed.content.contains("## Sheet: Second"));
         assert!(parsed.content.contains("1234.56") && parsed.content.contains("1254.81"));
@@ -1459,6 +1610,7 @@ struct SheetRef {
 enum PreviewCell {
     Text(String),
     SharedString(usize),
+    Formula(String, Box<PreviewCell>),
 }
 
 #[derive(Debug, Clone)]
@@ -1531,6 +1683,17 @@ fn parse_bounded_xlsx_inner(
     let rels_xml = read_zip_text(&mut archive, "xl/_rels/workbook.xml.rels")?;
     let relationships = parse_workbook_relationships(&rels_xml)?;
 
+    if request.limits.contains_key("archive_output") {
+        return archive_xlsx_rows(
+            request,
+            &mut archive,
+            &sheets,
+            &relationships,
+            &budget,
+            sheets_truncated,
+        )
+        .map_err(Into::into);
+    }
     let mut preview_sheets = Vec::new();
     let mut needed_shared_strings = BTreeSet::new();
     let mut truncated = sheets_truncated;
@@ -1547,7 +1710,7 @@ fn parse_bounded_xlsx_inner(
 
     let shared_strings = parse_needed_shared_strings(&mut archive, &needed_shared_strings)?;
     let (content, char_truncated, audit) =
-        render_xlsx_markdown(&preview_sheets, &shared_strings, &budget);
+        render_xlsx_markdown_with_output(&preview_sheets, &shared_strings, &budget, Some(request));
     Ok((content, truncated || char_truncated, audit))
 }
 
@@ -1662,6 +1825,16 @@ fn parse_sheet_bounded<R: Read + Seek>(
     sheet_name: &str,
     budget: &XlsxBudget,
 ) -> Result<PreviewSheet, String> {
+    visit_sheet_rows(archive, path, sheet_name, budget, None)
+}
+type RowSink<'a> = Option<&'a mut dyn FnMut(u64, Vec<PreviewCell>) -> Result<bool, String>>;
+fn visit_sheet_rows<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    path: &str,
+    sheet_name: &str,
+    budget: &XlsxBudget,
+    mut sink: RowSink<'_>,
+) -> Result<PreviewSheet, String> {
     let member = resolve_zip_member(archive, path)?;
     let entry = archive
         .by_name(&member)
@@ -1672,6 +1845,7 @@ fn parse_sheet_bounded<R: Read + Seek>(
     let mut rows: Vec<Vec<PreviewCell>> = Vec::new();
     let mut row_numbers = Vec::new();
     let mut read_rows = Vec::new();
+    let mut read_count = 0usize;
     let mut current_row_number = 0;
     let mut current_row: Option<Vec<Option<PreviewCell>>> = None;
     let mut current_cell: Option<CellBuilder> = None;
@@ -1686,7 +1860,7 @@ fn parse_sheet_bounded<R: Read + Seek>(
             .map_err(|error| format!("worksheet {path} XML error: {error}"))?
         {
             Event::Start(e) if is_local_name(e.name().as_ref(), b"row") => {
-                if read_rows.len() >= budget.max_rows {
+                if read_count >= budget.max_rows {
                     truncated = true;
                     break;
                 }
@@ -1694,14 +1868,24 @@ fn parse_sheet_bounded<R: Read + Seek>(
                     .and_then(|v| v.parse::<u64>().ok())
                     .filter(|v| *v > 0)
                     .unwrap_or(current_row_number + 1);
-                read_rows.push(current_row_number);
-                current_row = Some(vec![None; budget.max_columns]);
+                read_count += 1;
+                if sink.is_none() {
+                    read_rows.push(current_row_number);
+                }
+                current_row = Some(Vec::new());
             }
             Event::End(e) if is_local_name(e.name().as_ref(), b"row") => {
                 if let Some(row) = current_row.take() {
                     if let Some(trimmed) = trim_preview_row(row) {
-                        rows.push(trimmed);
-                        row_numbers.push(current_row_number);
+                        if let Some(sink) = sink.as_mut() {
+                            if !sink(current_row_number, trimmed)? {
+                                truncated = true;
+                                break;
+                            }
+                        } else {
+                            rows.push(trimmed);
+                            row_numbers.push(current_row_number);
+                        }
                     }
                 }
             }
@@ -1742,16 +1926,37 @@ fn parse_sheet_bounded<R: Read + Seek>(
             Event::End(e) if is_local_name(e.name().as_ref(), b"c") => {
                 if let (Some(cell), Some(row)) = (current_cell.take(), current_row.as_mut()) {
                     if cell.capture {
-                        if !cell.formula.is_empty() {
+                        if sink.is_none() && !cell.formula.is_empty() {
                             formula_rows.insert(current_row_number);
                         }
-                        if vertical_sum_formula(&cell.formula, current_row_number) {
+                        if sink.is_none() && vertical_sum_formula(&cell.formula, current_row_number)
+                        {
                             total_rows.insert(current_row_number);
                         }
-                        if let Some((column_index, preview_cell)) =
-                            finish_cell(cell, &mut shared_string_indexes)
-                        {
-                            let target = column_index.min(row.len()).max(1) - 1;
+                        let formula = if sink.is_some() {
+                            Some((cell.formula.clone(), cell.column_index))
+                        } else {
+                            None
+                        };
+                        let cell = finish_cell(cell, &mut shared_string_indexes);
+                        let cell = match formula {
+                            Some((formula, column)) if !formula.is_empty() => Some((
+                                column,
+                                PreviewCell::Formula(
+                                    formula,
+                                    Box::new(
+                                        cell.map(|(_, c)| c)
+                                            .unwrap_or_else(|| PreviewCell::Text(String::new())),
+                                    ),
+                                ),
+                            )),
+                            _ => cell,
+                        };
+                        if let Some((column_index, preview_cell)) = cell {
+                            let target = column_index.max(1) - 1;
+                            if row.len() <= target {
+                                row.resize_with(target + 1, || None);
+                            }
                             row[target] = Some(preview_cell);
                         }
                     }
@@ -1775,6 +1980,27 @@ fn parse_sheet_bounded<R: Read + Seek>(
             Event::Start(e) if is_local_name(e.name().as_ref(), b"f") => {
                 if let Some(cell) = current_cell.as_mut() {
                     cell.in_formula = true;
+                    if sink.is_some() {
+                        for key in [b"t".as_slice(), b"si", b"ref"] {
+                            if let Some(value) = attr_value(&e, key)? {
+                                cell.formula.push_str(&format!(
+                                    "[{}={value}]",
+                                    String::from_utf8_lossy(key)
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            Event::Empty(e) if is_local_name(e.name().as_ref(), b"f") && sink.is_some() => {
+                if let Some(cell) = current_cell.as_mut() {
+                    cell.formula.push_str("[formula]");
+                    for key in [b"t".as_slice(), b"si", b"ref"] {
+                        if let Some(value) = attr_value(&e, key)? {
+                            cell.formula
+                                .push_str(&format!("[{}={value}]", String::from_utf8_lossy(key)));
+                        }
+                    }
                 }
             }
             Event::End(e) if is_local_name(e.name().as_ref(), b"f") => {
@@ -1894,10 +2120,23 @@ fn parse_needed_shared_strings<R: Read + Seek>(
     archive: &mut ZipArchive<R>,
     needed: &BTreeSet<usize>,
 ) -> Result<HashMap<usize, String>, String> {
-    let Some(max_needed) = needed.iter().next_back().copied() else {
+    if needed.is_empty() {
         return Ok(HashMap::new());
+    }
+    parse_shared_strings(archive, Some(needed))
+}
+fn parse_shared_strings<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    needed: Option<&BTreeSet<usize>>,
+) -> Result<HashMap<usize, String>, String> {
+    let max_needed = needed
+        .and_then(|v| v.iter().next_back().copied())
+        .unwrap_or(usize::MAX);
+    let member = match resolve_zip_member(archive, "xl/sharedStrings.xml") {
+        Ok(value) => value,
+        Err(_) if needed.is_none() => return Ok(HashMap::new()),
+        Err(e) => return Err(e),
     };
-    let member = resolve_zip_member(archive, "xl/sharedStrings.xml")?;
     let entry = archive
         .by_name(&member)
         .map_err(|error| error.to_string())?;
@@ -1920,7 +2159,7 @@ fn parse_needed_shared_strings<R: Read + Seek>(
                 current_text.clear();
             }
             Event::End(e) if is_local_name(e.name().as_ref(), b"si") => {
-                if needed.contains(&current_index) {
+                if needed.is_none_or(|needed| needed.contains(&current_index)) {
                     result.insert(current_index, current_text.clone());
                 }
                 if current_index >= max_needed {
@@ -1947,7 +2186,7 @@ fn parse_needed_shared_strings<R: Read + Seek>(
         }
         buf.clear();
     }
-    if needed.iter().any(|index| !result.contains_key(index)) {
+    if needed.is_some_and(|needed| needed.iter().any(|index| !result.contains_key(index))) {
         return Err("referenced shared string is missing".into());
     }
     Ok(result)
@@ -2354,12 +2593,16 @@ impl XlsxRow {
     }
 }
 
-fn render_xlsx_markdown(
+fn render_xlsx_markdown_with_output(
     sheets: &[PreviewSheet],
     shared_strings: &HashMap<usize, String>,
     budget: &XlsxBudget,
+    request: Option<&OfficeParseRequest>,
 ) -> (String, bool, ParsedContentAudit) {
-    let mut builder = AuditTextBuilder::new(budget.max_chars as u64, "xlsx");
+    let archival = request.is_some_and(|r| r.limits.contains_key("archive_output"));
+    let mut builder = request
+        .map(|r| content_builder(r, budget.max_chars, "xlsx"))
+        .unwrap_or_else(|| AuditTextBuilder::new(budget.max_chars as u64, "xlsx"));
     let title = "# XLSX preview";
     builder.push(title, ContentUnitKind::Heading, vec![]);
     let mut prepared = Vec::new();
@@ -2475,6 +2718,18 @@ fn render_xlsx_markdown(
                 separator: (kind == ContentUnitKind::TableHeader && !metadata)
                     .then(|| format!("| {} |", vec!["---"; col_count].join(" | "))),
             });
+        }
+        if archival {
+            builder.push(&heading, ContentUnitKind::Heading, vec![]);
+            for row in rendered {
+                if !builder.push(&row.text, row.kind, row.ranges.clone()) {
+                    break;
+                }
+                if let Some(separator) = row.separator {
+                    builder.push(&separator, ContentUnitKind::TableHeader, row.ranges);
+                }
+            }
+            continue;
         }
         let mut summaries = xlsx_window_summaries(&rendered);
         let whole = summaries.pop();
@@ -2615,6 +2870,10 @@ fn is_header_row(cells: &[String]) -> bool {
 fn cell_to_text(cell: &PreviewCell, shared_strings: &HashMap<usize, String>) -> String {
     match cell {
         PreviewCell::Text(value) => value.clone(),
+        PreviewCell::Formula(formula, cached) => format!(
+            "公式：={formula}；缓存值：{}",
+            cell_to_text(cached, shared_strings)
+        ),
         PreviewCell::SharedString(index) => shared_strings
             .get(index)
             .cloned()
@@ -2684,4 +2943,68 @@ fn unescape_general_ref(e: &BytesRef<'_>) -> Result<String, String> {
     quick_xml::escape::unescape(&wrapped)
         .map(|value| value.into_owned())
         .map_err(|error| format!("XML reference unescape error: {error}"))
+}
+
+fn archive_xlsx_rows<R: Read + Seek>(
+    request: &OfficeParseRequest,
+    archive: &mut ZipArchive<R>,
+    sheets: &[SheetRef],
+    relationships: &HashMap<String, String>,
+    budget: &XlsxBudget,
+    mut truncated: bool,
+) -> Result<(String, bool, ParsedContentAudit), String> {
+    let strings = parse_shared_strings(archive, None)?;
+    let mut builder = content_builder(request, budget.max_chars, "xlsx");
+    builder.push("# XLSX archive", ContentUnitKind::Heading, vec![]);
+    for sheet in sheets {
+        let Some(path) = resolve_sheet_path(sheet, relationships) else {
+            truncated = true;
+            continue;
+        };
+        if !builder.push(
+            &format!("## Sheet: {}", escape_markdown_cell(&sheet.name)),
+            ContentUnitKind::Heading,
+            vec![],
+        ) {
+            truncated = true;
+            break;
+        }
+        let mut first = true;
+        let result = visit_sheet_rows(
+            archive,
+            &path,
+            &sheet.name,
+            budget,
+            Some(&mut |number, row| {
+                let cells: Vec<_> = row
+                    .iter()
+                    .map(|cell| escape_markdown_cell(&cell_to_text(cell, &strings)))
+                    .collect();
+                if cells.iter().any(|value| value.contains("#SHARED_STRING[")) {
+                    return Err("referenced shared string is missing".into());
+                }
+                let kind = if first || is_header_row(&cells) {
+                    ContentUnitKind::TableHeader
+                } else {
+                    ContentUnitKind::TableRow
+                };
+                first = false;
+                let mut range = SourceRange::new(
+                    SourceRangeUnit::SheetRow,
+                    number,
+                    number + 1,
+                    Some(sheet.name.clone()),
+                );
+                range.column_start = Some(1);
+                range.column_end = Some(cells.len() as u64 + 1);
+                Ok(builder.push(&format!("| {} |", cells.join(" | ")), kind, vec![range]))
+            }),
+        )?;
+        truncated |= result.truncated;
+        if result.truncated {
+            break;
+        }
+    }
+    let (content, audit, bounded) = builder.finish();
+    Ok((content, truncated || bounded, audit))
 }

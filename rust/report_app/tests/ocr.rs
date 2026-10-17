@@ -131,6 +131,7 @@ fn overlay_keeps_unverified_status_original_pages_and_rejects_changed_source() {
     assert_eq!(scan.sources.len(), 1);
     let source = &mut scan.sources[0];
     let original = source.excerpt.clone();
+    assert!(!original.is_empty(), "native scan failed: {source:?}");
     let doc = docs.values().next().unwrap();
     ocr::overlay(source, doc, &app.config, &Default::default()).unwrap();
     assert_eq!(source.excerpt, original, "native text is preserved");

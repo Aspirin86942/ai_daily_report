@@ -59,8 +59,13 @@ pub fn parse_xls(request: &OfficeParseRequest) -> FileContextOut {
         let max_chars = positive_limit(&request.limits, "document_excerpt_max_chars", 6000);
         let names = book.sheet_names().to_vec();
         let mut bounded = names.len() > max_sheets;
-        let mut builder = AuditTextBuilder::new(max_chars as u64, "xls");
+        let mut builder = content_builder(request, max_chars, "xls");
         for name in names.iter().take(max_sheets) {
+            let formulas = if request.limits.contains_key("archive_output") {
+                Some(book.worksheet_formula(name)?)
+            } else {
+                None
+            };
             let range = book.worksheet_range(name)?;
             let (start_row, start_col) = range.start().unwrap_or((0, 0));
             bounded |= range.height() > max_rows || range.width() > max_columns;
@@ -73,13 +78,25 @@ pub fn parse_xls(request: &OfficeParseRequest) -> FileContextOut {
                 let cells = row
                     .iter()
                     .take(max_columns)
-                    .map(|cell| {
+                    .enumerate()
+                    .map(|(column, cell)| {
                         let text = match cell {
                             calamine::Data::DateTime(value) => value
                                 .as_datetime()
                                 .map(|date| date.format("%Y-%m-%d %H:%M:%S").to_string())
                                 .unwrap_or_else(|| cell.to_string()),
                             _ => cell.to_string(),
+                        };
+                        let text = if let Some(formula) = formulas
+                            .as_ref()
+                            .and_then(|f| {
+                                f.get_value((start_row + index as u32, start_col + column as u32))
+                            })
+                            .filter(|f| !f.is_empty())
+                        {
+                            format!("公式：={formula}；缓存值：{text}")
+                        } else {
+                            text
                         };
                         escape_markdown_cell(&text)
                     })

@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 ai-daily-scanner-contract = { path = "../scanner_contract" }

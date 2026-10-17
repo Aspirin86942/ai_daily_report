@@ -56,6 +56,47 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
     let config = AppConfig::load(executable.parent().unwrap(), config_dir)?;
     let now = chrono::Utc::now();
     match command {
+        Command::Collect(args) => {
+            let budget =
+                ai_daily_report::archive::resources::Budget::new(config.archive.memory_mib)?;
+            let result = (|| -> Result<serde_json::Value, ReportError> {
+                let metrics = ai_daily_report::archive::collect::run(&config, args.baseline, now)?;
+                let mut value = serde_json::to_value(&metrics)?;
+                value["resources"] = budget.sample()?;
+                let store = ai_daily_report::archive::store::ArchiveStore::open(&config, true)?;
+                store.conn.execute(
+                    "UPDATE collections SET metrics_json=? WHERE id=?",
+                    rusqlite::params![serde_json::to_string(&value)?, metrics.run_id],
+                )?;
+                Ok(value)
+            })();
+            if args.scheduled {
+                ai_daily_report::operations::append_scheduled_log(&config, &result)?;
+            }
+            ai_daily_report::archive::cli::print(&result?, args.format)
+        }
+        Command::Archive { format, command } => ai_daily_report::archive::cli::print(
+            &ai_daily_report::archive::cli::execute(&config, command)?,
+            format,
+        ),
+        Command::Stats(args) => {
+            let value = ai_daily_report::archive::stats::query(
+                &config,
+                args.from.as_ref().map(ToString::to_string).as_deref(),
+                args.to.as_ref().map(ToString::to_string).as_deref(),
+                args.run_id.as_deref(),
+            )?;
+            if let Some(path) = args.files_csv {
+                ai_daily_report::archive::stats::write_csv(
+                    &config,
+                    args.from.as_ref().map(ToString::to_string).as_deref(),
+                    args.to.as_ref().map(ToString::to_string).as_deref(),
+                    args.run_id.as_deref(),
+                    &path,
+                )?;
+            }
+            ai_daily_report::archive::cli::print(&value, args.format)
+        }
         Command::ArchiveScanner { .. } => unreachable!(),
         command @ (Command::Daily(_) | Command::Weekly(_) | Command::Monthly(_)) => {
             let scheduled = matches!(&command,Command::Daily(args)if args.scheduled);
@@ -242,12 +283,12 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
             Ok(())
         }
         Command::Task {
-            command: ai_daily_report::cli::TaskCommand::Plan { sid },
+            command: ai_daily_report::cli::TaskCommand::Plan { sid, kind },
         } => {
             println!(
                 "{}",
-                serde_json::to_string_pretty(&ai_daily_report::operations::task_plan(
-                    &config, &sid, now
+                serde_json::to_string_pretty(&ai_daily_report::operations::task_plan_kind(
+                    &config, &sid, now, &kind
                 )?)?
             );
             Ok(())

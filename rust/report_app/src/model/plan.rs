@@ -14,6 +14,15 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 const FACTS_PROMPT: &str = include_str!("../../../../templates/evidence_facts_prompt_v3.md");
 const COMPOSE_PROMPT: &str = include_str!("../../../../templates/evidence_compose_prompt_v3.md");
 pub const DAILY_PLAN_VERSION: u32 = 4;
+const FACTS_PROMPT_V4: &str = include_str!("../../../../templates/evidence_facts_prompt_v4.md");
+const COMPOSE_PROMPT_V4: &str = include_str!("../../../../templates/evidence_compose_prompt_v4.md");
+fn daily_version(target: &Value) -> u32 {
+    if target["archive_format"] == 4 {
+        5
+    } else {
+        DAILY_PLAN_VERSION
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -53,6 +62,14 @@ pub struct DailyPlan {
     pub source_map: Value,
     pub coverage: Value,
     pub gaps: Vec<Value>,
+}
+
+fn wire_facts(facts: &[SelectedFact]) -> Result<Value, ReportError> {
+    let mut value = serde_json::to_value(facts)?;
+    for fact in value.as_array_mut().unwrap() {
+        fact.as_object_mut().unwrap().remove("evidence");
+    }
+    Ok(value)
 }
 
 fn hash(value: &Value) -> Result<String, ReportError> {
@@ -137,23 +154,41 @@ impl PlannedStep {
             return Ok(());
         }
         let compose = self.kind == StepKind::Compose;
-        let prompt = if compose {
-            COMPOSE_PROMPT
-        } else {
-            FACTS_PROMPT
+        let prompt = match (self.version, compose) {
+            (5, true) => COMPOSE_PROMPT_V4,
+            (5, false) => FACTS_PROMPT_V4,
+            (_, true) => COMPOSE_PROMPT,
+            (_, false) => FACTS_PROMPT,
         };
-        let schema = response_schema(compose);
+        let schema = if self.version == 5 {
+            super::contracts::archive_response_schema(compose)
+        } else {
+            response_schema(compose)
+        };
+        let response_version = if self.version == 5 { 4 } else { 3 };
         self.prompt_sha256 = digest(prompt.as_bytes());
         self.schema_sha256 = hash(&schema)?;
         let system = format!(
-            "{prompt}\n响应结构版本：3\n{}\n本次响应容量：{} UTF-8 字节。完整保留本批的关键事实、数字、条件和例外。",
+            "{prompt}\n响应结构版本：{response_version}\n{}\n本次响应容量：{} UTF-8 字节。完整保留本批的关键事实、数字、条件和例外。",
             String::from_utf8(canonical_json(&schema)?).unwrap(),
             self.output_capacity_bytes,
         );
+        let mut target = self.target.clone();
+        if let Some(target) = target.as_object_mut() {
+            target.remove("archive_changes");
+        }
+        let mut sources = self.source_map.clone();
+        if let Some(sources) = sources.as_object_mut() {
+            for source in sources.values_mut() {
+                if let Some(source) = source.as_object_mut() {
+                    source.remove("archive");
+                }
+            }
+        }
         let user = if compose {
-            json!({"target":self.target,"facts":self.facts,"sources":self.source_map,"coverage":self.coverage})
+            json!({"target":target,"facts":wire_facts(&self.facts)?,"sources":sources,"coverage":self.coverage})
         } else {
-            json!({"target":self.target,"sources":self.entries.iter().map(Entry::wire).collect::<Vec<_>>()})
+            json!({"target":target,"sources":self.entries.iter().map(Entry::wire).collect::<Vec<_>>()})
         };
         let output = if compose {
             llm.max_tokens
@@ -215,7 +250,7 @@ impl PlannedStep {
     }
     pub fn validate_identity(&self, llm: &Llm) -> Result<(), ReportError> {
         let version = if matches!(self.kind, StepKind::Facts | StepKind::Compose) {
-            DAILY_PLAN_VERSION
+            daily_version(&self.target)
         } else {
             3
         };
@@ -330,7 +365,7 @@ impl PlannedStep {
 fn empty_step(kind: StepKind, target: &Value) -> PlannedStep {
     PlannedStep {
         version: if matches!(kind, StepKind::Facts | StepKind::Compose) {
-            DAILY_PLAN_VERSION
+            daily_version(target)
         } else {
             3
         },
@@ -386,7 +421,7 @@ pub fn prepare(
     queues.sort_by_key(|(priority, _)| !priority);
     if queues.iter().all(|(_, queue)| queue.is_empty()) {
         return Ok(DailyPlan {
-            version: DAILY_PLAN_VERSION,
+            version: daily_version(&target),
             target,
             batches: vec![],
             source_map: json!({}),
@@ -463,7 +498,7 @@ pub fn prepare(
         batch.validate(llm)?;
     }
     Ok(DailyPlan {
-        version: DAILY_PLAN_VERSION,
+        version: daily_version(&target),
         target,
         batches,
         source_map,
@@ -498,7 +533,7 @@ impl DailyPlan {
     ) -> Result<Vec<PlannedStep>, ReportError> {
         let fits = |step: &PlannedStep| -> Result<bool, ReportError> {
             Ok(step.facts.len() <= 64
-                && canonical_json(&serde_json::to_value(&step.facts)?)?.len() as u64
+                && canonical_json(&wire_facts(&step.facts)?)?.len() as u64
                     <= llm.max_tokens.saturating_mul(2)
                 && step.bytes()?.len() <= request_limit(llm, llm.max_tokens)?)
         };

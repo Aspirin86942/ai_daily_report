@@ -1,7 +1,7 @@
 [CmdletBinding()]
-param([string]$ProjectRoot = (Join-Path $PSScriptRoot '..'), [string]$ConfigDirectory)
+param([string]$ProjectRoot = (Join-Path $PSScriptRoot '..'), [string]$ConfigDirectory, [ValidateSet("daily", "collect")][string]$Kind = "daily")
 . (Join-Path $PSScriptRoot 'daily_task_common.ps1')
-$plan = Get-ReportTaskPlan -ProjectRoot $ProjectRoot -ConfigDirectory $ConfigDirectory
+$plan = Get-ReportTaskPlan -ProjectRoot $ProjectRoot -ConfigDirectory $ConfigDirectory -Kind $Kind
 $task = Get-ExistingReportTask -Plan $plan
 if ($null -eq $task) {
     [pscustomobject]@{ Exists = $false; TaskName = $plan.task_name } | ConvertTo-Json

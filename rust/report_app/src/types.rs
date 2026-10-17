@@ -79,6 +79,7 @@ pub fn target_date(
 pub enum ReportSource {
     Db,
     Scan,
+    Archive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -233,9 +233,9 @@ if operation == "hello":
     ]
     print(json.dumps({
         "contract": "ai_daily_worker",
-        "protocol_version": 3,
+        "protocol_version": 4,
         "frame": "hello",
-        "worker_contract_version": "ai_daily_worker_v3",
+        "worker_contract_version": "ai_daily_worker_v4",
         "worker_kind": worker_kind,
         "worker_version": "0.1.0",
         "worker_build": "fake-build",
@@ -291,7 +291,7 @@ response = {
     "warnings": [],
     "error": error,
     "duration_ms": 1,
-    "worker_contract_version": "ai_daily_worker_v3",
+    "worker_contract_version": "ai_daily_worker_v4",
     "worker_version": "0.1.0",
     "worker_build": "changed-build" if mode == "wrong_build" else "fake-build",
     "observed_source_version": request["expected_source_version"],

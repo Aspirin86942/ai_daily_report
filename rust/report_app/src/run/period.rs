@@ -30,6 +30,8 @@ struct PeriodInput {
     input_fingerprint: String,
     recovery_fingerprint: String,
     model_pricing: Option<ModelPricing>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    model_paths: Vec<String>,
 }
 
 fn daily_context(reports: Vec<Value>) -> Vec<Value> {
@@ -45,6 +47,12 @@ fn daily_context(reports: Vec<Value>) -> Vec<Value> {
 }
 
 pub fn run_period(mut request: ReportRequest, app: &App) -> Result<ReportOutcome, ReportError> {
+    if request.period.source == ReportSource::Archive {
+        return Err(ReportError::new(
+            "REPORT_SOURCE_INVALID",
+            "周报和月报请使用 --source db 汇总已发布的归档日报",
+        ));
+    }
     let started = Instant::now();
     let deadline = started + Duration::from_secs(app.config.recovery.run_budget_seconds);
     let now = request.context.started_at;
@@ -82,11 +90,22 @@ pub fn run_period(mut request: ReportRequest, app: &App) -> Result<ReportOutcome
     let result = (|| {
         app.store.set_scanning(id, now)?;
         deadline_check(deadline)?;
+        let mut model_paths = Vec::new();
         let (reports, missing, file_context, sources, quality) =
             if request.period.source == ReportSource::Db {
                 let (reports, missing) = app
                     .store
                     .reports_in_range(request.period.start, request.period.end)?;
+                for source in reports
+                    .iter()
+                    .flat_map(|r| r["sources"].as_array().into_iter().flatten())
+                {
+                    if let Some(path) = source["coverage_limits"]["archive"]["path"].as_str() {
+                        model_paths.push(path.to_owned());
+                    }
+                }
+                model_paths.sort();
+                model_paths.dedup();
                 let partial = !missing.is_empty()
                     || reports
                         .iter()
@@ -137,6 +156,7 @@ pub fn run_period(mut request: ReportRequest, app: &App) -> Result<ReportOutcome
             input_fingerprint: fingerprint,
             recovery_fingerprint: app.fingerprint(true)?,
             model_pricing: app.config.recovery.model_pricing.clone(),
+            model_paths,
         };
         let reference = app
             .snapshots
@@ -212,10 +232,15 @@ fn finish(
     }
     let mut limits = app.config.recovery.clone();
     limits.model_pricing = payload.model_pricing.clone();
+    let transport = crate::archive::model_input::PathsTransport {
+        config: &app.config,
+        paths: &payload.model_paths,
+        inner: app.transport.as_ref(),
+    };
     let runner = ModelRunner {
         store: &app.store,
         snapshots: &app.snapshots,
-        transport: app.transport.as_ref(),
+        transport: &transport,
         llm: &app.config.llm,
         recovery: &limits,
         recovery_inputs: None,

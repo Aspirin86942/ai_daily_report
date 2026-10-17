@@ -1,13 +1,15 @@
 ﻿# Repository Guidelines
 
 ## Project Structure & Module Organization
-- `rust/report_app` contains the Rust CLI and report application: `config`, `run`, `store`, `snapshots`, `model`, `reports`, `publish`, `maintenance`, and `operations`.
+- `rust/report_app` contains the Rust CLI and report application: `config`, `run`, `store`, `snapshots`, `model`, `reports`, `publish`, `maintenance`, `operations`, and `archive`.
 - `run_report` handles daily, weekly and monthly reports; frozen inputs and raw model responses preserve recovery evidence. Daily v3 extracts facts and composes one report.
 - The live task uses `.releases/rust-20261016-02/ai-daily-report.exe` with `config-rust` after the 2026-10-16 capacity upgrade. Daily model plan v4 uses independent fact output limits, complete splits and grouped composition; report format stays v3. Retain the 2026-10-15 package and its saved config for unfinished model plan v3 runs. `main.py`, `src/`, the old Python tools, `scanner_native`, `.venv` and legacy workers remain available for rollback. Defer the planned source cleanup until the three real Rust scheduling windows pass; preserve the user environment, databases, reports and backups. See `docs/plans/2026-10-15-rust-cutover.md`.
 - `templates/` contains embedded LLM prompts and MiniJinja report templates. Packaged copies must match their compiled bytes.
 - `config/` stores YAML settings. Track only `settings.example.yaml`; keep `settings.windows.yaml` and `.secrets.yaml` local.
 - `data/` stores the SQLite database and generated Markdown reports; `logs/` holds runtime logs.
-- `rust/` contains `report_app`, `scanner_core`, `scanner_contract`, `worker_contract`, `discovery`, `office_parser`, and `pdf_parser`. Worker protocol is v3. PyO3 is outside the active workspace.
+- `rust/` contains `report_app`, `scanner_core`, `scanner_contract`, `worker_contract`, `discovery`, `office_parser`, and `pdf_parser`. Current source uses worker protocol v4; rebuild all three executables together. The retained production daily package still uses its original matching workers. PyO3 is outside the active workspace.
+- `archive` keeps independent schema v1, raw content objects, immutable full-text extractions and report evidence under `data_dir/archive`. Archive daily reports/frozen inputs use v4 and model plans use v5; old scan reports and recovery remain supported. Cache retention must never remove archive evidence. See `docs/change-archive.md` and `docs/plans/2026-10-17-change-archive.md`.
+- The independent current-user `AI Daily Report Collect` task uses `.releases/rust-20261017-archive-02` with `config-rust/archive-collector` every 30 minutes. Its real 2,648-file baseline and manual scheduler probe passed; partial and failed extraction gaps remain explicit. The daily task still uses the older package above until real cross-day archive collection and the existing three scheduled-window gates pass. See `.artifacts/rust-migration/archive-v1/production/acceptance.json` and `docs/archive-performance-20261017.md`.
 - `scanner_core::store` keeps its public API in `mod.rs`; private `types`, `runs`, `lease`, `artifacts`, `retention` and `tests` modules separate persistence responsibilities.
 - Rust integration tests live under each package's `tests/`; `tests/windows_operations.ps1` verifies operational scripts with scheduler doubles. Existing pytest modules are migration references.
 
@@ -18,6 +20,8 @@
 - Daily reports default to the previous completed calendar day. Prefer `--target-date YYYY-MM-DD`; `--date` remains a deprecated alias. `--dry-run` scans locally without model calls, while `--no-save` generates an audited preview.
 - `ai-daily-report.exe weekly --source db` aggregates weekly reports; `--source scan` scans files instead.
 - `ai-daily-report.exe monthly --source db` aggregates monthly reports.
+- `collect --baseline` fixes the initial inventory; `collect` saves observed changes and drains the durable parse queue. `daily --source archive` uses archived changes, while `archive` and `stats` query evidence without model calls. Additional archive roots are local-only until explicitly allowed in `archive.model_roots`.
+- `scripts/benchmark_archive.py` measures all 2,648 frozen files, tunes read/parse workers, and checks content signatures. Run timing suites without concurrent builds/tests; retain failures, partial coverage and all-file timing CSVs. The unchanged-collection gate is 20 runs with P95 <= 5 seconds and zero source-body reads, parse starts and model calls.
 - `cargo test --manifest-path rust/Cargo.toml --workspace --locked` verifies the Rust workspace.
 - Build debug workers and examples before integration tests; put the pinned `pdfium.dll` beside the PDF worker. Source identity changes require rebuilding both workers.
 - `scripts/build_windows_release.ps1` builds the three production executables with static CRT in an isolated target directory and verifies the complete manifest. Never use the live legacy worker directory as its output.

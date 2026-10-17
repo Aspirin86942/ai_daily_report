@@ -9,6 +9,9 @@ pub mod period;
 pub const DAILY_TEMPLATE_V3: &str =
     include_str!("../../../templates/evidence_report_template_v3.md");
 
+pub const DAILY_TEMPLATE_V4: &str =
+    include_str!("../../../templates/evidence_report_template_v4.md");
+
 pub fn render_daily(report: &data::DailyReport, template: &str) -> Result<String, ReportError> {
     report.validate()?;
     let mut value = serde_json::to_value(report)?;

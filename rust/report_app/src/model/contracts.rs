@@ -32,6 +32,10 @@ pub struct SelectedFact {
     pub fact_id: String,
     pub pending: bool,
     pub fact: Fact,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matter_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub evidence: Vec<crate::archive::model_input::EvidenceRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +49,8 @@ pub struct CitedText {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Matter {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matter_id: Option<String>,
     pub title: String,
     pub background: Option<CitedText>,
     pub details: Vec<CitedText>,
@@ -85,7 +91,7 @@ impl FactsResponse {
         unverified: &BTreeSet<String>,
         capacity: usize,
     ) -> Result<Vec<SelectedFact>, ReportError> {
-        if self.schema_version != FORMAT_VERSION {
+        if !matches!(self.schema_version, 3 | 4) {
             return Err(invalid());
         }
         if self.facts.len() + self.pending.len() > 64 {
@@ -112,6 +118,8 @@ impl FactsResponse {
                     return Err(invalid());
                 }
                 selected.push(SelectedFact {
+                    matter_id: None,
+                    evidence: vec![],
                     fact_id: format!("{step}:{:03}", selected.len()),
                     pending,
                     fact,
@@ -140,24 +148,32 @@ impl ComposedReport {
     }
 
     pub fn merge(parts: Vec<Self>, facts: &[SelectedFact]) -> Result<Self, ReportError> {
+        let version = parts
+            .first()
+            .map_or(FORMAT_VERSION, |part| part.schema_version);
+        if parts.iter().any(|part| part.schema_version != version) {
+            return Err(invalid());
+        }
         let mut merged = Self {
-            schema_version: FORMAT_VERSION,
+            schema_version: version,
             overview: vec![],
             matters: vec![],
             pending: vec![],
         };
         for part in parts {
-            // Overview is a short navigation aid. Every fact remains covered in
-            // the full body or pending section, checked again after merging.
-            merged
-                .overview
-                .extend(part.overview.into_iter().take(5 - merged.overview.len()));
+            merged.overview.extend(part.overview);
             for mut matter in part.matters {
-                if let Some(existing) = merged
-                    .matters
-                    .iter_mut()
-                    .find(|item| item.title.trim() == matter.title.trim())
-                {
+                if let Some(existing) = merged.matters.iter_mut().find(|item| {
+                    match (&item.matter_id, &matter.matter_id) {
+                        (Some(a), Some(b)) => a == b,
+                        _ => {
+                            item.title.trim() == matter.title.trim()
+                                || item.details.iter().flat_map(|v| &v.fact_ids).any(|id| {
+                                    matter.details.iter().any(|v| v.fact_ids.contains(id))
+                                })
+                        }
+                    }
+                }) {
                     existing.details.extend(matter.background.take());
                     existing.details.append(&mut matter.details);
                     existing.details.extend(matter.status.take());
@@ -167,12 +183,67 @@ impl ComposedReport {
             }
             merged.pending.extend(part.pending);
         }
+        // Consider the whole day, including facts absent from a group's overview.
+        merged.overview.extend(merged.matters.iter().flat_map(|m| {
+            m.background
+                .iter()
+                .chain(&m.details)
+                .chain(&m.status)
+                .cloned()
+        }));
+        let by_id: BTreeMap<_, _> = facts.iter().map(|f| (f.fact_id.as_str(), f)).collect();
+        let rank = |item: &CitedText| {
+            item.fact_ids
+                .iter()
+                .filter_map(|id| by_id.get(id.as_str()))
+                .map(|f| {
+                    priority(&format!(
+                        "{} {} {}",
+                        f.fact.topic,
+                        f.fact.detail,
+                        f.fact.status.as_deref().unwrap_or("")
+                    ))
+                })
+                .min()
+                .unwrap_or(4)
+        };
+        merged.overview.sort_by_key(&rank);
+        let mut seen = BTreeSet::new();
+        merged.overview.retain(|item| {
+            let keys: Vec<_> = item
+                .fact_ids
+                .iter()
+                .map(|id| {
+                    by_id
+                        .get(id.as_str())
+                        .and_then(|f| f.matter_id.clone())
+                        .unwrap_or_else(|| id.clone())
+                })
+                .collect();
+            if keys.iter().all(|key| seen.contains(key)) {
+                false
+            } else {
+                seen.extend(keys);
+                true
+            }
+        });
+        merged.overview.truncate(5);
+        merged.matters.sort_by_key(|matter| {
+            matter
+                .background
+                .iter()
+                .chain(&matter.details)
+                .chain(&matter.status)
+                .map(&rank)
+                .min()
+                .unwrap_or(4)
+        });
         merged.validate(facts)?;
         Ok(merged)
     }
 
     pub fn validate(&self, facts: &[SelectedFact]) -> Result<(), ReportError> {
-        if self.schema_version != FORMAT_VERSION || self.overview.len() > 5 {
+        if !matches!(self.schema_version, 3 | 4) || self.overview.len() > 5 {
             return Err(invalid());
         }
         let by_id: BTreeMap<_, _> = facts
@@ -214,7 +285,7 @@ impl ComposedReport {
         let mut titles = BTreeSet::new();
         for matter in &self.matters {
             if !bounded(&matter.title, 120)
-                || !titles.insert(matter.title.trim())
+                || !titles.insert(matter.matter_id.as_deref().unwrap_or(matter.title.trim()))
                 || matter.details.is_empty()
             {
                 return Err(invalid());
@@ -226,6 +297,15 @@ impl ComposedReport {
                 .chain(&matter.status)
             {
                 check(item)?;
+                if self.schema_version == 4
+                    && (matter.matter_id.is_none()
+                        || item
+                            .fact_ids
+                            .iter()
+                            .any(|id| by_id[id].matter_id != matter.matter_id))
+                {
+                    return Err(invalid());
+                }
                 if item.fact_ids.iter().any(|id| by_id[id].pending) {
                     return Err(invalid());
                 }
@@ -247,6 +327,46 @@ impl ComposedReport {
         }
         Ok(())
     }
+}
+
+pub fn priority(text: &str) -> u8 {
+    if ["审批", "权限", "制度", "授权"]
+        .iter()
+        .any(|w| text.contains(w))
+    {
+        0
+    } else if ["金额", "万元", "亿元", "异常", "差异", "超额", "¥", "￥"]
+        .iter()
+        .any(|w| text.contains(w))
+    {
+        1
+    } else if ["完成", "阻塞", "延期", "失败", "终止"]
+        .iter()
+        .any(|w| text.contains(w))
+    {
+        2
+    } else if ["截止", "期限", "到期", "限期"]
+        .iter()
+        .any(|w| text.contains(w))
+    {
+        3
+    } else {
+        4
+    }
+}
+
+pub fn archive_response_schema(compose: bool) -> Value {
+    let mut schema = response_schema(compose);
+    schema["properties"]["schema_version"]["const"] = json!(4);
+    if compose {
+        let matter = &mut schema["properties"]["matters"]["items"];
+        matter["properties"]["matter_id"] = json!({"type":"string","minLength":1});
+        matter["required"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!("matter_id"));
+    }
+    schema
 }
 
 /// This versioned schema is included in request identity and in the prompt.

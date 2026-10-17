@@ -38,7 +38,7 @@ fn validate_report(context_json: &str, report: &Value, markdown: &str) -> Result
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok());
     if report["date"].as_str() != Some(context.target_date.to_string().as_str())
         || start.map(|value| value.with_timezone(&Utc)) != Some(context.window_start_utc)
-        || !matches!(report["schema_version"].as_u64(), Some(2 | 3))
+        || !matches!(report["schema_version"].as_u64(), Some(2..=4))
         || !matches!(
             report["quality"].as_str(),
             Some("complete" | "partial" | "no_changes")

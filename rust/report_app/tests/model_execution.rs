@@ -635,6 +635,8 @@ fn grouped_composition_keeps_more_than_64_facts_and_pending_items() {
             serde_json::from_value(fact("s1")).unwrap();
         fact.detail = format!("事项 {n}：{}", "完整金额、条件和例外。".repeat(20));
         selected.push(SelectedFact {
+            matter_id: None,
+            evidence: vec![],
             fact_id: format!("batch_{n:03}:000"),
             pending: n >= 75,
             fact,
@@ -1124,4 +1126,48 @@ fn cached_responses_need_no_credentials_and_missing_credentials_reserve_no_calls
     h.runner(&network).execute(&plan.batches[0]).unwrap();
     assert!(h.runner(&offline).execute(&plan.batches[0]).unwrap().reused);
     assert_eq!(h.calls().len(), 1);
+}
+
+#[test]
+fn global_merge_ranks_last_group_and_unifies_stable_matter_ids() {
+    use ai_daily_report::model::contracts::{ComposedReport, SelectedFact};
+    let make_fact = |id: &str, matter: &str, detail: &str| -> SelectedFact {
+        serde_json::from_value(json!({"fact_id":id,"matter_id":matter,"pending":false,"fact":{"topic":detail,"background":null,"detail":detail,"conditions":[],"status":null,"source_ids":["s1"],"uncertainty":null}})).unwrap()
+    };
+    let mut facts: Vec<_> = (0..6)
+        .map(|i| make_fact(&format!("f{i}"), &format!("m{i}"), "一般资料整理"))
+        .collect();
+    facts.push(make_fact(
+        "important",
+        "approval",
+        "审批权限金额由5万元调整为10万元",
+    ));
+    facts.push(make_fact("same", "approval", "审批条件更新"));
+    let parts:Vec<ComposedReport>=facts.iter().enumerate().map(|(i,f)| {
+        let cite=json!({"text":f.fact.detail,"fact_ids":[f.fact_id],"source_ids":["s1"]});
+        serde_json::from_value(json!({"schema_version":4,"overview":[cite],"matters":[{"matter_id":f.matter_id,"title":format!("不同标题{i}"),"background":null,"details":[cite],"status":null}],"pending":[]})).unwrap()
+    }).collect();
+    let report = ComposedReport::merge(parts, &facts).unwrap();
+    assert!(report.overview.len() <= 5);
+    assert!(report.overview[0].text.contains("审批"));
+    let same: Vec<_> = report
+        .matters
+        .iter()
+        .filter(|m| m.matter_id.as_deref() == Some("approval"))
+        .collect();
+    assert_eq!(same.len(), 1);
+    assert_eq!(same[0].details.len(), 2);
+}
+
+#[test]
+fn global_overview_considers_facts_in_status_and_background() {
+    use ai_daily_report::model::contracts::{ComposedReport, SelectedFact};
+    let facts: Vec<SelectedFact> = ["资料整理", "审批权限调整"].into_iter().enumerate().map(|(i,text)| {
+        serde_json::from_value(json!({"fact_id":format!("f{i}"),"matter_id":"m1","pending":false,"fact":{"topic":text,"background":null,"detail":text,"conditions":[],"status":null,"source_ids":["s1"],"uncertainty":null}})).unwrap()
+    }).collect();
+    let cite = |i: usize| json!({"text":facts[i].fact.detail,"fact_ids":[facts[i].fact_id],"source_ids":["s1"]});
+    let part:ComposedReport=serde_json::from_value(json!({"schema_version":4,"overview":[cite(0)],"matters":[{"matter_id":"m1","title":"工作进展","background":null,"details":[cite(0)],"status":cite(1)}],"pending":[]})).unwrap();
+    part.validate_part(&facts).unwrap();
+    let merged = ComposedReport::merge(vec![part], &facts).unwrap();
+    assert_eq!(merged.overview[0].fact_ids, vec!["f1"]);
 }
