@@ -83,7 +83,56 @@ pub fn archive_scanner(
     Ok(value)
 }
 
-pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Value, ReportError> {
+fn trigger_times(local_time: &str) -> Result<[String; 3], ReportError> {
+    let time = chrono::NaiveTime::parse_from_str(local_time, "%H:%M")
+        .map_err(|_| ReportError::new("TASK_TIME_INVALID", "计划时间无效"))?;
+    let at = |minutes: i64| {
+        (time + chrono::Duration::minutes(minutes))
+            .format("%H:%M")
+            .to_string()
+    };
+    Ok([time.format("%H:%M").to_string(), at(30), at(90)])
+}
+
+fn calendar_trigger(id: &str, date: chrono::NaiveDate, time: &str) -> String {
+    format!("<CalendarTrigger id=\"{id}\"><StartBoundary>{date}T{time}:00+08:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>")
+}
+
+fn logon_trigger(config: &AppConfig, sid: &str) -> String {
+    if config.schedule.logon_catchup {
+        format!("<LogonTrigger id=\"LogonCatchup\"><Enabled>true</Enabled><UserId>{}</UserId><Delay>PT1M</Delay></LogonTrigger>", xml(sid))
+    } else {
+        String::new()
+    }
+}
+
+fn daily_triggers(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<String, ReportError> {
+    let date = now.with_timezone(&types::shanghai()).date_naive();
+    let times = trigger_times(&config.schedule.local_time)?;
+    Ok(format!(
+        "{}{}{}{}",
+        calendar_trigger("DailyShanghai", date, &times[0]),
+        calendar_trigger("DailyCatchup30", date, &times[1]),
+        calendar_trigger("DailyCatchup90", date, &times[2]),
+        logon_trigger(config, sid)
+    ))
+}
+
+fn collect_triggers(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> String {
+    let date = now.with_timezone(&types::shanghai()).date_naive();
+    format!(
+        "<CalendarTrigger id=\"Collect30Minutes\"><StartBoundary>{date}T00:00:00+08:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>PT30M</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>{}",
+        logon_trigger(config, sid)
+    )
+}
+
+fn task_plan_inner(
+    config: &AppConfig,
+    sid: &str,
+    task_name: &str,
+    arguments: &str,
+    triggers: &str,
+) -> Result<Value, ReportError> {
     let pieces: Vec<_> = sid.split('-').collect();
     if pieces.len() < 4
         || pieces[0] != "S"
@@ -106,19 +155,12 @@ pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Va
     if config_dir.contains(['"', '\r', '\n']) {
         return Err(ReportError::new("TASK_PATH_INVALID", "配置路径无效"));
     }
-    let arguments = format!("--config-dir \"{config_dir}\" daily --scheduled");
     // Ownership follows the persistent configuration, so updating a release keeps the same owner.
     let owner = format!(
         "AI Daily Report | checkout={}",
         display_path(config.config_dir.parent().unwrap())
     );
     let schedule = &config.schedule;
-    let date = now.with_timezone(&types::shanghai()).date_naive();
-    let logon = if schedule.logon_catchup {
-        format!("<LogonTrigger id=\"LogonCatchup\"><Enabled>true</Enabled><UserId>{}</UserId><Delay>PT1M</Delay></LogonTrigger>",xml(sid))
-    } else {
-        String::new()
-    };
     let restart = if schedule.restart_count > 0 {
         format!(
             "<RestartOnFailure><Interval>PT{}M</Interval><Count>{}</Count></RestartOnFailure>",
@@ -128,16 +170,16 @@ pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Va
         String::new()
     };
     let document = format!(
-        r#"<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>{owner}</Description><Author>{sid}</Author></RegistrationInfo><Triggers><CalendarTrigger id="DailyShanghai"><StartBoundary>{date}T{time}:00+08:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>{logon}</Triggers><Principals><Principal id="DailyReportUser"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>{battery}</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>{stop}</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><WakeToRun>{wake}</WakeToRun><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><ExecutionTimeLimit>PT{limit}M</ExecutionTimeLimit>{restart}</Settings><Actions Context="DailyReportUser"><Exec><Command>{program}</Command><Arguments>{arguments}</Arguments><WorkingDirectory>{root}</WorkingDirectory></Exec></Actions></Task>"#,
+        r#"<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>{owner}</Description><Author>{sid}</Author></RegistrationInfo><Triggers>{triggers}</Triggers><Principals><Principal id="DailyReportUser"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>{battery}</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>{stop}</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><WakeToRun>{wake}</WakeToRun><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><ExecutionTimeLimit>PT{limit}M</ExecutionTimeLimit>{restart}</Settings><Actions Context="DailyReportUser"><Exec><Command>{program}</Command><Arguments>{arguments}</Arguments><WorkingDirectory>{root}</WorkingDirectory></Exec></Actions></Task>"#,
         owner = xml(&owner),
         sid = xml(sid),
-        time = schedule.local_time,
+        triggers = triggers,
         battery = !schedule.allow_on_battery,
         stop = schedule.stop_on_battery,
         wake = schedule.wake_to_run,
         limit = schedule.execution_limit_minutes,
         program = xml(&display_path(&program)),
-        arguments = xml(&arguments),
+        arguments = xml(arguments),
         root = xml(&root)
     );
     let db = config.paths.db_dir.join("reports.sqlite3");
@@ -149,8 +191,15 @@ pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Va
         false
     };
     Ok(
-        json!({"project_root":root,"program":display_path(&program),"config_dir":config_dir,"arguments":arguments,"schedule":schedule,"task_name":schedule.task_name,"task_path":"\\","user_sid":sid,"owner_marker":owner,"data_dir":display_path(&config.paths.data_dir),"work_dir":display_path(&config.paths.work_dir),"reports_dir":display_path(&config.paths.reports_dir),"credential_present":!config.api_key().is_empty(),"capabilities_configured":config.llm.context_window_tokens.is_some()&&config.llm.verified_max_output_tokens.is_some(),"model_check_verified":verified,"xml":document}),
+        json!({"project_root":root,"program":display_path(&program),"config_dir":config_dir,"arguments":arguments,"schedule":schedule,"task_name":task_name,"task_path":"\\","user_sid":sid,"owner_marker":owner,"data_dir":display_path(&config.paths.data_dir),"work_dir":display_path(&config.paths.work_dir),"reports_dir":display_path(&config.paths.reports_dir),"credential_present":!config.api_key().is_empty(),"capabilities_configured":config.llm.context_window_tokens.is_some()&&config.llm.verified_max_output_tokens.is_some(),"model_check_verified":verified,"xml":document}),
     )
+}
+
+pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Value, ReportError> {
+    let config_dir = display_path(&config.config_dir);
+    let arguments = format!("--config-dir \"{config_dir}\" daily --scheduled");
+    let triggers = daily_triggers(config, sid, now)?;
+    task_plan_inner(config, sid, &config.schedule.task_name, &arguments, &triggers)
 }
 
 pub fn task_plan_kind(
@@ -159,28 +208,35 @@ pub fn task_plan_kind(
     now: DateTime<Utc>,
     kind: &str,
 ) -> Result<Value, ReportError> {
-    if kind == "daily" {
-        return task_plan(config, sid, now);
+    match kind {
+        "daily" => task_plan(config, sid, now),
+        "collect" => task_plan_collect(config, sid, now),
+        _ => Err(ReportError::new("TASK_KIND_INVALID", "任务类型无效")),
     }
-    if kind != "collect" {
-        return Err(ReportError::new("TASK_KIND_INVALID", "任务类型无效"));
-    }
+}
+
+fn task_plan_collect(
+    config: &AppConfig,
+    sid: &str,
+    now: DateTime<Utc>,
+) -> Result<Value, ReportError> {
     let mut collection = config.clone();
     collection.schedule.task_name = format!("{} Collect", config.schedule.task_name);
     collection.schedule.local_time = "00:00".into();
     collection.schedule.wake_to_run = false;
     collection.schedule.execution_limit_minutes = 20;
-    let mut value = task_plan(&collection, sid, now)?;
-    let arguments = value["arguments"]
-        .as_str()
-        .unwrap()
-        .replace("daily --scheduled", "collect --scheduled");
-    let document=value["xml"].as_str().unwrap().replace("daily --scheduled","collect --scheduled")
-        .replace("<CalendarTrigger id=\"DailyShanghai\">","<CalendarTrigger id=\"Collect30Minutes\"><Repetition><Interval>PT30M</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition>");
+    let config_dir = display_path(&collection.config_dir);
+    let arguments = format!("--config-dir \"{config_dir}\" collect --scheduled");
+    let triggers = collect_triggers(&collection, sid, now);
+    let mut value = task_plan_inner(
+        &collection,
+        sid,
+        &collection.schedule.task_name,
+        &arguments,
+        &triggers,
+    )?;
     value["kind"] = json!("collect");
     value["interval_minutes"] = json!(30);
-    value["arguments"] = json!(arguments);
-    value["xml"] = json!(document);
     Ok(value)
 }
 

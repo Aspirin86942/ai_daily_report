@@ -71,6 +71,14 @@ function Get-ReportTaskXmlFields {
     }
     $fields['action_count'] = @($document.SelectNodes('/t:Task/t:Actions/*', $ns)).Count
     $fields['trigger_count'] = @($document.SelectNodes('/t:Task/t:Triggers/*', $ns)).Count
+    $calendar = @($document.SelectNodes('/t:Task/t:Triggers/t:CalendarTrigger', $ns))
+    $fields['calendar_count'] = $calendar.Count
+    $fields['calendar_times'] = (($calendar | ForEach-Object {
+        $boundary = $_.SelectSingleNode('t:StartBoundary', $ns)
+        if ($null -eq $boundary) { '' } else {
+            ([DateTimeOffset]::Parse($boundary.InnerText)).ToOffset([TimeSpan]::FromHours(8)).ToString('HH:mm')
+        }
+    }) | Sort-Object) -join ';'
     return $fields
 }
 

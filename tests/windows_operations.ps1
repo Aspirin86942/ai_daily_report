@@ -14,6 +14,9 @@ $settings = "paths:`n  work_dir: '$work'`n  data_dir: '$data'`n  db_dir: '$data/
 [IO.File]::WriteAllText((Join-Path $root 'config/settings.yaml'), $settings, [Text.UTF8Encoding]::new($false))
 $plan = Get-ReportTaskPlan -ProjectRoot (Split-Path -Parent $Program) -ConfigDirectory (Join-Path $root 'config')
 function Assert-Test([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
+$dailyFields = Get-ReportTaskXmlFields -Xml $plan.xml
+Assert-Test ($dailyFields['calendar_count'] -eq 3) 'Daily plan must have three calendar triggers'
+Assert-Test ($dailyFields['calendar_times'] -eq '09:00;09:30;10:30') ('Daily trigger times: ' + $dailyFields['calendar_times'])
 # All scheduler calls are local function doubles. No task is registered on Windows.
 $script:task = $null
 $script:taskXml = ''
