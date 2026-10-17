@@ -56,6 +56,10 @@ fn health_command_reports_unhealthy_config_without_credentials() {
         .env_remove("OPENAI_API_KEY")
         .output()
         .unwrap();
-    assert_eq!(output.status.code(), Some(2), "缺少报告库时应返回 unhealthy");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "缺少报告库时应返回 unhealthy"
+    );
     assert!(String::from_utf8_lossy(&output.stdout).contains("unhealthy"));
 }

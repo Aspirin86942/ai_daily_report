@@ -94,9 +94,11 @@ fn shanghai_day_start(target: NaiveDate) -> Option<DateTime<Utc>> {
 fn baseline(store: &ArchiveStore) -> Result<Option<DateTime<Utc>>, ReportError> {
     let value: Option<String> = store
         .conn
-        .query_row("SELECT value FROM metadata WHERE key='baseline'", [], |row| {
-            row.get(0)
-        })
+        .query_row(
+            "SELECT value FROM metadata WHERE key='baseline'",
+            [],
+            |row| row.get(0),
+        )
         .optional()?;
     Ok(value
         .and_then(|text| DateTime::parse_from_rfc3339(&text).ok())
@@ -142,7 +144,9 @@ fn collection_continuity(
             if ranges.len() < 5 {
                 ranges.push(format!(
                     "{} 至 {}",
-                    (from + interval).max(start).with_timezone(&types::shanghai())
+                    (from + interval)
+                        .max(start)
+                        .with_timezone(&types::shanghai())
                         .format("%Y-%m-%d %H:%M:%S"),
                     to.with_timezone(&types::shanghai())
                         .format("%Y-%m-%d %H:%M:%S")
@@ -328,11 +332,7 @@ fn disk_space(config: &AppConfig) -> HealthCheck {
                 bytes as f64 / 1024.0 / 1024.0 / 1024.0
             ),
         ),
-        None => HealthCheck::warning(
-            "DISK_SPACE",
-            "无法读取数据目录所在磁盘剩余空间",
-            json!({}),
-        ),
+        None => HealthCheck::warning("DISK_SPACE", "无法读取数据目录所在磁盘剩余空间", json!({})),
     }
 }
 
@@ -357,14 +357,7 @@ fn free_bytes(path: &std::path::Path) -> Option<u64> {
     let mut available: u64 = 0;
     let mut total: u64 = 0;
     let mut free: u64 = 0;
-    let ok = unsafe {
-        GetDiskFreeSpaceExW(
-            wide.as_ptr(),
-            &mut available,
-            &mut total,
-            &mut free,
-        )
-    };
+    let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, &mut total, &mut free) };
     (ok != 0).then_some(available)
 }
 

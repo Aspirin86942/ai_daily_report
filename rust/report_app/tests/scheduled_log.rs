@@ -30,7 +30,9 @@ fn scheduled_log_records_kind_run_date_phase_and_duration() {
         .create(&context, "report", &generation, None, now())
         .unwrap();
     let started = Instant::now();
-    let ok = Ok(json!({"run_id":context.run_id,"target_date":"2026-10-16","action":"generated","quality":"partial"}));
+    let ok = Ok(
+        json!({"run_id":context.run_id,"target_date":"2026-10-16","action":"generated","quality":"partial"}),
+    );
     append_scheduled_log(
         &config,
         "daily",
@@ -50,17 +52,34 @@ fn scheduled_log_records_kind_run_date_phase_and_duration() {
         &failed,
     )
     .unwrap();
-    let text = fs::read_to_string(dir.path().join("logs/scheduled-2026-10-17.jsonl")).unwrap();
-    let lines: Vec<serde_json::Value> = text
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(lines[0]["kind"], "daily");
-    assert_eq!(lines[0]["run_id"], context.run_id);
-    assert_eq!(lines[0]["target_date"], "2026-10-16");
-    assert_eq!(lines[0]["status"], "succeeded");
-    assert!(lines[0]["duration_ms"].as_u64().is_some());
-    assert_eq!(lines[1]["status"], "failed");
-    assert_eq!(lines[1]["error_code"], "MODEL_RESPONSE_INVALID");
-    assert_eq!(lines[1]["phase"], "created", "失败记录应带运行阶段");
+    // 调度日志按运行时刻的上海日期命名；跨午夜时读取目录内全部日志再按 run_id 筛选。
+    let mut events = Vec::new();
+    for entry in fs::read_dir(dir.path().join("logs")).unwrap() {
+        let path = entry.unwrap().path();
+        if !path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("scheduled-")
+        {
+            continue;
+        }
+        let text = fs::read_to_string(&path).unwrap();
+        for line in text.lines() {
+            events.push(serde_json::from_str::<serde_json::Value>(line).unwrap());
+        }
+    }
+    let success = events
+        .iter()
+        .find(|event| event["run_id"] == context.run_id && event["status"] == "succeeded")
+        .expect("缺少成功调度日志");
+    assert_eq!(success["kind"], "daily");
+    assert_eq!(success["target_date"], "2026-10-16");
+    assert!(success["duration_ms"].as_u64().is_some());
+    let failed = events
+        .iter()
+        .find(|event| event["run_id"] == context.run_id && event["status"] == "failed")
+        .expect("缺少失败调度日志");
+    assert_eq!(failed["error_code"], "MODEL_RESPONSE_INVALID");
+    assert_eq!(failed["phase"], "created", "失败记录应带运行阶段");
 }

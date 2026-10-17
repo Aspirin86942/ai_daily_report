@@ -106,7 +106,11 @@ fn logon_trigger(config: &AppConfig, sid: &str) -> String {
     }
 }
 
-fn daily_triggers(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<String, ReportError> {
+fn daily_triggers(
+    config: &AppConfig,
+    sid: &str,
+    now: DateTime<Utc>,
+) -> Result<String, ReportError> {
     let date = now.with_timezone(&types::shanghai()).date_naive();
     let times = trigger_times(&config.schedule.local_time)?;
     Ok(format!(
@@ -204,7 +208,13 @@ pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Va
     let config_dir = display_path(&config.config_dir);
     let arguments = format!("--config-dir \"{config_dir}\" daily --scheduled");
     let triggers = daily_triggers(config, sid, now)?;
-    task_plan_inner(config, sid, &config.schedule.task_name, &arguments, &triggers)
+    task_plan_inner(
+        config,
+        sid,
+        &config.schedule.task_name,
+        &arguments,
+        &triggers,
+    )
 }
 
 fn health_triggers(now: DateTime<Utc>) -> String {

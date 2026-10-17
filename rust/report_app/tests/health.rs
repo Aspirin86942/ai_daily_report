@@ -12,8 +12,18 @@ fn setup() -> (tempfile::TempDir, AppConfig) {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("config")).unwrap();
     fs::create_dir_all(dir.path().join("work")).unwrap();
-    let work = dir.path().join("work").display().to_string().replace('\\', "/");
-    let data = dir.path().join("data").display().to_string().replace('\\', "/");
+    let work = dir
+        .path()
+        .join("work")
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let data = dir
+        .path()
+        .join("data")
+        .display()
+        .to_string()
+        .replace('\\', "/");
     fs::write(
         dir.path().join("config/settings.yaml"),
         format!("paths:\n  work_dir: '{work}'\n  data_dir: '{data}'\n  reports_dir: '{data}/reports'\n  db_dir: '{data}/db'\n  log_dir: '{data}/logs'\n"),
@@ -46,7 +56,11 @@ fn health_reports_error_when_daily_report_is_missing() {
 #[test]
 fn health_reports_database_failures_as_unhealthy() {
     let (dir, config) = setup();
-    fs::write(config.paths.db_dir.join("reports.sqlite3"), b"not a database").unwrap();
+    fs::write(
+        config.paths.db_dir.join("reports.sqlite3"),
+        b"not a database",
+    )
+    .unwrap();
     let report = health::check(
         &config,
         chrono::NaiveDate::from_ymd_opt(2026, 10, 17).unwrap(),
@@ -93,7 +107,7 @@ fn health_baseline_window_is_not_a_collection_gap() {
                 )
                 .unwrap();
         }
-        at = at + chrono::Duration::minutes(30);
+        at += chrono::Duration::minutes(30);
     }
     let report = health::check(
         &config,

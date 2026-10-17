@@ -498,6 +498,7 @@ impl ModelRunner<'_> {
                                     continue;
                                 }
                                 if error.code == "MODEL_RESPONSE_INVALID"
+                                    && matches!(step.kind, StepKind::Facts | StepKind::Compose)
                                     && invalid_retries < self.llm.invalid_response_retries
                                 {
                                     invalid_retries += 1;

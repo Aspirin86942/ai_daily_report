@@ -1346,7 +1346,9 @@ fn single_oversized_fact_degrades_to_pending() {
         evidence: vec![],
     };
     one.fact.detail = "采购审批调整。".repeat(200);
-    let groups = plan.compose_groups(&h.config.llm, vec![one.clone()]).unwrap();
+    let groups = plan
+        .compose_groups(&h.config.llm, vec![one.clone()])
+        .unwrap();
     let ComposeGroup::Degraded(degraded) = &groups[0] else {
         panic!("超大单条事实应降级");
     };
@@ -1358,7 +1360,7 @@ fn single_oversized_fact_degrades_to_pending() {
         .unwrap_or("")
         .contains("容量"));
     let part = ComposedReport::pending_from(degraded, 3);
-    let merged = ComposedReport::merge(vec![part], &[degraded.clone()]).unwrap();
+    let merged = ComposedReport::merge(vec![part], std::slice::from_ref(degraded)).unwrap();
     assert_eq!(merged.pending.len(), 1);
     assert_eq!(merged.pending[0].source_ids, vec!["s1".to_string()]);
 }
