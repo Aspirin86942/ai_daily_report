@@ -3,7 +3,7 @@ use ai_daily_report::{
     model::{
         budget::{charged, Reservation},
         contracts::{ComposedReport, FactsResponse, SelectedFact},
-        plan::{self, DailyPlan},
+        plan::{self, ComposeGroup, DailyPlan},
         slicing::{union_chars, InputUnit, SourceInput},
         transport::{HttpResponse, HttpTransport, ModelTransport, TransportFailure},
         ModelRunner, StepOutput,
@@ -656,6 +656,9 @@ fn grouped_composition_keeps_more_than_64_facts_and_pending_items() {
     let mut seen = BTreeSet::new();
     let mut parts = Vec::new();
     for group in groups {
+        let ComposeGroup::Step(group) = group else {
+            panic!("该用例不应出现降级分组");
+        };
         group.validate(&h.config.llm).unwrap();
         assert!(group
             .facts
@@ -1290,4 +1293,72 @@ fn invalid_response_with_zero_retries_fails_after_one_call() {
     let error = h.runner(&network).execute(&plan.batches[0]).unwrap_err();
     assert_eq!(error.code, "MODEL_RESPONSE_INVALID");
     assert_eq!(network.count(), 1);
+}
+
+#[test]
+fn compose_capacity_keeps_every_fact_covered() {
+    use ai_daily_report::model::plan::ComposeGroup;
+    let mut h = Harness::new();
+    h.config.llm.max_request_utf8_bytes = 20000;
+    let plan = h.plan(&[source("s1", "采购审批拟调整，超过五万元增加审批。")]);
+    let facts: Vec<SelectedFact> = (0..6)
+        .map(|i| {
+            let mut fact: SelectedFact = SelectedFact {
+                fact_id: format!("batch_000:{i:03}"),
+                pending: false,
+                fact: serde_json::from_value(fact("s1")).unwrap(),
+                matter_id: None,
+                evidence: vec![],
+            };
+            fact.fact.detail = "采购审批调整需要保留金额档位与适用条件。".repeat(60);
+            fact
+        })
+        .collect();
+    let groups = plan.compose_groups(&h.config.llm, facts.clone()).unwrap();
+    let mut covered = std::collections::BTreeSet::new();
+    for group in &groups {
+        if let ComposeGroup::Step(step) = group {
+            covered.extend(step.facts.iter().map(|f| f.fact_id.clone()));
+        }
+    }
+    for fact in &facts {
+        assert!(
+            covered.contains(&fact.fact_id),
+            "事实未进入任何成稿分组: {}",
+            fact.fact_id
+        );
+    }
+    assert!(groups.len() > 1, "容量不足时应拆分");
+}
+
+#[test]
+fn single_oversized_fact_degrades_to_pending() {
+    use ai_daily_report::model::plan::ComposeGroup;
+    let mut h = Harness::new();
+    let plan = h.plan(&[source("s1", "采购审批拟调整，超过五万元增加审批。")]);
+    // 计划阶段使用正常容量；仅对成稿阶段收紧，模拟单条事实无法装入请求。
+    h.config.llm.max_request_utf8_bytes = 2048;
+    let mut one = SelectedFact {
+        fact_id: "batch_000:000".into(),
+        pending: false,
+        fact: serde_json::from_value(fact("s1")).unwrap(),
+        matter_id: None,
+        evidence: vec![],
+    };
+    one.fact.detail = "采购审批调整。".repeat(200);
+    let groups = plan.compose_groups(&h.config.llm, vec![one.clone()]).unwrap();
+    let ComposeGroup::Degraded(degraded) = &groups[0] else {
+        panic!("超大单条事实应降级");
+    };
+    assert!(degraded.pending);
+    assert!(degraded
+        .fact
+        .uncertainty
+        .as_deref()
+        .unwrap_or("")
+        .contains("容量"));
+    let part = ComposedReport::pending_from(degraded, 3);
+    let merged = ComposedReport::merge(vec![part], &[degraded.clone()]).unwrap();
+    assert_eq!(merged.pending.len(), 1);
+    assert_eq!(merged.pending[0].source_ids, vec!["s1".to_string()]);
 }

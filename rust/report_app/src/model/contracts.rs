@@ -137,6 +137,20 @@ impl FactsResponse {
 }
 
 impl ComposedReport {
+    /// 成稿容量不足时本地构造的待确认片段：保留原文、事实编号与来源，不丢引用。
+    pub fn pending_from(fact: &SelectedFact, schema_version: u32) -> Self {
+        Self {
+            schema_version,
+            overview: vec![],
+            matters: vec![],
+            pending: vec![CitedText {
+                text: format!("{}：{}", fact.fact.topic, fact.fact.detail),
+                fact_ids: vec![fact.fact_id.clone()],
+                source_ids: fact.fact.source_ids.clone(),
+            }],
+        }
+    }
+
     pub fn validate_part(&self, facts: &[SelectedFact]) -> Result<(), ReportError> {
         if self.matters.len() > 64
             || self.pending.len() > 64

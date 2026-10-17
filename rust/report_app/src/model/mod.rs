@@ -14,7 +14,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use contracts::{ComposedReport, FactsResponse, SelectedFact, MAX_RESPONSE_BYTES};
-use plan::{DailyPlan, PlannedStep, StepKind};
+use plan::{ComposeGroup, DailyPlan, PlannedStep, StepKind};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -609,12 +609,24 @@ impl ModelRunner<'_> {
         }
         let composition_started = Instant::now();
         let mut parts = Vec::new();
+        let schema_version = if plan.batches.first().map(|batch| batch.version) == Some(5) {
+            4
+        } else {
+            3
+        };
         for group in plan.compose_groups(self.llm, facts.clone())? {
-            for result in self.execute_complete(&group)? {
-                if let StepOutput::Compose(report) = &result.output {
-                    parts.push(report.clone());
+            match group {
+                ComposeGroup::Step(step) => {
+                    for result in self.execute_complete(&step)? {
+                        if let StepOutput::Compose(report) = &result.output {
+                            parts.push(report.clone());
+                        }
+                        steps.push(result);
+                    }
                 }
-                steps.push(result);
+                ComposeGroup::Degraded(fact) => {
+                    parts.push(ComposedReport::pending_from(&fact, schema_version));
+                }
             }
         }
         let report = Some(ComposedReport::merge(parts, &facts)?);
@@ -654,6 +666,7 @@ fn split_error(code: &str) -> Option<&'static str> {
         "MODEL_OUTPUT_TRUNCATED" => Some("MODEL_OUTPUT_TRUNCATED"),
         "MODEL_FACT_CAPACITY_EXCEEDED" => Some("MODEL_FACT_CAPACITY_EXCEEDED"),
         "MODEL_FACT_COUNT_EXCEEDED" => Some("MODEL_FACT_COUNT_EXCEEDED"),
+        "MODEL_COMPOSE_CAPACITY_INSUFFICIENT" => Some("MODEL_COMPOSE_CAPACITY_INSUFFICIENT"),
         _ => None,
     }
 }

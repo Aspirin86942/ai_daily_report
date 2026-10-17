@@ -34,6 +34,12 @@ pub enum StepKind {
     LegacySummary,
 }
 
+#[derive(Debug, Clone)]
+pub enum ComposeGroup {
+    Step(PlannedStep),
+    Degraded(SelectedFact),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlannedStep {
@@ -357,6 +363,12 @@ impl PlannedStep {
                 .collect();
             if let Some(sources) = self.source_map.as_object_mut() {
                 sources.retain(|id, _| ids.contains(id));
+                // 成稿步骤不需要归档原件元数据；保留它会放大请求并触发容量不足。
+                for value in sources.values_mut() {
+                    if let Some(object) = value.as_object_mut() {
+                        object.remove("archive");
+                    }
+                }
             }
         }
     }
@@ -530,7 +542,7 @@ impl DailyPlan {
         &self,
         llm: &Llm,
         mut facts: Vec<SelectedFact>,
-    ) -> Result<Vec<PlannedStep>, ReportError> {
+    ) -> Result<Vec<ComposeGroup>, ReportError> {
         let fits = |step: &PlannedStep| -> Result<bool, ReportError> {
             Ok(step.facts.len() <= 64
                 && canonical_json(&wire_facts(&step.facts)?)?.len() as u64
@@ -539,7 +551,7 @@ impl DailyPlan {
         };
         if let Ok(step) = self.compose(llm, facts.clone()) {
             if fits(&step)? {
-                return Ok(vec![step]);
+                return Ok(vec![ComposeGroup::Step(step)]);
             }
         }
         facts.sort_by(|a, b| {
@@ -550,27 +562,67 @@ impl DailyPlan {
         for fact in facts {
             let mut candidate = pending.clone();
             candidate.push(fact.clone());
-            let fits = self
-                .compose(llm, candidate.clone())
+            let candidate_fits = self
+                .compose(llm, candidate)
                 .and_then(|step| fits(&step))
                 .unwrap_or(false);
             if !pending.is_empty()
-                && (!fits
+                && (!candidate_fits
                     || pending
                         .last()
                         .is_some_and(|prior| prior.pending != fact.pending))
             {
-                groups.push(self.compose(llm, std::mem::take(&mut pending))?);
+                self.push_group(&mut groups, std::mem::take(&mut pending), llm)?;
             }
             pending.push(fact);
         }
         if !pending.is_empty() {
-            groups.push(self.compose(llm, pending)?);
-        }
-        for (index, group) in groups.iter_mut().enumerate() {
-            group.logical_step = format!("compose_{index:03}");
-            group.validate(llm)?;
+            self.push_group(&mut groups, pending, llm)?;
         }
         Ok(groups)
+    }
+
+    /// 先尝试整组装入；容量不足时二分，单条仍放不下则降级为待确认且不丢引用。
+    fn push_group(
+        &self,
+        groups: &mut Vec<ComposeGroup>,
+        mut facts: Vec<SelectedFact>,
+        llm: &Llm,
+    ) -> Result<(), ReportError> {
+        let prepared = self.compose(llm, facts.clone()).and_then(|mut step| {
+            step.logical_step = format!("compose_{:03}", groups.len());
+            step.validate(llm)?;
+            Ok(step)
+        });
+        match prepared {
+            Ok(step) => {
+                groups.push(ComposeGroup::Step(step));
+                Ok(())
+            }
+            Err(error)
+                if matches!(
+                    error.code,
+                    "MODEL_COMPOSE_CAPACITY_INSUFFICIENT" | "MODEL_REQUEST_TOO_LARGE"
+                ) && facts.len() > 1 =>
+            {
+                let middle = facts.len() / 2;
+                let right = facts.split_off(middle);
+                self.push_group(groups, facts, llm)?;
+                self.push_group(groups, right, llm)
+            }
+            Err(error)
+                if matches!(
+                    error.code,
+                    "MODEL_COMPOSE_CAPACITY_INSUFFICIENT" | "MODEL_REQUEST_TOO_LARGE"
+                ) =>
+            {
+                let fact = &mut facts[0];
+                fact.pending = true;
+                fact.fact.uncertainty = Some("成稿请求容量不足，本事实未纳入成稿依据。".into());
+                groups.push(ComposeGroup::Degraded(facts.pop().unwrap()));
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 }
