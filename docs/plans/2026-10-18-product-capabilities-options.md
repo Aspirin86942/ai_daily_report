@@ -64,3 +64,18 @@
 3. 是否有时间/范围约束（例如只做只读能力、暂不联网）？
 
 选定后我再写 F 的设计与实现计划，并按 B/E 的方式实现与本地验证。
+
+## 七、可行性核对（2026-10-18，只读）
+
+- **FTS5 可用**：`rusqlite 0.40.1` 使用 `libsqlite3-sys 0.38.2` 的 bundled SQLite，构建脚本启用 `SQLITE_ENABLE_FTS5`（`build.rs` 中 `-DSQLITE_ENABLE_FTS5`），F1 无需新增依赖，也不需要网络。
+- **报告库规模**：`data/db/reports.sqlite3` 37 MB，`daily_reports` 188 行、`raw_json` 合计 5.77 MB，周报/月报各 1 行。报告正文全部可索引，索引规模与报告库同量级。
+- **归档库边界**：`data/archive/index.sqlite3` 75 MB，`documents` 2,686、`versions` 2,700、`extractions` 2,562；但 `extractions` 表不存正文（正文对象在磁盘上，`manifest_json` 只含哈希、字符数与覆盖信息）。归档全文检索需要读文件并另建索引，属于比“报告检索”更大的范围，建议 F1 先只覆盖报告库。
+- **结论**：F1 的范围可先定为“报告库检索”（日报/周报/月报正文、事项标题、待确认），归档全文检索作为后续增量；两者都不调用模型、不改现有表结构。
+
+## 八、F1 若被选中时的候选范围（供选择）
+
+- 命令：`search --query <关键词> [--from YYYY-MM-DD] [--to YYYY-MM-DD] [--kind daily|weekly|monthly] [--source S001] [--format text|json]`。
+- 范围：只读报告库；输出命中日期、报告类型、事项标题/片段与来源标签；`--format json` 供脚本消费。
+- 索引：新增独立 FTS5 表，按报告 `(date, kind)` 增量重建；提供 `search --reindex` 或复用现有维护命令；不修改 `daily_reports` 等既有表。
+- 验证：合成报告库单测（中文分词用 trigram 或 unicode61 + 前缀查询需实测）+ 真实库只读重建；零模型、零网络。
+
