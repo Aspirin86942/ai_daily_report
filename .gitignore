@@ -45,6 +45,10 @@ venv/
 ~$*
 *.tmp
 
+# 临时探查与生成 dump
+/tmp/
+*.inspect.ndjson
+
 # Rust
 target/
 
