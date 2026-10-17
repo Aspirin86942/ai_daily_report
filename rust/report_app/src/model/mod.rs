@@ -322,6 +322,7 @@ impl ModelRunner<'_> {
             }
         }
         let mut step = self.effective(root, &run.generation_id)?;
+        let mut invalid_retries = 0u32;
         loop {
             let bytes = step.bytes()?;
             let identity = request_identity(&run, &step)?;
@@ -496,7 +497,14 @@ impl ModelRunner<'_> {
                                     step = step.shrink_once(self.llm)?;
                                     continue;
                                 }
-                                (error, false, None)
+                                if error.code == "MODEL_RESPONSE_INVALID"
+                                    && invalid_retries < self.llm.invalid_response_retries
+                                {
+                                    invalid_retries += 1;
+                                    (error, true, None)
+                                } else {
+                                    (error, false, None)
+                                }
                             }
                         }
                     }

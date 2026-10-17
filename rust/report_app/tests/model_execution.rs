@@ -6,7 +6,7 @@ use ai_daily_report::{
         plan::{self, DailyPlan},
         slicing::{union_chars, InputUnit, SourceInput},
         transport::{HttpResponse, HttpTransport, ModelTransport, TransportFailure},
-        ModelRunner,
+        ModelRunner, StepOutput,
     },
     snapshots::{SnapshotRef, SnapshotStore},
     store::Store,
@@ -333,22 +333,29 @@ fn rate_limit_and_unknown_connection_are_retried_once_by_the_application() {
 
 #[test]
 fn permanent_and_invalid_output_errors_do_not_retry() {
-    for (reply, code) in [
-        (
-            HttpResponse {
-                status: 401,
-                retry_after: None,
-                body: b"{}".to_vec(),
-            },
-            "MODEL_HTTP_ERROR",
-        ),
-        (response(facts("unknown-source")), "MODEL_RESPONSE_INVALID"),
-        (
-            response(json!({"schema_version":999,"facts":[],"pending":[]})),
-            "MODEL_RESPONSE_INVALID",
-        ),
+    let h = Harness::new();
+    let plan = h.plan(&[source("s1", "材料。")]);
+    let network = Script::new(vec![Ok(HttpResponse {
+        status: 401,
+        retry_after: None,
+        body: b"{}".to_vec(),
+    })]);
+    assert_eq!(
+        h.runner(&network)
+            .execute(&plan.batches[0])
+            .unwrap_err()
+            .code,
+        "MODEL_HTTP_ERROR"
+    );
+    assert_eq!(network.count(), 1);
+    assert_eq!(h.calls()[0]["status"], "failed");
+
+    for reply in [
+        response(facts("unknown-source")),
+        response(json!({"schema_version":999,"facts":[],"pending":[]})),
     ] {
-        let h = Harness::new();
+        let mut h = Harness::new();
+        h.config.llm.invalid_response_retries = 0;
         let plan = h.plan(&[source("s1", "材料。")]);
         let network = Script::new(vec![Ok(reply)]);
         assert_eq!(
@@ -356,7 +363,7 @@ fn permanent_and_invalid_output_errors_do_not_retry() {
                 .execute(&plan.batches[0])
                 .unwrap_err()
                 .code,
-            code
+            "MODEL_RESPONSE_INVALID"
         );
         assert_eq!(network.count(), 1);
         assert_eq!(h.calls()[0]["status"], "failed");
@@ -1235,4 +1242,52 @@ fn global_overview_considers_facts_in_status_and_background() {
     part.validate_part(&facts).unwrap();
     let merged = ComposedReport::merge(vec![part], &facts).unwrap();
     assert_eq!(merged.overview[0].fact_ids, vec!["f1"]);
+}
+
+fn invalid_body() -> HttpResponse {
+    HttpResponse {
+        status: 200,
+        retry_after: None,
+        body: serde_json::to_vec(&json!({"choices":[{"finish_reason":"stop","message":{"content":"{\"schema_version\":3,\"facts\":\"oops\"}"}}]})).unwrap(),
+    }
+}
+
+#[test]
+fn invalid_response_is_retried_then_succeeds() {
+    let h = Harness::new();
+    let plan = h.plan(&[source("s1", "采购审批拟调整，超过五万元增加审批。")]);
+    let network = Script::new(vec![Ok(invalid_body()), Ok(response(facts("s1")))]);
+    let result = h.runner(&network).execute(&plan.batches[0]).unwrap();
+    assert!(matches!(result.output, StepOutput::Facts(_)));
+    let calls = h.calls();
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[0]["status"], "failed");
+    assert_eq!(calls[0]["error_code"], "MODEL_RESPONSE_INVALID");
+    assert_eq!(calls[1]["status"], "succeeded");
+}
+
+#[test]
+fn invalid_response_retry_is_bounded_by_attempt_limit() {
+    let mut h = Harness::new();
+    h.config.llm.invalid_response_retries = 2;
+    let plan = h.plan(&[source("s1", "采购审批拟调整，超过五万元增加审批。")]);
+    let network = Script::new(vec![
+        Ok(invalid_body()),
+        Ok(invalid_body()),
+        Ok(invalid_body()),
+    ]);
+    let error = h.runner(&network).execute(&plan.batches[0]).unwrap_err();
+    assert_eq!(error.code, "MODEL_RESPONSE_INVALID");
+    assert_eq!(network.count(), 3, "每次发送都必须有账本记录");
+}
+
+#[test]
+fn invalid_response_with_zero_retries_fails_after_one_call() {
+    let mut h = Harness::new();
+    h.config.llm.invalid_response_retries = 0;
+    let plan = h.plan(&[source("s1", "采购审批拟调整，超过五万元增加审批。")]);
+    let network = Script::new(vec![Ok(invalid_body())]);
+    let error = h.runner(&network).execute(&plan.batches[0]).unwrap_err();
+    assert_eq!(error.code, "MODEL_RESPONSE_INVALID");
+    assert_eq!(network.count(), 1);
 }
