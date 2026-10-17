@@ -29,7 +29,7 @@ ai-daily-report.exe list | Out-Host
 
 成稿按实际事实数量、字节数和输出容量分组；大批量分组时将确定事实和待确认分别安排，同主题事实相邻。每组事实 JSON 按成稿输出上限的两倍字节规划，Rust 合并全部正文与待确认，概览最多五条。每个事实编号都须在正文或待确认出现。使用指定日期的 `backfill --dry-run` 检查输入分批，零模型调用；事实提取完成后才能确定实际成稿组数。`daily --dry-run` 按来源准备归档或扫描输入，不调用模型。
 
-累计次数、token 和金额预算由 `recovery.enforce_model_budgets` 控制。当前业务选择为关闭，示例配置保持关闭；实际调用与未知用量继续记录。每个请求仍有最多三次尝试、请求容量、超时和整个运行截止时间。显式补跑和覆盖修复的作业预算独立有效。
+累计次数、token 和金额预算由 `recovery.enforce_model_budgets` 控制。当前业务选择为关闭，示例配置保持关闭；实际调用与未知用量继续记录。每个请求仍有最多三次尝试、请求容量、超时和整个运行截止时间。模型响应结构或引用无效时，按 `llm.invalid_response_retries`（默认 1）额外重试，与 `max_retries` 共享单步骤总尝试上限；成稿容量不足时自动拆分，单条事实仍放不下则转为待确认并保留引用。显式补跑和覆盖修复的作业预算独立有效。
 
 事实提取成功后被冻结，成稿失败可复用已有事实。拆分后的步骤有独立编号和父请求哈希；恢复时复用已记录的截断结果和成功子批次，只执行缺失部分。请求体与响应原字节保存到 `data_dir/run_snapshots`。未知调用保持未知并计入预算，恢复不会清空消耗。程序不自动更换服务商、模型或请求格式。当前归档日报使用模型计划 v5、报告格式 v4；保留的扫描日报使用模型计划 v4、报告格式 v3，较早未完成的 v3 模型计划由保留的旧包和对应配置恢复。`truncation_policy` 与 `max_strategy_changes` 只用于旧格式恢复。
 
@@ -46,6 +46,17 @@ ai-daily-report.exe backfill --start-date 2026-10-01 --end-date 2026-10-11 --pre
 归档日报使用 `daily --source archive`，直接读取已保存的变化和证据。自动恢复只选择相同来源的未完成运行，旧扫描失败不会阻止归档日报。需要恢复旧扫描运行时，保留匹配业务配置并显式执行 `daily --source scan --target-date <日期>`；原运行、冻结输入和调用账本继续保留。归档入口、基线边界及生产切换条件见 [变化归档](change-archive.md)。
 
 历史日报恢复结果与证据见[当前状态](current-state.md)。
+
+## 健康巡检
+
+```powershell
+ai-daily-report.exe health --format text | Out-Host
+ai-daily-report.exe health --target-date 2026-10-17 --format json | Out-Host
+```
+
+`health` 只读检查默认目标日（上一自然日）的采集连续性、日报是否已发布且正文哈希一致、待续运行与近 24 小时失败运行、归档解析队列、数据目录所在磁盘余量、报告库与归档索引完整性。不调用模型、不扫描原目录、不修改数据库。退出码 0 健康、1 有警告、2 不健康；文本或 JSON 输出可直接审计。基线建立前的时段按基线窗口豁免，不判为采集缺口。
+
+健康任务每日 11:00 与 23:00 执行发布包内 `scripts/health_notify.ps1`：调用 `health --scheduled` 写入调度日志，回读 daily、collect、health 三个计划任务，写 `log_dir/health-YYYY-MM-DD.json`；非健康时弹出 Windows 本地通知，并按同日同错误码去重，通知记录写入 `log_dir/health-notify.log`。锁屏或未登录时通知可能不显示，健康文件与日志仍保留。
 
 ## 覆盖修复
 

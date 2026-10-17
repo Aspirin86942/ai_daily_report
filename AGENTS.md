@@ -24,6 +24,8 @@
 - `ai-daily-report.exe weekly --source db` aggregates weekly reports; `--source scan` scans files instead.
 - `ai-daily-report.exe monthly --source db` aggregates monthly reports.
 - `collect --baseline` fixes the initial inventory; `collect` saves observed changes and drains the durable parse queue. `daily --source archive` uses archived changes, while `archive` and `stats` query evidence without model calls. Additional archive roots are local-only until explicitly allowed in `archive.model_roots`.
+- `ai-daily-report.exe --config-dir <directory> health [--target-date YYYY-MM-DD] [--format json|text]` checks scheduled-task context, collection continuity, published report hash, pending/failed runs, parse queue, disk and database integrity without model calls; exit codes 0 healthy, 1 warning, 2 unhealthy.
+- Scheduled runs write `kind`, `run_id`, `target_date`, `phase`, `error_code` and `duration_ms` to `log_dir/scheduled-YYYY-MM-DD.jsonl`; the health task (`-Kind health`) runs `scripts/health_notify.ps1` at 11:00 and 23:00 and writes `log_dir/health-YYYY-MM-DD.json`.
 - `scripts/benchmark_archive.py` measures all 2,648 frozen files, tunes read/parse workers, and checks content signatures. Run timing suites without concurrent builds/tests; retain failures, partial coverage and all-file timing CSVs. The unchanged-collection gate is 20 runs with P95 <= 5 seconds and zero source-body reads, parse starts and model calls.
 - `cargo test --manifest-path rust/Cargo.toml --workspace --locked` verifies the Rust workspace.
 - Build debug workers and examples before integration tests; put the pinned `pdfium.dll` beside the PDF worker. Source identity changes require rebuilding both workers.

@@ -45,10 +45,14 @@ D:/DailyReport/
 ./scripts/install_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config
 # 核对计划后，已获准的注册操作使用 -Apply。
 ./scripts/install_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config -Apply
+./scripts/install_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config -Kind health -Apply
 ./scripts/check_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config
+./scripts/check_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config -Kind health
 ```
 
-任务直接运行 `ai-daily-report.exe --config-dir "..." daily --scheduled`。发布 EXE 使用 Windows 图形子系统，调度时不打开终端窗口；命令行调用保留标准输出与退出码。日志仅记录运行编号、日期、结果和错误码，位于 `log_dir/scheduled-YYYY-MM-DD.jsonl`。
+任务直接运行 `ai-daily-report.exe --config-dir "..." daily --scheduled`。日报任务带 09:00、09:30、10:30 三次触发：09:00 正常出报，09:30/10:30 为兜底续跑；目标日已发布时快速返回且不调用模型。发布 EXE 使用 Windows 图形子系统，调度时不打开终端窗口；命令行调用保留标准输出与退出码。调度日志位于 `log_dir/scheduled-YYYY-MM-DD.jsonl`，每条记录 kind、运行编号、目标日期、阶段、结果、错误码与耗时。
+
+健康任务 `AI Daily Report Health` 由 `scripts/install_daily_task.ps1 -Kind health -Apply` 注册，每日 11:00 与 23:00 运行 `scripts/health_notify.ps1`；它调用 `health --scheduled`、回读三个任务、写 `log_dir/health-YYYY-MM-DD.json`，异常时弹出 Windows 本地通知。health 任务不要求模型检查记录。
 
 PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；接收 JSON 时使用 `| ConvertFrom-Json`。运维脚本已经使用管道等待并检查退出码。
 
