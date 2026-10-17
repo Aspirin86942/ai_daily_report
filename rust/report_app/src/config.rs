@@ -509,6 +509,7 @@ impl AppConfig {
         if recovery {
             for key in [
                 "max_retries",
+                "invalid_response_retries",
                 "request_timeout_seconds",
                 "context_window_tokens",
                 "verified_max_output_tokens",

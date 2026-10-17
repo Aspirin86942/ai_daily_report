@@ -249,3 +249,24 @@ fn invalid_response_retries_defaults_and_is_bounded() {
     let (_directory, zero) = test_config("llm:\n  invalid_response_retries: 0\n");
     assert_eq!(zero.llm.invalid_response_retries, 0);
 }
+
+#[test]
+fn invalid_response_retries_is_excluded_from_recovery_fingerprint() {
+    let (directory, baseline) = test_config("");
+    let path = directory.path().join("config/settings.yaml");
+    fs::write(
+        &path,
+        "paths:\n  work_dir: work\nllm:\n  invalid_response_retries: 2\n",
+    )
+    .unwrap();
+    let changed = AppConfig::load_with_env(directory.path(), None, &BTreeMap::new()).unwrap();
+    assert_eq!(
+        baseline.fingerprint(true).unwrap(),
+        changed.fingerprint(true).unwrap(),
+        "恢复身份不应因重试次数变化而失效"
+    );
+    assert_ne!(
+        baseline.fingerprint(false).unwrap(),
+        changed.fingerprint(false).unwrap()
+    );
+}

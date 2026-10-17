@@ -547,6 +547,7 @@ pub fn append_scheduled_log(
             "kind": kind,
             "status": "succeeded",
             "run_id": if value["run_id"].is_null() { json!(run_id) } else { value["run_id"].clone() },
+            "date": if value["target_date"].is_null() { json!(target_date) } else { value["target_date"].clone() },
             "target_date": if value["target_date"].is_null() { json!(target_date) } else { value["target_date"].clone() },
             "action": value["action"],
             "quality": value["quality"],

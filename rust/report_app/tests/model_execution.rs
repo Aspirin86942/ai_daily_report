@@ -1364,3 +1364,23 @@ fn single_oversized_fact_degrades_to_pending() {
     assert_eq!(merged.pending.len(), 1);
     assert_eq!(merged.pending[0].source_ids, vec!["s1".to_string()]);
 }
+
+#[test]
+fn all_degraded_composition_publishes_pending_without_failing() {
+    let mut h = Harness::new();
+    let plan = h.plan(&[source("s1", "材料。")]);
+    // 成稿阶段收紧容量：事实批次仍可发送，但单条事实的成稿请求放不下。
+    h.config.llm.max_request_utf8_bytes = 8000;
+    let mut payload = facts("s1");
+    payload["facts"][0]["detail"] =
+        json!("采购审批调整需要完整保留金额档位、适用条件、例外与审批人。".repeat(100));
+    let network = Script::new(vec![Ok(response(payload))]);
+    let result = h.runner(&network).generate(&plan).unwrap();
+    let report = result.report.unwrap();
+    assert!(
+        result.facts.iter().any(|fact| fact.pending),
+        "降级事实必须在事实列表中标为待确认"
+    );
+    assert!(!report.pending.is_empty(), "降级事实必须进入待确认");
+    report.validate(&result.facts).unwrap();
+}

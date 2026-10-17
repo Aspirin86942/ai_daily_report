@@ -610,6 +610,7 @@ impl ModelRunner<'_> {
         }
         let composition_started = Instant::now();
         let mut parts = Vec::new();
+        let mut degraded = BTreeSet::new();
         let schema_version = if plan.batches.first().map(|batch| batch.version) == Some(5) {
             4
         } else {
@@ -626,7 +627,17 @@ impl ModelRunner<'_> {
                     }
                 }
                 ComposeGroup::Degraded(fact) => {
+                    degraded.insert(fact.fact_id.clone());
                     parts.push(ComposedReport::pending_from(&fact, schema_version));
+                }
+            }
+        }
+        // 降级事实必须在返回的事实列表中同样标记为待确认，否则合并校验会拒绝。
+        for fact in facts.iter_mut() {
+            if degraded.contains(&fact.fact_id) && !fact.pending {
+                fact.pending = true;
+                if fact.fact.uncertainty.is_none() {
+                    fact.fact.uncertainty = Some("成稿请求容量不足，本事实未纳入成稿依据。".into());
                 }
             }
         }

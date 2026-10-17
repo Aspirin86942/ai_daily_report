@@ -139,6 +139,8 @@ fn collection_continuity(
     let mut gaps = 0usize;
     let mut ranges: Vec<String> = Vec::new();
     let mut record = |from: DateTime<Utc>, to: DateTime<Utc>| {
+        // 窗口起点之前的历史采集不能计入目标日缺口。
+        let from = from.max(start);
         if to - from > interval + tolerance {
             gaps += 1;
             if ranges.len() < 5 {
@@ -256,7 +258,7 @@ fn published_report(
 
 fn run_attention(connection: &Connection, now: DateTime<Utc>) -> Result<HealthCheck, ReportError> {
     let pending: i64 = connection.query_row(
-        "SELECT count(*) FROM report_runs WHERE status='running' AND phase IN ('prepared','generating','db_committed')",
+        "SELECT count(*) FROM report_runs WHERE run_kind='report' AND phase IN ('prepared','generating','db_committed') AND status!='succeeded' AND COALESCE(error_code,'')!='RUN_SUPERSEDED' AND COALESCE(regeneration_reason,'') NOT LIKE 'coverage_publish:%'",
         [],
         |row| row.get(0),
     )?;
@@ -398,8 +400,22 @@ pub fn check(
     };
     match &reports {
         Some(connection) => {
-            checks.push(published_report(connection, config, target)?);
-            checks.push(run_attention(connection, now)?);
+            match published_report(connection, config, target) {
+                Ok(check) => checks.push(check),
+                Err(_) => checks.push(HealthCheck::error(
+                    "DATABASE_INTEGRITY",
+                    format!("{target} 日报无法核对：报告库结构不可用"),
+                    json!({"target_date": target}),
+                )),
+            }
+            match run_attention(connection, now) {
+                Ok(check) => checks.push(check),
+                Err(_) => checks.push(HealthCheck::error(
+                    "DATABASE_INTEGRITY",
+                    "运行状态无法核对：报告库结构不可用",
+                    json!({}),
+                )),
+            }
         }
         None => checks.push(HealthCheck::error(
             "REPORT_NOT_PUBLISHED",
@@ -411,8 +427,22 @@ pub fn check(
     match ArchiveStore::open(config, false) {
         Ok(store) => {
             if quick_check(&store.conn) {
-                checks.push(collection_continuity(&store, target, now)?);
-                checks.push(parse_queue(&store)?);
+                match collection_continuity(&store, target, now) {
+                    Ok(check) => checks.push(check),
+                    Err(_) => checks.push(HealthCheck::error(
+                        "DATABASE_INTEGRITY",
+                        "归档索引结构不可用，无法核对采集连续性",
+                        json!({"target_date": target}),
+                    )),
+                }
+                match parse_queue(&store) {
+                    Ok(check) => checks.push(check),
+                    Err(_) => checks.push(HealthCheck::error(
+                        "DATABASE_INTEGRITY",
+                        "归档索引结构不可用，无法核对解析队列",
+                        json!({}),
+                    )),
+                }
             } else {
                 checks.push(HealthCheck::error(
                     "DATABASE_INTEGRITY",

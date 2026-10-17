@@ -43,8 +43,13 @@ $healthFile = Join-Path $logDir ('health-' + $date + '.json')
 $report | ConvertTo-Json -Depth 12 | Set-Content -LiteralPath $healthFile -Encoding UTF8
 
 $failing = @($report.checks | Where-Object { $_.level -ne 'ok' })
-$missing = @($tasks | Where-Object { -not $_.exists })
-$badResult = @($tasks | Where-Object { $_.exists -and $null -ne $_.last_result -and $_.last_result -ne 0 })
+# The health task itself is excluded from failure judgement: it is running (0x41301)
+# and this script may exit non-zero by design. 0x41301 = 267009.
+$checkable = @($tasks | Where-Object { $_.name -ne $report.task_names.health })
+$missing = @($checkable | Where-Object { -not $_.exists })
+$badResult = @($checkable | Where-Object {
+    $_.exists -and $null -ne $_.last_result -and $_.last_result -ne 0 -and $_.last_result -ne 267009
+})
 $notify = ($report.status -ne 'healthy') -or ($missing.Count -gt 0) -or ($badResult.Count -gt 0)
 $codes = (($failing | ForEach-Object { $_.code }) + ($missing | ForEach-Object { 'TASK_MISSING' }) | Sort-Object -Unique) -join ','
 $stateFile = Join-Path $logDir 'health-notify-state.json'
@@ -71,5 +76,5 @@ if ($notify -and -not $already) {
     [ordered]@{ date = $date; codes = $codes; status = $report.status; target_date = $report.target_date } | ConvertTo-Json | Set-Content -LiteralPath $stateFile -Encoding UTF8
     Add-Content -LiteralPath (Join-Path $logDir 'health-notify.log') -Value ($date + ' ' + $codes)
 }
-if ($notify) { exit 1 }
+if ($report.status -ne 'healthy') { exit 1 }
 exit 0

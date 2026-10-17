@@ -124,3 +124,74 @@ fn health_baseline_window_is_not_a_collection_gap() {
         report.checks
     );
 }
+
+#[test]
+fn health_reports_empty_database_as_unhealthy() {
+    let (_dir, config) = setup();
+    fs::write(config.paths.db_dir.join("reports.sqlite3"), b"").unwrap();
+    let report = health::check(
+        &config,
+        chrono::NaiveDate::from_ymd_opt(2026, 10, 17).unwrap(),
+        now(),
+    )
+    .unwrap();
+    assert_eq!(report.status, "unhealthy");
+    assert!(report
+        .checks
+        .iter()
+        .any(|check| check.code == "DATABASE_INTEGRITY" && check.level == "error"));
+    assert_eq!(health::exit_code(&report), 2);
+}
+
+#[test]
+fn health_previous_day_tail_gap_is_not_today_gap() {
+    use ai_daily_report::archive::store::ArchiveStore;
+    let (_dir, config) = setup();
+    let store = ArchiveStore::open(&config, true).unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO metadata(key,value) VALUES('baseline','2026-10-16T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+    // 前一日最后一轮在目标窗口开始前 1 小时；目标日采集完整，不应把这段算作当日缺口。
+    store
+        .conn
+        .execute(
+            "INSERT INTO collections(id,started_at,finished_at,status,baseline) VALUES('prev','2026-10-16T15:00:00+00:00','2026-10-16T15:00:00+00:00','complete',0)",
+            [],
+        )
+        .unwrap();
+    let start = DateTime::parse_from_rfc3339("2026-10-16T16:00:00+00:00")
+        .unwrap()
+        .with_timezone(&Utc);
+    let end = DateTime::parse_from_rfc3339("2026-10-17T16:00:00+00:00")
+        .unwrap()
+        .with_timezone(&Utc);
+    let mut at = start;
+    while at < end {
+        store
+            .conn
+            .execute(
+                "INSERT INTO collections(id,started_at,finished_at,status,baseline) VALUES(?,?,?,'complete',0)",
+                rusqlite::params![format!("t{}", at.timestamp()), at.to_rfc3339(), at.to_rfc3339()],
+            )
+            .unwrap();
+        at += chrono::Duration::minutes(30);
+    }
+    let report = health::check(
+        &config,
+        chrono::NaiveDate::from_ymd_opt(2026, 10, 17).unwrap(),
+        now(),
+    )
+    .unwrap();
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|check| check.code == "COLLECTION_GAP" && check.level == "error"),
+        "{:?}",
+        report.checks
+    );
+}

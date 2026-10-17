@@ -92,4 +92,10 @@ Assert-Test (Test-Path -LiteralPath $healthFile) 'Health file was not written'
 $healthJson = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
 Assert-Test ($healthJson.status -ne 'healthy') 'Empty data directory should not be healthy'
 Assert-Test (@($healthJson.tasks).Count -eq 3) 'Health report must include all three task readbacks'
-[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 21; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
+$healthState = Join-Path $healthData 'logs/health-notify-state.json'
+Assert-Test (Test-Path -LiteralPath $healthState) 'Health notify state was not written'
+Assert-Test (@($healthJson.checks | Where-Object { $_.level -ne 'ok' }).Count -gt 0) 'Health report should list failing checks'
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts/health_notify.ps1') -Program $Program -ConfigDirectory $healthConfig -NoNotify | Out-Null
+$healthJson2 = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
+Assert-Test (@($healthJson2.tasks).Count -eq 3) 'Repeated health run must stay readable'
+[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 24; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
