@@ -59,6 +59,7 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
         Command::Collect(args) => {
             let budget =
                 ai_daily_report::archive::resources::Budget::new(config.archive.memory_mib)?;
+            let started = std::time::Instant::now();
             let result = (|| -> Result<serde_json::Value, ReportError> {
                 let metrics = ai_daily_report::archive::collect::run(&config, args.baseline, now)?;
                 let mut value = serde_json::to_value(&metrics)?;
@@ -71,7 +72,14 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
                 Ok(value)
             })();
             if args.scheduled {
-                ai_daily_report::operations::append_scheduled_log(&config, &result)?;
+                ai_daily_report::operations::append_scheduled_log(
+                    &config,
+                    "collect",
+                    started.elapsed().as_millis() as u64,
+                    None,
+                    None,
+                    &result,
+                )?;
             }
             ai_daily_report::archive::cli::print(&result?, args.format)
         }
@@ -100,8 +108,18 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
         Command::ArchiveScanner { .. } => unreachable!(),
         command @ (Command::Daily(_) | Command::Weekly(_) | Command::Monthly(_)) => {
             let scheduled = matches!(&command,Command::Daily(args)if args.scheduled);
+            let kind = if matches!(&command, Command::Daily(_)) {
+                "daily"
+            } else {
+                "period"
+            };
+            let run_id = new_run_id();
+            let mut target_date: Option<String> = None;
+            let started = std::time::Instant::now();
             let result = (|| {
-                let request = command.report_request(&config, now, new_run_id(), String::new())?;
+                let request =
+                    command.report_request(&config, now, run_id.clone(), String::new())?;
+                target_date = Some(request.context.target_date.to_string());
                 let mut app = App::open(config.clone(), now)?;
                 if let Command::Daily(args) = &command {
                     if let Some(path) = &args.ocr_manifest {
@@ -115,7 +133,14 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
                 serde_json::to_value(run_report(request, &app)?).map_err(ReportError::from)
             })();
             if scheduled {
-                ai_daily_report::operations::append_scheduled_log(&config, &result)?;
+                ai_daily_report::operations::append_scheduled_log(
+                    &config,
+                    kind,
+                    started.elapsed().as_millis() as u64,
+                    Some(&run_id),
+                    target_date.as_deref(),
+                    &result,
+                )?;
             }
             println!("{}", serde_json::to_string_pretty(&result?)?);
             Ok(())

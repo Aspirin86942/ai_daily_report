@@ -389,8 +389,26 @@ pub fn model_check(app: &App, now: DateTime<Utc>) -> Result<Value, ReportError> 
     result
 }
 
+fn run_phase(config: &AppConfig, run_id: &str) -> String {
+    let path = config.paths.db_dir.join("reports.sqlite3");
+    let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return "unknown".into();
+    };
+    connection
+        .query_row(
+            "SELECT phase FROM report_runs WHERE run_id=?",
+            [run_id],
+            |row| row.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "unknown".into())
+}
+
 pub fn append_scheduled_log(
     config: &AppConfig,
+    kind: &str,
+    duration_ms: u64,
+    run_id: Option<&str>,
+    target_date: Option<&str>,
     result: &Result<Value, ReportError>,
 ) -> Result<(), ReportError> {
     fs::create_dir_all(&config.paths.log_dir)?;
@@ -402,10 +420,26 @@ pub fn append_scheduled_log(
     ));
     reject_redirects(&path, "LOG_PATH_REDIRECTED")?;
     let event = match result {
-        Ok(value) => {
-            json!({"at":Utc::now(),"status":"succeeded","run_id":value["run_id"],"date":value["target_date"],"action":value["action"],"quality":value["quality"]})
-        }
-        Err(e) => json!({"at":Utc::now(),"status":"failed","error_code":e.code}),
+        Ok(value) => json!({
+            "at": Utc::now(),
+            "kind": kind,
+            "status": "succeeded",
+            "run_id": if value["run_id"].is_null() { json!(run_id) } else { value["run_id"].clone() },
+            "target_date": if value["target_date"].is_null() { json!(target_date) } else { value["target_date"].clone() },
+            "action": value["action"],
+            "quality": value["quality"],
+            "duration_ms": duration_ms,
+        }),
+        Err(e) => json!({
+            "at": Utc::now(),
+            "kind": kind,
+            "status": "failed",
+            "run_id": run_id,
+            "target_date": target_date,
+            "phase": run_id.map(|id| run_phase(config, id)).unwrap_or_else(|| "unknown".into()),
+            "error_code": e.code,
+            "duration_ms": duration_ms,
+        }),
     };
     let mut file = fs::OpenOptions::new()
         .create(true)
