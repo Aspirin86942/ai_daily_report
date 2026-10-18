@@ -1,8 +1,51 @@
 # 脚本归属与保留说明
 
-核对日期：2026-10-18。本目录顶层实际有 **22 个脚本**，均已逐项阅读文件头和关键参数；其中生产/发布 6 个、计划任务 6 个、验收证据 9 个、旧 Python 保留 1 个。另列出 `pdf_benchmark/` 的 6 个脚本和 3 份结果，覆盖递归跟踪的全部 31 个文件（本 README 除外）。
+核对日期：2026-10-18。本目录顶层实际有 **23 个脚本**；其中生产/发布 6 个、计划任务 6 个、验收证据 9 个、旧 Python 保留 1 个、离线维护 1 个。原有脚本的文件头和关键参数已按历史记录逐项核对，本次补充维护脚本入口。另列出 `pdf_benchmark/` 的 6 个脚本和 3 份结果，覆盖目录内全部 32 个文件（本 README 除外）。
 
-正式运行状态见[当前状态](../docs/current-state.md)。脚本归类仅说明用途；生产切换、任务安装/移除、模型调用、原始数据或证据覆盖仍需相应授权。本轮只补说明，不运行这些脚本、不安装依赖、不改扫描覆盖或 OCR 开关。
+正式运行状态见[当前状态](../docs/current-state.md)。脚本归类仅说明用途；生产切换、任务安装/移除、模型调用、原始数据或证据覆盖仍需相应授权。新增离线维护入口及其隔离验证见下节；运行真实目录仍须相应授权。
+
+## 离线维护
+
+| 文件 | 用途 | 入口或前置条件 | 分类 |
+| --- | --- | --- | --- |
+| [compress_historical_artifacts.py](compress_historical_artifacts.py) | 对冻结清单内的两处历史解析产物执行 NTFS LZNT1 透明压缩、核验与回退 | Windows/NTFS、已有 Python 3.13 标准库、三项正式任务可只读查询；`plan` / `apply` / `verify` / `rollback` | 离线维护 |
+
+此脚本不加入 Rust 生产发布包，不给产品增加 Python 依赖，也不修改保留的 Python 回退环境。它不调用采集、解析或模型，不启动、注册或改写计划任务。代码目录 `CodeRoot` 与待维护数据目录 `SourceRoot` 必须显式区分；脚本不会从当前目录猜测数据位置。
+
+范围固定为相对 `SourceRoot` 的以下两处目录，且只处理其中名称恰为 `body.md`、`units.jsonl`、`units.idx` 的普通文件：
+
+- `.artifacts/rust-migration/archive-benchmark-final-20261017-04/incremental/data/archive/extractions`
+- `.artifacts/rust-migration/archive-benchmark-final-20261017/incremental/data/archive/extractions`
+
+多硬链接、重解析点、加密、原本已压缩或扫描期间变化的项保留在清单的 `skipped` 中，附具体原因；这些项和范围外文件均不参与 apply/rollback。目录的压缩继承属性不改。
+
+以下为维护命令模板。执行真实目录前须审阅 `plan` 生成的清单并取得对应授权；`Evidence` 必须是固定证据根下的全新目录，不得置于目标目录中。
+
+```powershell
+$Python = '<已有维护 Python 的绝对路径>'
+$CodeRoot = '<维护代码的绝对目录>'
+$SourceRoot = '<经授权的数据项目绝对目录>'
+$Evidence = Join-Path $SourceRoot '.artifacts/rust-migration/historical-artifact-compression/<全新批次>'
+& $Python -B "$CodeRoot\scripts\compress_historical_artifacts.py" plan --project-root $SourceRoot --evidence-dir $Evidence
+$Manifest = Join-Path $Evidence 'manifest.json'
+& $Python -B "$CodeRoot\scripts\compress_historical_artifacts.py" apply --manifest $Manifest
+& $Python -B "$CodeRoot\scripts\compress_historical_artifacts.py" verify --manifest $Manifest
+```
+
+`plan` 只读目标文件，发布不可修改的 `manifest.json` 及其原始 UTF-8 字节摘要 `manifest.sha256`。其余命令每次另建 `runs/<run_id>/`，保存事件、任务窗口回读与最终汇总；旧证据全部保留。运行输出一条标准 JSON；`completed` / `paused` / `failed` 的退出码依次为 0 / 1 / 2，具体原因在 `pause_reason` / `error_code` / `message` 中。`verify` 报告当前压缩和未压缩数量。`failed` 的空间汇总不作最终节省实测，收益以成功运行及独立前后测量为准。
+
+三项正式任务运行中、查询失败、任务缺失，或进入下一次触发前 300 秒时暂停；每 100 文件或累计 256 MiB 重新查询，单个大文件完整处理。空间不足时回退也暂停。排除原因后重复同一条 apply 或 rollback 命令即可续跑；程序重新核对冻结清单、身份、完整哈希和真实压缩状态，不依赖旧日志判断进度。重复 apply/rollback 的匹配项计入 `files_already`，不重复写入；重复 verify 创建新的只读核验证据。
+
+**需要恢复时才执行**以下独立回退命令块，沿用上面的维护解释器、代码目录与已审阅清单变量；回退后再次核验：
+
+```powershell
+& $Python -B "$CodeRoot\scripts\compress_historical_artifacts.py" rollback --manifest $Manifest
+& $Python -B "$CodeRoot\scripts\compress_historical_artifacts.py" verify --manifest $Manifest
+```
+
+回退先对全部候选作只读核验，再在同一锁定 HANDLE 解压并复核哈希、随机块和修改时间。它按当前分配量、原始逻辑大小与实际 NTFS 簇粒度保守估计增量，开始前保留额外 1 GiB，每次解压前重查余量。哈希、身份或非压缩属性不符时停止，保留具体错误，不覆盖内容或自动修复。完成后再次 verify，应看到全部候选恢复原始未压缩状态。
+
+隔离测试入口：[test_historical_artifact_compression.py](../tests/test_historical_artifact_compression.py)。使用已有维护 Python 执行 `-B <CodeRoot>\tests\test_historical_artifact_compression.py -v`；测试仅在系统临时目录构造合成 NTFS 文件，不读取或修改真实历史产物。
 
 ## 生产/发布
 
