@@ -230,6 +230,424 @@ fn request(app: &ai_daily_report::run::App, save: bool) -> ai_daily_report::type
 }
 
 #[test]
+fn expanded_archive_batches_keep_only_their_own_evidence() {
+    use ai_daily_report::run::{self, App};
+    let (_dir, mut config) = setup();
+    config.archive.model_group_max_units = 1;
+    config.llm.context_window_tokens = Some(128000);
+    config.llm.verified_max_output_tokens = Some(32768);
+    config.llm.max_sources_per_batch = 1;
+    config.llm.max_batches = 32;
+    let path = config.paths.work_dir.join("changes.txt");
+    fs::write(&path, "基线内容。\n").unwrap();
+    collect::run(&config, true, Utc::now() - chrono::Duration::days(2)).unwrap();
+    let changes = (0..40)
+        .map(|i| format!("新增条目{i}，金额{}元。\n", i + 1))
+        .collect::<String>();
+    fs::write(&path, format!("基线内容。\n{changes}")).unwrap();
+    collect::run(&config, false, Utc::now() - chrono::Duration::days(1)).unwrap();
+    let mut app = App::open(config, Utc::now()).unwrap();
+    assert_eq!(
+        run::prepare_archive_input(&app, &request(&app, false))
+            .unwrap_err()
+            .code,
+        "MODEL_BATCH_BUDGET_EXHAUSTED"
+    );
+    app.config.llm.max_batches = 128;
+    let frozen = run::prepare_archive_input(&app, &request(&app, false)).unwrap();
+    assert!(frozen.plan.batches.len() > 32);
+    assert_eq!(
+        frozen.plan.source_map.as_object().unwrap().len(),
+        frozen.sources.len()
+    );
+    for batch in &frozen.plan.batches {
+        let ids = batch.source_ids();
+        assert_eq!(batch.source_map.as_object().unwrap().len(), ids.len());
+        for id in ids {
+            assert_eq!(batch.source_map[&id], frozen.plan.source_map[&id]);
+            assert!(batch.source_map[&id]["archive"]["evidence"].is_array());
+        }
+        batch.validate(&app.config.llm).unwrap();
+    }
+    assert!(frozen.sources.iter().all(|source| !source.model_truncated));
+}
+
+#[test]
+fn archive_groups_adjacent_additions_and_preserves_every_unicode_quote() {
+    use ai_daily_report::{archive::model_input, run::App, snapshots::digest};
+    let (_dir, mut config) = setup();
+    config.llm.context_window_tokens = Some(128000);
+    config.llm.verified_max_output_tokens = Some(32768);
+    config.archive.model_group_max_units = 1;
+    let path = config.paths.work_dir.join("business.md");
+    fs::write(&path, "baseline\n").unwrap();
+    collect::run(&config, true, Utc::now() - chrono::Duration::days(2)).unwrap();
+    let additions = (0..12)
+        .map(|i| format!("业务条目{i}：{}\n", "汉字😀".repeat(80)))
+        .collect::<String>();
+    fs::write(&path, format!("baseline\n{additions}")).unwrap();
+    fs::write(
+        config.paths.work_dir.join(".tmp-tests-diff.txt"),
+        "temporary evidence\n",
+    )
+    .unwrap();
+    collect::run(&config, false, Utc::now() - chrono::Duration::days(1)).unwrap();
+    let mut app = App::open(config, Utc::now()).unwrap();
+    let req = request(&app, false);
+    let single = model_input::prepare(&app.config, &req).unwrap();
+    assert_eq!(single.excluded_changes.len(), 1);
+    assert_eq!(single.changes.len(), 2);
+    assert_eq!(single.sources.len(), 12);
+    let original: Vec<model_input::EvidenceRef> = single
+        .sources
+        .iter()
+        .flat_map(|source| {
+            serde_json::from_value::<Vec<model_input::EvidenceRef>>(
+                source.coverage_limits["archive"]["evidence"].clone(),
+            )
+            .unwrap()
+        })
+        .collect();
+    app.config.archive.model_group_max_units = 4;
+    let grouped = model_input::prepare(&app.config, &req).unwrap();
+    assert_eq!(grouped.sources.len(), 3);
+    let mut references = Vec::new();
+    for source in &grouped.sources {
+        let text = &grouped.texts[&source.source_id];
+        assert_eq!(source.excerpt_chars, text.chars().count());
+        assert_eq!(source.excerpt_sha256, digest(text.as_bytes()));
+        let refs: Vec<model_input::EvidenceRef> =
+            serde_json::from_value(source.coverage_limits["archive"]["evidence"].clone()).unwrap();
+        assert_eq!(refs.len(), 4);
+        for reference in &refs {
+            assert_eq!(reference.source_id, source.source_id);
+            let quote: String = text
+                .chars()
+                .skip(reference.input_start)
+                .take(reference.input_end - reference.input_start)
+                .collect();
+            assert_eq!(quote, reference.quote);
+            assert_eq!(digest(quote.as_bytes()), reference.quote_sha256);
+            assert!(original.iter().any(|old| old.unit_id == reference.unit_id
+                && old.quote == reference.quote
+                && old.ranges == reference.ranges));
+        }
+        references.extend(refs);
+    }
+    assert_eq!(references.len(), original.len());
+    let frozen = ai_daily_report::run::prepare_archive_input(&app, &req).unwrap();
+    assert!(frozen.sources.iter().all(|source| !source.model_truncated));
+    let step = &frozen.plan.batches[0];
+    let response: ai_daily_report::model::contracts::FactsResponse = serde_json::from_value(
+        serde_json::json!({"schema_version":4,"facts":[{"topic":"业务新增","background":null,
+        "detail":"业务新增条目","conditions":[],"status":null,"uncertainty":null,
+        "source_ids":step.source_ids()}],"pending":[]}),
+    )
+    .unwrap();
+    let mut facts = response
+        .select(
+            &step.logical_step,
+            &step.source_ids(),
+            &Default::default(),
+            step.output_capacity_bytes,
+        )
+        .unwrap();
+    model_input::bind_facts(step, &mut facts).unwrap();
+    model_input::validate_evidence(&app.config, &facts).unwrap();
+    assert_eq!(facts[0].evidence.len(), 12);
+    let expected = frozen.plan.compose(&app.config.llm, facts.clone()).unwrap();
+    let mut large_index = frozen.plan.clone();
+    for i in 0..1000 {
+        large_index.source_map[format!("unused_{i}")] = serde_json::json!({
+            "path":"unrelated.md", "archive":{"evidence":["unrelated".repeat(1024)]}
+        });
+    }
+    let actual = large_index.compose(&app.config.llm, facts).unwrap();
+    assert_eq!(actual.identity().unwrap(), expected.identity().unwrap());
+    assert_eq!(actual.bytes().unwrap(), expected.bytes().unwrap());
+    assert_eq!(
+        frozen.plan.target["archive_excluded_changes"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    app.config.archive.model_group_max_utf8_bytes = 1024;
+    assert_eq!(
+        model_input::prepare(&app.config, &req)
+            .unwrap()
+            .sources
+            .len(),
+        12
+    );
+    let store = ArchiveStore::open(&app.config, false).unwrap();
+    assert_eq!(
+        store
+            .versions(Some(&config_path(&app.config, ".tmp-tests-diff.txt")))
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+fn config_path(config: &AppConfig, name: &str) -> String {
+    config
+        .paths
+        .work_dir
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
+struct ProbeModel {
+    calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    compose_peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    fail_at: Option<usize>,
+}
+
+impl ai_daily_report::model::transport::ModelTransport for ProbeModel {
+    fn send(
+        &self,
+        bytes: &[u8],
+        timeout: std::time::Duration,
+    ) -> Result<
+        ai_daily_report::model::transport::HttpResponse,
+        ai_daily_report::model::transport::TransportFailure,
+    > {
+        use std::sync::atomic::Ordering::SeqCst;
+        let call = self.calls.fetch_add(1, SeqCst);
+        let active = self.active.fetch_add(1, SeqCst) + 1;
+        self.peak.fetch_max(active, SeqCst);
+        let wire: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+        let input: serde_json::Value =
+            serde_json::from_str(wire["messages"][1]["content"].as_str().unwrap()).unwrap();
+        if input["facts"].is_array() {
+            self.compose_peak.fetch_max(active, SeqCst);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        self.active.fetch_sub(1, SeqCst);
+        if self.fail_at == Some(call) {
+            return Err(ai_daily_report::model::transport::TransportFailure::Configuration);
+        }
+        LocalModel.send(bytes, timeout)
+    }
+}
+
+#[test]
+fn formal_daily_reads_concurrency_setting_and_reuses_success_on_recovery() {
+    use ai_daily_report::run::{self, App};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering::SeqCst},
+        Arc,
+    };
+    let (_dir, mut config) = setup();
+    config.llm.context_window_tokens = Some(128000);
+    config.llm.verified_max_output_tokens = Some(32768);
+    config.llm.max_tokens = 512;
+    config.recovery.max_calls_per_run = 32;
+    config.llm.max_sources_per_batch = 1;
+    collect::run(&config, true, Utc::now() - chrono::Duration::days(2)).unwrap();
+    for i in 0..8 {
+        fs::write(
+            config.paths.work_dir.join(format!("business-{i}.txt")),
+            "业务新增记录。\n",
+        )
+        .unwrap();
+    }
+    collect::run(&config, false, Utc::now() - chrono::Duration::days(1)).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let compose_peak = Arc::new(AtomicUsize::new(0));
+    let probe = |fail_at| {
+        Box::new(ProbeModel {
+            calls: calls.clone(),
+            active: active.clone(),
+            peak: peak.clone(),
+            compose_peak: compose_peak.clone(),
+            fail_at,
+        })
+    };
+    let mut app = App::open(config.clone(), Utc::now()).unwrap();
+    assert_eq!(app.model_workers, 1);
+    app.transport = probe(Some(2));
+    let req = request(&app, true);
+    let id = req.context.run_id.clone();
+    let fingerprint = app.fingerprint(false).unwrap();
+    assert_eq!(
+        run::run_daily(req, &app).unwrap_err().code,
+        "MODEL_TRANSPORT_INVALID"
+    );
+    assert_eq!(calls.load(SeqCst), 3);
+    let before = app.store.calls(&id).unwrap();
+    let success_ids: Vec<_> = before
+        .iter()
+        .filter(|row| row["status"] == "succeeded")
+        .map(|row| row["call_id"].clone())
+        .collect();
+    assert_eq!(success_ids.len(), 2);
+    drop(app);
+    config.recovery.model_workers = 4;
+    config.recovery.run_budget_seconds = 1800;
+    config.schedule.execution_limit_minutes = 40;
+    let prepared =
+        ai_daily_report::archive::recovery::prepare(&config, &id, "authorized test recovery")
+            .unwrap();
+    assert_eq!(prepared["new_model_calls"], 0);
+    assert_eq!(prepared["reused_fact_steps"], 2);
+    assert_eq!(calls.load(SeqCst), 3);
+    let recovered_id = prepared["run_id"].as_str().unwrap().to_owned();
+    assert_ne!(recovered_id, id);
+    let mut app = App::open(config, Utc::now()).unwrap();
+    assert_eq!(app.model_workers, 4);
+    assert_eq!(app.fingerprint(false).unwrap(), fingerprint);
+    app.transport = probe(None);
+    let result = run::run_daily(request(&app, true), &app).unwrap();
+    assert_eq!(result.run_id, recovered_id);
+    assert!(result.output_path.unwrap().is_file());
+    assert!(peak.load(SeqCst) > 1);
+    assert!(peak.load(SeqCst) <= 4);
+    assert!(compose_peak.load(SeqCst) > 1);
+    assert_eq!(active.load(SeqCst), 0);
+    assert_eq!(app.store.calls(&id).unwrap(), before);
+    let after = app.store.calls(&recovered_id).unwrap();
+    assert_eq!(
+        after
+            .iter()
+            .filter(|row| row["logical_step"].as_str().unwrap().starts_with("batch_"))
+            .count(),
+        6
+    );
+    let compositions = after
+        .iter()
+        .filter(|row| {
+            row["logical_step"]
+                .as_str()
+                .unwrap()
+                .starts_with("compose_")
+        })
+        .count();
+    assert!(compositions > 1);
+    assert_eq!(calls.load(SeqCst), 8 + 1 + compositions);
+    for source in &result.markdown.lines().collect::<Vec<_>>() {
+        assert!(!source.contains(".tmp-"));
+    }
+}
+
+#[test]
+fn archive_recovery_reuses_successful_composition_without_new_fact_requests() {
+    use ai_daily_report::run::{self, App};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering::SeqCst},
+        Arc,
+    };
+    let (_dir, mut config) = setup();
+    config.llm.context_window_tokens = Some(128000);
+    config.llm.verified_max_output_tokens = Some(32768);
+    config.llm.max_tokens = 512;
+    config.llm.max_sources_per_batch = 1;
+    config.recovery.max_calls_per_run = 64;
+    collect::run(&config, true, Utc::now() - chrono::Duration::days(2)).unwrap();
+    for index in 0..16 {
+        fs::write(
+            config.paths.work_dir.join(format!("recovery-{index}.txt")),
+            "业务新增记录。\n",
+        )
+        .unwrap();
+    }
+    collect::run(&config, false, Utc::now() - chrono::Duration::days(1)).unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let compose_peak = Arc::new(AtomicUsize::new(0));
+    let probe = |fail_at| {
+        Box::new(ProbeModel {
+            calls: calls.clone(),
+            active: active.clone(),
+            peak: peak.clone(),
+            compose_peak: compose_peak.clone(),
+            fail_at,
+        })
+    };
+    let mut app = App::open(config.clone(), Utc::now()).unwrap();
+    app.transport = probe(Some(18));
+    let req = request(&app, true);
+    let parent_id = req.context.run_id.clone();
+    assert_eq!(
+        run::run_daily(req, &app).unwrap_err().code,
+        "MODEL_TRANSPORT_INVALID"
+    );
+    let before = app.store.calls(&parent_id).unwrap();
+    let successful_composition: Vec<_> = before
+        .iter()
+        .filter(|row| {
+            row["status"] == "succeeded"
+                && row["logical_step"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("compose_")
+        })
+        .map(|row| row["logical_step"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(successful_composition.len(), 2);
+    let calls_before = calls.load(SeqCst);
+    assert_eq!(calls_before, 19);
+    drop(app);
+    config.recovery.model_workers = 4;
+    let prepared = ai_daily_report::archive::recovery::prepare(
+        &config,
+        &parent_id,
+        "reuse completed composition",
+    )
+    .unwrap();
+    assert_eq!(prepared["reused_fact_steps"], 16);
+    assert_eq!(prepared["reused_composition_steps"], 2);
+    assert_eq!(prepared["new_model_calls"], 0);
+    assert_eq!(calls.load(SeqCst), calls_before);
+    let mut app = App::open(config, Utc::now()).unwrap();
+    app.transport = probe(None);
+    let result = run::run_daily(request(&app, true), &app).unwrap();
+    assert_eq!(result.run_id, prepared["run_id"]);
+    assert!(result.output_path.unwrap().is_file());
+    assert_eq!(app.store.calls(&parent_id).unwrap(), before);
+    let after = app.store.calls(&result.run_id).unwrap();
+    assert!(after.iter().all(|row| {
+        let step = row["logical_step"].as_str().unwrap();
+        step.starts_with("compose_") && !successful_composition.iter().any(|old| old == step)
+    }));
+    assert_eq!(calls.load(SeqCst), calls_before + after.len());
+    assert_eq!(active.load(SeqCst), 0);
+}
+
+#[test]
+fn model_concurrency_and_task_runtime_limits_are_validated() {
+    let (_dir, mut config) = setup();
+    for workers in [0, 5] {
+        config.recovery.model_workers = workers;
+        assert_eq!(config.validate().unwrap_err().code, "CONFIG_INVALID");
+    }
+    config.recovery.model_workers = 4;
+    config.recovery.run_budget_seconds = 1800;
+    config.schedule.execution_limit_minutes = 30;
+    assert_eq!(
+        ai_daily_report::operations::task_plan(&config, "S-1-5-21-1", Utc::now())
+            .unwrap_err()
+            .code,
+        "TASK_RUNTIME_LIMIT_TOO_SHORT"
+    );
+    config.schedule.execution_limit_minutes = 40;
+    config.validate().unwrap();
+    fs::write(config.program_dir.join("ai-daily-report.exe"), []).unwrap();
+    let plan = ai_daily_report::operations::task_plan(&config, "S-1-5-21-1", Utc::now()).unwrap();
+    assert!(plan["xml"]
+        .as_str()
+        .unwrap()
+        .contains("<ExecutionTimeLimit>PT40M</ExecutionTimeLimit>"));
+}
+
+#[test]
 fn archive_daily_preview_publication_evidence_and_permissions() {
     use ai_daily_report::{
         archive::model_input,

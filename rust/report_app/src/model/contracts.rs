@@ -336,7 +336,10 @@ impl ComposedReport {
                     && !detailed.contains(&fact.fact_id)
                     && !pending_ids.contains(&fact.fact_id)
             {
-                return Err(invalid());
+                return Err(ReportError::new(
+                    "MODEL_COMPOSE_COVERAGE_INSUFFICIENT",
+                    "成稿未完整覆盖本组事实，需保留全部事实继续拆分。",
+                ));
             }
         }
         Ok(())

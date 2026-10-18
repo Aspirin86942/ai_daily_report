@@ -36,6 +36,7 @@ enum Event {
         u64,
     ),
     Deferred,
+    CompressionUnavailable,
 }
 
 pub fn profile(config: &AppConfig) -> Result<String, ReportError> {
@@ -218,6 +219,12 @@ pub fn drain(
                             let directory = tempfile::Builder::new()
                                 .prefix("parse-")
                                 .tempdir_in(staging)?;
+                            if config.archive.compress_extractions {
+                                // Unsupported filesystems keep the same readable format.
+                                if super::storage::compress(directory.path()).is_err() {
+                                    let _ = sender.send(Event::CompressionUnavailable);
+                                }
+                            }
                             let timeout = Duration::from_secs(config.archive.parse_seconds)
                                 .min(deadline.saturating_duration_since(Instant::now()));
                             if timeout.is_zero() {
@@ -294,12 +301,32 @@ pub fn drain(
             for event in receiver {
                 match event {
                     Event::Start(id, ack) => {
+                        // A resumed parse is real work even when its source is unchanged.
+                        store.conn.execute(
+                            "INSERT OR IGNORE INTO file_metrics(collection_id,path,version_id,status)
+                             SELECT ?1,v.path,v.id,'queued' FROM versions v
+                             JOIN version_extractions ve ON ve.version_id=v.id
+                             WHERE ve.extraction_id=?2 AND v.pruned_at IS NULL
+                             ORDER BY v.observed_at DESC,v.rowid DESC",
+                            params![metrics.run_id, id],
+                        )?;
                         metrics.queue_work_ms += started.elapsed().as_millis() as u64;
                         store.conn.execute("UPDATE extractions SET status=CASE WHEN manifest_json IS NULL THEN 'running' ELSE status END,attempts=attempts+1,started_at=? WHERE id=?",params![Utc::now().to_rfc3339(),id])?;
                         store.conn.execute("UPDATE file_metrics SET queue_ms=? WHERE collection_id=? AND version_id IN(SELECT version_id FROM version_extractions WHERE extraction_id=?)",params![started.elapsed().as_millis() as i64,metrics.run_id,id])?;
                         let _ = ack.send(());
                     }
                     Event::Deferred => {}
+                    Event::CompressionUnavailable => {
+                        if !metrics
+                            .warnings
+                            .iter()
+                            .any(|w| w == "ARCHIVE_COMPRESSION_UNAVAILABLE")
+                        {
+                            metrics
+                                .warnings
+                                .push("ARCHIVE_COMPRESSION_UNAVAILABLE".into());
+                        }
+                    }
                     Event::End(job, result, elapsed, spawned, peak) => {
                         metrics.parse_work_ms += elapsed;
                         metrics.worker_peak_bytes = metrics.worker_peak_bytes.max(peak);

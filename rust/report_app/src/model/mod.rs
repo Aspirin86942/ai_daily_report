@@ -117,10 +117,13 @@ fn validate_response(step: &PlannedStep, body: &[u8]) -> Result<StepOutput, Repo
             Ok(StepOutput::Facts(selected))
         }
         StepKind::Compose => {
-            let report: ComposedReport =
+            let mut report: ComposedReport =
                 serde_json::from_value(content).map_err(|_| contracts::invalid())?;
             if report.schema_version != if step.version == 5 { 4 } else { 3 } {
                 return Err(contracts::invalid());
+            }
+            if step.version == 5 {
+                bind_composition(&mut report, &step.facts)?;
             }
             report.validate_part(&step.facts)?;
             Ok(StepOutput::Compose(report))
@@ -130,6 +133,61 @@ fn validate_response(step: &PlannedStep, body: &[u8]) -> Result<StepOutput, Repo
             Ok(StepOutput::Period(content))
         }
     }
+}
+
+fn bind_composition(
+    report: &mut ComposedReport,
+    facts: &[SelectedFact],
+) -> Result<(), ReportError> {
+    let by_id: BTreeMap<_, _> = facts
+        .iter()
+        .map(|fact| (fact.fact_id.clone(), fact))
+        .collect();
+    let bind = |item: &mut contracts::CitedText| -> Result<(), ReportError> {
+        if item.fact_ids.is_empty() || item.fact_ids.iter().any(|id| !by_id.contains_key(id)) {
+            return Err(contracts::invalid());
+        }
+        item.source_ids = item
+            .fact_ids
+            .iter()
+            .flat_map(|id| by_id[id].fact.source_ids.iter().cloned())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        Ok(())
+    };
+    // Notes without fact IDs have no verified basis. Required facts still pass coverage checks.
+    report.pending.retain(|item| !item.fact_ids.is_empty());
+    report.overview.retain(|item| !item.fact_ids.is_empty());
+    for item in report.overview.iter_mut().chain(&mut report.pending) {
+        bind(item)?;
+    }
+    for matter in &mut report.matters {
+        let mut matters = BTreeSet::new();
+        for item in matter
+            .background
+            .iter_mut()
+            .chain(&mut matter.details)
+            .chain(&mut matter.status)
+        {
+            bind(item)?;
+            matters.extend(item.fact_ids.iter().map(|id| by_id[id].matter_id.clone()));
+        }
+        if matters.len() > 1 {
+            return Err(ReportError::new(
+                "MODEL_COMPOSE_MATTER_MIXED",
+                "成稿混合了不同事项，需完整拆分本组事实。",
+            ));
+        }
+        matter.matter_id = Some(
+            matters
+                .into_iter()
+                .next()
+                .flatten()
+                .ok_or_else(contracts::invalid)?,
+        );
+    }
+    Ok(())
 }
 
 fn reference(row: &Value, prefix: &str) -> Result<SnapshotRef, ReportError> {
@@ -248,38 +306,42 @@ impl ModelRunner<'_> {
             let (parent, row) = pin.read(self.store, &run, job_id)?;
             let usage: Value = serde_json::from_str(row["usage_json"].as_str().unwrap_or("{}"))?;
             let audit = &usage["reserved_budget"]["request_audit"];
-            let plan_ref: SnapshotRef = serde_json::from_value(audit["plan_revision"].clone())
-                .map_err(|_| ReportError::new("MODEL_REUSE_NOT_VALIDATED", "引用的模型计划缺失"))?;
-            let step: PlannedStep = serde_json::from_value(self.snapshots.read(&plan_ref)?)?;
-            let expected = if step.revision == root.revision {
-                root.clone()
-            } else {
-                root.shrink_once(self.llm)?
-            };
-            if row["status"] != "succeeded"
-                || pin.logical_step != root.logical_step
-                || audit["root_plan_sha256"] != root.identity()?
-                || step.identity()? != expected.identity()?
-                || row["request_fingerprint"] != request_identity(&parent, &step)?
-                || self.snapshots.read_bytes(&reference(&row, "request")?)? != step.bytes()?
-                || audit["source_ranges"] != source_ranges(&step)
-                || audit["response_schema_sha256"] != step.schema_sha256
-            {
-                return Err(ReportError::new(
-                    "MODEL_REUSE_NOT_VALIDATED",
-                    "引用响应与冻结请求、范围或版本不一致",
-                ));
+            if root.kind != StepKind::Compose || audit["root_plan_sha256"] == root.identity()? {
+                let plan_ref: SnapshotRef = serde_json::from_value(audit["plan_revision"].clone())
+                    .map_err(|_| {
+                        ReportError::new("MODEL_REUSE_NOT_VALIDATED", "引用的模型计划缺失")
+                    })?;
+                let step: PlannedStep = serde_json::from_value(self.snapshots.read(&plan_ref)?)?;
+                let expected = if step.revision == root.revision {
+                    root.clone()
+                } else {
+                    root.shrink_once(self.llm)?
+                };
+                if row["status"] != "succeeded"
+                    || pin.logical_step != root.logical_step
+                    || audit["root_plan_sha256"] != root.identity()?
+                    || step.identity()? != expected.identity()?
+                    || row["request_fingerprint"] != request_identity(&parent, &step)?
+                    || self.snapshots.read_bytes(&reference(&row, "request")?)? != step.bytes()?
+                    || audit["source_ranges"] != source_ranges(&step)
+                    || audit["response_schema_sha256"] != step.schema_sha256
+                {
+                    return Err(ReportError::new(
+                        "MODEL_REUSE_NOT_VALIDATED",
+                        "引用响应与冻结请求、范围或版本不一致",
+                    ));
+                }
+                let output = validate_response(
+                    &step,
+                    &self.snapshots.read_bytes(&reference(&row, "response")?)?,
+                )?;
+                return Ok(StepResult {
+                    output,
+                    effective: step,
+                    call_id: pin.call_id,
+                    reused: true,
+                });
             }
-            let output = validate_response(
-                &step,
-                &self.snapshots.read_bytes(&reference(&row, "response")?)?,
-            )?;
-            return Ok(StepResult {
-                output,
-                effective: step,
-                call_id: pin.call_id,
-                reused: true,
-            });
         }
         if matches!(root.kind, StepKind::Facts | StepKind::Compose) {
             if let Some(inputs) = self.recovery_inputs {
@@ -571,23 +633,8 @@ impl ModelRunner<'_> {
         let mut facts = Vec::new();
         let fact_started = Instant::now();
         for batches in plan.batches.chunks(usize::from(workers)) {
-            let results = std::thread::scope(|scope| {
-                let handles: Vec<_> = batches
-                    .iter()
-                    .map(|batch| scope.spawn(move || self.execute_complete(batch)))
-                    .collect();
-                handles
-                    .into_iter()
-                    .map(|handle| {
-                        handle.join().unwrap_or_else(|_| {
-                            Err(ReportError::new(
-                                "MODEL_WORKER_FAILED",
-                                "模型执行线程异常终止",
-                            ))
-                        })
-                    })
-                    .collect::<Vec<_>>()
-            });
+            let requests: Vec<_> = batches.iter().collect();
+            let results = self.execute_parallel(&requests);
             // Join every in-flight request before returning an error; each has its own ledger row.
             for result in results {
                 for result in result? {
@@ -616,19 +663,40 @@ impl ModelRunner<'_> {
         } else {
             3
         };
-        for group in plan.compose_groups(self.llm, facts.clone())? {
-            match group {
-                ComposeGroup::Step(step) => {
-                    for result in self.execute_complete(&step)? {
-                        if let StepOutput::Compose(report) = &result.output {
-                            parts.push(report.clone());
+        // Pending facts already have verified wording and provenance. Preserve them
+        // directly so a second model pass cannot turn uncertainty into a conclusion.
+        for fact in facts.iter().filter(|fact| fact.pending) {
+            parts.push(ComposedReport::pending_from(fact, schema_version));
+        }
+        let confirmed: Vec<_> = facts.iter().filter(|fact| !fact.pending).cloned().collect();
+        let groups = if confirmed.is_empty() {
+            Vec::new()
+        } else {
+            plan.compose_groups(self.llm, confirmed)?
+        };
+        for groups in groups.chunks(usize::from(workers)) {
+            let requests: Vec<_> = groups
+                .iter()
+                .filter_map(|group| match group {
+                    ComposeGroup::Step(step) => Some(step),
+                    ComposeGroup::Degraded(_) => None,
+                })
+                .collect();
+            let mut results = self.execute_parallel(&requests).into_iter();
+            for group in groups {
+                match group {
+                    ComposeGroup::Step(_) => {
+                        for result in results.next().unwrap()? {
+                            if let StepOutput::Compose(report) = &result.output {
+                                parts.push(report.clone());
+                            }
+                            steps.push(result);
                         }
-                        steps.push(result);
                     }
-                }
-                ComposeGroup::Degraded(fact) => {
-                    degraded.insert(fact.fact_id.clone());
-                    parts.push(ComposedReport::pending_from(&fact, schema_version));
+                    ComposeGroup::Degraded(fact) => {
+                        degraded.insert(fact.fact_id.clone());
+                        parts.push(ComposedReport::pending_from(fact, schema_version));
+                    }
                 }
             }
         }
@@ -648,6 +716,30 @@ impl ModelRunner<'_> {
             facts,
             report,
             steps,
+        })
+    }
+
+    fn execute_parallel(
+        &self,
+        steps: &[&PlannedStep],
+    ) -> Vec<Result<Vec<StepResult>, ReportError>> {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = steps
+                .iter()
+                .map(|step| scope.spawn(move || self.execute_complete(step)))
+                .collect();
+            // Finish and audit every in-flight request, including when a sibling fails.
+            handles
+                .into_iter()
+                .map(|handle| {
+                    handle.join().unwrap_or_else(|_| {
+                        Err(ReportError::new(
+                            "MODEL_WORKER_FAILED",
+                            "模型执行线程异常终止",
+                        ))
+                    })
+                })
+                .collect()
         })
     }
 
@@ -679,6 +771,8 @@ fn split_error(code: &str) -> Option<&'static str> {
         "MODEL_FACT_CAPACITY_EXCEEDED" => Some("MODEL_FACT_CAPACITY_EXCEEDED"),
         "MODEL_FACT_COUNT_EXCEEDED" => Some("MODEL_FACT_COUNT_EXCEEDED"),
         "MODEL_COMPOSE_CAPACITY_INSUFFICIENT" => Some("MODEL_COMPOSE_CAPACITY_INSUFFICIENT"),
+        "MODEL_COMPOSE_COVERAGE_INSUFFICIENT" => Some("MODEL_COMPOSE_COVERAGE_INSUFFICIENT"),
+        "MODEL_COMPOSE_MATTER_MIXED" => Some("MODEL_COMPOSE_MATTER_MIXED"),
         _ => None,
     }
 }
@@ -707,4 +801,142 @@ fn source_ranges(step: &PlannedStep) -> Value {
             .extend(entry.text_ranges.iter().map(|r| json!(r)));
     }
     Value::Object(ranges)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "requires an explicit local snapshot corpus and run ID; never calls a model"]
+    fn replay_saved_composition_responses() {
+        let root = std::path::PathBuf::from(std::env::var_os("AI_DAILY_REPLAY_DATA").unwrap());
+        let run = std::env::var("AI_DAILY_REPLAY_RUN").unwrap();
+        let database = std::path::PathBuf::from(std::env::var_os("AI_DAILY_REPLAY_DB").unwrap());
+        let connection = rusqlite::Connection::open_with_flags(
+            database,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let mut statement = connection.prepare(
+            "SELECT call_id,status,response_path,response_sha256,usage_json FROM report_model_calls WHERE run_id=? AND logical_step LIKE 'compose_%' AND response_path IS NOT NULL ORDER BY call_id",
+        ).unwrap();
+        let rows = statement
+            .query_map([run], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .unwrap();
+        let mut accepted = 0;
+        let mut split = 0;
+        let mut repaired = 0;
+        let mut pending_preserved = 0;
+        for row in rows {
+            let (call, status, path, sha, usage) = row.unwrap();
+            let usage: Value = serde_json::from_str(&usage).unwrap();
+            let reference: SnapshotRef = serde_json::from_value(
+                usage["reserved_budget"]["request_audit"]["plan_revision"].clone(),
+            )
+            .unwrap();
+            let plan_bytes = std::fs::read(root.join(&reference.path)).unwrap();
+            assert_eq!(digest(&plan_bytes), reference.sha256);
+            let step: PlannedStep = serde_json::from_slice(&plan_bytes).unwrap();
+            let response = std::fs::read(root.join(path)).unwrap();
+            assert_eq!(digest(&response), sha);
+            match validate_response(&step, &response) {
+                Ok(_) => {
+                    accepted += 1;
+                    repaired += usize::from(status == "failed");
+                }
+                Err(error) if status == "failed" && split_error(error.code).is_some() => split += 1,
+                Err(_) if step.facts.iter().all(|fact| fact.pending) => {
+                    let parts = step
+                        .facts
+                        .iter()
+                        .map(|fact| ComposedReport::pending_from(fact, 4))
+                        .collect();
+                    ComposedReport::merge(parts, &step.facts).unwrap();
+                    pending_preserved += 1;
+                }
+                Err(error) => panic!("saved call {call} remains invalid: {}", error.code),
+            }
+        }
+        assert!(accepted > 0);
+        println!(
+            "{}",
+            json!({"accepted":accepted,"previously_failed_now_valid":repaired,
+            "complete_splits_required":split,"pending_preserved_without_model":pending_preserved,
+            "model_calls":0,"status":"passed"})
+        );
+    }
+
+    #[test]
+    fn uncited_model_notes_are_removed_and_fact_coverage_remains_strict() {
+        let fact: SelectedFact = serde_json::from_value(json!({
+            "fact_id":"f1", "pending":false, "matter_id":"m1", "fact":{
+                "topic":"topic", "detail":"verified detail", "background":null,
+                "conditions":[], "status":null, "source_ids":["s1"], "uncertainty":null
+            }
+        }))
+        .unwrap();
+        let cited = json!({"text":"verified detail","fact_ids":["f1"],"source_ids":["s1"]});
+        let mut report: ComposedReport = serde_json::from_value(json!({
+            "schema_version":4, "overview":[cited],
+            "matters":[{"matter_id":"m1","title":"topic","background":null,
+                "details":[cited],"status":null}],
+            "pending":[{"text":"unattributed model note","fact_ids":[],"source_ids":[]}]
+        }))
+        .unwrap();
+        assert!(report.validate_part(std::slice::from_ref(&fact)).is_err());
+        bind_composition(&mut report, std::slice::from_ref(&fact)).unwrap();
+        report.validate_part(std::slice::from_ref(&fact)).unwrap();
+        assert!(report.pending.is_empty());
+        report.overview.push(
+            serde_json::from_value(json!({
+                "text":"unattributed overview note","fact_ids":[],"source_ids":[]
+            }))
+            .unwrap(),
+        );
+        bind_composition(&mut report, std::slice::from_ref(&fact)).unwrap();
+        assert_eq!(report.overview.len(), 1);
+        report.matters[0].matter_id = Some("mistyped identifier".into());
+        report.overview[0].source_ids = vec!["mistyped source".into()];
+        report.matters[0].details[0].source_ids = vec!["mistyped source".into()];
+        bind_composition(&mut report, std::slice::from_ref(&fact)).unwrap();
+        assert_eq!(report.matters[0].matter_id.as_deref(), Some("m1"));
+        assert_eq!(report.overview[0].source_ids, vec!["s1"]);
+        assert_eq!(report.matters[0].details[0].text, "verified detail");
+        report.validate_part(std::slice::from_ref(&fact)).unwrap();
+        let mut second = fact.clone();
+        second.fact_id = "f2".into();
+        second.matter_id = Some("m2".into());
+        let pair = [fact.clone(), second];
+        assert_eq!(
+            report.validate_part(&pair).unwrap_err().code,
+            "MODEL_COMPOSE_COVERAGE_INSUFFICIENT"
+        );
+        let mut mixed = report.clone();
+        mixed.matters[0].details[0].fact_ids.push("f2".into());
+        assert_eq!(
+            bind_composition(&mut mixed, &pair).unwrap_err().code,
+            "MODEL_COMPOSE_MATTER_MIXED"
+        );
+        report.pending.push(
+            serde_json::from_value(json!({
+                "text":"unknown citation", "fact_ids":["unknown"], "source_ids":["s1"]
+            }))
+            .unwrap(),
+        );
+        assert!(bind_composition(&mut report, std::slice::from_ref(&fact)).is_err());
+        assert_eq!(report.pending.len(), 1);
+        assert!(report.validate_part(std::slice::from_ref(&fact)).is_err());
+        report.pending.clear();
+        report.matters.clear();
+        assert!(report.validate_part(std::slice::from_ref(&fact)).is_err());
+    }
 }

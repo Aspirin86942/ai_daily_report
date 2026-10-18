@@ -1,4 +1,6 @@
 //! Only observed, immutable changes enter a report. Publication owns coverage.
+mod group;
+
 use super::{
     diff, error, identity, parse,
     store::{atomic_write, ArchiveStore},
@@ -55,6 +57,7 @@ pub struct Prepared {
     pub texts: BTreeMap<String, String>,
     pub gaps: Vec<CoverageGap>,
     pub changes: Vec<String>,
+    pub excluded_changes: Vec<String>,
     pub continued: u64,
 }
 
@@ -146,6 +149,7 @@ pub fn prepare(config: &AppConfig, request: &ReportRequest) -> Result<Prepared, 
         texts: BTreeMap::new(),
         gaps: vec![],
         changes: vec![],
+        excluded_changes: vec![],
         continued: 0,
     };
     let mut total = 0usize;
@@ -163,6 +167,20 @@ pub fn prepare(config: &AppConfig, request: &ReportRequest) -> Result<Prepared, 
         }
         let changes: diff::Changes = serde_json::from_str(&manifest)?;
         out.changes.push(change.clone());
+        let name = Path::new(&current.path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        if config
+            .archive
+            .model_ignored_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(&prefix.to_lowercase()))
+        {
+            out.excluded_changes.push(change);
+            continue;
+        }
         let artifact: ArchiveArtifact = serde_json::from_value(store.read_manifest(&extraction)?)?;
         let prior_artifact: Option<ArchiveArtifact> = before_extraction
             .as_deref()
@@ -320,7 +338,7 @@ pub fn prepare(config: &AppConfig, request: &ReportRequest) -> Result<Prepared, 
                     &hunk_index.to_string(),
                     &offset.to_string(),
                 ]);
-                let archive = json!({"change_id":change,"document_id":current.document_id,"version_id":version,"extraction_id":extraction,"path":current.path,"observed_date":day,"kind":kind,"comparison_incomplete":comparison_incomplete,"matter_id":matter,"evidence":evidence});
+                let archive = json!({"change_id":change,"document_id":current.document_id,"version_id":version,"extraction_id":extraction,"path":current.path,"observed_date":day,"kind":kind,"comparison_incomplete":comparison_incomplete,"matter_id":matter,"evidence":evidence,"hunk_index":hunk_index,"unit_offset":offset});
                 let source = ReportSource {
                     source_id: id.clone(),
                     source_kind: "file".into(),
@@ -409,6 +427,7 @@ pub fn prepare(config: &AppConfig, request: &ReportRequest) -> Result<Prepared, 
             &format!("本次范围内或尚未恢复的采集、解析缺口共 {unresolved} 条，可通过 stats 查看原因与恢复时间。"),
         ));
     }
+    group::coalesce(&mut out, &config.archive)?;
     out.gaps
         .sort_by(|a, b| (&a.code, &a.source_id).cmp(&(&b.code, &b.source_id)));
     out.gaps
@@ -429,63 +448,16 @@ fn collection_coverage(
     if start >= end {
         return Ok(None);
     }
-    // Partial rounds have finished capture; their per-file gaps remain visible separately.
-    // A later recovery must not erase a missed interval in the report's own day.
-    let mut statement = store.conn.prepare(
-        "WITH completed AS (
-            SELECT started_at FROM collections
-            WHERE status IN ('complete','partial') AND started_at<?2 AND finished_at<=?3
-        ) SELECT started_at FROM completed
-          WHERE started_at>=?1 OR started_at=(SELECT max(started_at) FROM completed WHERE started_at<?1)
-          ORDER BY started_at",
-    )?;
-    let rows = statement.query_map(
-        params![
-            start.to_rfc3339(),
-            end.to_rfc3339(),
-            request.context.started_at.to_rfc3339()
-        ],
-        |row| row.get::<_, String>(0),
-    )?;
-    let interval = chrono::Duration::minutes(30);
-    let tolerance = chrono::Duration::minutes(1);
-    let mut previous = start - interval;
-    let mut completed = false;
-    let mut count = 0usize;
-    let mut ranges = Vec::new();
-    let mut record = |from: DateTime<chrono::Utc>, to: DateTime<chrono::Utc>| {
-        if to - from > interval + tolerance {
-            count += 1;
-            if ranges.len() < 5 {
-                ranges.push(format!(
-                    "{} 至 {}",
-                    (from + interval)
-                        .max(start)
-                        .with_timezone(&crate::types::shanghai())
-                        .format("%Y-%m-%d %H:%M:%S"),
-                    to.with_timezone(&crate::types::shanghai())
-                        .format("%Y-%m-%d %H:%M:%S")
-                ));
-            }
-        }
-    };
-    for row in rows {
-        let at = DateTime::parse_from_rfc3339(&row?)
-            .map_err(|_| error("ARCHIVE_TIME_INVALID"))?
-            .with_timezone(&chrono::Utc);
-        if at >= start {
-            record(previous, at);
-        }
-        previous = at;
-        completed = true;
-    }
-    record(previous, end);
+    let coverage = super::schedule::coverage(store, start, end, request.context.started_at)?;
+    let completed = coverage.completed;
+    let count = coverage.gaps;
+    let ranges = coverage.ranges;
     if completed && count == 0 {
         return Ok(None);
     }
     let detail = if completed {
         format!(
-            "按每 30 分钟采集检查（允许 1 分钟调度偏差），发现 {count} 段缺少已完成采集记录的时间，以下列出前 {} 段（Asia/Shanghai）：{}。这些时间内是否有变化无法判断。",
+            "按当时生效的采集间隔检查（允许 1 分钟调度偏差），发现 {count} 段缺少已完成采集记录的时间，以下列出前 {} 段（Asia/Shanghai）：{}。这些时间内是否有变化无法判断。",
             ranges.len(), ranges.join("；")
         )
     } else {

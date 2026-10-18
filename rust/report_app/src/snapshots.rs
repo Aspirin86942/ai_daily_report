@@ -131,7 +131,7 @@ impl SnapshotStore {
         Ok(Self {
             root: fs::canonicalize(root)?,
             max_bytes,
-            max_file_bytes: 8 * 1024 * 1024,
+            max_file_bytes: max_bytes.min(128 * 1024 * 1024),
             write_lock: Mutex::new(()),
         })
     }
@@ -239,5 +239,27 @@ impl SnapshotStore {
     pub fn read(&self, reference: &SnapshotRef) -> Result<Value, ReportError> {
         serde_json::from_slice(&self.read_bytes(reference)?)
             .map_err(|_| ReportError::new("SNAPSHOT_JSON_INVALID", "快照 JSON 无效"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn large_input_round_trips_without_bypassing_total_capacity_or_hashes() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = SnapshotStore::new(directory.path().to_path_buf(), 16 * 1024 * 1024).unwrap();
+        let run = crate::types::new_run_id();
+        let input = json!({"text": "a".repeat(9 * 1024 * 1024)});
+        let reference = store.put(&run, "input", &input).unwrap();
+        assert_eq!(store.read(&reference).unwrap(), input);
+        assert_eq!(
+            store.put(&run, "another-input", &input).unwrap_err().code,
+            "SNAPSHOT_CAPACITY_EXCEEDED"
+        );
+        fs::write(store.root.join(&reference.path), b"{}").unwrap();
+        assert!(store.read(&reference).is_err());
     }
 }

@@ -78,6 +78,8 @@ pub struct ModelPricing {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recovery {
+    #[serde(default = "default_model_workers")]
+    pub model_workers: u8,
     pub enforce_model_budgets: bool,
     pub missed_days_policy: String,
     pub max_calls_per_run: u64,
@@ -89,6 +91,10 @@ pub struct Recovery {
     pub max_cost_per_run_microunits: Option<u64>,
     pub max_cost_per_calendar_day_microunits: Option<u64>,
     pub model_pricing: Option<ModelPricing>,
+}
+
+fn default_model_workers() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -534,6 +540,9 @@ impl AppConfig {
     }
 
     pub fn validate(&self) -> Result<(), ReportError> {
+        if !(1..=4).contains(&self.recovery.model_workers) {
+            return Err(invalid("recovery.model_workers"));
+        }
         let llm = &self.llm;
         if !["deepseek", "openai"].contains(&llm.provider.as_str())
             || llm.model_id.trim().is_empty()

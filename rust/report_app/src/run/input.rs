@@ -285,7 +285,7 @@ pub(super) fn prepare(
 
 pub fn prepare_archive(app: &App, request: &ReportRequest) -> Result<FrozenInput, ReportError> {
     let prepared = crate::archive::model_input::prepare(&app.config, request)?;
-    let target = json!({"archive_format":4,"archive_changes":prepared.changes,"continued":prepared.continued});
+    let target = json!({"archive_format":4,"archive_changes":prepared.changes,"archive_excluded_changes":prepared.excluded_changes,"continued":prepared.continued});
     prepare_sources(
         app,
         request,
@@ -348,7 +348,14 @@ fn prepare_sources(
             }
         }
         for batch in &mut plan.batches {
-            batch.source_map = plan.source_map.clone();
+            batch.source_map = batch
+                .source_ids()
+                .into_iter()
+                .map(|id| {
+                    let metadata = plan.source_map[&id].clone();
+                    (id, metadata)
+                })
+                .collect();
         }
     }
     let mut ranges: BTreeMap<String, Vec<TextRange>> = BTreeMap::new();

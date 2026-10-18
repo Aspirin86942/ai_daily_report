@@ -6,7 +6,10 @@ pub mod diff;
 pub mod maintenance;
 pub mod model_input;
 pub mod parse;
+pub mod recovery;
+pub mod schedule;
 pub mod stats;
+pub mod storage;
 pub mod store;
 
 use crate::{snapshots::digest, ReportError};

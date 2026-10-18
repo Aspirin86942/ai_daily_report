@@ -21,6 +21,13 @@ pub struct CollectArgs {
 }
 #[derive(Debug, Subcommand)]
 pub enum ArchiveCommand {
+    /// Prepare a new recovery generation using frozen input and validated fact receipts; no model calls.
+    Recover {
+        #[arg(long)]
+        run_id: String,
+        #[arg(long)]
+        reason: String,
+    },
     History {
         #[arg(long)]
         path: String,
@@ -42,6 +49,8 @@ pub enum ArchiveCommand {
         version: String,
     },
     Verify,
+    /// Compress extraction storage without changing evidence bytes.
+    Optimize,
     Backup {
         #[arg(long)]
         output: PathBuf,
@@ -68,6 +77,10 @@ pub struct StatsArgs {
 }
 pub fn execute(config: &AppConfig, command: ArchiveCommand) -> Result<Value, ReportError> {
     match command {
+        ArchiveCommand::Recover { run_id, reason } => {
+            super::recovery::prepare(config, &run_id, &reason)
+        }
+        ArchiveCommand::Optimize => super::storage::optimize(config),
         ArchiveCommand::Backup { output } => super::maintenance::backup(config, &output),
         ArchiveCommand::Prune {
             before,

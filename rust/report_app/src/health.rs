@@ -6,13 +6,11 @@ use crate::{
     types, ReportError,
 };
 use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf};
 
-const INTERVAL_MINUTES: i64 = 30;
-const TOLERANCE_MINUTES: i64 = 1;
 const DISK_WARN_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const DISK_ERROR_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 
@@ -126,48 +124,10 @@ fn collection_continuity(
             "目标时段尚未结束或归档尚未建立基线，无需核对采集连续性",
         ));
     }
-    let mut statement = store.conn.prepare(
-        "SELECT started_at FROM collections WHERE status IN ('complete','partial') AND finished_at IS NOT NULL AND started_at<?1 AND finished_at<=?2 ORDER BY started_at",
-    )?;
-    let rows = statement.query_map(params![end.to_rfc3339(), now.to_rfc3339()], |row| {
-        row.get::<_, String>(0)
-    })?;
-    let interval = Duration::minutes(INTERVAL_MINUTES);
-    let tolerance = Duration::minutes(TOLERANCE_MINUTES);
-    let mut previous = start - interval;
-    let mut completed = false;
-    let mut gaps = 0usize;
-    let mut ranges: Vec<String> = Vec::new();
-    let mut record = |from: DateTime<Utc>, to: DateTime<Utc>| {
-        // 窗口起点之前的历史采集不能计入目标日缺口。
-        let from = from.max(start);
-        if to - from > interval + tolerance {
-            gaps += 1;
-            if ranges.len() < 5 {
-                ranges.push(format!(
-                    "{} 至 {}",
-                    (from + interval)
-                        .max(start)
-                        .with_timezone(&types::shanghai())
-                        .format("%Y-%m-%d %H:%M:%S"),
-                    to.with_timezone(&types::shanghai())
-                        .format("%Y-%m-%d %H:%M:%S")
-                ));
-            }
-        }
-    };
-    for row in rows {
-        let text = row?;
-        let at = DateTime::parse_from_rfc3339(&text)
-            .map_err(|_| ReportError::new("HEALTH_TIME_INVALID", "采集时间格式无效"))?
-            .with_timezone(&Utc);
-        if at >= start {
-            record(previous, at);
-        }
-        previous = at;
-        completed = true;
-    }
-    record(previous, end);
+    let coverage = crate::archive::schedule::coverage(store, start, end, now)?;
+    let completed = coverage.completed;
+    let gaps = coverage.gaps;
+    let ranges = coverage.ranges;
     if !completed {
         return Ok(HealthCheck::error(
             "COLLECTION_GAP",
@@ -184,7 +144,7 @@ fn collection_continuity(
     Ok(HealthCheck::error(
         "COLLECTION_GAP",
         format!(
-            "按每 30 分钟采集检查（允许 1 分钟调度偏差），发现 {gaps} 段缺少已完成采集记录，前 {} 段（Asia/Shanghai）：{}",
+            "按当时生效的采集间隔检查（允许 1 分钟调度偏差），发现 {gaps} 段缺少已完成采集记录，前 {} 段（Asia/Shanghai）：{}",
             ranges.len(),
             ranges.join("；")
         ),

@@ -124,8 +124,15 @@ fn daily_triggers(
 
 fn collect_triggers(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> String {
     let date = now.with_timezone(&types::shanghai()).date_naive();
+    let interval = config.archive.collection_interval_minutes;
+    let repetition = match (interval / 60, interval % 60) {
+        (24, 0) => "P1D".to_owned(),
+        (0, minutes) => format!("PT{minutes}M"),
+        (hours, 0) => format!("PT{hours}H"),
+        (hours, minutes) => format!("PT{hours}H{minutes}M"),
+    };
     format!(
-        "<CalendarTrigger id=\"Collect30Minutes\"><StartBoundary>{date}T00:00:00+08:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>PT30M</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>{}",
+        "<CalendarTrigger id=\"CollectInterval\"><StartBoundary>{date}T00:00:00+08:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>{repetition}</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>{}",
         logon_trigger(config, sid)
     )
 }
@@ -205,6 +212,14 @@ fn task_plan_inner(
 }
 
 pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Value, ReportError> {
+    if u64::from(config.schedule.execution_limit_minutes) * 60
+        < config.recovery.run_budget_seconds.saturating_add(60)
+    {
+        return Err(ReportError::new(
+            "TASK_RUNTIME_LIMIT_TOO_SHORT",
+            "日报任务时限须比程序运行时限至少多一分钟，以完成状态保存。",
+        ));
+    }
     let config_dir = display_path(&config.config_dir);
     let arguments = format!("--config-dir \"{config_dir}\" daily --scheduled");
     let triggers = daily_triggers(config, sid, now)?;
@@ -302,7 +317,7 @@ fn task_plan_collect(
         &triggers,
     )?;
     value["kind"] = json!("collect");
-    value["interval_minutes"] = json!(30);
+    value["interval_minutes"] = json!(config.archive.collection_interval_minutes);
     Ok(value)
 }
 

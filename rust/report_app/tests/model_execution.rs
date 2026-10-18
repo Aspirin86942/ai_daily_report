@@ -835,13 +835,46 @@ fn uncertain_facts_are_preserved_as_pending_without_retrying_the_model() {
     assert_eq!(serde_json::to_value(&selected[1].fact).unwrap(), uncertain);
     let network = Script::new(vec![
         Ok(response(content)),
-        Ok(response(composed_for(&selected))),
+        Ok(response(composed_for(&selected[..1]))),
     ]);
     let generated = h.runner(&network).generate_with_workers(&plan, 1).unwrap();
     assert_eq!(generated.facts, selected);
     assert_eq!(generated.report.unwrap().pending.len(), 2);
     assert_eq!(network.count(), 2);
+    let sent: Value = serde_json::from_slice(&network.requests.lock().unwrap()[1]).unwrap();
+    let input: Value =
+        serde_json::from_str(sent["messages"][1]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(input["facts"].as_array().unwrap().len(), 1);
     assert!(h.calls().iter().all(|call| call["status"] == "succeeded"));
+}
+
+#[test]
+fn entirely_pending_facts_need_no_composition_request() {
+    let h = Harness::new();
+    let plan = h.plan(&[source("s1", "审批方案尚待确认。")]);
+    let mut pending = fact("s1");
+    pending["uncertainty"] = json!("生效日期未确认。");
+    let network = Script::new(vec![Ok(response(json!({
+        "schema_version":3,"facts":[],"pending":[pending]
+    })))]);
+    let generated = h.runner(&network).generate_with_workers(&plan, 4).unwrap();
+    assert_eq!(network.count(), 1);
+    assert_eq!(generated.steps.len(), 1);
+    assert_eq!(generated.facts.len(), 1);
+    assert!(generated.facts[0].pending);
+    let report = generated.report.unwrap();
+    assert!(report.overview.is_empty());
+    assert!(report.matters.is_empty());
+    assert_eq!(report.pending.len(), 1);
+    assert_eq!(
+        report.pending[0].fact_ids,
+        vec![generated.facts[0].fact_id.clone()]
+    );
+    assert_eq!(report.pending[0].source_ids, vec!["s1"]);
+    assert!(report.pending[0]
+        .text
+        .contains(pending["detail"].as_str().unwrap()));
+    report.validate(&generated.facts).unwrap();
 }
 
 #[test]

@@ -72,8 +72,14 @@ pub struct DailyPlan {
 
 fn wire_facts(facts: &[SelectedFact]) -> Result<Value, ReportError> {
     let mut value = serde_json::to_value(facts)?;
+    let mut aliases = BTreeMap::new();
     for fact in value.as_array_mut().unwrap() {
         fact.as_object_mut().unwrap().remove("evidence");
+        if let Some(matter) = fact["matter_id"].as_str().map(str::to_owned) {
+            let next = format!("m_{:03}", aliases.len());
+            let alias = aliases.entry(matter).or_insert(next);
+            fact["matter_id"] = json!(alias);
+        }
     }
     Ok(value)
 }
@@ -182,6 +188,7 @@ impl PlannedStep {
         let mut target = self.target.clone();
         if let Some(target) = target.as_object_mut() {
             target.remove("archive_changes");
+            target.remove("archive_excluded_changes");
         }
         let mut sources = self.source_map.clone();
         if let Some(sources) = sources.as_object_mut() {
@@ -524,7 +531,17 @@ impl DailyPlan {
         let mut step = empty_step(StepKind::Compose, &self.target);
         step.logical_step = "compose_000".into();
         step.facts = facts;
-        step.source_map = self.source_map.clone();
+        step.source_map = if let Some(sources) = self.source_map.as_object() {
+            step.facts
+                .iter()
+                .flat_map(|fact| &fact.fact.source_ids)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .filter_map(|id| sources.get(id).map(|value| (id.clone(), value.clone())))
+                .collect()
+        } else {
+            self.source_map.clone()
+        };
         step.coverage = self.coverage.clone();
         step.retain_sources();
         step.rebuild(llm)?;

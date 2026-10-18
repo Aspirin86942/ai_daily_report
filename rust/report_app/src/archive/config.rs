@@ -5,9 +5,14 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ArchiveSettings {
+    pub collection_interval_minutes: u32,
+    pub compress_extractions: bool,
     pub roots: Vec<PathBuf>,
     pub model_roots: Vec<PathBuf>,
     pub allow_work_dir_for_model: bool,
+    pub model_ignored_prefixes: Vec<String>,
+    pub model_group_max_units: usize,
+    pub model_group_max_utf8_bytes: usize,
     pub read_workers: usize,
     pub parse_workers: usize,
     pub memory_mib: u64,
@@ -29,9 +34,14 @@ pub struct ArchiveSettings {
 impl Default for ArchiveSettings {
     fn default() -> Self {
         Self {
+            collection_interval_minutes: 30,
+            compress_extractions: true,
             roots: vec![],
             model_roots: vec![],
             allow_work_dir_for_model: true,
+            model_ignored_prefixes: vec![".tmp-".into()],
+            model_group_max_units: 16,
+            model_group_max_utf8_bytes: 8192,
             read_workers: 2,
             parse_workers: 5,
             memory_mib: 3072,
@@ -53,7 +63,17 @@ impl Default for ArchiveSettings {
 
 impl ArchiveSettings {
     pub fn validate(&self) -> Result<(), ReportError> {
-        if !(1..=2).contains(&self.read_workers)
+        if !(1..=64).contains(&self.model_group_max_units)
+            || !(1024..=32768).contains(&self.model_group_max_utf8_bytes)
+            || self.model_ignored_prefixes.iter().any(|prefix| {
+                prefix.is_empty() || prefix.len() > 128 || prefix.contains(['/', '\\', '\r', '\n'])
+            })
+        {
+            return Err(super::error("ARCHIVE_CONFIG_INVALID"));
+        }
+        if !(30..=1440).contains(&self.collection_interval_minutes)
+            || 1440 % self.collection_interval_minutes != 0
+            || !(1..=2).contains(&self.read_workers)
             || !(1..=5).contains(&self.parse_workers)
             || self.worker_memory_mib != 512
             || self.parent_memory_mib < 512

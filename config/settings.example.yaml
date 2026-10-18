@@ -48,6 +48,8 @@ report:
   notes_dir: "data/report_notes"
 
 recovery:
+  # 同时执行的模型请求数，范围 1-4；调整并发不会改变冻结请求的身份。
+  model_workers: 1
   enforce_model_budgets: false
   missed_days_policy: "latest_due_day_with_gap_notice"
   max_calls_per_run: 12
@@ -119,6 +121,14 @@ scanner:
 
 # 长期归档与模型缓存独立；以下目录不受缓存保留天数影响。
 archive:
+  # 按文件名前缀筛选模型输入；原件和变化仍保存在本地归档中。
+  model_ignored_prefixes: [".tmp-"]
+  model_group_max_units: 16
+  model_group_max_utf8_bytes: 8192
+  # 全天采集间隔；必须为 30～1440 分钟且能整除一天，兼容默认值为 30。
+  collection_interval_minutes: 30
+  # NTFS 透明压缩保留正文、随机定位和证据哈希。
+  compress_extractions: true
   # work_dir 始终在采集范围内，其他目录默认仅供本地归档。
   roots: []
   model_roots: []

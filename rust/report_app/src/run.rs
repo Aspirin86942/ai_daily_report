@@ -69,12 +69,13 @@ impl App {
                 .saturating_mul(1024 * 1024),
         )?;
         let transport = Box::new(HttpTransport::new(&config));
+        let model_workers = config.recovery.model_workers;
         Ok(Self {
             config,
             store,
             snapshots,
             transport,
-            model_workers: 1,
+            model_workers,
             ocr_manifest: Default::default(),
             scanner: OnceLock::new(),
         })

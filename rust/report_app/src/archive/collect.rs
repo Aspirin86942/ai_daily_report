@@ -185,6 +185,7 @@ pub fn run(
         return Err(error("ARCHIVE_BASELINE_ALREADY_CREATED"));
     }
     let timestamp = now.to_rfc3339();
+    super::schedule::activate(&store, config.archive.collection_interval_minutes, now)?;
     store.conn.execute(
         "INSERT INTO collections(id,started_at,status,baseline) VALUES(?,?,'running',?)",
         params![run_id, timestamp, baseline],
@@ -207,9 +208,10 @@ pub fn run(
         |r| r.get(0),
     )?;
     if let Some(previous) = previous.and_then(|v| DateTime::parse_from_rfc3339(&v).ok()) {
-        let interval = now.signed_duration_since(previous).num_seconds();
-        if interval > 1860 {
-            let gap = serde_json::json!({"from":(previous+chrono::Duration::minutes(30)).to_rfc3339(),"to":timestamp,"interval_seconds":interval});
+        let previous = previous.with_timezone(&Utc);
+        let schedule = super::schedule::CollectionSchedule::load(&store)?;
+        if let Some(due) = schedule.missed_after(previous, now, previous) {
+            let gap = serde_json::json!({"from":due.to_rfc3339(),"to":timestamp,"interval_seconds":now.signed_duration_since(previous).num_seconds()});
             store.gap(&run_id, None, "COLLECTION_INTERVAL_GAP", &gap.to_string())?;
             store.conn.execute("UPDATE gaps SET resolved_at=? WHERE collection_id=? AND code='COLLECTION_INTERVAL_GAP'",params![timestamp,run_id])?;
             metrics.warnings.push("COLLECTION_INTERVAL_GAP".into());
@@ -360,7 +362,6 @@ pub fn run(
         let audit = audit_day.as_deref() != Some(day.as_str());
         if parent.is_some() && guard.is_some() && old_guard == guard && !audit {
             metrics.unchanged += 1;
-            tx.execute("INSERT INTO file_metrics(collection_id,path,version_id,capture_ms,status) VALUES(?,?,?,0,'unchanged')",params![run_id,file.path,parent])?;
             continue;
         }
         let known_hash = parent
@@ -694,7 +695,9 @@ fn persist_capture(
         "UPDATE gaps SET resolved_at=? WHERE path=? AND resolved_at IS NULL",
         params![observed, job.file.path],
     )?;
-    tx.execute("INSERT INTO file_metrics(collection_id,path,version_id,capture_ms,bytes_read,status) VALUES(?,?,?,?,?,?)",params![run,job.file.path,version,elapsed as i64,captured.bytes as i64,if unchanged{"unchanged"}else{"captured"}])?;
+    if !unchanged {
+        tx.execute("INSERT INTO file_metrics(collection_id,path,version_id,capture_ms,bytes_read,status) VALUES(?,?,?,?,?,?)",params![run,job.file.path,version,elapsed as i64,captured.bytes as i64,"captured"])?;
+    }
     tx.commit()?;
     if !unchanged {
         fs::remove_file(receipt_path)?;
