@@ -1,18 +1,26 @@
 # 当前运行与验收状态
 
-核验时间：2026-10-18 13:57（Asia/Shanghai）。10 月 17 日日报已手动恢复发布，文件、数据库、引用与归档覆盖核验通过；计划任务手动触发退出码为 0。三个任务统一使用 incremental-06。真实日历触发与手动执行分开记录，下一次日报日历触发为 2026-10-19 09:00。
+核验时间：2026-10-18 20:37（Asia/Shanghai）。10 月 17 日日报已手动恢复发布，原报告哈希保持；两处历史解析产物 16,641 文件透明压缩与全量核验完成，释放 8.88 GB。正式包与严格离线自检通过，health 仅原 3 条历史失败提醒，本轮生产模型调用 0。三个任务统一使用 incremental-06；20:00 采集真实触发结果 0，下一次 22:00。日报下一次日历触发仍为 2026-10-19 09:00，尚未发生，手动执行与真实日历验收分开记录。
 
 ## 正式任务
 
 | 任务 | 程序包 | 配置目录 | 触发 | 回读状态 |
 | --- | --- | --- | --- | --- |
 | AI Daily Report | .releases/rust-20261018-incremental-06 | config-rust | 每日 09:00（兜底 09:30、10:30）+ 登录后 1 分钟 | Ready；手动计划任务验证退出码 0、新增模型调用 0；下一日历触发 2026-10-19 09:00 |
-| AI Daily Report Collect | .releases/rust-20261018-incremental-06 | config-rust/archive-collector | 全天每 2 小时（00:00、02:00…22:00）+ 登录补采 | Ready；12:00 由 incremental-01 真实定时执行成功，重复间隔 PT2H，下一次 2026-10-18 14:00 |
+| AI Daily Report Collect | .releases/rust-20261018-incremental-06 | config-rust/archive-collector | 全天每 2 小时（00:00、02:00…22:00）+ 登录补采 | Ready；20:00 由 incremental-06 真实定时执行成功，结果 0，定义 SHA 未变；下一次 2026-10-18 22:00 |
 | AI Daily Report Health | .releases/rust-20261018-incremental-06 | config-rust | 每日 11:00、23:00 | Ready；11:00 最近日历退出码 1；本次补报后的只读 health 为 warning；下一次 23:00 |
 
 日报任务直接执行 ai-daily-report.exe daily --scheduled，当前 archive.daily_source 为 archive，模型名称为 `deepseek-v4-flash`；三个日历触发器加登录后 1 分钟兜底，首次成功后的后续触发快速返回。采集任务执行 collect --scheduled，allow_work_dir_for_model 为 false，本轮未改动。健康任务执行 scripts/health_notify.ps1，只读巡检并写健康文件与本地通知，不调用模型。完整程序路径和参数以实际任务回读为准。
 
 正式归档日报于 2026-10-17 10:50 按用户立即切换授权启用；2026-10-18 03:40 左右按本轮部署授权将日报与健康任务切换到 `rust-20261018-release-01`（包含定时链路可靠性、日报可读性、历史检索与工程清理）。部署门禁、`doctor --strict`、`doctor --check-model`（1 次合成请求）均通过，任务注册后回读一致；旧包与切换前任务 XML 保留。首份由新包生成的真实定时 v4 日报尚待验收。
+
+## 10 月 18 日历史测量与验收产物压缩
+
+18:39 完成[历史产物透明压缩计划](superpowers/plans/2026-10-18-historical-artifact-compression.md)的真实验收。范围仅为两处历史 archive-benchmark-final extractions 的三个固定文件名，共 16,641 项；逻辑内容 14,279,826,110 字节保持，文件数据占用从 14,279,826,110 降到 5,401,958,732 字节，释放 **8,877,867,378 字节（8.88 GB，62.1707%）**。完整哈希、随机读取、身份、链接数、大小、mtime 和压缩状态全量核验通过，missing/extra 为 0。
+
+按硬链接去重的项目文件数据占用 73,921,613,875 → 65,066,161,384 字节，净减 8,855,452,491 字节；与目标节省的差额为新增清单及审计证据。D: 整卷空闲另行测量，不与文件数据混算。原件、旧包、配置、Python 恢复环境、数据库、响应账本、失败证据均保留，实际回退未执行；旧性能记录仍代表原测量时状态，以后复测须注明压缩属性。
+
+维护入口为[压缩工具](../scripts/compress_historical_artifacts.py)和[维护说明](../scripts/README.md)，78 项隔离测试、逐任务审查及最终整体/修复审查通过；标准库和 Windows 原生透明压缩，不进入 Rust 产品依赖。正式 incremental-06 的 445 文件、自检、已发布报告 SHA 和 5 个保留 Worker 哈希前后通过，三个任务定义未改，本轮生产模型调用 0。18:39 验收时未进行 Git 集成；20:32 用户追加提交、合并与远端发布授权，开发审查证据归档保留。完整[结果、清单、运行证据与回退入口](superpowers/plans/2026-10-18-historical-artifact-compression-results.md)已保存，正式程序包保持 incremental-06。
 
 ## 10 月 18 日采集与磁盘占用优化
 
