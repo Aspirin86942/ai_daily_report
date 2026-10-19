@@ -154,6 +154,42 @@ fn register_receipt(store: &mut ArchiveStore, receipt: &CaptureReceipt) -> Resul
     Ok(())
 }
 
+/// CLI collection path, including the gate before resources or archive writes.
+pub fn execute(
+    config: &AppConfig,
+    baseline: bool,
+    scheduled: bool,
+    now: DateTime<Utc>,
+) -> Result<serde_json::Value, ReportError> {
+    if scheduled
+        && config
+            .archive
+            .collection_workday_window
+            .as_ref()
+            .is_some_and(|window| !window.allows(now))
+    {
+        return Ok(serde_json::json!({
+            "status": "skipped",
+            "action": "skipped",
+            "reason": "outside_collection_workday_window",
+            "model_calls": 0,
+            "bytes_read": 0,
+            "parse_jobs": 0,
+            "worker_starts": 0,
+        }));
+    }
+    let budget = super::resources::Budget::new(config.archive.memory_mib)?;
+    let metrics = run(config, baseline, now)?;
+    let mut value = serde_json::to_value(&metrics)?;
+    value["resources"] = budget.sample()?;
+    let store = ArchiveStore::open(config, true)?;
+    store.conn.execute(
+        "UPDATE collections SET metrics_json=? WHERE id=?",
+        params![serde_json::to_string(&value)?, metrics.run_id],
+    )?;
+    Ok(value)
+}
+
 pub fn run(
     config: &AppConfig,
     baseline: bool,
@@ -185,7 +221,7 @@ pub fn run(
         return Err(error("ARCHIVE_BASELINE_ALREADY_CREATED"));
     }
     let timestamp = now.to_rfc3339();
-    super::schedule::activate(&store, config.archive.collection_interval_minutes, now)?;
+    super::schedule::activate_config(&store, &config.archive, now)?;
     store.conn.execute(
         "INSERT INTO collections(id,started_at,status,baseline) VALUES(?,?,'running',?)",
         params![run_id, timestamp, baseline],

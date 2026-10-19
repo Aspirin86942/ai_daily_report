@@ -125,8 +125,11 @@ archive:
   model_ignored_prefixes: [".tmp-"]
   model_group_max_units: 16
   model_group_max_utf8_bytes: 8192
-  # 全天采集间隔；必须为 30～1440 分钟且能整除一天，兼容默认值为 30。
+  # 采集频率；必须为 30～1440 分钟且能整除一天，兼容默认值为 30。
   collection_interval_minutes: 30
+  # null 保持旧全天模式；设为 {start: "09:00", end: "18:00"} 则仅周一至五采集。
+  # 窗口从 start 按频率触发，末次固定补到 end；登录和延后执行也受窗口限制。
+  collection_workday_window: null
   # NTFS 透明压缩保留正文、随机定位和证据哈希。
   compress_extractions: true
   # work_dir 始终在采集范围内，其他目录默认仅供本地归档。

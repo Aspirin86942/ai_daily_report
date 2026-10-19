@@ -86,6 +86,25 @@ function Get-ReportTaskXmlFields {
         $enabled = $_.SelectSingleNode('t:Enabled', $ns)
         $null -ne $enabled -and $enabled.InnerText -ne '' -and $enabled.InnerText -ne 'true'
     }).Count -eq 0) { 'true' } else { 'false' }
+    # Keep each time bound to its own recurrence, weekday mask and limits.
+    $fields['calendar_signatures'] = (($calendar | ForEach-Object {
+        $trigger = $_
+        $values = [ordered]@{}
+        foreach ($path in @('StartBoundary','Enabled','EndBoundary','ExecutionTimeLimit','ScheduleByDay/DaysInterval','ScheduleByWeek/WeeksInterval','Repetition/Interval','Repetition/Duration','Repetition/StopAtDurationEnd')) {
+            $xpath = (($path.Split('/') | ForEach-Object { 't:' + $_ }) -join '/')
+            $node = $trigger.SelectSingleNode($xpath, $ns)
+            $value = if ($null -eq $node) { '' } else { $node.InnerText }
+            if ($path -eq 'StartBoundary' -and $value) { $value = ([DateTimeOffset]::Parse($value)).ToOffset([TimeSpan]::FromHours(8)).ToString('HH:mm:ss.fffffff') }
+            if ($path -eq 'Enabled' -and -not $value) { $value = 'true' }
+            if ($path -eq 'ScheduleByDay/DaysInterval' -and -not $value -and $trigger.SelectSingleNode('t:ScheduleByDay',$ns)) { $value = '1' }
+            if ($path -eq 'ScheduleByWeek/WeeksInterval' -and -not $value -and $trigger.SelectSingleNode('t:ScheduleByWeek',$ns)) { $value = '1' }
+            if ($path -eq 'Repetition/StopAtDurationEnd' -and -not $value -and $trigger.SelectSingleNode('t:Repetition',$ns)) { $value = 'false' }
+            $values[$path] = $value
+        }
+        $values['recurrence'] = (@($trigger.ChildNodes | Where-Object { $_.LocalName.StartsWith('ScheduleBy') } | ForEach-Object { $_.LocalName }) | Sort-Object) -join ','
+        $values['weekdays'] = (@($trigger.SelectNodes('t:ScheduleByWeek/t:DaysOfWeek/*',$ns) | ForEach-Object { $_.LocalName }) | Sort-Object) -join ','
+        $values | ConvertTo-Json -Compress
+    }) | Sort-Object) -join ';'
     return $fields
 }
 
@@ -120,8 +139,81 @@ function Get-ExistingReportTask {
     return $tasks[0]
 }
 
+function Activate-ReportCollectionSchedule {
+    param($Plan)
+    $text = & $Plan.program --config-dir $Plan.config_dir archive activate-schedule | Out-String
+    if ($LASTEXITCODE -ne 0) { throw 'COLLECTION_SCHEDULE_ACTIVATION_FAILED' }
+    return ($text | ConvertFrom-Json)
+}
+
+function Install-ReportCollectionTask {
+    param($Plan, [switch]$Apply)
+    $mayDisable = $false
+    try {
+        $existing = Get-ExistingReportTask -Plan $Plan
+        $oldXml = $null
+        $differences = @()
+        if ($null -ne $existing) {
+            $oldXml = Export-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path
+            Assert-ReportTaskOwned -Plan $Plan -Xml $oldXml
+            $mayDisable = $true
+            $differences = @(Get-ReportTaskDifferences -Plan $Plan -Xml $oldXml)
+        }
+        if (-not $Apply) {
+            return [pscustomobject]@{Action=$(if ($null -eq $existing) {'create'} else {'update-or-reuse'});Applied=$false;TaskName=$Plan.task_name;Plan=$Plan;Differences=$differences}
+        }
+        $backup = $null
+        if ($oldXml) {
+            $backupDirectory = Join-Path $Plan.data_dir 'task_backups'
+            [IO.Directory]::CreateDirectory($backupDirectory) | Out-Null
+            $backup = Join-Path $backupDirectory ('task-' + [Guid]::NewGuid().ToString('N') + '.xml')
+            [IO.File]::WriteAllText($backup, $oldXml, [Text.UTF8Encoding]::new($false))
+        }
+        $staged = $Plan.PSObject.Copy()
+        [xml]$document = $Plan.xml
+        $ns = [Xml.XmlNamespaceManager]::new($document.NameTable)
+        $ns.AddNamespace('t','http://schemas.microsoft.com/windows/2004/02/mit/task')
+        $settings = $document.SelectSingleNode('/t:Task/t:Settings',$ns)
+        $enabled = $settings.SelectSingleNode('t:Enabled',$ns)
+        if ($null -eq $enabled) { $enabled = $document.CreateElement('Enabled',$settings.NamespaceURI); $settings.AppendChild($enabled) | Out-Null }
+        $enabled.InnerText = 'false'
+        $staged.xml = $document.OuterXml
+        $changed = $null -eq $existing -or $differences.Count -gt 0
+        $mayDisable = $true
+        if ($changed) {
+            Register-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -Xml $staged.xml -Force | Out-Null
+        } else {
+            Disable-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path | Out-Null
+        }
+        $readback = Export-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path
+        if (@(Get-ReportTaskDifferences -Plan $staged -Xml $readback).Count -ne 0) { throw 'TASK_READBACK_MISMATCH_DISABLED' }
+        $receipt = Activate-ReportCollectionSchedule -Plan $Plan
+        if ($receipt.status -notin @('activated','unchanged') -or $receipt.interval_minutes -ne $Plan.interval_minutes) { throw 'COLLECTION_SCHEDULE_RECEIPT_MISMATCH' }
+        $expectedWindow = $Plan.collection_workday_window
+        $actualWindow = $receipt.collection_workday_window
+        if ($null -eq $expectedWindow) {
+            if ($null -ne $actualWindow) { throw 'COLLECTION_SCHEDULE_RECEIPT_MISMATCH' }
+        } elseif ($null -eq $actualWindow -or $actualWindow.start -cne $expectedWindow.start -or $actualWindow.end -cne $expectedWindow.end) {
+            throw 'COLLECTION_SCHEDULE_RECEIPT_MISMATCH'
+        }
+        Enable-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path | Out-Null
+        $readback = Export-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path
+        if (@(Get-ReportTaskDifferences -Plan $Plan -Xml $readback).Count -ne 0) { throw 'TASK_READBACK_MISMATCH_DISABLED' }
+        return [pscustomobject]@{Action=$(if ($changed) {'registered'} else {'unchanged'});Applied=$true;TaskName=$Plan.task_name;Backup=$backup;ScheduleReceipt=$receipt}
+    } catch {
+        $failure = $_
+        if ($Apply -and $mayDisable) {
+            try { Disable-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path | Out-Null } catch { Write-Warning 'Collector could not be disabled after installation failure' }
+        }
+        throw $failure
+    }
+}
+
 function Install-ReportDailyTask {
     param($Plan, [switch]$Apply)
+    if ($Plan.PSObject.Properties.Name -contains 'kind' -and $Plan.kind -eq 'collect') {
+        return Install-ReportCollectionTask -Plan $Plan -Apply:$Apply
+    }
     $existing = Get-ExistingReportTask -Plan $Plan
     $oldXml = $null
     $differences = @()

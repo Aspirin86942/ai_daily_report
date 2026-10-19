@@ -280,7 +280,7 @@ impl Store {
         for row in rows {
             let data: Value = serde_json::from_str(row["raw_json"].as_str().unwrap())?;
             let version = data["schema_version"].as_u64().unwrap_or(1);
-            if !(1..=3).contains(&version) {
+            if !(1..=4).contains(&version) {
                 return Err(ReportError::new(
                     "REPORT_SCHEMA_UNSUPPORTED",
                     "历史报告格式不支持",
