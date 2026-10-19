@@ -125,6 +125,12 @@ fn collection_continuity(
         ));
     }
     let coverage = crate::archive::schedule::coverage(store, start, end, now)?;
+    if coverage.planned_idle {
+        return Ok(HealthCheck::ok(
+            "COLLECTION_GAP",
+            "按当时生效的工作日采集规则，目标范围没有计划采集点",
+        ));
+    }
     let completed = coverage.completed;
     let gaps = coverage.gaps;
     let ranges = coverage.ranges;

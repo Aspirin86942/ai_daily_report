@@ -452,7 +452,7 @@ fn collection_coverage(
     let completed = coverage.completed;
     let count = coverage.gaps;
     let ranges = coverage.ranges;
-    if completed && count == 0 {
+    if coverage.planned_idle || completed && count == 0 {
         return Ok(None);
     }
     let detail = if completed {

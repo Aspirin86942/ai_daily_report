@@ -49,6 +49,8 @@ pub enum ArchiveCommand {
         version: String,
     },
     Verify,
+    /// Activate the configured collection policy without collecting or parsing.
+    ActivateSchedule,
     /// Compress extraction storage without changing evidence bytes.
     Optimize,
     Backup {
@@ -79,6 +81,15 @@ pub fn execute(config: &AppConfig, command: ArchiveCommand) -> Result<Value, Rep
     match command {
         ArchiveCommand::Recover { run_id, reason } => {
             super::recovery::prepare(config, &run_id, &reason)
+        }
+        ArchiveCommand::ActivateSchedule => {
+            let _lock = crate::store::locking::ReportLock::acquire(
+                &config.paths.data_dir.join("archive/collector"),
+                "archive",
+                std::time::Duration::ZERO,
+            )?;
+            let store = ArchiveStore::open(config, true)?;
+            super::schedule::activate_config(&store, &config.archive, chrono::Utc::now())
         }
         ArchiveCommand::Optimize => super::storage::optimize(config),
         ArchiveCommand::Backup { output } => super::maintenance::backup(config, &output),

@@ -5,7 +5,7 @@ use ai_daily_report::{
     types::{Period, ReportRequest, ReportSource, RunContext},
     ReportError,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -57,6 +57,12 @@ fn weekly() -> Value {
 fn monthly() -> Value {
     serde_json::from_str(include_str!("fixtures/monthly-v1.json")).unwrap()
 }
+fn weekly_w42() -> Value {
+    let mut value = weekly();
+    value["week_label"] = json!("2026-W42");
+    value["date_range"] = json!("2026-10-12 ~ 2026-10-18");
+    value
+}
 struct Fixture {
     _dir: tempfile::TempDir,
     app: App,
@@ -82,11 +88,37 @@ impl Fixture {
             network,
         }
     }
+    fn with_published_v4_daily(self) -> Self {
+        let report: Value =
+            serde_json::from_str(include_str!("fixtures/readability/v4-input.json")).unwrap();
+        self.app
+            .store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO daily_reports(date,completed_work,work_summary,next_plan,raw_json,schema_version,report_kind) VALUES ('2026-10-17','','','',?,4,'file_evidence')",
+                [report.to_string()],
+            )
+            .unwrap();
+        self.app
+            .store
+            .activate(NaiveDate::from_ymd_opt(2026, 10, 12).unwrap())
+            .unwrap();
+        self
+    }
     fn request(&self, digit: char, month: bool, save: bool) -> ReportRequest {
+        self.request_for(
+            digit,
+            if month { "2026-10" } else { "2026-W41" },
+            month,
+            save,
+        )
+    }
+    fn request_for(&self, digit: char, label: &str, month: bool, save: bool) -> ReportRequest {
         let period = if month {
-            Period::monthly(now().date_naive(), Some("2026-10"), ReportSource::Db)
+            Period::monthly(now().date_naive(), Some(label), ReportSource::Db)
         } else {
-            Period::weekly(now().date_naive(), Some("2026-W41"), ReportSource::Db)
+            Period::weekly(now().date_naive(), Some(label), ReportSource::Db)
         }
         .unwrap();
         ReportRequest {
@@ -219,6 +251,65 @@ fn unknown_period_schema_and_changed_period_labels_fail_validation() {
     let error: ReportError = run_report(f.request('a', false, true), &f.app).unwrap_err();
     assert_eq!(error.code, "MODEL_RESPONSE_INVALID");
     assert_eq!(f.calls(), 1);
+}
+
+#[test]
+fn published_v4_daily_content_reaches_weekly_reports_summary() {
+    let f = Fixture::new(vec![response(weekly_w42())]).with_published_v4_daily();
+    let report = run_report(f.request_for('a', "2026-W42", false, true), &f.app).unwrap();
+    assert_eq!(report.action, "published");
+    assert!(report
+        .output_path
+        .as_ref()
+        .unwrap()
+        .ends_with(Path::new("weekly/2026-W42.md")));
+    let requests = f.network.requests.lock().unwrap();
+    let prompt = requests[0]["messages"][1]["content"].as_str().unwrap();
+    for text in [
+        "采购审批方案(新)集中说明现状与建议",
+        "采购审批方案(新)调整",
+        "[集团]例外复核归并",
+        "#制度附件与空字段口径",
+        "src_22f3bf94abdc4fb1933025dc0b6bca6d62f8558298bf6a316d48c1eff41bd66e",
+        "采购审批调整.txt",
+        "制度附件.pdf",
+        "材料存在覆盖缺口，相关附件内容待补齐",
+        "制度附件读取失败，暂不纳入结论",
+        "生效日期尚未确认",
+        "2026-10-12、2026-10-13、2026-10-14、2026-10-15、2026-10-16、2026-10-18",
+    ] {
+        assert!(prompt.contains(text), "weekly prompt missing {text}");
+    }
+}
+
+#[test]
+fn v4_and_legacy_daily_content_reach_monthly_preview_summary() {
+    let f = Fixture::new(vec![response(monthly())]).with_published_v4_daily();
+    let report = run_report(f.request_for('b', "2026-10", true, false), &f.app).unwrap();
+    assert_eq!(report.action, "preview");
+    assert!(report.output_path.is_none());
+    assert_eq!(
+        f.app
+            .store
+            .connection()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM monthly_reports", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    let requests = f.network.requests.lock().unwrap();
+    let prompt = requests[0]["messages"][1]["content"].as_str().unwrap();
+    for text in [
+        "方案草稿待评审",
+        "预算外增加复核",
+        "采购审批方案(新)集中说明现状与建议",
+        "#制度附件与空字段口径",
+        "制度附件读取失败，暂不纳入结论",
+        "2026-10-12、2026-10-13",
+    ] {
+        assert!(prompt.contains(text), "monthly prompt missing {text}");
+    }
 }
 
 #[test]

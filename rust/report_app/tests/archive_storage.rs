@@ -158,6 +158,14 @@ fn cadence_changes_preserve_old_gaps_and_do_not_report_planned_two_hour_interval
     let start = time("2026-10-16T16:00:00Z");
     collect::run(&config, true, start).unwrap();
     let store = ArchiveStore::open(&config, true).unwrap();
+    // Keep the synthetic baseline inside the simulated coverage window.
+    store
+        .conn
+        .execute(
+            "UPDATE collections SET finished_at=? WHERE baseline=1",
+            [start.to_rfc3339()],
+        )
+        .unwrap();
     let switch = time("2026-10-17T02:45:00Z");
     schedule::activate(&store, 120, switch).unwrap();
     let insert = |at: DateTime<Utc>| {

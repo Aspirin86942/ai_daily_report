@@ -122,19 +122,36 @@ fn daily_triggers(
     ))
 }
 
-fn collect_triggers(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> String {
+fn collect_triggers(
+    config: &AppConfig,
+    sid: &str,
+    now: DateTime<Utc>,
+) -> Result<String, ReportError> {
     let date = now.with_timezone(&types::shanghai()).date_naive();
-    let interval = config.archive.collection_interval_minutes;
-    let repetition = match (interval / 60, interval % 60) {
-        (24, 0) => "P1D".to_owned(),
-        (0, minutes) => format!("PT{minutes}M"),
-        (hours, 0) => format!("PT{hours}H"),
-        (hours, minutes) => format!("PT{hours}H{minutes}M"),
+    let Some(window) = config.archive.collection_workday_window.as_ref() else {
+        let interval = config.archive.collection_interval_minutes;
+        let repetition = match (interval / 60, interval % 60) {
+            (24, 0) => "P1D".to_owned(),
+            (0, minutes) => format!("PT{minutes}M"),
+            (hours, 0) => format!("PT{hours}H"),
+            (hours, minutes) => format!("PT{hours}H{minutes}M"),
+        };
+        return Ok(format!(
+            "<CalendarTrigger id=\"CollectInterval\"><StartBoundary>{date}T00:00:00+08:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>{repetition}</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>{}",
+            logon_trigger(config, sid)
+        ));
     };
-    format!(
-        "<CalendarTrigger id=\"CollectInterval\"><StartBoundary>{date}T00:00:00+08:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>{repetition}</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>{}",
-        logon_trigger(config, sid)
-    )
+    let interval = config.archive.collection_interval_minutes;
+    let mut triggers = String::new();
+    for (index, tick) in window.ticks(interval)?.iter().enumerate() {
+        triggers.push_str(&format!(
+            "<CalendarTrigger id=\"CollectWorkday{:02}\"><StartBoundary>{date}T{}:00+08:00</StartBoundary><Enabled>true</Enabled><ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek><Monday/><Tuesday/><Wednesday/><Thursday/><Friday/></DaysOfWeek></ScheduleByWeek></CalendarTrigger>",
+            index + 1,
+            tick.format("%H:%M")
+        ));
+    }
+    triggers.push_str(&logon_trigger(config, sid));
+    Ok(triggers)
 }
 
 fn validate_sid(sid: &str) -> Result<(), ReportError> {
@@ -308,7 +325,7 @@ fn task_plan_collect(
     collection.schedule.execution_limit_minutes = 20;
     let config_dir = display_path(&collection.config_dir);
     let arguments = format!("--config-dir \"{config_dir}\" collect --scheduled");
-    let triggers = collect_triggers(&collection, sid, now);
+    let triggers = collect_triggers(&collection, sid, now)?;
     let mut value = task_plan_inner(
         &collection,
         sid,
@@ -318,6 +335,8 @@ fn task_plan_collect(
     )?;
     value["kind"] = json!("collect");
     value["interval_minutes"] = json!(config.archive.collection_interval_minutes);
+    value["collection_workday_window"] =
+        serde_json::to_value(&config.archive.collection_workday_window)?;
     Ok(value)
 }
 
@@ -557,7 +576,8 @@ pub fn append_scheduled_log(
     ));
     reject_redirects(&path, "LOG_PATH_REDIRECTED")?;
     let event = match result {
-        Ok(value) => json!({
+        Ok(value) => {
+            let mut event = json!({
             "at": Utc::now(),
             "kind": kind,
             "status": "succeeded",
@@ -567,7 +587,14 @@ pub fn append_scheduled_log(
             "action": value["action"],
             "quality": value["quality"],
             "duration_ms": duration_ms,
-        }),
+            });
+            if kind == "collect" && value["action"] == "skipped" {
+                event["status"] = json!("skipped");
+                event["reason"] = value["reason"].clone();
+                event["model_calls"] = json!(0);
+            }
+            event
+        }
         Err(e) => json!({
             "at": Utc::now(),
             "kind": kind,

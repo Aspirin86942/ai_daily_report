@@ -57,20 +57,13 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
     let now = chrono::Utc::now();
     match command {
         Command::Collect(args) => {
-            let budget =
-                ai_daily_report::archive::resources::Budget::new(config.archive.memory_mib)?;
             let started = std::time::Instant::now();
-            let result = (|| -> Result<serde_json::Value, ReportError> {
-                let metrics = ai_daily_report::archive::collect::run(&config, args.baseline, now)?;
-                let mut value = serde_json::to_value(&metrics)?;
-                value["resources"] = budget.sample()?;
-                let store = ai_daily_report::archive::store::ArchiveStore::open(&config, true)?;
-                store.conn.execute(
-                    "UPDATE collections SET metrics_json=? WHERE id=?",
-                    rusqlite::params![serde_json::to_string(&value)?, metrics.run_id],
-                )?;
-                Ok(value)
-            })();
+            let result = ai_daily_report::archive::collect::execute(
+                &config,
+                args.baseline,
+                args.scheduled,
+                now,
+            );
             if args.scheduled {
                 ai_daily_report::operations::append_scheduled_log(
                     &config,

@@ -3,7 +3,7 @@ use ai_daily_report::{
     store::{locking::ReportLock, Store},
     types::RunContext,
 };
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::params;
 use serde_json::{json, Value};
 use std::{fs, time::Duration};
@@ -229,6 +229,102 @@ fn staged_body_is_durable_before_history_pointer_moves() {
             .unwrap()
             .0[0],
         report
+    );
+}
+
+#[test]
+fn activated_history_reads_mixed_v2_v3_v4_and_lists_natural_missing_days() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("reports.sqlite3"), now()).unwrap();
+    let v4: Value =
+        serde_json::from_str(include_str!("fixtures/readability/v4-input.json")).unwrap();
+    assert_eq!(v4["schema_version"].as_u64(), Some(4));
+    let conn = store.connection().unwrap();
+    for (date, report) in [
+        (
+            "2026-10-10",
+            json!({"schema_version": 2, "date": "2026-10-10"}),
+        ),
+        (
+            "2026-10-11",
+            json!({"schema_version": 3, "date": "2026-10-11"}),
+        ),
+        ("2026-10-17", v4.clone()),
+    ] {
+        conn.execute(
+            "INSERT INTO daily_reports(date,completed_work,work_summary,next_plan,raw_json) VALUES (?,'','','',?)",
+            params![date, report.to_string()],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let first = NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+    store.activate(first).unwrap();
+    let (reports, _) = store
+        .reports_in_range(first, NaiveDate::from_ymd_opt(2026, 10, 19).unwrap())
+        .unwrap();
+    assert_eq!(reports.len(), 3);
+    assert_eq!(reports[2]["date"], "2026-10-17");
+    assert_eq!(
+        reports[2]["content"]["overview"][0]["text"],
+        "采购审批方案(新)集中说明现状与建议，保留金额变化+38909%。"
+    );
+    let missing = store
+        .missed_dates(NaiveDate::from_ymd_opt(2026, 10, 20).unwrap())
+        .unwrap();
+    assert_eq!(
+        missing.join("、"),
+        "2026-10-12、2026-10-13、2026-10-14、2026-10-15、2026-10-16、2026-10-18、2026-10-19"
+    );
+}
+
+#[test]
+fn unknown_history_schema_versions_remain_rejected() {
+    for version in [0, 5] {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::open(&directory.path().join("reports.sqlite3"), now()).unwrap();
+        store
+            .connection()
+            .unwrap()
+            .execute(
+                "INSERT INTO daily_reports(date,completed_work,work_summary,next_plan,raw_json) VALUES ('2026-10-17','','','',?)",
+                [json!({"schema_version": version, "date": "2026-10-17"}).to_string()],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .reports_in_range(
+                    NaiveDate::from_ymd_opt(2026, 10, 10).unwrap(),
+                    NaiveDate::from_ymd_opt(2026, 10, 19).unwrap(),
+                )
+                .unwrap_err()
+                .code,
+            "REPORT_SCHEMA_UNSUPPORTED"
+        );
+    }
+}
+
+#[test]
+fn v4_history_report_date_must_match_its_index_row() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Store::open(&directory.path().join("reports.sqlite3"), now()).unwrap();
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "INSERT INTO daily_reports(date,completed_work,work_summary,next_plan,raw_json) VALUES ('2026-10-17','','','',?)",
+            [json!({"schema_version": 4, "date": "2026-10-16"}).to_string()],
+        )
+        .unwrap();
+    assert_eq!(
+        store
+            .reports_in_range(
+                NaiveDate::from_ymd_opt(2026, 10, 10).unwrap(),
+                NaiveDate::from_ymd_opt(2026, 10, 19).unwrap(),
+            )
+            .unwrap_err()
+            .code,
+        "REPORT_CONTEXT_MISMATCH"
     );
 }
 
