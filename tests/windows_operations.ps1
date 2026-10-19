@@ -8,12 +8,22 @@ $root = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $root) { throw 'Use a fresh isolated output directory' }
 [IO.Directory]::CreateDirectory((Join-Path $root 'config')) | Out-Null
 [IO.Directory]::CreateDirectory((Join-Path $root 'work')) | Out-Null
-$work = (Join-Path $root 'work').Replace('\','/')
+$unicodeWork = 'work-'+[char]0x5DE5+[char]0x4F5C
+$work = (Join-Path $root $unicodeWork).Replace('\','/')
+[IO.Directory]::CreateDirectory($work) | Out-Null
 $data = (Join-Path $root 'data').Replace('\','/')
 $settings = "paths:`n  work_dir: '$work'`n  data_dir: '$data'`n  db_dir: '$data/db'`n  reports_dir: '$data/reports'`nschedule:`n  task_name: 'Rust isolated contract test'`nllm:`n  context_window_tokens: 100000`n  verified_max_output_tokens: 8192`n"
 [IO.File]::WriteAllText((Join-Path $root 'config/settings.yaml'), $settings, [Text.UTF8Encoding]::new($false))
-$plan = Get-ReportTaskPlan -ProjectRoot (Split-Path -Parent $Program) -ConfigDirectory (Join-Path $root 'config')
+$savedEncoding = [Console]::OutputEncoding
+try {
+    [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(936)
+    $plan = Get-ReportTaskPlan -ProjectRoot (Split-Path -Parent $Program) -ConfigDirectory (Join-Path $root 'config')
+    $encodingRestored = [Console]::OutputEncoding.CodePage -eq 936
+}
+finally { [Console]::OutputEncoding = $savedEncoding }
 function Assert-Test([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
+Assert-Test ($plan.work_dir.Replace('\','/') -ceq $work) 'Task plan corrupted a Unicode work path under CP936'
+Assert-Test $encodingRestored 'Task plan did not restore the caller console encoding'
 $dailyFields = Get-ReportTaskXmlFields -Xml $plan.xml
 Assert-Test ($dailyFields['calendar_count'] -eq 3) 'Daily plan must have three calendar triggers'
 Assert-Test ($dailyFields['calendar_times'] -eq '09:00;09:30;10:30') ('Daily trigger times: ' + $dailyFields['calendar_times'])
@@ -94,11 +104,11 @@ $healthFile = Join-Path $healthData ('logs/health-' + (Get-Date -Format 'yyyy-MM
 Assert-Test (Test-Path -LiteralPath $healthFile) 'Health file was not written'
 $healthJson = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
 Assert-Test ($healthJson.status -ne 'healthy') 'Empty data directory should not be healthy'
-Assert-Test (@($healthJson.tasks).Count -eq 3) 'Health report must include all three task readbacks'
+Assert-Test (@($healthJson.tasks).Count -eq 4) 'Health report must include all four task readbacks'
 $healthState = Join-Path $healthData 'logs/health-notify-state.json'
 Assert-Test (Test-Path -LiteralPath $healthState) 'Health notify state was not written'
 Assert-Test (@($healthJson.checks | Where-Object { $_.level -ne 'ok' }).Count -gt 0) 'Health report should list failing checks'
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts/health_notify.ps1') -Program $Program -ConfigDirectory $healthConfig -NoNotify | Out-Null
 $healthJson2 = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
-Assert-Test (@($healthJson2.tasks).Count -eq 3) 'Repeated health run must stay readable'
-[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 24; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
+Assert-Test (@($healthJson2.tasks).Count -eq 4) 'Repeated health run must stay readable'
+[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 26; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')

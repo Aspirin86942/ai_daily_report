@@ -111,7 +111,7 @@ struct CaptureReceipt {
     temp: Option<PathBuf>,
 }
 
-fn recover_captures(store: &mut ArchiveStore) -> Result<(), ReportError> {
+pub(super) fn recover_captures(store: &mut ArchiveStore) -> Result<(), ReportError> {
     for entry in fs::read_dir(store.root.join("staging"))? {
         let entry = entry?;
         if !entry.file_name().to_string_lossy().starts_with("capture-")
@@ -180,13 +180,40 @@ pub fn execute(
     }
     let budget = super::resources::Budget::new(config.archive.memory_mib)?;
     let metrics = run(config, baseline, now)?;
-    let mut value = serde_json::to_value(&metrics)?;
+    let mut value = result_value(&metrics, "collect")?;
     value["resources"] = budget.sample()?;
     let store = ArchiveStore::open(config, true)?;
     store.conn.execute(
         "UPDATE collections SET metrics_json=? WHERE id=?",
         params![serde_json::to_string(&value)?, metrics.run_id],
     )?;
+    Ok(value)
+}
+
+pub(super) fn recover_parses(store: &mut ArchiveStore, run_id: &str) -> Result<(), ReportError> {
+    // Work interrupted after a durable raw copy is requeued; originals are immutable.
+    store.conn.execute(
+        "UPDATE extractions SET status='queued' WHERE status='running' AND attempts<3",
+        [],
+    )?;
+    store.conn.execute("UPDATE extractions SET status='failed',error_code='INTERRUPTED_RETRY_EXHAUSTED' WHERE status='running'",[])?;
+    store.conn.execute("INSERT INTO gaps(collection_id,path,code,detail) SELECT ?, 'extraction:'||e.id,'INTERRUPTED_RETRY_EXHAUSTED','retry interrupted after maximum attempts' FROM extractions e JOIN metadata m ON m.value=e.id AND m.key='retry:'||e.id WHERE e.attempts>=3",[run_id])?;
+    store.conn.execute("DELETE FROM metadata WHERE key LIKE 'retry:%' AND value IN(SELECT id FROM extractions WHERE attempts>=3)",[])?;
+    Ok(())
+}
+
+pub(super) fn result_value(
+    metrics: &CollectionMetrics,
+    operation: &str,
+) -> Result<serde_json::Value, ReportError> {
+    let mut value = serde_json::to_value(metrics)?;
+    let complete = metrics.errors == 0 && metrics.queued == 0;
+    value["operation"] = serde_json::json!(operation);
+    value["status"] = serde_json::json!(if complete { "succeeded" } else { "partial" });
+    value["execution_status"] = serde_json::json!("succeeded");
+    value["material_status"] = serde_json::json!(if complete { "complete" } else { "partial" });
+    value["publication_status"] = serde_json::json!("not_applicable");
+    value["reason_codes"] = serde_json::json!(metrics.warnings);
     Ok(value)
 }
 
@@ -226,20 +253,13 @@ pub fn run(
         "INSERT INTO collections(id,started_at,status,baseline) VALUES(?,?,'running',?)",
         params![run_id, timestamp, baseline],
     )?;
-    // Work interrupted after a durable raw copy is requeued; originals are immutable.
-    store.conn.execute(
-        "UPDATE extractions SET status='queued' WHERE status='running' AND attempts<3",
-        [],
-    )?;
-    store.conn.execute("UPDATE extractions SET status='failed',error_code='INTERRUPTED_RETRY_EXHAUSTED' WHERE status='running'",[])?;
-    store.conn.execute("INSERT INTO gaps(collection_id,path,code,detail) SELECT ?, 'extraction:'||e.id,'INTERRUPTED_RETRY_EXHAUSTED','retry interrupted after maximum attempts' FROM extractions e JOIN metadata m ON m.value=e.id AND m.key='retry:'||e.id WHERE e.attempts>=3",[&run_id])?;
-    store.conn.execute("DELETE FROM metadata WHERE key LIKE 'retry:%' AND value IN(SELECT id FROM extractions WHERE attempts>=3)",[])?;
+    recover_parses(&mut store, &run_id)?;
     let mut metrics = CollectionMetrics {
         run_id: run_id.clone(),
         ..Default::default()
     };
     let previous: Option<String> = store.conn.query_row(
-        "SELECT max(started_at) FROM collections WHERE id<>? AND started_at<?",
+        "SELECT max(started_at) FROM collections WHERE id<>? AND started_at<? AND status NOT LIKE 'parse_%'",
         params![run_id, timestamp],
         |r| r.get(0),
     )?;

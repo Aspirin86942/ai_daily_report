@@ -1,3 +1,5 @@
 tests/fixtures/pdf_benchmark/*.pdf binary
 tests/fixtures/pdf_classifier/*.pdf binary
 requirements.lock text eol=lf
+rust/report_app/tests/fixtures/*.md text eol=lf
+templates/evidence_*_prompt_v3.md text eol=lf

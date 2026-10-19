@@ -52,9 +52,11 @@ D:/DailyReport/
 
 任务直接运行 `ai-daily-report.exe --config-dir "..." daily --scheduled`。日报任务带 09:00、09:30、10:30 三次触发：09:00 正常出报，09:30/10:30 为兜底续跑；目标日已发布时快速返回且不调用模型。发布 EXE 使用 Windows 图形子系统，调度时不打开终端窗口；命令行调用保留标准输出与退出码。调度日志位于 `log_dir/scheduled-YYYY-MM-DD.jsonl`，每条记录 kind、运行编号、目标日期、阶段、结果、错误码与耗时。
 
-健康任务 `AI Daily Report Health` 由 `scripts/install_daily_task.ps1 -Kind health -Apply` 注册，每日 11:00 与 23:00 运行 `scripts/health_notify.ps1`；它调用 `health --scheduled`、回读三个任务、写 `log_dir/health-YYYY-MM-DD.json`，异常时弹出 Windows 本地通知。health 任务不要求模型检查记录。
+补解析任务 `AI Daily Report Parse` 使用采集配置，以 `-Kind parse` 安装，运行 `archive drain --scheduled --max-seconds 120`。工作日窗口内每半小时检查队列，常规时间比窗口网格晚 5 分钟，并补窗口末次；正式窗口为 09:05、09:35…17:35、18:00。它与采集共用归档锁，不访问源目录、不调用模型，运行上限 5 分钟；窗口外登录或延后启动跳过。
 
-PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；接收 JSON 时使用 `| ConvertFrom-Json`。运维脚本已经使用管道等待并检查退出码。
+健康任务 `AI Daily Report Health` 由 `scripts/install_daily_task.ps1 -Kind health -Apply` 注册，每日 11:00 与 23:00 运行 `scripts/health_notify.ps1`。Rust 先原子写入 `log_dir/health-YYYY-MM-DD.json`；脚本通过 `health --scheduled --output <临时文件>` 读取 UTF-8 JSON、回读四个任务后通知。通知组件异常另存错误，健康文件保持。health 和 parse 任务不要求模型检查记录。
+
+PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；机器 JSON 应显式按 UTF-8 解码。健康通知优先读取程序 `--output` 文件，避免 Windows PowerShell 5.1 按本地代码页转换 stdout。调度日志新增 execution_status、material_status、publication_status、queued、errors、reason_codes；材料未齐备为 partial，晨间等待材料为 deferred，不能将命令结束等同于完整处理。
 
 沿用当前用户、普通权限、每日上海时间、登录补触发和 `IgnoreNew` 单实例策略。安装先核对归属，保存原 XML，注册后重新读取比较。读取结果不符合计划时禁用该任务并返回错误。仅改写版本指针不会修改计划任务；任务升级必须显式更新并核对直接 EXE 路径。
 

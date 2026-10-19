@@ -9,7 +9,11 @@ use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::{fs, path::PathBuf};
+use std::{
+    fs,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 const DISK_WARN_BYTES: u64 = 20 * 1024 * 1024 * 1024;
 const DISK_ERROR_BYTES: u64 = 5 * 1024 * 1024 * 1024;
@@ -26,6 +30,7 @@ pub struct HealthCheck {
 pub struct TaskNames {
     pub daily: String,
     pub collect: String,
+    pub parse: String,
     pub health: String,
 }
 
@@ -229,50 +234,142 @@ fn run_attention(connection: &Connection, now: DateTime<Utc>) -> Result<HealthCh
         |row| row.get(0),
     )?;
     let cutoff = now - Duration::hours(24);
-    let mut statement =
-        connection.prepare("SELECT created_at FROM report_runs WHERE status='failed'")?;
-    let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+    // 正式发布时间的上界：同一 scope/目标日、run_kind=report 且已完成 published 的运行。
+    // 只有比失败更晚的发布才能证明该失败已恢复。
+    let mut published_statement = connection.prepare(
+        "SELECT scope_id,target_date,MAX(COALESCE(finished_at,created_at)) FROM report_runs \
+         WHERE run_kind='report' AND status='succeeded' AND phase='published' \
+         GROUP BY scope_id,target_date",
+    )?;
+    let published: Vec<(String, String, String)> = published_statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
+    let mut statement = connection
+        .prepare("SELECT scope_id,target_date,created_at FROM report_runs WHERE status='failed'")?;
+    let rows = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
     let mut recent_failures = 0usize;
+    let mut resolved_failures = 0usize;
     let mut failures: Vec<String> = Vec::new();
     for row in rows {
-        let text = row?;
+        let (scope, target, text) = row?;
         let Ok(at) = DateTime::parse_from_rfc3339(&text) else {
             continue;
         };
-        if at.with_timezone(&Utc) >= cutoff {
-            recent_failures += 1;
-            if failures.len() < 5 {
-                failures.push(text);
-            }
+        let at = at.with_timezone(&Utc);
+        if at < cutoff {
+            continue;
+        }
+        let resolved = published
+            .iter()
+            .find(|(published_scope, published_target, _)| {
+                *published_scope == scope && *published_target == target
+            })
+            .and_then(|(_, _, published_at)| {
+                DateTime::parse_from_rfc3339(published_at)
+                    .ok()
+                    .map(|value| value.with_timezone(&Utc) > at)
+            })
+            .unwrap_or(false);
+        if resolved {
+            resolved_failures += 1;
+            continue;
+        }
+        recent_failures += 1;
+        if failures.len() < 5 {
+            failures.push(text);
         }
     }
     if pending == 0 && recent_failures == 0 {
-        return Ok(HealthCheck::ok(
-            "RUN_ATTENTION",
-            "没有待续运行，近 24 小时没有失败运行",
+        // 即使当前没有告警，证据里仍保留已恢复失败的数量，便于核对历史失败未丢失。
+        return Ok(HealthCheck {
+            code: "RUN_ATTENTION",
+            level: "ok",
+            message: if resolved_failures == 0 {
+                "没有待续运行，近 24 小时没有失败运行".to_string()
+            } else {
+                format!(
+                    "没有待续运行；近 24 小时的 {resolved_failures} 个失败已由更晚的正式发布恢复"
+                )
+            },
+            evidence: json!({
+                "pending": 0,
+                "recent_failures": 0,
+                "resolved_failures": resolved_failures,
+                "failures": []
+            }),
+        });
+    }
+    let mut message = format!("待续运行 {pending} 个，近 24 小时失败运行 {recent_failures} 个");
+    if resolved_failures > 0 {
+        message.push_str(&format!(
+            "（另有 {resolved_failures} 个失败已由更晚的正式发布恢复）"
         ));
     }
     Ok(HealthCheck::warning(
         "RUN_ATTENTION",
-        format!("待续运行 {pending} 个，近 24 小时失败运行 {recent_failures} 个"),
-        json!({"pending": pending, "recent_failures": recent_failures, "failures": failures}),
+        message,
+        json!({
+            "pending": pending,
+            "recent_failures": recent_failures,
+            "resolved_failures": resolved_failures,
+            "failures": failures
+        }),
     ))
 }
 
-fn parse_queue(store: &ArchiveStore) -> Result<HealthCheck, ReportError> {
+fn parse_queue(
+    store: &ArchiveStore,
+    config: &AppConfig,
+    now: DateTime<Utc>,
+) -> Result<HealthCheck, ReportError> {
     let queued: i64 = store.conn.query_row(
-        "SELECT count(*) FROM extractions WHERE status IN ('queued','running')",
-        [],
-        |row| row.get(0),
+        "SELECT count(*) FROM extractions WHERE status IN ('queued','running') OR id IN (SELECT value FROM metadata WHERE key LIKE 'retry:%')",
+        [], |row| row.get(0),
     )?;
-    if queued == 0 {
-        return Ok(HealthCheck::ok("PARSE_QUEUE", "归档解析队列为空"));
-    }
-    Ok(HealthCheck::warning(
-        "PARSE_QUEUE",
-        format!("归档仍有 {queued} 个解析任务未完成"),
-        json!({"queued": queued}),
-    ))
+    let oldest: Option<String> = store.conn.query_row(
+        "SELECT min(v.observed_at) FROM versions v JOIN version_extractions ve ON ve.version_id=v.id JOIN extractions e ON e.id=ve.extraction_id WHERE v.pruned_at IS NULL AND (e.status IN ('queued','running') OR e.id IN (SELECT value FROM metadata WHERE key LIKE 'retry:%'))",
+        [], |row| row.get(0),
+    )?;
+    let age = oldest
+        .as_deref()
+        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| (now - at.with_timezone(&Utc)).num_seconds().max(0));
+    let last: Option<String> = store.conn.query_row(
+        "SELECT metrics_json FROM collections WHERE status LIKE 'parse_%' ORDER BY julianday(started_at) DESC LIMIT 1", [], |row| row.get(0)
+    ).optional()?;
+    let changes = crate::archive::queue::pending_changes(
+        store,
+        &crate::archive::parse::profile(config)?,
+        None,
+    )?;
+    let evidence = json!({"queued":queued,"pending_changes":changes,"oldest_observed_at":oldest,"oldest_age_seconds":age,
+        "last_parse_run":last.map(|value|serde_json::from_str::<Value>(&value)).transpose()?});
+    Ok(HealthCheck {
+        code: "PARSE_QUEUE",
+        level: if queued == 0 && changes == 0 {
+            "ok"
+        } else {
+            "warning"
+        },
+        message: if queued == 0 && changes == 0 {
+            "归档解析队列为空".into()
+        } else {
+            format!("归档仍有 {queued} 个解析任务、{changes} 个变化依据未准备完成")
+        },
+        evidence,
+    })
 }
 
 fn disk_space(config: &AppConfig) -> HealthCheck {
@@ -401,7 +498,7 @@ pub fn check(
                         json!({"target_date": target}),
                     )),
                 }
-                match parse_queue(&store) {
+                match parse_queue(&store, config, now) {
                     Ok(check) => checks.push(check),
                     Err(_) => checks.push(HealthCheck::error(
                         "DATABASE_INTEGRITY",
@@ -446,11 +543,50 @@ pub fn check(
         task_names: TaskNames {
             daily: config.schedule.task_name.clone(),
             collect: format!("{} Collect", config.schedule.task_name),
+            parse: format!("{} Parse", config.schedule.task_name),
             health: format!("{} Health", config.schedule.task_name),
         },
         log_dir: display_path(&config.paths.log_dir),
         generated_at: now.to_rfc3339(),
     })
+}
+
+fn shanghai_date_of(generated_at: &str) -> Result<NaiveDate, ReportError> {
+    DateTime::parse_from_rfc3339(generated_at)
+        .map(|value| value.with_timezone(&types::shanghai()).date_naive())
+        .map_err(|_| ReportError::new("HEALTH_TIMESTAMP_INVALID", "健康结果生成时间无效"))
+}
+
+/// 原子写入健康 JSON：临时文件与目标同目录，显式 UTF-8，刷新后替换。
+pub fn write_report(report: &HealthReport, path: &Path) -> Result<(), ReportError> {
+    if path.file_name().is_none() {
+        return Err(ReportError::new(
+            "HEALTH_PATH_INVALID",
+            "健康文件路径缺少文件名",
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| ReportError::new("HEALTH_PATH_INVALID", "健康文件路径缺少目录"))?;
+    crate::snapshots::reject_redirects(path, "HEALTH_PATH_REDIRECTED")?;
+    fs::create_dir_all(parent)?;
+    crate::snapshots::reject_redirects(path, "HEALTH_PATH_REDIRECTED")?;
+    let mut bytes = serde_json::to_vec_pretty(report)?;
+    bytes.push(b'\n');
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(&bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path)
+        .map_err(|error| ReportError::from(error.error))?;
+    Ok(())
+}
+
+/// 按 generated_at 的上海日期写入 `log_dir/health-YYYY-MM-DD.json`。
+pub fn persist(report: &HealthReport) -> Result<PathBuf, ReportError> {
+    let day = shanghai_date_of(&report.generated_at)?;
+    let path = PathBuf::from(&report.log_dir).join(format!("health-{day}.json"));
+    write_report(report, &path)?;
+    Ok(path)
 }
 
 pub fn exit_code(report: &HealthReport) -> i32 {

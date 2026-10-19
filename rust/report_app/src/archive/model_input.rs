@@ -406,12 +406,22 @@ pub fn prepare(config: &AppConfig, request: &ReportRequest) -> Result<Prepared, 
         out.gaps.push(gap);
     }
     let pending:i64=store.conn.query_row("SELECT count(*) FROM versions v WHERE v.baseline=0 AND v.pruned_at IS NULL AND v.observed_at<? AND NOT EXISTS(SELECT 1 FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=v.id AND e.profile=? AND e.status IN('complete','partial'))",params![request.context.window_end_utc.to_rfc3339(),profile],|r|r.get(0))?;
-    if pending > 0 {
+    let pending_changes = super::queue::pending_changes(
+        &store,
+        &profile,
+        Some(&request.context.window_end_utc.to_rfc3339()),
+    )?;
+    if pending > 0 || pending_changes > 0 {
+        let message = if pending_changes == 0 {
+            format!("{pending} 个版本尚未完成解析，完成后进入下一份日报。")
+        } else {
+            format!("{pending} 个版本尚未完成解析，另有 {pending_changes} 个版本尚未完成变化依据准备；完成后进入下一份日报。")
+        };
         out.gaps.push(CoverageGap::new(
             "ARCHIVE_PARSE_PENDING",
             "parse",
             None,
-            &format!("{pending} 个版本尚未完成解析，完成后进入下一份日报。"),
+            &message,
         ));
     }
     let unresolved: i64 = store.conn.query_row(

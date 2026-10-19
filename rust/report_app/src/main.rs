@@ -110,7 +110,7 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
             let mut target_date: Option<String> = None;
             let started = std::time::Instant::now();
             let result = (|| {
-                let request =
+                let mut request =
                     command.report_request(&config, now, run_id.clone(), String::new())?;
                 target_date = Some(request.context.target_date.to_string());
                 let mut app = App::open(config.clone(), now)?;
@@ -123,7 +123,18 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
                         )?;
                     }
                 }
-                serde_json::to_value(run_report(request, &app)?).map_err(ReportError::from)
+                let preparation =
+                    ai_daily_report::run::prepare_scheduled_archive(&app, &mut request)?;
+                if let Some(ready) = &preparation {
+                    if ready["action"] == "deferred" {
+                        return Ok(ready.clone());
+                    }
+                }
+                let mut value = serde_json::to_value(run_report(request, &app)?)?;
+                if let Some(preparation) = preparation {
+                    value["preparation"] = preparation;
+                }
+                Ok(value)
             })();
             if scheduled {
                 ai_daily_report::operations::append_scheduled_log(
@@ -312,6 +323,12 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
             });
             let started = std::time::Instant::now();
             let report = ai_daily_report::health::check(&config, target, now)?;
+            if args.scheduled {
+                ai_daily_report::health::persist(&report)?;
+            }
+            if let Some(path) = &args.output {
+                ai_daily_report::health::write_report(&report, path)?;
+            }
             if args.scheduled {
                 let value = serde_json::to_value(&report)?;
                 ai_daily_report::operations::append_scheduled_log(

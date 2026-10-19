@@ -183,8 +183,10 @@ pub struct HealthArgs {
     pub target_date: Option<NaiveDate>,
     #[arg(long, value_enum, default_value = "json")]
     pub format: crate::archive::cli::Format,
-    #[arg(long, help = "写入调度日志；供健康任务使用")]
+    #[arg(long, help = "写入健康文件与调度日志；供健康任务使用")]
     pub scheduled: bool,
+    #[arg(long, help = "另外保存 UTF-8 JSON，供通知程序读取")]
+    pub output: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -303,7 +305,7 @@ pub enum OcrCommand {
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
     Plan {
-        #[arg(long,default_value="daily",value_parser=["daily","collect","health"])]
+        #[arg(long,default_value="daily",value_parser=["daily","collect","parse","health"])]
         kind: String,
         #[arg(long)]
         sid: String,

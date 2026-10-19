@@ -1,18 +1,27 @@
 # 当前运行与验收状态
 
-运行核验时间：2026-10-19 11:38（Asia/Shanghai）。三个正式任务使用 `rust-20261019-workday-window-01`。10:30 真实定时发布已验收：由 `history-v4-01` 发布 10 月 18 日 v4 日报，7 条变化、19 条事实和 377 处引用核对通过，2 次模型调用，无重试。工作日采集规则于 10:38:20 生效；11:00 新包首次真实时间采集退出 0，新增 5 个版本全部解析完成，模型调用 0，下一次 13:00。规则仅周一至五 09、11、13、15、17、18 点自动采集，窗口外登录、延后启动及周末跳过。账本保持 1,064，16、17、18 日报告哈希保持，历史 96 条缺口与原 8 条解析失败保留。报告仍为 partial，原生 health 为旧两条失败记录 warning；11:00 通知脚本另因 UTF-8/CP936 解码后 JSON 解析失败退出 1，未生成当日健康文件，不能把该退出码当作正常 warning 落盘。验收 automation 已暂停，三个 Windows 常规任务保持启用。
+运行核验：2026-10-19 晚间（Asia/Shanghai；数据审计 23:10:48）。四个正式任务已于 23:05:54 切换为 `rust-20261019-reliability-01`，启用状态及 XML 均回读匹配。153 项积压于 23:06:31–23:06:45 独立补处理完成：118 项 complete、35 项保留 partial，新增失败 0，解析队列和待准备变化均为 0；未扫描源目录、未新增版本、模型调用 0。23:08 人工经调度器启动采集和补解析任务，窗口外均 skipped、退出 0；23:09:44 人工经调度器启动健康任务，退出 0，UTF-8 健康文件为 healthy。模型账本仍为 1,064；16、17、18 日正式报告、归档报告证据、153 份原件、原采集账本、96 条历史缺口及原 8 条解析失败均核对保持。既有报告质量仍为 partial。明早 10 月 20 日的真实日历触发尚未发生，不以本次人工调度和隔离测试代替；原验收 automation 继续暂停。
 
 ## 正式任务
 
 | 任务 | 程序包 | 配置目录 | 触发 | 回读状态 |
 | --- | --- | --- | --- | --- |
-| AI Daily Report | .releases/rust-20261019-workday-window-01 | config-rust | 每日 09:00（兜底 09:30、10:30）+ 登录后 1 分钟 | Ready；最近真实发布为 10:30、执行包 history-v4-01、退出 0；下一次 10 月 20 日 09:00 |
-| AI Daily Report Collect | .releases/rust-20261019-workday-window-01 | config-rust/archive-collector | 周一至五 09、11、13、15、17、18 点；登录和延后执行也受窗口限制 | Ready；11:00 真实时间触发退出 0，5 个新增版本解析完成、模型 0；下一次 13:00 |
-| AI Daily Report Health | .releases/rust-20261019-workday-window-01 | config-rust | 每日 11:00、23:00 | Ready；11:00 通知脚本解码/JSON 解析失败退出 1，当日文件缺失；下一次 23:00 |
+| AI Daily Report | .releases/rust-20261019-reliability-01 | config-rust | 每日 09:00（兜底 09:30、10:30）+ 登录后 1 分钟 | Ready、退出 0；最近真实发布仍为 10:30；下一次 10 月 20 日 09:00 |
+| AI Daily Report Collect | .releases/rust-20261019-reliability-01 | config-rust/archive-collector | 周一至五 09、11、13、15、17、18 点；登录和延后执行也受窗口限制 | Ready；23:08 人工调度验证窗口外 skipped、退出 0；最近真实采集仍为 18:00；下一次 10 月 20 日 09:00 |
+| AI Daily Report Parse | .releases/rust-20261019-reliability-01 | config-rust/archive-collector | 周一至五 09:05、09:35，之后每半小时至 17:35，末次 18:00；登录和延后启动受同一窗口限制 | Ready；23:08 人工调度验证窗口外 skipped、退出 0；下一次 10 月 20 日 09:05 |
+| AI Daily Report Health | .releases/rust-20261019-reliability-01 | config-rust | 每日 11:00、23:00 | Ready；23:09:44 人工调度退出 0、健康文件 healthy；下一次 10 月 20 日 11:00 |
 
-日报任务执行 `ai-daily-report.exe daily --scheduled`，`archive.daily_source` 为 archive，模型为 `deepseek-v4-flash`；三个日历触发器加登录兜底保持。采集任务执行 `collect --scheduled`，`allow_work_dir_for_model` 保持 false，窗口外在资源预算、归档锁和任何采集写入前返回 `skipped` 并记录原因；显式人工采集仍可运行。健康任务执行[健康通知脚本](../.releases/rust-20261019-workday-window-01/scripts/health_notify.ps1)，使用新包读取历史规则，不调用模型。完整程序路径和参数以实际任务回读为准。
+日报任务执行 `ai-daily-report.exe daily --scheduled`，`archive.daily_source` 为 archive，模型为 `deepseek-v4-flash`；三个日历触发器加登录兜底保持。采集任务执行 `collect --scheduled`，`allow_work_dir_for_model` 保持 false，窗口外在资源预算、归档锁和任何采集写入前返回 `skipped` 并记录原因；显式人工采集仍可运行。补解析任务执行 `archive drain --scheduled --max-seconds 120`，仅处理已归档原件与待准备变化，不扫描源目录、不调用模型，也不补齐采集覆盖。晨间新归档日报先准备目标日期材料；09:30 前仍有待办则暂缓且不调用模型，截止后保留明确缺口出报，既有冻结输入和正式发布保持。健康任务执行[健康通知脚本](../.releases/rust-20261019-reliability-01/scripts/health_notify.ps1)，由 Rust 原子写入 UTF-8 文件后读取，分别保留健康结论、程序失败和通知失败。完整程序路径和参数见[最终任务回读](../.artifacts/reliability-closure-20261019/tasks-final.json)。
 
 正式归档日报于 2026-10-17 10:50 按用户立即切换授权启用；2026-10-18 03:40 左右按本轮部署授权将日报与健康任务切换到 `rust-20261018-release-01`（包含定时链路可靠性、日报可读性、历史检索与工程清理）。部署门禁、`doctor --strict`、`doctor --check-model`（1 次合成请求）均通过，任务注册后回读一致；旧包与切换前任务 XML 保留。首份真实定时 v4 日报现已通过以下独立验收。
+
+## 10 月 19 日晚间可靠性闭环
+
+本轮完成独立补处理、晨间材料衔接、真实执行/材料/发布状态、UTF-8 健康落盘及通知容错。首次部署因当前 DSH 进程缺少用户级凭据而被严格自检阻止，旧任务完整恢复；仅在重试进程读取既有用户环境后成功部署，配置和凭据存储均未更改。解析器源码身份保持 `2f731806…`，继续使用原配置中的匹配 Worker，避免对存量材料重新解析。
+
+565 项 Rust 工作区测试、严格 Clippy、fmt、独立包验收、109 项 Windows 健康检查、26 项 Windows 运维检查及采集安装的 6 类故障验证均通过，发布清单 450 文件校验通过。2 项默认忽略测试中，独立包验收已另行执行通过。153 项补处理耗时 14.161 秒，预算仍为 3072 MiB；系统预留、父进程/Worker 限制及 OCR 关闭保持原设置。8 条旧失败、96 条历史缺口（95 条未解决）及原采集指标完整保留；当前 healthy 表示运行与发布检查通过，既有 partial 报告和 35 项新 partial 提取结果仍如实标记。
+
+[完整实施与验收结果](superpowers/plans/2026-10-19-reliability-closure-results.md)、[正式切换回执](../.artifacts/reliability-closure-20261019/deployment-02/verification.json)、[补处理指标](../.artifacts/reliability-closure-20261019/drain.json)、[原件及历史不变性核验](../.artifacts/reliability-closure-20261019/after-02/verification.json)、[健康文件](../logs/health-2026-10-19.json)和[调度器原始事件](../.artifacts/reliability-closure-20261019/scheduler-events.json)已保留。部署验收后，用户追加授权合并、commit 和 push；Git 整合目标为 main 与既有 origin/main，提交范围仅包含本轮可靠性改动。隔离工作区、旧包和本地证据保留，用户原有四份无关文档改动不纳入本次提交；具体提交与远端状态以 Git 回读为准。明早实际日历触发及连续工作日观察仍待发生；本次没有触发生产日报、重生成报告、调用模型或新增跟踪任务。
 
 ## 10 月 19 日 11:00 新规则真实采集与 Git 整合
 

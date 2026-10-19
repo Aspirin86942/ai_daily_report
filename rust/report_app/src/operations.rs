@@ -229,12 +229,20 @@ fn task_plan_inner(
 }
 
 pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Value, ReportError> {
+    let preparation_seconds = if config.archive.daily_source == "archive" {
+        120
+    } else {
+        0
+    };
     if u64::from(config.schedule.execution_limit_minutes) * 60
-        < config.recovery.run_budget_seconds.saturating_add(60)
+        < config
+            .recovery
+            .run_budget_seconds
+            .saturating_add(60 + preparation_seconds)
     {
         return Err(ReportError::new(
             "TASK_RUNTIME_LIMIT_TOO_SHORT",
-            "日报任务时限须比程序运行时限至少多一分钟，以完成状态保存。",
+            "日报任务时限须覆盖程序运行预算、归档材料准备时间及至少一分钟的状态保存时间。",
         ));
     }
     let config_dir = display_path(&config.config_dir);
@@ -308,6 +316,7 @@ pub fn task_plan_kind(
     match kind {
         "daily" => task_plan(config, sid, now),
         "collect" => task_plan_collect(config, sid, now),
+        "parse" => task_plan_parse(config, sid, now),
         "health" => task_plan_health(config, sid, now),
         _ => Err(ReportError::new("TASK_KIND_INVALID", "任务类型无效")),
     }
@@ -338,6 +347,54 @@ fn task_plan_collect(
     value["collection_workday_window"] =
         serde_json::to_value(&config.archive.collection_workday_window)?;
     Ok(value)
+}
+
+fn task_plan_parse(
+    config: &AppConfig,
+    sid: &str,
+    now: DateTime<Utc>,
+) -> Result<Value, ReportError> {
+    let mut parsing = config.clone();
+    parsing.schedule.task_name = format!("{} Parse", config.schedule.task_name);
+    parsing.schedule.execution_limit_minutes = 5;
+    let arguments = format!(
+        "--config-dir \"{}\" archive drain --scheduled --max-seconds 120",
+        display_path(&config.config_dir)
+    );
+    let triggers = if let Some(window) = &config.archive.collection_workday_window {
+        let date = now.with_timezone(&types::shanghai()).date_naive();
+        let ticks = window.ticks(30)?;
+        let end = *ticks.last().expect("validated workday ticks");
+        let mut triggers = String::new();
+        for (index, tick) in ticks.iter().enumerate() {
+            let shifted = if *tick == end {
+                end
+            } else {
+                *tick + chrono::Duration::minutes(5)
+            };
+            if shifted > end {
+                continue;
+            }
+            triggers.push_str(&format!(
+                "<CalendarTrigger id=\"ParseWorkday{:02}\"><StartBoundary>{date}T{}:00+08:00</StartBoundary><Enabled>true</Enabled><ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek><Monday/><Tuesday/><Wednesday/><Thursday/><Friday/></DaysOfWeek></ScheduleByWeek></CalendarTrigger>",
+                index + 1, shifted.format("%H:%M")
+            ));
+        }
+        triggers.push_str(&logon_trigger(config, sid));
+        triggers
+    } else {
+        parsing.archive.collection_interval_minutes = 30;
+        collect_triggers(&parsing, sid, now)?
+    };
+    let mut plan = task_plan_inner(
+        &parsing,
+        sid,
+        &parsing.schedule.task_name,
+        &arguments,
+        &triggers,
+    )?;
+    plan["kind"] = json!("parse");
+    Ok(plan)
 }
 
 pub const TEMPLATES: &[(&str, &str)] = &[
@@ -577,21 +634,58 @@ pub fn append_scheduled_log(
     reject_redirects(&path, "LOG_PATH_REDIRECTED")?;
     let event = match result {
         Ok(value) => {
-            let mut event = json!({
-            "at": Utc::now(),
-            "kind": kind,
-            "status": "succeeded",
-            "run_id": if value["run_id"].is_null() { json!(run_id) } else { value["run_id"].clone() },
-            "date": if value["target_date"].is_null() { json!(target_date) } else { value["target_date"].clone() },
-            "target_date": if value["target_date"].is_null() { json!(target_date) } else { value["target_date"].clone() },
-            "action": value["action"],
-            "quality": value["quality"],
-            "duration_ms": duration_ms,
+            let action = value["action"].as_str().unwrap_or("");
+            let status = match action {
+                "skipped" => "skipped",
+                "deferred" => "deferred",
+                _ => value["status"].as_str().unwrap_or("succeeded"),
+            };
+            let execution = match action {
+                "skipped" => "skipped",
+                "deferred" => "deferred",
+                _ => value["execution_status"].as_str().unwrap_or("succeeded"),
+            };
+            let material = value["material_status"]
+                .as_str()
+                .unwrap_or_else(|| value["quality"].as_str().unwrap_or("unknown"));
+            let publication = if kind == "daily" {
+                if matches!(
+                    action,
+                    "published" | "existing" | "reused" | "generated" | "repaired"
+                ) {
+                    "published"
+                } else {
+                    "not_published"
+                }
+            } else {
+                "not_applicable"
+            };
+            let reasons = value.get("reason_codes").cloned().unwrap_or_else(|| {
+                json!(value["checks"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|check| check["level"] != "ok")
+                    .filter_map(|check| check["code"].as_str())
+                    .collect::<Vec<_>>())
             });
-            if kind == "collect" && value["action"] == "skipped" {
-                event["status"] = json!("skipped");
+            let mut event = json!({
+                "at": Utc::now(), "kind":kind, "status":status,
+                "execution_status":execution, "material_status":material,
+                "publication_status":publication,
+                "run_id": if value["run_id"].is_null() { json!(run_id) } else { value["run_id"].clone() },
+                "date": if value["target_date"].is_null() { json!(target_date) } else { value["target_date"].clone() },
+                "target_date": if value["target_date"].is_null() { json!(target_date) } else { value["target_date"].clone() },
+                "action":value["action"], "quality":value["quality"], "duration_ms":duration_ms,
+                "queued":value["queued"], "pending_changes":value["pending_changes"], "errors":value["errors"], "reason_codes":reasons,
+                "phase": if action == "deferred" { "waiting_materials" } else { "completed" },
+            });
+            if action == "skipped" {
                 event["reason"] = value["reason"].clone();
                 event["model_calls"] = json!(0);
+            }
+            if let Some(calls) = value.get("model_calls") {
+                event["model_calls"] = calls.clone();
             }
             event
         }
@@ -599,6 +693,9 @@ pub fn append_scheduled_log(
             "at": Utc::now(),
             "kind": kind,
             "status": "failed",
+            "execution_status":"failed", "material_status":"unknown",
+            "publication_status":if kind == "daily" { "unknown" } else { "not_applicable" },
+            "queued":null, "pending_changes":null, "errors":1, "reason_codes":[e.code],
             "run_id": run_id,
             "target_date": target_date,
             "phase": run_id.map(|id| run_phase(config, id)).unwrap_or_else(|| "unknown".into()),

@@ -298,10 +298,11 @@ pub fn prepare_changes(
     config: &AppConfig,
     profile: &str,
     deadline: Instant,
+    before: Option<&str>,
 ) -> Result<(), ReportError> {
-    let mut statement=store.conn.prepare("SELECT v.id,v.parent_id,v.observed_at,e.id FROM versions v JOIN version_extractions ve ON ve.version_id=v.id JOIN extractions e ON e.id=ve.extraction_id WHERE v.baseline=0 AND v.pruned_at IS NULL AND e.profile=? AND e.status IN('complete','partial') ORDER BY v.rowid")?;
+    let mut statement=store.conn.prepare("SELECT v.id,v.parent_id,v.observed_at,e.id FROM versions v JOIN version_extractions ve ON ve.version_id=v.id JOIN extractions e ON e.id=ve.extraction_id WHERE v.baseline=0 AND v.pruned_at IS NULL AND e.profile=?1 AND e.status IN('complete','partial') AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2)) ORDER BY v.rowid")?;
     let rows = statement
-        .query_map([profile], |r| {
+        .query_map(params![profile, before], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, Option<String>>(1)?,

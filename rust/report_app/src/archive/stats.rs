@@ -10,6 +10,7 @@ pub fn query(
     run_id: Option<&str>,
 ) -> Result<Value, ReportError> {
     let mut collections = vec![];
+    let mut parse_runs = vec![];
     let mut storage = Value::Null;
     let mut files = vec![];
     let mut slow = vec![];
@@ -36,7 +37,12 @@ pub fn query(
             ))
         })? {
             let (id, started, finished, status, metrics) = row?;
-            collections.push(json!({"run_id":id,"started_at":started,"finished_at":finished,"status":status,"metrics":serde_json::from_str::<Value>(&metrics)?}));
+            let row = json!({"run_id":id,"started_at":started,"finished_at":finished,"status":status,"metrics":serde_json::from_str::<Value>(&metrics)?});
+            if status.starts_with("parse_") {
+                parse_runs.push(row);
+            } else {
+                collections.push(row);
+            }
         }
         let counts:(i64,i64,i64,i64)=store.conn.query_row("SELECT (SELECT count(*) FROM versions WHERE pruned_at IS NULL),(SELECT COALESCE(sum(size_bytes),0) FROM versions WHERE pruned_at IS NULL),(SELECT COALESCE(sum(size_bytes),0) FROM objects o WHERE EXISTS(SELECT 1 FROM versions v WHERE v.sha256=o.sha256 AND v.pruned_at IS NULL)),(SELECT count(*) FROM extractions WHERE profile=? AND (status IN('queued','running') OR id IN(SELECT value FROM metadata WHERE key LIKE 'retry:%')))",[super::parse::profile(config)?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
         storage = json!({"versions":counts.0,"logical_bytes":counts.1,"object_bytes":counts.2,"deduplicated_bytes":counts.1.saturating_sub(counts.2),"parse_queue":counts.3});
@@ -89,18 +95,21 @@ pub fn query(
     }
     let model = model_statistics(config, from, to, run_id)?;
     let total_work = |field: &str| -> Option<u64> {
-        if collections.is_empty() {
+        if collections.is_empty() && parse_runs.is_empty() {
             return None;
         }
-        collections.iter().try_fold(0u64, |sum, row| {
-            row["metrics"][field]
-                .as_u64()
-                .map(|value| sum.saturating_add(value))
-        })
+        collections
+            .iter()
+            .chain(parse_runs.iter())
+            .try_fold(0u64, |sum, row| {
+                row["metrics"][field]
+                    .as_u64()
+                    .map(|value| sum.saturating_add(value))
+            })
     };
     let work = json!({"capture_ms":total_work("capture_work_ms"),"parse_ms":total_work("parse_work_ms"),"queue_ms":total_work("queue_work_ms"),"diff_ms":total_work("diff_ms")});
     Ok(
-        json!({"version":1,"report_stages":report_stages,"collections":collections,"storage":storage,"model":model,"files":files,"file_rows_total":file_count,"file_rows_limit":5000,"slow_files":slow,"coverage_gaps":gaps,"parse_coverage":parse_coverage,"summed_parallel_work_ms":work,"summed_file_work_ms":summed,"new_model_calls":0,"timing_note":"实际解析任务耗时只计一次；文件耗时可能共享同一解析。并行任务之和与 collections 中实际完成耗时分开；null 表示历史未记录。"}),
+        json!({"version":1,"report_stages":report_stages,"collections":collections,"parse_runs":parse_runs,"storage":storage,"model":model,"files":files,"file_rows_total":file_count,"file_rows_limit":5000,"slow_files":slow,"coverage_gaps":gaps,"parse_coverage":parse_coverage,"summed_parallel_work_ms":work,"summed_file_work_ms":summed,"new_model_calls":0,"timing_note":"实际解析任务耗时只计一次；文件耗时可能共享同一解析。并行任务之和与 collections 中实际完成耗时分开；null 表示历史未记录。"}),
     )
 }
 

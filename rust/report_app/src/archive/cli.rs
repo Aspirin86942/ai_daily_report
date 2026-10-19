@@ -21,6 +21,15 @@ pub struct CollectArgs {
 }
 #[derive(Debug, Subcommand)]
 pub enum ArchiveCommand {
+    /// Process saved originals without scanning source directories or calling a model.
+    Drain {
+        #[arg(long)]
+        scheduled: bool,
+        #[arg(long, value_parser=types::parse_date)]
+        target_date: Option<NaiveDate>,
+        #[arg(long, default_value_t=120, value_parser=clap::value_parser!(u64).range(1..=1200))]
+        max_seconds: u64,
+    },
     /// Prepare a new recovery generation using frozen input and validated fact receipts; no model calls.
     Recover {
         #[arg(long)]
@@ -79,6 +88,31 @@ pub struct StatsArgs {
 }
 pub fn execute(config: &AppConfig, command: ArchiveCommand) -> Result<Value, ReportError> {
     match command {
+        ArchiveCommand::Drain {
+            scheduled,
+            target_date,
+            max_seconds,
+        } => {
+            let started = std::time::Instant::now();
+            let result = super::queue::execute(
+                config,
+                scheduled,
+                target_date,
+                max_seconds,
+                chrono::Utc::now(),
+            );
+            if scheduled {
+                crate::operations::append_scheduled_log(
+                    config,
+                    "parse",
+                    started.elapsed().as_millis() as u64,
+                    None,
+                    target_date.as_ref().map(ToString::to_string).as_deref(),
+                    &result,
+                )?;
+            }
+            result
+        }
         ArchiveCommand::Recover { run_id, reason } => {
             super::recovery::prepare(config, &run_id, &reason)
         }

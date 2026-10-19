@@ -288,6 +288,30 @@ fn deadline_check(deadline: Instant) -> Result<(), ReportError> {
     }
 }
 
+/// Prepare only new scheduled archive input; published and frozen runs stay immutable.
+pub fn prepare_scheduled_archive(
+    app: &App,
+    request: &mut ReportRequest,
+) -> Result<Option<Value>, ReportError> {
+    if !request.scheduled || request.period.source != crate::types::ReportSource::Archive {
+        return Ok(None);
+    }
+    let target = request.context.target_date.to_string();
+    if app.store.current(&target)?.is_some() || !app.store.pending(Some(&target))?.is_empty() {
+        return Ok(None);
+    }
+    let ready = crate::archive::queue::prepare_daily(
+        &app.config,
+        request.context.target_date,
+        request.context.started_at,
+    )?;
+    if ready["action"] != "deferred" {
+        // Newly completed parses carry their real ready_at, after the original CLI start.
+        request.context.started_at = Utc::now();
+    }
+    Ok(Some(ready))
+}
+
 pub fn run_daily(mut request: ReportRequest, app: &App) -> Result<ReportOutcome, ReportError> {
     let started = Instant::now();
     let deadline = started + Duration::from_secs(app.config.recovery.run_budget_seconds);

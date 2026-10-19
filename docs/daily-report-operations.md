@@ -87,7 +87,9 @@ ai-daily-report.exe health --target-date 2026-10-17 --format json | Out-Host
 
 `health` 只读检查默认目标日（上一自然日）的采集连续性、日报是否已发布且正文哈希一致、待续运行与近 24 小时失败运行、归档解析队列、数据目录所在磁盘余量、报告库与归档索引完整性。不调用模型、不扫描原目录、不修改数据库。退出码 0 健康、1 有警告、2 不健康；文本或 JSON 输出可直接审计。基线建立前的时段按基线窗口豁免，不判为采集缺口。
 
-健康任务每日 11:00 与 23:00 执行发布包内 `scripts/health_notify.ps1`：调用 `health --scheduled` 写入调度日志，回读 daily、collect、health 三个计划任务，写 `log_dir/health-YYYY-MM-DD.json`；非健康时弹出 Windows 本地通知，并按同日同错误码去重，通知记录写入 `log_dir/health-notify.log`。锁屏或未登录时通知可能不显示，健康文件与日志仍保留。
+健康任务每日 11:00 与 23:00 执行发布包内 `scripts/health_notify.ps1`。Rust 的 `health --scheduled` 先原子写入当天 UTF-8 健康文件及调度日志；`--output <路径>` 可另外输出 JSON 文件。通知脚本显式读取 UTF-8 文件，回读 daily、collect、parse、health 四个任务后补充任务状态，不解析本地代码页转换的 stdout。非健康时弹出 Windows 本地通知，按同日同错误码去重；通知失败另存 `health-notify-error.json`，健康检查结果仍保留。已被同 scope、目标日更晚正式发布恢复的失败归入 `resolved_failures`，原失败账本保持，未恢复失败继续告警。
+
+新的 scheduled archive 日报在冻结输入前检查目标日期队列，最多先补解析 120 秒；配置出报时间后 30 分钟前仍未齐备时返回 `deferred/waiting_materials`，模型调用 0，由既有兜底触发继续。达到截止时间后按实际缺口生成 partial 报告；晚完成材料沿用下一份日报补充机制。已发布日报和已有冻结恢复不重新准备材料。普通预览和显式日报命令仍按原合同读取归档证据。
 
 ## 覆盖修复
 

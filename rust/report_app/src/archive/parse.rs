@@ -51,12 +51,22 @@ pub fn drain(
     metrics: &mut CollectionMetrics,
     deadline: Instant,
 ) -> Result<(), ReportError> {
+    drain_before(config, store, metrics, deadline, None)
+}
+
+pub(crate) fn drain_before(
+    config: &AppConfig,
+    store: &mut ArchiveStore,
+    metrics: &mut CollectionMetrics,
+    deadline: Instant,
+    before: Option<&str>,
+) -> Result<(), ReportError> {
     let started = Instant::now();
     let profile = profile(config)?;
     let versions = {
-        let mut stmt=store.conn.prepare("SELECT v.id,v.sha256,v.extension FROM versions v WHERE v.pruned_at IS NULL AND NOT EXISTS(SELECT 1 FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=v.id AND e.profile=?1)")?;
+        let mut stmt=store.conn.prepare("SELECT v.id,v.sha256,v.extension FROM versions v WHERE v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2)) AND NOT EXISTS(SELECT 1 FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=v.id AND e.profile=?1)")?;
         let values = stmt
-            .query_map([&profile], |r| {
+            .query_map(params![&profile, before], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -86,9 +96,9 @@ pub fn drain(
     }
     tx.commit()?;
     let jobs = {
-        let mut stmt=store.conn.prepare("SELECT e.id,e.sha256,e.extension,o.size_bytes FROM extractions e JOIN objects o ON o.sha256=e.sha256 WHERE (e.status='queued' OR e.id IN(SELECT value FROM metadata WHERE key LIKE 'retry:%')) AND e.attempts<3 AND e.profile=? ORDER BY e.extension,o.size_bytes")?;
+        let mut stmt=store.conn.prepare("SELECT e.id,e.sha256,e.extension,o.size_bytes FROM extractions e JOIN objects o ON o.sha256=e.sha256 WHERE (e.status='queued' OR e.id IN(SELECT value FROM metadata WHERE key LIKE 'retry:%')) AND e.attempts<3 AND e.profile=?1 AND EXISTS(SELECT 1 FROM version_extractions ve JOIN versions v ON v.id=ve.version_id WHERE ve.extraction_id=e.id AND v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2))) ORDER BY e.extension,o.size_bytes,e.id")?;
         let values = stmt
-            .query_map([&profile], |r| {
+            .query_map(params![&profile, before], |r| {
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
@@ -350,6 +360,19 @@ pub fn drain(
                                 store.conn.execute("UPDATE file_metrics SET parse_ms=?,backend=?,lane=?,status=? WHERE collection_id=? AND version_id IN(SELECT version_id FROM version_extractions WHERE extraction_id=?)",params![elapsed as i64,artifact.parser_backend,artifact.worker_lane,status,metrics.run_id,job.id])?;
                             }
                             Err(e) => {
+                                if Instant::now() >= deadline
+                                    && (e.code == "PARSE_DEADLINE" || e.message == "PARSE_DEADLINE")
+                                {
+                                    defer_run_budget(store, &job.id)?;
+                                    if !metrics
+                                        .warnings
+                                        .iter()
+                                        .any(|code| code == "RUN_BUDGET_DEFERRED")
+                                    {
+                                        metrics.warnings.push("RUN_BUDGET_DEFERRED".into());
+                                    }
+                                    continue;
+                                }
                                 metrics.errors += 1;
                                 store.gap(
                                     &metrics.run_id,
@@ -379,7 +402,7 @@ pub fn drain(
     store.conn.execute("UPDATE file_metrics SET backend=(SELECT json_extract(e.manifest_json,'$.parser_backend') FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=file_metrics.version_id AND e.profile=?1),lane=(SELECT json_extract(e.manifest_json,'$.worker_lane') FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=file_metrics.version_id AND e.profile=?1) WHERE collection_id=?2 AND backend IS NULL", params![profile,metrics.run_id])?;
     metrics.parse_ms = started.elapsed().as_millis() as u64;
     let diff_started = Instant::now();
-    diff::prepare_changes(store, config, &profile, deadline)?;
+    diff::prepare_changes(store, config, &profile, deadline, before)?;
     metrics.diff_ms = diff_started.elapsed().as_millis() as u64;
     Ok(())
 }
@@ -517,6 +540,15 @@ pub fn available_memory_mib() -> Result<u64, ReportError> {
     Err(error("ARCHIVE_MEMORY_QUERY_UNSUPPORTED"))
 }
 
+fn defer_run_budget(store: &ArchiveStore, id: &str) -> Result<(), ReportError> {
+    // A bounded queue pass is scheduling, not a failed full per-file attempt.
+    store.conn.execute(
+        "UPDATE extractions SET status=CASE WHEN manifest_json IS NULL THEN 'queued' ELSE status END,attempts=max(0,attempts-1),error_code=NULL WHERE id=?",
+        [id],
+    )?;
+    Ok(())
+}
+
 fn request_id() -> String {
     let id = crate::types::new_run_id();
     format!(
@@ -527,4 +559,57 @@ fn request_id() -> String {
         &id[16..20],
         &id[20..]
     )
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    #[test]
+    fn run_budget_deferral_preserves_retry_attempts_and_readable_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArchiveStore::at(dir.path(), true).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO objects VALUES('raw',1,'2026-10-19T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        store.conn.execute("INSERT INTO extractions(id,sha256,profile,extension,status) VALUES('job','raw','profile','.pdf','queued')", []).unwrap();
+        for _ in 0..4 {
+            store
+                .conn
+                .execute(
+                    "UPDATE extractions SET status='running',attempts=attempts+1 WHERE id='job'",
+                    [],
+                )
+                .unwrap();
+            defer_run_budget(&store, "job").unwrap();
+            let state: (String, i64) = store
+                .conn
+                .query_row(
+                    "SELECT status,attempts FROM extractions WHERE id='job'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(
+                state,
+                ("queued".into(), 0),
+                "a short run budget must not exhaust per-file retries"
+            );
+        }
+        store.conn.execute("UPDATE extractions SET status='partial',manifest_json='{}',attempts=1 WHERE id='job'", []).unwrap();
+        defer_run_budget(&store, "job").unwrap();
+        let state: (String, String, i64) = store
+            .conn
+            .query_row(
+                "SELECT status,manifest_json,attempts FROM extractions WHERE id='job'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state, ("partial".into(), "{}".into(), 0));
+    }
 }

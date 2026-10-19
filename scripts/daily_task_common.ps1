@@ -2,14 +2,19 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 function Get-ReportTaskPlan {
-    param([string]$ProjectRoot, [string]$ConfigDirectory, [ValidateSet("daily", "collect", "health")][string]$Kind = "daily")
+    param([string]$ProjectRoot, [string]$ConfigDirectory, [ValidateSet("daily", "collect", "parse", "health")][string]$Kind = "daily")
     $root = (Resolve-Path -LiteralPath $ProjectRoot).Path
     $program = Join-Path $root 'ai-daily-report.exe'
     if (-not $ConfigDirectory) { $ConfigDirectory = Join-Path $root 'config' }
     $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
     # A Windows GUI-subsystem executable needs a pipeline for PowerShell to
     # wait for completion and capture its output and exit code.
-    $text = & $program --config-dir $ConfigDirectory task plan --sid $sid --kind $Kind | Out-String
+    $previousEncoding = [Console]::OutputEncoding
+    try {
+        [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $text = & $program --config-dir $ConfigDirectory task plan --sid $sid --kind $Kind | Out-String
+    }
+    finally { [Console]::OutputEncoding = $previousEncoding }
     if ($LASTEXITCODE -ne 0) { throw 'TASK_PLAN_FAILED' }
     return ($text | ConvertFrom-Json)
 }
@@ -228,7 +233,8 @@ function Install-ReportDailyTask {
     }
     $collect = $Plan.PSObject.Properties.Name -contains 'kind' -and $Plan.kind -eq 'collect'
     $health = $Plan.PSObject.Properties.Name -contains 'kind' -and $Plan.kind -eq 'health'
-    if (-not $collect -and -not $health) {
+    $parse = $Plan.PSObject.Properties.Name -contains 'kind' -and $Plan.kind -eq 'parse'
+    if (-not $collect -and -not $health -and -not $parse) {
         if (-not $Plan.credential_present) { throw 'TASK_CREDENTIAL_NOT_VISIBLE' }
         if (-not $Plan.capabilities_configured -or -not $Plan.model_check_verified) { throw 'TASK_MODEL_ACCEPTANCE_REQUIRED' }
     }

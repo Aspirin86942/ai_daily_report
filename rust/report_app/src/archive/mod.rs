@@ -6,6 +6,7 @@ pub mod diff;
 pub mod maintenance;
 pub mod model_input;
 pub mod parse;
+pub mod queue;
 pub mod recovery;
 pub mod schedule;
 pub mod stats;
