@@ -38,7 +38,7 @@ fn validate_report(context_json: &str, report: &Value, markdown: &str) -> Result
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok());
     if report["date"].as_str() != Some(context.target_date.to_string().as_str())
         || start.map(|value| value.with_timezone(&Utc)) != Some(context.window_start_utc)
-        || !matches!(report["schema_version"].as_u64(), Some(2..=4))
+        || !matches!(report["schema_version"].as_u64(), Some(2..=5))
         || !matches!(
             report["quality"].as_str(),
             Some("complete" | "partial" | "no_changes")
@@ -49,6 +49,17 @@ fn validate_report(context_json: &str, report: &Value, markdown: &str) -> Result
             "REPORT_CONTEXT_MISMATCH",
             "报告与冻结日期或格式不一致",
         ));
+    }
+    if report["schema_version"] == 5 {
+        let personal: crate::reports::personal::PersonalReport =
+            serde_json::from_value(report.clone())?;
+        personal.validate()?;
+        if markdown.len() > crate::reports::personal::MAX_REPORT_BYTES {
+            return Err(ReportError::new(
+                "PERSONAL_REPORT_TOO_LARGE",
+                "日报与依据超过文件上限",
+            ));
+        }
     }
     Ok(())
 }
@@ -134,8 +145,8 @@ impl Store {
         let version = report["schema_version"]
             .as_i64()
             .ok_or_else(|| ReportError::new("REPORT_SCHEMA_UNSUPPORTED", "报告格式无效"))?;
-        tx.execute("INSERT INTO daily_reports(date,completed_work,work_summary,next_plan,raw_json,schema_version,report_kind,current_run_id) VALUES (?,'','','',?,?,'file_evidence',?) ON CONFLICT(date) DO UPDATE SET completed_work='',work_summary='',next_plan='',raw_json=excluded.raw_json,schema_version=excluded.schema_version,report_kind='file_evidence',current_run_id=excluded.current_run_id,updated_at=?",
-            params![run.target_date,run.report_json,version,id,timestamp(now)])?;
+        tx.execute("INSERT INTO daily_reports(date,completed_work,work_summary,next_plan,raw_json,schema_version,report_kind,current_run_id) VALUES (?,'','','',?,?,?,?) ON CONFLICT(date) DO UPDATE SET completed_work='',work_summary='',next_plan='',raw_json=excluded.raw_json,schema_version=excluded.schema_version,report_kind=excluded.report_kind,current_run_id=excluded.current_run_id,updated_at=?",
+            params![run.target_date,run.report_json,version,report["report_kind"].as_str().unwrap_or("file_evidence"),id,timestamp(now)])?;
         tx.execute("UPDATE report_runs SET phase='published',status='succeeded',error_code=NULL,updated_at=?,finished_at=? WHERE run_id=?", params![timestamp(now),timestamp(now),id])?;
         if run.regeneration_reason.is_some() {
             tx.execute("UPDATE report_runs SET status='cancelled',error_code='RUN_SUPERSEDED',updated_at=?,finished_at=? WHERE run_kind='report' AND scope_id=? AND target_date=? AND phase IN ('prepared','generating','db_committed') AND status!='succeeded' AND run_id!=? AND created_at<=?", params![timestamp(now),timestamp(now),run.scope_id,run.target_date,id,run.created_at])?;
@@ -280,7 +291,7 @@ impl Store {
         for row in rows {
             let data: Value = serde_json::from_str(row["raw_json"].as_str().unwrap())?;
             let version = data["schema_version"].as_u64().unwrap_or(1);
-            if !(1..=4).contains(&version) {
+            if !(1..=5).contains(&version) {
                 return Err(ReportError::new(
                     "REPORT_SCHEMA_UNSUPPORTED",
                     "历史报告格式不支持",
@@ -291,6 +302,10 @@ impl Store {
                     "REPORT_CONTEXT_MISMATCH",
                     "历史报告日期与数据库索引不一致",
                 ));
+            }
+            if version == 5 {
+                serde_json::from_value::<crate::reports::personal::PersonalReport>(data.clone())?
+                    .validate()?;
             }
             reports.insert(parse_date(row["date"].as_str().unwrap())?, data);
         }

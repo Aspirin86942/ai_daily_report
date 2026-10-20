@@ -66,6 +66,7 @@ struct Captured {
     bytes: u64,
     modified: String,
     _reservation: Option<DiskReservation>,
+    cache_reservation: Option<crate::processing_cache::CacheReservation>,
 }
 
 struct DiskReservation {
@@ -113,6 +114,9 @@ struct CaptureReceipt {
 
 pub(super) fn recover_captures(store: &mut ArchiveStore) -> Result<(), ReportError> {
     for entry in fs::read_dir(store.root.join("staging"))? {
+        if let Some(quota) = &store.quota {
+            crate::processing_cache::check_deadline(quota.deadline())?;
+        }
         let entry = entry?;
         if !entry.file_name().to_string_lossy().starts_with("capture-")
             || entry.path().extension().is_none_or(|ext| ext != "json")
@@ -128,15 +132,28 @@ pub(super) fn recover_captures(store: &mut ArchiveStore) -> Result<(), ReportErr
                 .as_ref()
                 .filter(|p| p.parent() == Some(store.root.join("staging").as_path()))
                 .ok_or_else(|| error("ARCHIVE_CAPTURE_INCOMPLETE"))?;
-            if super::file_hash(temp)? != receipt.version.sha256 {
+            let hash = if let Some(quota) = &store.quota {
+                super::file_hash_bounded(temp, quota.deadline())?
+            } else {
+                super::file_hash(temp)?
+            };
+            if hash != receipt.version.sha256 {
                 return Err(error("ARCHIVE_CAPTURE_CORRUPT"));
             }
             fs::create_dir_all(object.parent().unwrap())?;
-            fs::rename(temp, &object)?;
+            if let Some(quota) = &store.quota {
+                quota.relocate(temp, &object)?;
+            } else {
+                fs::rename(temp, &object)?;
+            }
         }
         store.verify_object(&receipt.version.sha256)?;
         register_receipt(store, &receipt)?;
-        fs::remove_file(entry.path())?;
+        if let Some(quota) = &store.quota {
+            quota.remove(&entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
     }
     Ok(())
 }
@@ -179,9 +196,22 @@ pub fn execute(
         }));
     }
     let budget = super::resources::Budget::new(config.archive.memory_mib)?;
-    let metrics = run(config, baseline, now)?;
+    let metrics = match run(config, baseline, now) {
+        Err(e)
+            if config.report.profile == crate::config::ReportProfile::Personal
+                && e.code == "REPORT_ALREADY_RUNNING" =>
+        {
+            return Ok(
+                serde_json::json!({"status":"skipped","action":"skipped","reason":"processing_busy","model_calls":0}),
+            );
+        }
+        result => result?,
+    };
     let mut value = result_value(&metrics, "collect")?;
     value["resources"] = budget.sample()?;
+    if config.report.profile == crate::config::ReportProfile::Personal {
+        return Ok(value);
+    }
     let store = ArchiveStore::open(config, true)?;
     store.conn.execute(
         "UPDATE collections SET metrics_json=? WHERE id=?",
@@ -223,13 +253,41 @@ pub fn run(
     now: DateTime<Utc>,
 ) -> Result<CollectionMetrics, ReportError> {
     let started = Instant::now();
-    let deadline = started + Duration::from_secs(config.archive.run_seconds);
-    let _lock = ReportLock::acquire(
-        &config.paths.data_dir.join("archive/collector"),
-        "archive",
-        Duration::ZERO,
-    )?;
-    let mut store = ArchiveStore::open(config, true)?;
+    let deadline = started
+        + Duration::from_secs(
+            if config.report.profile == crate::config::ReportProfile::Personal {
+                config.archive.run_seconds.min(120)
+            } else {
+                config.archive.run_seconds
+            },
+        );
+    let personal = config.report.profile == crate::config::ReportProfile::Personal;
+    let processing = if personal {
+        Some(crate::processing_cache::ProcessingSession::at(
+            &config.paths.data_dir.join("daily_cache"),
+            now,
+            deadline,
+            crate::processing_cache::MAX_BYTES,
+            crate::processing_cache::CONTROL_BYTES,
+            Duration::ZERO,
+        )?)
+    } else {
+        None
+    };
+    let _lock = if !personal {
+        Some(ReportLock::acquire(
+            &config.paths.data_dir.join("archive/collector"),
+            "archive",
+            Duration::ZERO,
+        )?)
+    } else {
+        None
+    };
+    let mut store = if let Some(session) = &processing {
+        session.open_archive(config)?
+    } else {
+        ArchiveStore::open(config, true)?
+    };
     recover_captures(&mut store)?;
     store.conn.execute(
         "UPDATE collections SET status='interrupted',finished_at=? WHERE status='running'",
@@ -246,6 +304,20 @@ pub fn run(
     }
     if initialized && baseline {
         return Err(error("ARCHIVE_BASELINE_ALREADY_CREATED"));
+    }
+    let building_baseline = personal
+        && (!initialized
+            || store.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='baseline_building')",
+                [],
+                |r| r.get::<_, bool>(0),
+            )?);
+    let baseline = baseline || building_baseline;
+    if building_baseline {
+        store.conn.execute(
+            "INSERT OR IGNORE INTO metadata VALUES('baseline_building',?)",
+            [now.to_rfc3339()],
+        )?;
     }
     let timestamp = now.to_rfc3339();
     super::schedule::activate_config(&store, &config.archive, now)?;
@@ -284,7 +356,19 @@ pub fn run(
     roots.dedup();
     let mut files = BTreeMap::new();
     let mut complete_roots = BTreeSet::new();
+    let mut cursor_updates = Vec::new();
+    let mut remaining_entries = 10_000usize;
+    let mut continued_roots = 0;
     for root in &roots {
+        if building_baseline
+            && store.conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?)",
+                [format!("baseline_root:{}", root.to_string_lossy())],
+                |r| r.get::<_, bool>(0),
+            )?
+        {
+            continue;
+        }
         let mut excluded: Vec<PathBuf> = profile
             .discovery
             .excluded_dirs
@@ -308,7 +392,53 @@ pub fn run(
             ignored_patterns: profile.discovery.ignored_patterns.clone(),
             excluded_dirs: excluded,
         };
-        match discover_files_with_diagnostics(&request) {
+        let found = if personal {
+            let cursor_key = format!("discovery_cursor:{}", root.to_string_lossy());
+            let cursor: Option<String> = store
+                .conn
+                .query_row(
+                    "SELECT value FROM metadata WHERE key=?",
+                    [&cursor_key],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let cursor = cursor
+                .as_deref()
+                .map(serde_json::from_str::<ai_daily_discovery::DiscoveryCursor>)
+                .transpose()?;
+            let result = ai_daily_discovery::discover_files_bounded_from(
+                &request,
+                deadline,
+                remaining_entries.min((10_000 / roots.len()).max(1)),
+                cursor,
+            );
+            match result {
+                Ok((found, next, visited)) => {
+                    remaining_entries = remaining_entries.saturating_sub(visited);
+                    if let Some(next) = next {
+                        continued_roots += 1;
+                        cursor_updates.push((
+                            cursor_key,
+                            Some(serde_json::to_string(&next)?),
+                            None,
+                        ));
+                    } else {
+                        let baseline_key = (building_baseline
+                            && found
+                                .issues
+                                .iter()
+                                .all(|i| i.kind == ai_daily_discovery::DiscoveryIssueKind::Budget))
+                        .then(|| format!("baseline_root:{}", root.to_string_lossy()));
+                        cursor_updates.push((cursor_key, None, baseline_key));
+                    }
+                    Ok(found)
+                }
+                Err(e) => Err(e),
+            }
+        } else {
+            discover_files_with_diagnostics(&request)
+        };
+        match found {
             Ok(found) => {
                 if found.issues.is_empty() {
                     complete_roots.insert(root.to_string_lossy().into_owned());
@@ -344,8 +474,25 @@ pub fn run(
     let present: BTreeSet<_> = files.keys().cloned().collect();
     let day = local_day(now);
     let mut jobs = VecDeque::new();
-    let tx = store.conn.transaction()?;
-    for (root, file) in files.into_values() {
+    let mut tx = store.conn.transaction()?;
+    let mut files: Vec<_> = files.into_values().collect();
+    if personal {
+        files.sort_by(|a, b| {
+            b.1.modified_at
+                .cmp(&a.1.modified_at)
+                .then(a.1.path.cmp(&b.1.path))
+        });
+    }
+    for (index, (root, file)) in files.into_iter().enumerate() {
+        if personal && index > 0 && index % 128 == 0 {
+            tx.commit()?;
+            tx = store.conn.transaction()?;
+        }
+        if personal && Instant::now() >= deadline {
+            metrics.warnings.push("COLLECTION_DEADLINE".into());
+            complete_roots.clear();
+            break;
+        }
         let metadata_identity = archive_identity(Path::new(&file.path)).ok().flatten();
         let (fs_id, guard) = metadata_identity
             .map(|(id, g)| (Some(id), Some(g)))
@@ -445,13 +592,57 @@ pub fn run(
     if !initialized {
         tx.execute("INSERT INTO metadata VALUES('baseline',?)", [&timestamp])?;
     }
+    // Advance only after every discovered path has durable metadata. A crash or
+    // deadline during this page repeats it, preserving first-observation semantics.
+    if !metrics.warnings.iter().any(|w| w == "COLLECTION_DEADLINE") {
+        for (key, next, baseline_key) in cursor_updates {
+            if let Some(next) = next {
+                tx.execute("INSERT INTO metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,next])?;
+            } else {
+                tx.execute("DELETE FROM metadata WHERE key=?", [&key])?;
+            }
+            if let Some(key) = baseline_key {
+                tx.execute(
+                    "INSERT OR IGNORE INTO metadata VALUES(?,?)",
+                    params![key, timestamp],
+                )?;
+            }
+        }
+    }
     tx.commit()?;
+    if building_baseline
+        && continued_roots == 0
+        && !metrics.warnings.iter().any(|w| w == "COLLECTION_DEADLINE")
+    {
+        let complete: bool = roots.iter().all(|root| {
+            store
+                .conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?)",
+                    [format!("baseline_root:{}", root.to_string_lossy())],
+                    |r| r.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+        });
+        if complete {
+            store.conn.execute(
+                "DELETE FROM metadata WHERE key='baseline_building' OR key LIKE 'baseline_root:%'",
+                [],
+            )?;
+        }
+    }
     let free = free_disk(&store.root)?;
     if free < config.archive.warn_free_mib * 1024 * 1024 {
         metrics.warnings.push("LOW_DISK_SPACE".into());
     }
     let job_queue = Mutex::new(jobs);
     let disk_pending = Arc::new(Mutex::new(0));
+    let cache = store.quota.clone();
+    // Capturing originals must leave room for at least one bounded parse.
+    let capture_headroom = cache
+        .as_ref()
+        .map(|quota| quota.reserve(crate::processing_cache::MAX_OUTPUT_BYTES))
+        .transpose()?;
     let capture_started = Instant::now();
     let staging = store.root.join("staging");
     let (sender, receiver) = mpsc::sync_channel(config.archive.read_workers * 2);
@@ -461,6 +652,7 @@ pub fn run(
             let queue = &job_queue;
             let staging = &staging;
             let disk_pending = &disk_pending;
+            let cache = &cache;
             scope.spawn(move || loop {
                 let Some(mut job) = queue.lock().unwrap().pop_front() else {
                     break;
@@ -469,7 +661,15 @@ pub fn run(
                 let result = if time >= deadline {
                     Err(error("COLLECTION_DEADLINE"))
                 } else {
-                    capture(&job, staging, config, deadline, disk_pending).or_else(|e| {
+                    capture(
+                        &job,
+                        staging,
+                        config,
+                        deadline,
+                        disk_pending,
+                        cache.as_ref(),
+                    )
+                    .or_else(|e| {
                         if e.code == "SOURCE_CHANGED" || e.code == "SOURCE_BUSY" {
                             let fresh = fs::metadata(&job.file.path)?;
                             job.file.size_bytes = fresh.len();
@@ -479,7 +679,14 @@ pub fn run(
                                 .map(|(id, guard)| (Some(id), Some(guard)))
                                 .unwrap_or_default();
                             job.audit_only = false;
-                            capture(&job, staging, config, deadline, disk_pending)
+                            capture(
+                                &job,
+                                staging,
+                                config,
+                                deadline,
+                                disk_pending,
+                                cache.as_ref(),
+                            )
                         } else {
                             Err(e)
                         }
@@ -505,6 +712,7 @@ pub fn run(
         Ok(())
     })?;
     metrics.capture_ms = capture_started.elapsed().as_millis() as u64;
+    drop(capture_headroom);
     parse::drain(config, &mut store, &mut metrics, deadline)?;
     metrics.queued = store.conn.query_row(
         "SELECT count(*) FROM extractions WHERE profile=? AND (status IN('queued','running') OR id IN(SELECT value FROM metadata WHERE key LIKE 'retry:%'))",
@@ -535,6 +743,7 @@ fn capture(
     config: &AppConfig,
     run_deadline: Instant,
     disk_pending: &Arc<Mutex<u64>>,
+    quota: Option<&Arc<crate::processing_cache::CacheQuota>>,
 ) -> Result<Captured, ReportError> {
     let path = Path::new(&job.file.path);
     let deadline =
@@ -548,6 +757,9 @@ fn capture(
     }
     let mut file = options.open(path).map_err(|_| error("SOURCE_BUSY"))?;
     let before = file.metadata()?;
+    if quota.is_some() && before.len() > crate::processing_cache::MAX_INPUT_BYTES {
+        return Err(error("FILE_TOO_LARGE"));
+    }
     let stable = archive_identity(path).ok().flatten();
     if before.len() != job.file.size_bytes
         || (job.guard.is_some() && stable.as_ref().map(|(_, g)| g) != job.guard.as_ref())
@@ -556,6 +768,11 @@ fn capture(
     }
     let audit_only = job.audit_only && job.known_hash.is_some();
     let mut reservation = None;
+    let mut cache_reservation = if audit_only {
+        None
+    } else {
+        quota.map(|q| q.reserve(before.len())).transpose()?
+    };
     let mut temp = if audit_only {
         None
     } else {
@@ -567,6 +784,9 @@ fn capture(
         )?);
         Some(tempfile::NamedTempFile::new_in(staging)?)
     };
+    if let (Some(reservation), Some(temp)) = (&mut cache_reservation, &temp) {
+        reservation.track_existing_empty(temp.path())?;
+    }
     let mut hash = Sha256::new();
     let mut buffer = [0; 65536];
     let mut bytes = 0;
@@ -580,6 +800,9 @@ fn capture(
         }
         hash.update(&buffer[..n]);
         bytes += n as u64;
+        if quota.is_some() && bytes > before.len() {
+            return Err(error("SOURCE_CHANGED"));
+        }
         if let Some(temp) = &mut temp {
             temp.write_all(&buffer[..n])?;
         }
@@ -604,7 +827,12 @@ fn capture(
             config.archive.reserve_free_mib * 1024 * 1024,
         )?);
         let mut output = tempfile::NamedTempFile::new_in(staging)?;
+        cache_reservation = quota.map(|q| q.reserve(before.len())).transpose()?;
+        if let Some(reservation) = &mut cache_reservation {
+            reservation.track_existing_empty(output.path())?;
+        }
         let mut second = Sha256::new();
+        let mut copied = 0u64;
         loop {
             if Instant::now() >= deadline {
                 return Err(error("COPY_DEADLINE"));
@@ -612,6 +840,10 @@ fn capture(
             let n = file.read(&mut buffer)?;
             if n == 0 {
                 break;
+            }
+            copied += n as u64;
+            if quota.is_some() && copied > before.len() {
+                return Err(error("SOURCE_CHANGED"));
             }
             output.write_all(&buffer[..n])?;
             second.update(&buffer[..n]);
@@ -631,6 +863,7 @@ fn capture(
         bytes,
         modified: DateTime::<Utc>::from(before.modified()?).to_rfc3339(),
         _reservation: reservation,
+        cache_reservation,
     })
 }
 
@@ -648,7 +881,7 @@ fn persist_capture(
         elapsed,
     } = capture;
     metrics.capture_work_ms += elapsed;
-    let captured = match result {
+    let mut captured = match result {
         Ok(value) => value,
         Err(e) => {
             metrics.errors += 1;
@@ -692,7 +925,7 @@ fn persist_capture(
     if !unchanged {
         // Commit the observation before moving its bytes. A crash on either side
         // of the rename can recover the same observed version, even if the source changes.
-        store.put_json(
+        let receipt = store.put_json(
             &receipt_path,
             &CaptureReceipt {
                 version: super::store::Version {
@@ -713,15 +946,36 @@ fn persist_capture(
                 guard: job.guard.clone(),
                 temp: temp_path.clone(),
             },
-        )?;
+        );
+        if let Err(e) = receipt {
+            if store.quota.is_some() && e.code == "PROCESSING_CACHE_FULL" {
+                // The original's reservation is still owned by `captured`.
+                // Dropping it removes this uncommitted copy; the source remains
+                // eligible for a later collection and no version is published.
+                metrics.errors += 1;
+                store.gap(run, Some(&job.file.path), e.code, &e.message)?;
+                store.conn.execute(
+                    "INSERT INTO file_metrics(collection_id,path,capture_ms,status) VALUES(?,?,?,?)",
+                    params![run, job.file.path, elapsed as i64, e.code],
+                )?;
+                return Ok(());
+            }
+            return Err(e);
+        }
     }
-    if !object.exists() {
+    if !(object.exists() || unchanged && store.quota.is_some()) {
+        if let Some(reservation) = &mut captured.cache_reservation {
+            reservation.track(&object)?;
+        }
         fs::create_dir_all(object.parent().unwrap())?;
         let temp = temp_path
             .as_ref()
             .ok_or_else(|| error("ARCHIVE_OBJECT_MISSING"))?;
         fs::rename(temp, &object)?;
         metrics.bytes_written += job.file.size_bytes;
+        if let Some(reservation) = captured.cache_reservation.take() {
+            reservation.commit(std::slice::from_ref(&object))?;
+        }
     }
     let tx = store.conn.transaction()?;
     tx.execute(
@@ -756,7 +1010,11 @@ fn persist_capture(
     }
     tx.commit()?;
     if !unchanged {
-        fs::remove_file(receipt_path)?;
+        if let Some(quota) = &store.quota {
+            quota.remove(&receipt_path)?;
+        } else {
+            fs::remove_file(receipt_path)?;
+        }
     }
     if let Some(temp) = temp_path.filter(|p| p.exists()) {
         fs::remove_file(temp)?;
@@ -785,4 +1043,136 @@ pub fn free_disk(path: &Path) -> Result<u64, ReportError> {
 #[cfg(not(windows))]
 pub fn free_disk(_path: &Path) -> Result<u64, ReportError> {
     Err(error("ARCHIVE_DISK_QUERY_UNSUPPORTED"))
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::processing_cache::ProcessingSession;
+
+    #[test]
+    fn full_receipt_capacity_defers_only_that_file_and_can_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("config")).unwrap();
+        fs::create_dir(dir.path().join("work")).unwrap();
+        fs::write(
+            dir.path().join("config/settings.yaml"),
+            r#"{"paths":{"work_dir":"work"},"report":{"profile":"personal"},"archive":{"daily_source":"archive"}}"#,
+        )
+        .unwrap();
+        let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
+        let now = Utc::now();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let session = ProcessingSession::at(
+            &config.paths.data_dir.join("daily_cache"),
+            now,
+            deadline,
+            2 * 1024 * 1024,
+            1024 * 1024,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let mut store = session.open_archive(&config).unwrap();
+        let source = config.paths.work_dir.join("amount.txt");
+        let body = vec![b'a'; 1024];
+        fs::write(&source, &body).unwrap();
+        let run = new_run_id();
+        let document = identity(&["document", source.to_str().unwrap()]);
+        store
+            .conn
+            .execute(
+                "INSERT INTO collections(id,started_at,status,baseline) VALUES(?,?,'running',1)",
+                params![run, now.to_rfc3339()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO documents(id,root,path,extension,baseline) VALUES(?,?,?,'.txt',1)",
+                params![
+                    document,
+                    config.paths.work_dir.to_str().unwrap(),
+                    source.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        let job = || CaptureJob {
+            file: DiscoveredFileOut {
+                file_identity: document.clone(),
+                path: source.to_str().unwrap().into(),
+                extension: ".txt".into(),
+                modified_at: now.to_rfc3339(),
+                size_bytes: body.len() as u64,
+                source_version: "test".into(),
+                source_guard_kind: None,
+                source_guard_sha256: None,
+            },
+            document: document.clone(),
+            parent: None,
+            known_hash: None,
+            fs_id: None,
+            guard: None,
+            baseline: true,
+            audit: false,
+            audit_only: false,
+        };
+        let quota = &session.quota;
+        let occupied = quota
+            .reserve(quota.available_bytes().unwrap() - body.len() as u64)
+            .unwrap();
+        let staging = store.root.join("staging");
+        let pending = Arc::new(Mutex::new(0));
+        let mut metrics = CollectionMetrics::default();
+        {
+            let job = job();
+            let result = capture(&job, &staging, &config, deadline, &pending, Some(quota));
+            assert!(result.is_ok());
+            persist_capture(
+                &mut store,
+                &run,
+                &local_day(now),
+                now,
+                Capture {
+                    job,
+                    result,
+                    elapsed: 1,
+                },
+                &mut metrics,
+            )
+            .unwrap();
+            assert_eq!(metrics.versions, 0);
+            assert_eq!(fs::read(&source).unwrap(), body);
+            assert!(fs::read_dir(&staging).unwrap().next().is_none());
+            assert_eq!(metrics.errors, 1);
+            assert_eq!(quota.used_bytes().unwrap(), 1024 * 1024);
+        }
+        drop(occupied);
+        let run = new_run_id();
+        store
+            .conn
+            .execute(
+                "INSERT INTO collections(id,started_at,status,baseline) VALUES(?,?,'running',0)",
+                params![run, now.to_rfc3339()],
+            )
+            .unwrap();
+        let job = job();
+        let result = capture(&job, &staging, &config, deadline, &pending, Some(quota));
+        persist_capture(
+            &mut store,
+            &run,
+            &local_day(now),
+            now,
+            Capture {
+                job,
+                result,
+                elapsed: 1,
+            },
+            &mut metrics,
+        )
+        .unwrap();
+        assert_eq!((metrics.errors, metrics.versions), (1, 1));
+        assert_eq!(store.versions(None).unwrap().len(), 1);
+        assert_eq!(fs::read(&source).unwrap(), body);
+        assert!(fs::read_dir(staging).unwrap().next().is_none());
+    }
 }

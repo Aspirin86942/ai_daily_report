@@ -1,6 +1,7 @@
 pub mod budget;
 pub mod contracts;
 pub mod legacy;
+pub mod personal;
 pub mod plan;
 pub mod recovery;
 pub mod slicing;
@@ -24,6 +25,7 @@ use transport::ModelTransport;
 
 #[derive(Debug)]
 pub enum StepOutput {
+    Personal(personal::PersonalOutput),
     Facts(Vec<SelectedFact>),
     Compose(ComposedReport),
     Period(Value),
@@ -90,6 +92,9 @@ fn response_content(body: &[u8]) -> Result<(Value, Value), ReportError> {
 fn validate_response(step: &PlannedStep, body: &[u8]) -> Result<StepOutput, ReportError> {
     let (content, _) = response_content(body)?;
     match step.kind {
+        StepKind::PersonalSummary => Ok(StepOutput::Personal(personal::validate_response(
+            step, content,
+        )?)),
         StepKind::LegacySummary => {
             let batch: legacy::LegacyBatch =
                 serde_json::from_value(step.target["legacy_batch"].clone())?;
@@ -432,6 +437,7 @@ impl ModelRunner<'_> {
             }
             step.check_capacity(self.llm)?;
             self.transport.prepare()?;
+            let response_reservation = self.snapshots.reserve_response()?;
             let request = self
                 .snapshots
                 .put_bytes(self.run_id, "model-request", &bytes)?;
@@ -473,6 +479,7 @@ impl ModelRunner<'_> {
                 .remaining()?
                 .min(Duration::from_secs_f64(self.llm.request_timeout_seconds));
             let result = self.transport.send(&bytes, timeout);
+            drop(response_reservation);
             let duration_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
             let (error, retry, after) = match result {
                 Err(failure) => {
@@ -572,7 +579,12 @@ impl ModelRunner<'_> {
                                     continue;
                                 }
                                 if error.code == "MODEL_RESPONSE_INVALID"
-                                    && matches!(step.kind, StepKind::Facts | StepKind::Compose)
+                                    && matches!(
+                                        step.kind,
+                                        StepKind::Facts
+                                            | StepKind::Compose
+                                            | StepKind::PersonalSummary
+                                    )
                                     && invalid_retries < self.llm.invalid_response_retries
                                 {
                                     invalid_retries += 1;

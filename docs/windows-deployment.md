@@ -41,6 +41,12 @@ D:/DailyReport/
 
 ## 计划任务
 
+新安装示例采用 `personal + archive`，日报应用预算 300 秒，最后 30 秒用于收尾，任务时限至少 6 分钟；采集和补解析应用预算至多 120 秒，任务时限 3 分钟。时间检查约束程序主动启动的工作，Windows 文件系统调用卡死时由任务计划终止。日志记录正常应用退出；回读中 `267014` 表示调度终止，其他非零结果保留未知原因。外部强制终止前可能尚未完成保存。
+
+日报、采集、补解析和健康任务必须使用同一 profile、工作目录、处理目录与模型发送权限。安装器和回读脚本检查已有兄弟任务，拒绝 personal/evidence 或两种处理目录混用。两份配置可保留独立文件，但以上字段必须一致，Worker 均指向同一候选包。
+
+从旧任务组切换时，应在授权维护窗口保存四份任务 XML、两份配置、报告库一致备份及哈希，确认没有运行中的任务；按原归属移除已停用的旧任务定义，再用现有安装脚本注册四个一致的新任务并逐个回读。首次在新处理区执行 `collect --baseline`，随后由普通采集继续建立基线；在观察充分前，日报保留首日缺口。正式切换和真实模型自检须在对应授权内执行。
+
 ```powershell
 ./scripts/install_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config
 # 核对计划后，已获准的注册操作使用 -Apply。
@@ -50,9 +56,9 @@ D:/DailyReport/
 ./scripts/check_daily_task.ps1 -ProjectRoot D:/DailyReport/releases/<version> -ConfigDirectory D:/DailyReport/shared/config -Kind health
 ```
 
-任务直接运行 `ai-daily-report.exe --config-dir "..." daily --scheduled`。日报任务带 09:00、09:30、10:30 三次触发：09:00 正常出报，09:30/10:30 为兜底续跑；目标日已发布时快速返回且不调用模型。发布 EXE 使用 Windows 图形子系统，调度时不打开终端窗口；命令行调用保留标准输出与退出码。调度日志位于 `log_dir/scheduled-YYYY-MM-DD.jsonl`，每条记录 kind、运行编号、目标日期、阶段、结果、错误码与耗时。
+任务直接运行 `ai-daily-report.exe --config-dir "..." daily --scheduled`。日报任务带 09:00、09:30、10:30 三次触发：09:00 正常出报，09:30/10:30 为兜底续跑；目标日已发布时快速返回且不调用模型。发布 EXE 使用 Windows 图形子系统，调度时不打开终端窗口；命令行调用保留标准输出与退出码。personal 调度日志位于 `log_dir/personal/scheduled-YYYY-MM-DD.jsonl`，evidence 保持 `log_dir/scheduled-YYYY-MM-DD.jsonl`。每条记录 kind、运行编号、目标日期、阶段、结果、错误码与耗时，错误包含 `message/retryable`。
 
-补解析任务 `AI Daily Report Parse` 使用采集配置，以 `-Kind parse` 安装，运行 `archive drain --scheduled --max-seconds 120`。工作日窗口内每半小时检查队列，常规时间比窗口网格晚 5 分钟，并补窗口末次；正式窗口为 09:05、09:35…17:35、18:00。它与采集共用归档锁，不访问源目录、不调用模型，运行上限 5 分钟；窗口外登录或延后启动跳过。
+补解析任务 `AI Daily Report Parse` 使用采集配置，以 `-Kind parse` 安装，运行 `archive drain --scheduled --max-seconds 120`。工作日窗口内每半小时检查队列，常规时间比窗口网格晚 5 分钟，并补窗口末次；正式窗口为 09:05、09:35…17:35、18:00。它与采集共用处理区锁，不访问源目录、不调用模型，personal 的调度上限 3 分钟，evidence 保持 5 分钟；窗口外登录或延后启动跳过。
 
 健康任务 `AI Daily Report Health` 由 `scripts/install_daily_task.ps1 -Kind health -Apply` 注册，每日 11:00 与 23:00 运行 `scripts/health_notify.ps1`。Rust 先原子写入 `log_dir/health-YYYY-MM-DD.json`；脚本通过 `health --scheduled --output <临时文件>` 读取 UTF-8 JSON、回读四个任务后通知。通知组件异常另存错误，健康文件保持。health 和 parse 任务不要求模型检查记录。
 
@@ -63,6 +69,8 @@ PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；
 任务归属按持久配置的父目录生成。将配置从旧仓库移到新的安装根目录时，先保存并按原归属移除旧任务，再注册新任务，禁止绕过归属检查覆盖同名任务。
 
 ## 备份与回退
+
+旧 Rust 二进制可能无法读取新增 v5 报告。回退时应为旧程序使用隔离的数据目录，保留新程序对新增报告的只读访问和修复能力。新处理缓存可以到期，但报告库及其新记录必须保留；禁止用切换前的数据库备份覆盖新增记录。
 
 ```powershell
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config backup --output D:/DailyReport/shared/backups/reports-before-switch.sqlite3 | Out-Host

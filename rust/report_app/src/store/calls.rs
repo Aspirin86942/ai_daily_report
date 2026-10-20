@@ -124,6 +124,7 @@ impl Store {
             check_budgets(&rows, &input, &day, &chain)?;
         }
         let mut usage = json!({"reserved_budget": input.budget});
+        super::daily_budget::reserve(&tx, &run)?;
         if !input.recovery.enforce_model_budgets {
             usage["budget_limits_enforced"] = json!(false);
         }

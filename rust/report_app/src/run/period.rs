@@ -37,7 +37,7 @@ struct PeriodInput {
 fn daily_context(reports: Vec<Value>) -> Vec<Value> {
     reports.into_iter().map(|report|{
         let mut data=json!({"date":report["date"]});
-        for field in ["schema_version","report_kind","quality","completed_work","work_summary","next_plan","summary_items","verification_items","content","user_notes"] {
+        for field in ["schema_version","report_kind","quality","completed_work","work_summary","next_plan","summary_items","verification_items","content","user_notes","items","selection"] {
             if !report[field].is_null(){data[field]=report[field].clone();}
         }
         if let Some(gaps)=report["gaps"].as_array(){data["gaps"]=json!(gaps.iter().map(|gap|&gap["message"]).collect::<Vec<_>>());}
@@ -100,7 +100,10 @@ pub fn run_period(mut request: ReportRequest, app: &App) -> Result<ReportOutcome
                     .iter()
                     .flat_map(|r| r["sources"].as_array().into_iter().flatten())
                 {
-                    if let Some(path) = source["coverage_limits"]["archive"]["path"].as_str() {
+                    if let Some(path) = source["coverage_limits"]["archive"]["path"]
+                        .as_str()
+                        .or_else(|| source["coverage_limits"]["personal"]["absolute_path"].as_str())
+                    {
                         model_paths.push(path.to_owned());
                     }
                 }

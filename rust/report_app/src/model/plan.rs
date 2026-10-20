@@ -27,6 +27,7 @@ fn daily_version(target: &Value) -> u32 {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {
+    PersonalSummary,
     Facts,
     Compose,
     Weekly,
@@ -88,7 +89,12 @@ fn hash(value: &Value) -> Result<String, ReportError> {
     Ok(digest(&canonical_json(value)?))
 }
 
-fn payload(llm: &Llm, system: String, user: Value, max_tokens: u64) -> Result<Value, ReportError> {
+pub(super) fn payload(
+    llm: &Llm,
+    system: String,
+    user: Value,
+    max_tokens: u64,
+) -> Result<Value, ReportError> {
     let mut value = json!({"model":llm.model_id,"messages":[{"role":"system","content":system},{"role":"user","content":String::from_utf8(canonical_json(&user)?).unwrap()}],"temperature":llm.temperature,"max_tokens":max_tokens,"response_format":{"type":"json_object"}});
     if let Some(mode) = &llm.thinking_mode {
         let thinking = json!({"type":mode});
@@ -164,6 +170,9 @@ impl PlannedStep {
     }
 
     fn rebuild(&mut self, llm: &Llm) -> Result<(), ReportError> {
+        if self.kind == StepKind::PersonalSummary {
+            return super::personal::rebuild(self, llm);
+        }
         let aliases = self.source_aliases()?;
         if self.kind == StepKind::LegacySummary {
             let batch: super::legacy::LegacyBatch =
@@ -307,6 +316,13 @@ impl PlannedStep {
         Ok(step)
     }
     pub fn source_ids(&self) -> BTreeSet<String> {
+        if self.kind == StepKind::PersonalSummary {
+            return self
+                .source_map
+                .as_object()
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+        }
         self.entries.iter().map(|e| e.source_id.clone()).collect()
     }
     pub fn validate(&self, llm: &Llm) -> Result<(), ReportError> {
@@ -314,7 +330,9 @@ impl PlannedStep {
         self.check_capacity(llm)
     }
     pub fn validate_identity(&self, llm: &Llm) -> Result<(), ReportError> {
-        let version = if matches!(self.kind, StepKind::Facts | StepKind::Compose) {
+        let version = if self.kind == StepKind::PersonalSummary {
+            6
+        } else if matches!(self.kind, StepKind::Facts | StepKind::Compose) {
             daily_version(&self.target)
         } else {
             3

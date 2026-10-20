@@ -324,7 +324,7 @@ fn reindex_updates_metadata_and_deleted_index_is_recoverable() {
     assert!(result.get("results").is_none());
     assert!(search::render(&result, Format::Text).contains("建立 9 个片段"));
     let meta = fixture.meta();
-    assert_eq!(meta["schema_version"], "1");
+    assert_eq!(meta["schema_version"], "2");
     assert_eq!(meta["source_count"], "5");
     assert_eq!(meta["source_max_updated_at"], "2026-10-17T10:00:00Z");
     assert_eq!(meta["indexed_fragments"], "9");
@@ -337,7 +337,7 @@ fn reindex_updates_metadata_and_deleted_index_is_recoverable() {
         )
         .unwrap();
     assert_eq!(fixture.execute(&arguments("审批"))["index_rebuilt"], true);
-    assert_eq!(fixture.meta()["schema_version"], "1");
+    assert_eq!(fixture.meta()["schema_version"], "2");
     assert_eq!(fixture.execute(&reindex())["index_rebuilt"], true);
     assert_eq!(fixture.execute(&arguments("审批"))["index_rebuilt"], false);
     let index = fixture.config.paths.db_dir.join("report_search.sqlite3");

@@ -69,12 +69,25 @@ pub fn text(dir: &Path, unit: &ArchiveUnit) -> Result<String, ReportError> {
     String::from_utf8(bytes).map_err(|_| error("ARCHIVE_TEXT_INVALID"))
 }
 fn indexes(dir: &Path, keys: &BTreeMap<String, Vec<String>>) -> Result<Vec<Unit>, ReportError> {
+    indexes_bounded(dir, keys, None)
+}
+fn indexes_bounded(
+    dir: &Path,
+    keys: &BTreeMap<String, Vec<String>>,
+    bounds: Option<(Instant, usize)>,
+) -> Result<Vec<Unit>, ReportError> {
     let mut output = Vec::new();
     let reader = BufReader::new(File::open(dir.join("units.jsonl"))?);
     let mut body = BufReader::new(File::open(dir.join("body.md"))?);
     let mut body_pos = 0;
     let mut headers: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for line in reader.lines() {
+    for line in reader
+        .lines()
+        .take(bounds.map(|(_, limit)| limit).unwrap_or(usize::MAX))
+    {
+        if let Some((deadline, _)) = bounds {
+            crate::processing_cache::check_deadline(deadline)?;
+        }
         let unit: ArchiveUnit = serde_json::from_str(&line?)?;
         let mut key = unit.sha256.clone();
         if matches!(
@@ -163,6 +176,28 @@ pub fn compare(
     after: &str,
     keys: &BTreeMap<String, Vec<String>>,
 ) -> Result<Changes, ReportError> {
+    compare_impl(store, before, after, keys, None)
+}
+
+pub fn compare_bounded(
+    store: &ArchiveStore,
+    before: Option<&str>,
+    after: &str,
+    keys: &BTreeMap<String, Vec<String>>,
+    deadline: Instant,
+    max_units: usize,
+) -> Result<Changes, ReportError> {
+    crate::processing_cache::check_deadline(deadline)?;
+    compare_impl(store, before, after, keys, Some((deadline, max_units)))
+}
+
+fn compare_impl(
+    store: &ArchiveStore,
+    before: Option<&str>,
+    after: &str,
+    keys: &BTreeMap<String, Vec<String>>,
+    bounds: Option<(Instant, usize)>,
+) -> Result<Changes, ReportError> {
     let new: ArchiveArtifact = serde_json::from_value(store.read_manifest(after)?)?;
     let Some(before) = before else {
         return Ok(Changes {
@@ -173,13 +208,17 @@ pub fn compare(
                 before: Span { start: 1, end: 1 },
                 after: Span {
                     start: 1,
-                    end: new.units + 1,
+                    end: new
+                        .units
+                        .min(bounds.map(|(_, n)| n as u64).unwrap_or(u64::MAX))
+                        + 1,
                 },
             }],
         });
     };
     let old: ArchiveArtifact = serde_json::from_value(store.read_manifest(before)?)?;
-    if old.body_sha256 == new.body_sha256 {
+    let limited = bounds.is_some_and(|(_, n)| old.units > n as u64 || new.units > n as u64);
+    if old.body_sha256 == new.body_sha256 && !limited {
         return Ok(Changes {
             version: 1,
             kind: "continued".into(),
@@ -187,7 +226,7 @@ pub fn compare(
             hunks: vec![],
         });
     }
-    if old.units > 100000 || new.units > 100000 {
+    if bounds.is_none() && (old.units > 100000 || new.units > 100000) {
         return Ok(Changes {
             version: 1,
             kind: "modified".into(),
@@ -204,11 +243,20 @@ pub fn compare(
             }],
         });
     }
-    let a = indexes(&store.extraction_dir(before)?, keys)?;
-    let b = indexes(&store.extraction_dir(after)?, keys)?;
+    let a = match bounds {
+        Some(_) => indexes_bounded(&store.extraction_dir(before)?, keys, bounds)?,
+        None => indexes(&store.extraction_dir(before)?, keys)?,
+    };
+    let b = match bounds {
+        Some(_) => indexes_bounded(&store.extraction_dir(after)?, keys, bounds)?,
+        None => indexes(&store.extraction_dir(after)?, keys)?,
+    };
     let mut left: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut right: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, u) in a.iter().enumerate() {
+        if let Some((deadline, _)) = bounds {
+            crate::processing_cache::check_deadline(deadline)?;
+        }
         left.entry(&u.key).or_default().push(i);
     }
     for (i, u) in b.iter().enumerate() {
@@ -230,6 +278,9 @@ pub fn compare(
     let mut tails: Vec<usize> = vec![];
     let mut previous = vec![None; pairs.len()];
     for (i, &(_, j)) in pairs.iter().enumerate() {
+        if let Some((deadline, _)) = bounds {
+            crate::processing_cache::check_deadline(deadline)?;
+        }
         let pos = tails.partition_point(|p| pairs[*p].1 < j);
         if pos > 0 {
             previous[i] = Some(tails[pos - 1]);
@@ -250,6 +301,9 @@ pub fn compare(
     let mut hunks = vec![];
     let (mut x, mut y) = (0, 0);
     for (i, j) in anchors.into_iter().chain(Some((a.len(), b.len()))) {
+        if let Some((deadline, _)) = bounds {
+            crate::processing_cache::check_deadline(deadline)?;
+        }
         let (mut begin_a, mut begin_b, mut end_a, mut end_b) = (x, y, i, j);
         while begin_a < end_a && begin_b < end_b && a[begin_a].hash == b[begin_b].hash {
             begin_a += 1;
@@ -289,7 +343,7 @@ pub fn compare(
     Ok(Changes {
         version: 1,
         kind: "modified".into(),
-        granularity: "unit".into(),
+        granularity: if limited { "bounded_unit" } else { "unit" }.into(),
         hunks,
     })
 }

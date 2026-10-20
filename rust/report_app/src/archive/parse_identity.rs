@@ -122,7 +122,7 @@ fn verification_key(config: &AppConfig) -> Result<String, ReportError> {
 
 fn saved_verification(config: &AppConfig, key: &str) -> Option<Verification> {
     // A profile query must not create an archive or write verification state.
-    let store = super::store::ArchiveStore::open(config, false).ok()?;
+    let store = super::store::ArchiveStore::open_collection(config, false).ok()?;
     let text: String = store
         .conn
         .query_row(

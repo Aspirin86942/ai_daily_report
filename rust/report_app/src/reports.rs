@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod data;
 pub mod legacy;
 pub mod period;
+pub mod personal;
 
 pub const DAILY_TEMPLATE_V3: &str =
     include_str!("../../../templates/evidence_report_template_v3.md");

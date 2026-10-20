@@ -280,7 +280,11 @@ fn activated_history_reads_mixed_v2_v3_v4_and_lists_natural_missing_days() {
 
 #[test]
 fn unknown_history_schema_versions_remain_rejected() {
-    for version in [0, 5] {
+    for (version, expected) in [
+        (0, "REPORT_SCHEMA_UNSUPPORTED"),
+        (6, "REPORT_SCHEMA_UNSUPPORTED"),
+        (5, "JSON_INVALID"),
+    ] {
         let directory = tempfile::tempdir().unwrap();
         let store = Store::open(&directory.path().join("reports.sqlite3"), now()).unwrap();
         store
@@ -299,7 +303,7 @@ fn unknown_history_schema_versions_remain_rejected() {
                 )
                 .unwrap_err()
                 .code,
-            "REPORT_SCHEMA_UNSUPPORTED"
+            expected
         );
     }
 }

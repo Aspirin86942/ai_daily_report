@@ -131,6 +131,9 @@ pub fn cleanup(
     }
     // Cross-generation references remain readable while their owner still has an input snapshot.
     for run in &runs {
+        if app.store.is_personal_run(&run.run_id)? {
+            continue;
+        }
         if let (Some(path), Some(sha)) = (&run.snapshot_path, &run.snapshot_sha256) {
             let reference = crate::snapshots::SnapshotRef {
                 path: path.clone(),
@@ -170,6 +173,10 @@ pub fn cleanup(
         ..Default::default()
     };
     for run in runs {
+        if app.store.is_personal_run(&run.run_id)? {
+            result.preserved_runs += 1;
+            continue;
+        }
         let Some(finished) = run
             .finished_at
             .as_deref()
@@ -245,6 +252,11 @@ pub fn cleanup(
     }
     if !execute {
         return Ok(result);
+    }
+    if let Some(session) = &app.processing {
+        session.open_archive(&app.config)?;
+        app.store
+            .compact_personal(now, &session.quota.root.join("snapshots"))?;
     }
     use rusqlite::TransactionBehavior;
     for candidate in candidates {

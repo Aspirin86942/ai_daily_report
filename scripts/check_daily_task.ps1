@@ -2,6 +2,7 @@
 param([string]$ProjectRoot = (Join-Path $PSScriptRoot '..'), [string]$ConfigDirectory, [ValidateSet("daily", "collect", "parse", "health")][string]$Kind = "daily")
 . (Join-Path $PSScriptRoot 'daily_task_common.ps1')
 $plan = Get-ReportTaskPlan -ProjectRoot $ProjectRoot -ConfigDirectory $ConfigDirectory -Kind $Kind
+Assert-ReportTaskContext -Plan $plan
 $task = Get-ExistingReportTask -Plan $plan
 if ($null -eq $task) {
     [pscustomobject]@{ Exists = $false; TaskName = $plan.task_name } | ConvertTo-Json
@@ -18,6 +19,7 @@ $zone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
     NextRunShanghai = [TimeZoneInfo]::ConvertTime($info.NextRunTime, $zone).ToString('yyyy-MM-dd HH:mm:ss');
     LastRunShanghai = [TimeZoneInfo]::ConvertTime($info.LastRunTime, $zone).ToString('yyyy-MM-dd HH:mm:ss');
     LastTaskResult = $info.LastTaskResult; MissedRuns = $info.NumberOfMissedRuns;
+    Termination = if ($info.LastTaskResult -eq 267014) { 'scheduler_terminated' } elseif ($info.LastTaskResult -eq 0) { 'application_exit' } else { 'unknown' };
     CredentialVisibleInInspector = $plan.credential_present
 } | ConvertTo-Json -Depth 10
 if ($differences.Count -ne 0) { exit 1 }

@@ -59,11 +59,27 @@ impl Llm {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportSettings {
+    #[serde(default, skip_serializing_if = "ReportProfile::is_evidence")]
+    pub profile: ReportProfile,
     pub scope_id: String,
     pub root_alias: String,
     pub timezone: String,
     pub default_target: String,
     pub notes_dir: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportProfile {
+    #[default]
+    Evidence,
+    Personal,
+}
+
+impl ReportProfile {
+    pub fn is_evidence(&self) -> bool {
+        *self == Self::Evidence
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -500,6 +516,14 @@ impl AppConfig {
             .chain(&mut config.archive.model_roots)
         {
             *path = absolute(&program_dir, path);
+        }
+        if config.report.profile == ReportProfile::Personal {
+            config.archive.run_seconds = config.archive.run_seconds.min(120);
+            config.archive.max_input_mib = config.archive.max_input_mib.min(50);
+            config.archive.max_output_mib = config.archive.max_output_mib.min(16);
+            config.recovery.run_budget_seconds = 300;
+            config.recovery.lock_wait_seconds = config.recovery.lock_wait_seconds.min(5.0);
+            config.recovery.model_workers = 1;
         }
         config.validate()?;
         config.archive.validate()?;

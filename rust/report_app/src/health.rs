@@ -349,12 +349,26 @@ fn parse_queue(
     let last: Option<String> = store.conn.query_row(
         "SELECT metrics_json FROM collections WHERE status LIKE 'parse_%' ORDER BY julianday(started_at) DESC LIMIT 1", [], |row| row.get(0)
     ).optional()?;
-    let changes = crate::archive::queue::pending_changes(
-        store,
-        &crate::archive::parse::profile(config)?,
-        None,
+    let changes = if config.report.profile == crate::config::ReportProfile::Personal {
+        0
+    } else {
+        crate::archive::queue::pending_changes(
+            store,
+            &crate::archive::parse::profile(config)?,
+            None,
+        )?
+    };
+    let expired: i64 = store.conn.query_row(
+        "SELECT count(*) FROM extractions WHERE status='expired'",
+        [],
+        |r| r.get(0),
     )?;
-    let evidence = json!({"queued":queued,"pending_changes":changes,"oldest_observed_at":oldest,"oldest_age_seconds":age,
+    let gaps: i64 = store.conn.query_row(
+        "SELECT count(*) FROM gaps WHERE resolved_at IS NULL",
+        [],
+        |r| r.get(0),
+    )?;
+    let evidence = json!({"queued":queued,"expired":expired,"read_gaps":gaps,"pending_changes":changes,"oldest_observed_at":oldest,"oldest_age_seconds":age,
         "last_parse_run":last.map(|value|serde_json::from_str::<Value>(&value)).transpose()?});
     Ok(HealthCheck {
         code: "PARSE_QUEUE",
@@ -479,6 +493,14 @@ pub fn check(
                     json!({}),
                 )),
             }
+            let partial: Option<String> = connection.query_row(
+                "SELECT r.report_json FROM report_runs r JOIN daily_reports d ON d.current_run_id=r.run_id WHERE d.date=? AND r.quality='partial'",
+                [target.to_string()], |r|r.get(0)).optional().ok().flatten();
+            if let Some(report) = partial {
+                let report: Value = serde_json::from_str(&report).unwrap_or_default();
+                checks.push(HealthCheck::warning("REPORT_CONTENT_PARTIAL", "日报已发布，内容仅部分可用",
+                    json!({"quality":"partial","selection":report["selection"],"gaps":report["gaps"]})));
+            }
         }
         None => checks.push(HealthCheck::error(
             "REPORT_NOT_PUBLISHED",
@@ -487,7 +509,7 @@ pub fn check(
         )),
     }
 
-    match ArchiveStore::open(config, false) {
+    match ArchiveStore::open_collection(config, false) {
         Ok(store) => {
             if quick_check(&store.conn) {
                 match collection_continuity(&store, target, now) {
@@ -510,7 +532,7 @@ pub fn check(
                 checks.push(HealthCheck::error(
                     "DATABASE_INTEGRITY",
                     "归档索引完整性检查未通过",
-                    json!({"path": display_path(&config.paths.data_dir.join("archive/index.sqlite3"))}),
+                    json!({"path": display_path(&store.root.join("index.sqlite3"))}),
                 ));
                 checks.push(HealthCheck::error(
                     "COLLECTION_GAP",
@@ -528,6 +550,32 @@ pub fn check(
         }
     }
     checks.push(disk_space(config));
+    if config.report.profile == crate::config::ReportProfile::Personal {
+        let root = config.paths.data_dir.join("daily_cache");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut bytes = 0u64;
+        let mut complete = true;
+        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
+            if std::time::Instant::now() >= deadline {
+                complete = false;
+                break;
+            }
+            match entry {
+                Ok(entry) if entry.file_type().is_file() => match entry.metadata() {
+                    Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
+                    Err(_) => complete = false,
+                },
+                Ok(entry) if entry.path_is_symlink() => complete = false,
+                Err(_) => complete = false,
+                _ => {}
+            }
+        }
+        checks.push(HealthCheck {
+            code:"PROCESSING_CACHE",level:if complete && bytes <= crate::processing_cache::MAX_BYTES {"ok"} else {"warning"},
+            message:format!("个人处理缓存已核对 {bytes} 字节"),
+            evidence:json!({"path":display_path(&root),"logical_bytes":bytes,"complete":complete,"max_bytes":crate::processing_cache::MAX_BYTES,"retention_days":7}),
+        });
+    }
 
     let status = if checks.iter().any(|check| check.level == "error") {
         "unhealthy"

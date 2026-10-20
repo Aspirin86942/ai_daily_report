@@ -197,7 +197,7 @@ fn source_state(reports: &Connection) -> Result<SourceState, ReportError> {
         tables,
         count,
         metadata: BTreeMap::from([
-            ("schema_version".into(), "1".into()),
+            ("schema_version".into(), "2".into()),
             ("source_count".into(), count.to_string()),
             ("source_max_updated_at".into(), latest.unwrap_or_default()),
             ("source_tables".into(), json!(signature).to_string()),
@@ -291,7 +291,15 @@ fn text_parts(value: &Value, parts: &mut Vec<String>) {
             }
         }
         Value::Object(object) => {
-            for field in ["title", "text", "background", "details", "detail", "status"] {
+            for field in [
+                "title",
+                "text",
+                "background",
+                "details",
+                "detail",
+                "status",
+                "message",
+            ] {
                 if let Some(text) = object.get(field) {
                     text_parts(text, parts);
                 }
@@ -387,6 +395,27 @@ fn add_fragment(fragments: &mut Vec<Fragment>, report: &Value, item: &Value, tit
 fn fragments(report: &Value, kind: &str) -> Vec<Fragment> {
     let mut result = Vec::new();
     if kind == "daily" {
+        if report["schema_version"] == 5 {
+            if serde_json::from_value::<crate::reports::personal::PersonalReport>(report.clone())
+                .and_then(|r| r.validate().map_err(serde::de::Error::custom))
+                .is_err()
+            {
+                return result;
+            }
+            for item in report["items"].as_array().into_iter().flatten() {
+                add_fragment(
+                    &mut result,
+                    report,
+                    item,
+                    item["title"].as_str().unwrap_or("事项"),
+                );
+            }
+            if result.is_empty() {
+                add_fragment(&mut result, report, &report["user_notes"], "用户补充");
+                add_fragment(&mut result, report, &report["gaps"], "材料范围");
+            }
+            return result;
+        }
         let content = report.get("content").filter(|value| value.is_object());
         let body = content.unwrap_or(report);
         for (field, title) in [

@@ -19,6 +19,31 @@ function Get-ReportTaskPlan {
     return ($text | ConvertFrom-Json)
 }
 
+function Assert-ReportTaskContext {
+    param($Plan)
+    if (-not $Plan.PSObject.Properties['collection_scope']) { return }
+    $tasks = @(Get-ScheduledTask -TaskPath $Plan.task_path -ErrorAction SilentlyContinue)
+    foreach ($kind in @('daily', 'collect', 'parse', 'health')) {
+        $suffix = switch ($kind) { daily { '' } collect { ' Collect' } parse { ' Parse' } health { ' Health' } }
+        $name = $Plan.base_task_name + $suffix
+        if ($name -eq $Plan.task_name) { continue }
+        $task = @($tasks | Where-Object { $_.TaskName -eq $name })
+        if ($task.Count -eq 0) { continue }
+        $xml = Export-ScheduledTask -TaskName $name -TaskPath $Plan.task_path
+        $fields = Get-ReportTaskXmlFields -Xml $xml
+        $arguments = $fields['/t:Task/t:Actions/t:Exec/t:Arguments']
+        $root = $fields['/t:Task/t:Actions/t:Exec/t:WorkingDirectory']
+        if ($arguments -notmatch '(?:--config-dir|-ConfigDirectory)\s+"([^"]+)"') { throw 'TASK_CONTEXT_UNVERIFIABLE' }
+        $other = Get-ReportTaskPlan -ProjectRoot $root -ConfigDirectory $Matches[1] -Kind $kind
+        if (-not $other.PSObject.Properties['collection_scope'] -or
+            $other.collection_scope -cne $Plan.collection_scope -or
+            $other.report_profile -cne $Plan.report_profile -or
+            $other.processing_dir -ine $Plan.processing_dir) {
+            throw "TASK_COLLECTION_CONTEXT_MISMATCH: $name"
+        }
+    }
+}
+
 function Get-ReportTaskXmlFields {
     param([string]$Xml)
     [xml]$document = $Xml

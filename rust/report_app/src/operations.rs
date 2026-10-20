@@ -229,7 +229,9 @@ fn task_plan_inner(
 }
 
 pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Value, ReportError> {
-    let preparation_seconds = if config.archive.daily_source == "archive" {
+    let preparation_seconds = if config.archive.daily_source == "archive"
+        && config.report.profile != crate::config::ReportProfile::Personal
+    {
         120
     } else {
         0
@@ -313,13 +315,31 @@ pub fn task_plan_kind(
     now: DateTime<Utc>,
     kind: &str,
 ) -> Result<Value, ReportError> {
-    match kind {
+    let mut plan = match kind {
         "daily" => task_plan(config, sid, now),
         "collect" => task_plan_collect(config, sid, now),
         "parse" => task_plan_parse(config, sid, now),
         "health" => task_plan_health(config, sid, now),
         _ => Err(ReportError::new("TASK_KIND_INVALID", "任务类型无效")),
-    }
+    }?;
+    plan["report_profile"] = json!(config.report.profile);
+    plan["processing_dir"] = json!(display_path(&config.paths.data_dir.join(
+        if config.report.profile == crate::config::ReportProfile::Personal {
+            "daily_cache"
+        } else {
+            "archive"
+        }
+    )));
+    plan["base_task_name"] = json!(config.schedule.task_name);
+    plan["collection_scope"] = json!(crate::snapshots::fingerprint(&json!({
+        "profile":config.report.profile,"work_dir":config.paths.work_dir,"data_dir":config.paths.data_dir,
+        "roots":config.archive.roots,"model_roots":config.archive.model_roots,
+        "allow_work_dir_for_model":config.archive.allow_work_dir_for_model,
+        "model_ignored_prefixes":config.archive.model_ignored_prefixes,
+        "allowed_extensions":config.scanner.allowed_extensions,
+        "excluded_dirs":config.scanner.excluded_dirs,"ignored_patterns":config.scanner.ignored_patterns
+    }))?);
+    Ok(plan)
 }
 
 fn task_plan_collect(
@@ -331,7 +351,12 @@ fn task_plan_collect(
     collection.schedule.task_name = format!("{} Collect", config.schedule.task_name);
     collection.schedule.local_time = "00:00".into();
     collection.schedule.wake_to_run = false;
-    collection.schedule.execution_limit_minutes = 20;
+    collection.schedule.execution_limit_minutes =
+        if config.report.profile == crate::config::ReportProfile::Personal {
+            3
+        } else {
+            20
+        };
     let config_dir = display_path(&collection.config_dir);
     let arguments = format!("--config-dir \"{config_dir}\" collect --scheduled");
     let triggers = collect_triggers(&collection, sid, now)?;
@@ -356,7 +381,12 @@ fn task_plan_parse(
 ) -> Result<Value, ReportError> {
     let mut parsing = config.clone();
     parsing.schedule.task_name = format!("{} Parse", config.schedule.task_name);
-    parsing.schedule.execution_limit_minutes = 5;
+    parsing.schedule.execution_limit_minutes =
+        if config.report.profile == crate::config::ReportProfile::Personal {
+            3
+        } else {
+            5
+        };
     let arguments = format!(
         "--config-dir \"{}\" archive drain --scheduled --max-seconds 120",
         display_path(&config.config_dir)
@@ -398,6 +428,14 @@ fn task_plan_parse(
 }
 
 pub const TEMPLATES: &[(&str, &str)] = &[
+    (
+        "personal_daily_prompt_v5.md",
+        crate::model::personal::PROMPT,
+    ),
+    (
+        "personal_daily_template_v5.md",
+        crate::reports::personal::TEMPLATE,
+    ),
     (
         "evidence_facts_prompt_v4.md",
         include_str!("../../../templates/evidence_facts_prompt_v4.md"),
@@ -632,7 +670,7 @@ pub fn append_scheduled_log(
             .format("%Y-%m-%d")
     ));
     reject_redirects(&path, "LOG_PATH_REDIRECTED")?;
-    let event = match result {
+    let mut event = match result {
         Ok(value) => {
             let action = value["action"].as_str().unwrap_or("");
             let status = match action {
@@ -700,9 +738,16 @@ pub fn append_scheduled_log(
             "target_date": target_date,
             "phase": run_id.map(|id| run_phase(config, id)).unwrap_or_else(|| "unknown".into()),
             "error_code": e.code,
+            "message": e.message,
+            "retryable": e.retryable(),
+            "termination": "application_exit",
             "duration_ms": duration_ms,
         }),
     };
+    event["termination"] = json!("application_exit");
+    if config.report.profile == crate::config::ReportProfile::Personal {
+        return personal_log::append(&config.paths.log_dir, event, Utc::now());
+    }
     let mut file = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -711,3 +756,5 @@ pub fn append_scheduled_log(
     file.sync_all()?;
     Ok(())
 }
+
+mod personal_log;

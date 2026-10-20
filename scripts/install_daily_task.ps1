@@ -3,9 +3,10 @@ param([string]$ProjectRoot = (Join-Path $PSScriptRoot '..'), [string]$ConfigDire
 . (Join-Path $PSScriptRoot 'daily_task_common.ps1')
 $plan = Get-ReportTaskPlan -ProjectRoot $ProjectRoot -ConfigDirectory $ConfigDirectory -Kind $Kind
 if ($Apply) {
+    Assert-ReportTaskContext -Plan $plan
     if ($Kind -ne 'parse' -and -not (Test-Path -LiteralPath $plan.work_dir -PathType Container)) { throw 'TASK_WORK_DIRECTORY_UNAVAILABLE' }
     if ($Kind -in @('collect','parse')) {
-        $verification = & $plan.program --config-dir $plan.config_dir archive verify --format json | Out-String
+        $verification = & $plan.program --config-dir $plan.config_dir archive verify-collection --format json | Out-String
         if ($LASTEXITCODE -ne 0 -or ($verification | ConvertFrom-Json).status -ne 'verified') { throw 'TASK_ARCHIVE_VERIFICATION_FAILED' }
     } elseif ($Kind -eq 'daily') {
         & $plan.program --config-dir $plan.config_dir doctor --strict | Out-Host

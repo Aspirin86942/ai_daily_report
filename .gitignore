@@ -75,5 +75,6 @@ scripts/corpus/
 .artifacts/reliability-closure*/
 .artifacts/architecture-storage-*/
 .artifacts/daily-capacity-*/
+.artifacts/personal-*/
 .releases/
 config-rust/

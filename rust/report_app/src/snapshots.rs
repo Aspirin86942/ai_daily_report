@@ -6,7 +6,7 @@ use std::{
     fs::{self, File},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 pub fn digest(bytes: &[u8]) -> String {
@@ -121,6 +121,7 @@ pub struct SnapshotStore {
     max_bytes: u64,
     max_file_bytes: u64,
     write_lock: Mutex<()>,
+    quota: Option<Arc<crate::processing_cache::CacheQuota>>,
 }
 
 impl SnapshotStore {
@@ -133,7 +134,28 @@ impl SnapshotStore {
             max_bytes,
             max_file_bytes: max_bytes.min(512 * 1024 * 1024),
             write_lock: Mutex::new(()),
+            quota: None,
         })
+    }
+    pub fn with_quota(
+        root: PathBuf,
+        max_bytes: u64,
+        quota: Arc<crate::processing_cache::CacheQuota>,
+    ) -> Result<Self, ReportError> {
+        let mut store = Self::new(root, max_bytes)?;
+        store.quota = Some(quota);
+        Ok(store)
+    }
+
+    pub(crate) fn reserve_response(
+        &self,
+    ) -> Result<Option<crate::processing_cache::CacheReservation>, ReportError> {
+        // HttpTransport caps response bytes at 1 MiB; snapshot publication briefly
+        // has two logical paths. Hold this capacity before authorizing a request.
+        self.quota
+            .as_ref()
+            .map(|q| q.reserve(2 * 1024 * 1024))
+            .transpose()
     }
 
     fn resolve(&self, relative: &str) -> Result<PathBuf, ReportError> {
@@ -198,7 +220,8 @@ impl SnapshotStore {
             return Ok(reference);
         }
         if bytes.len() as u64 > self.max_file_bytes
-            || self.total_bytes()?.saturating_add(bytes.len() as u64) > self.max_bytes
+            || self.quota.is_none()
+                && self.total_bytes()?.saturating_add(bytes.len() as u64) > self.max_bytes
         {
             return Err(ReportError::new(
                 "SNAPSHOT_CAPACITY_EXCEEDED",
@@ -207,7 +230,17 @@ impl SnapshotStore {
         }
         fs::create_dir_all(path.parent().unwrap())?;
         self.resolve(&reference.path)?;
+        let mut reservation = self
+            .quota
+            .as_ref()
+            .map(|quota| quota.reserve((bytes.len() as u64).saturating_mul(2)))
+            .transpose()?;
         let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+        // Register before writing content. Empty, interrupted files fail closed on reconciliation.
+        if let Some(reservation) = &mut reservation {
+            reservation.track_existing_empty(temporary.path())?;
+            reservation.track(&path)?;
+        }
         temporary.write_all(bytes)?;
         temporary.as_file().sync_all()?;
         match fs::hard_link(temporary.path(), &path) {
@@ -216,6 +249,10 @@ impl SnapshotStore {
                 self.read_bytes(&reference)?;
             }
             Err(error) => return Err(error.into()),
+        }
+        drop(temporary);
+        if let Some(reservation) = reservation {
+            reservation.commit(&[path])?;
         }
         Ok(reference)
     }

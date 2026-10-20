@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 pub fn pending(config: &AppConfig, before: Option<&str>) -> Result<Value, ReportError> {
-    let store = ArchiveStore::open(config, false)?;
+    let store = ArchiveStore::open_collection(config, false)?;
     pending_in(&store, config, before)
 }
 
@@ -38,7 +38,11 @@ fn pending_in(
         .as_deref()
         .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
         .map(|at| (Utc::now() - at.with_timezone(&Utc)).num_seconds().max(0));
-    let changes = pending_changes(store, &profile, before)?;
+    let changes = if config.report.profile == crate::config::ReportProfile::Personal {
+        0
+    } else {
+        pending_changes(store, &profile, before)?
+    };
     Ok(
         json!({"queued":queued,"pending_changes":changes,"oldest_observed_at":oldest,"oldest_age_seconds":age}),
     )
@@ -140,7 +144,7 @@ pub fn execute(
         return Ok(skipped("outside_collection_workday_window"));
     }
     // Validate the existing archive before creating locks or process resources.
-    let existing = ArchiveStore::open(config, false)?;
+    let existing = ArchiveStore::open_collection(config, false)?;
     let initialized: bool = existing.conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM metadata WHERE key='baseline')",
         [],
@@ -150,25 +154,87 @@ pub fn execute(
         return Err(error("ARCHIVE_BASELINE_REQUIRED"));
     }
     drop(existing);
-    let _lock = match ReportLock::acquire(
-        &config.paths.data_dir.join("archive/collector"),
-        "archive",
-        Duration::ZERO,
-    ) {
-        Ok(lock) => lock,
-        Err(error) if scheduled && error.code == "REPORT_ALREADY_RUNNING" => {
-            return Ok(skipped("archive_busy"))
+    let started = Instant::now();
+    let personal = config.report.profile == crate::config::ReportProfile::Personal;
+    let deadline = started
+        + Duration::from_secs(
+            max_seconds
+                .min(config.archive.run_seconds)
+                .min(if personal { 120 } else { 1200 }),
+        );
+    let processing = if personal {
+        match crate::processing_cache::ProcessingSession::at(
+            &config.paths.data_dir.join("daily_cache"),
+            now,
+            deadline,
+            crate::processing_cache::MAX_BYTES,
+            crate::processing_cache::CONTROL_BYTES,
+            Duration::ZERO,
+        ) {
+            Ok(session) => Some(session),
+            Err(e) if e.code == "REPORT_ALREADY_RUNNING" => return Ok(skipped("processing_busy")),
+            Err(e) => return Err(e),
         }
-        Err(error) => return Err(error),
+    } else {
+        None
+    };
+    let _lock = if !personal {
+        Some(
+            match ReportLock::acquire(
+                &config.paths.data_dir.join("archive/collector"),
+                "archive",
+                Duration::ZERO,
+            ) {
+                Ok(lock) => lock,
+                Err(error) if scheduled && error.code == "REPORT_ALREADY_RUNNING" => {
+                    return Ok(skipped("archive_busy"))
+                }
+                Err(error) => return Err(error),
+            },
+        )
+    } else {
+        None
     };
     let resources = super::resources::Budget::new(config.archive.memory_mib)?;
+    let store = if let Some(session) = &processing {
+        session.open_archive(config)?
+    } else {
+        ArchiveStore::open(config, true)?
+    };
+    let mut result = drain_store(config, store, target_date, now, deadline)?;
+    result["resources"] = resources.sample()?;
+    Ok(result)
+}
+
+pub(crate) fn prepare_personal(
+    config: &AppConfig,
+    session: &crate::processing_cache::ProcessingSession,
+    target_date: NaiveDate,
+    now: DateTime<Utc>,
+    deadline: Instant,
+) -> Result<Value, ReportError> {
+    let store = session.open_archive(config)?;
+    drain_store(
+        config,
+        store,
+        Some(target_date),
+        now,
+        deadline.min(Instant::now() + Duration::from_secs(120)),
+    )
+}
+
+fn drain_store(
+    config: &AppConfig,
+    mut store: ArchiveStore,
+    target_date: Option<NaiveDate>,
+    now: DateTime<Utc>,
+    deadline: Instant,
+) -> Result<Value, ReportError> {
     let started = Instant::now();
-    let deadline = started + Duration::from_secs(max_seconds.min(config.archive.run_seconds));
     let before = target_date
         .map(types::utc_window)
         .transpose()?
         .map(|(_, end)| end.to_rfc3339());
-    let mut store = ArchiveStore::open(config, true)?;
     collect::recover_captures(&mut store)?;
     store.conn.execute(
         "UPDATE collections SET status='parse_interrupted',finished_at=? WHERE status='parse_running'",
@@ -204,7 +270,6 @@ pub fn execute(
         value["material_status"] = json!("partial");
     }
     value["target_date"] = json!(target_date);
-    value["resources"] = resources.sample()?;
     let mut reasons = metrics.warnings.clone();
     if changes > 0 {
         reasons.push("ARCHIVE_CHANGE_PENDING".into());

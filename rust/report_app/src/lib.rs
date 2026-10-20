@@ -5,6 +5,7 @@ pub mod health;
 pub mod maintenance;
 pub mod model;
 pub mod operations;
+pub mod processing_cache;
 pub mod publish;
 pub mod reports;
 pub mod run;
@@ -21,6 +22,20 @@ pub struct ReportError {
 }
 
 impl ReportError {
+    pub fn retryable(&self) -> bool {
+        matches!(
+            self.code,
+            "REPORT_ALREADY_RUNNING"
+                | "IO_FAILED"
+                | "PROCESSING_READ_FAILED"
+                | "MODEL_CONNECTION_FAILED"
+                | "MODEL_TRANSPORT_FAILED"
+                | "SOURCE_BUSY"
+                | "SOURCE_CHANGED"
+                | "MODEL_TIMEOUT"
+                | "MODEL_RESPONSE_INTERRUPTED"
+        )
+    }
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,

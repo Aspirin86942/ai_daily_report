@@ -9,6 +9,7 @@ use ai_daily_report::{
 use clap::{CommandFactory, Parser};
 
 fn main() {
+    let started = std::time::Instant::now();
     #[cfg(windows)]
     if !std::env::args_os().any(|arg| arg == "--scheduled") {
         // Preserve redirected pipes; attach only when launched without an output handle.
@@ -30,13 +31,20 @@ fn main() {
         Cli::command().print_help().unwrap();
         return;
     };
-    if let Err(error) = execute(command, args.config_dir.as_deref()) {
-        eprintln!("{error}");
+    if let Err(error) = execute(command, args.config_dir.as_deref(), started) {
+        eprintln!(
+            "{}",
+            serde_json::json!({"error_code":error.code,"message":error.message,"retryable":error.retryable()})
+        );
         std::process::exit(1);
     }
 }
 
-fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(), ReportError> {
+fn execute(
+    command: Command,
+    config_dir: Option<&std::path::Path>,
+    started: std::time::Instant,
+) -> Result<(), ReportError> {
     if let Command::ArchiveScanner {
         source,
         archive_dir,
@@ -108,12 +116,11 @@ fn execute(command: Command, config_dir: Option<&std::path::Path>) -> Result<(),
             };
             let run_id = new_run_id();
             let mut target_date: Option<String> = None;
-            let started = std::time::Instant::now();
             let result = (|| {
                 let mut request =
                     command.report_request(&config, now, run_id.clone(), String::new())?;
                 target_date = Some(request.context.target_date.to_string());
-                let mut app = App::open(config.clone(), now)?;
+                let mut app = App::open_started(config.clone(), now, started)?;
                 if let Command::Daily(args) = &command {
                     if let Some(path) = &args.ocr_manifest {
                         app.ocr_manifest = ai_daily_report::maintenance::ocr::load_manifest(

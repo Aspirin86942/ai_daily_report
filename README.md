@@ -2,7 +2,9 @@
 
 根据本地文件生成可核对的中文日报、周报和月报。Rust 程序负责扫描、提取事实、成稿、存储及恢复，Windows 程序包无需 Python、uv 或虚拟环境。
 
-日报按“要素速览 → 内容概览 →（事项目录）→ 事项详情 → 待确认 → 来源与覆盖附录”呈现，归档来源另有“变化依据”审计附录。速览行给出材料、事实与缺口数量；事项详情按重要度排序，长段按句切分，来源引用紧邻事实；覆盖缺口按错误码聚合；事项达到 10 个时生成可跳转目录。同一事项集中说明，保留关键数字、条件、例外及方案状态。技术统计集中放在附录，引用、哈希与版本信息不因排版调整而删减。历史日报继续保留原正文。
+新安装示例启用 `report.profile: personal`：日报按进展、留意、下一步整理，通常 3～7 项、最多 10 项，正文最多 1,500 字。关键数字、条件、待审批状态和来源摘录随日报保存。旧配置缺省为 `evidence`，历史日报保留原正文与完整证据附录。
+
+个人日报只选择目标日首尾版本的有效变化，输入最多 20,000 字，人工补充最多 2,000 字。通常一次模型请求，同一工作范围和目标日期合计最多 3 次，预览、失败、未知结果、重启均计入。处理缓存位于独立的 `data_dir/daily_cache`，最多 7 天、1 GiB；最终日报及依据文件最多 100,000 字节。程序总预算 300 秒，目录遍历、解析和模型调用均检查剩余时间。
 
 ## 当前状态
 
@@ -14,13 +16,15 @@
 
 ```powershell
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config doctor --strict | Out-Host
+./ai-daily-report.exe --config-dir D:/DailyReport/shared/config collect --baseline | Out-Host
+./ai-daily-report.exe --config-dir D:/DailyReport/shared/config collect | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config daily --dry-run | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config daily --target-date 2026-10-11 | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config weekly 2026-W41 --source db | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config monthly 2026-10 --source db | Out-Host
 ```
 
-`daily` 默认报告上一个已结束的自然日，时区固定为 `Asia/Shanghai`。日报来源由 `archive.daily_source` 决定，也可用 `--source archive` 或 `--source scan` 显式指定。`--dry-run` 仅准备输入，不调用模型：归档来源读取已有归档，扫描来源扫描原目录。`--no-save` 生成有审计记录的预览。`doctor --strict` 不联网；`doctor --check-model` 明确发送一批合成材料并记录用量。
+`daily` 默认报告上一个已结束的自然日，时区固定为 `Asia/Shanghai`。personal 要求 `archive.daily_source: archive`，拒绝 `daily --source scan`。首次基线用于建立文件状态；后续采集才提供可比较变化，基线不计为新进展。`--dry-run` 准备有限输入、零模型请求；`--no-save` 生成有调用记录的预览。补充可通过 `daily -i "..."` 或 `report.notes_dir/YYYY-MM-DD.md` 提供。`doctor --strict` 不联网；`doctor --check-model` 明确发送一批合成材料并记录用量。
 
 ```powershell
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config runs --target-date 2026-10-11 | Out-Host

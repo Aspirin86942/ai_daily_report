@@ -1,7 +1,8 @@
 mod daily;
-mod input;
+pub(crate) mod input;
 mod legacy;
 mod period;
+pub mod personal;
 pub use input::FrozenInput;
 pub fn prepare_daily_input(
     app: &App,
@@ -43,6 +44,8 @@ use std::{
 };
 
 pub struct App {
+    pub processing: Option<crate::processing_cache::ProcessingSession>,
+    pub started: Instant,
     pub config: AppConfig,
     pub store: Store,
     pub snapshots: SnapshotStore,
@@ -54,13 +57,42 @@ pub struct App {
 
 impl App {
     pub fn open(config: AppConfig, now: DateTime<Utc>) -> Result<Self, ReportError> {
+        Self::open_started(config, now, Instant::now())
+    }
+    pub fn open_started(
+        config: AppConfig,
+        now: DateTime<Utc>,
+        started: Instant,
+    ) -> Result<Self, ReportError> {
+        let processing = if config.report.profile == crate::config::ReportProfile::Personal {
+            Some(crate::processing_cache::ProcessingSession::acquire(
+                &config,
+                now,
+                started + Duration::from_secs(300),
+            )?)
+        } else {
+            None
+        };
         let path = config.paths.db_dir.join("reports.sqlite3");
         let lock = ReportLock::acquire(
             &path,
             &config.report.scope_id,
-            Duration::from_secs_f64(config.recovery.lock_wait_seconds),
+            if processing.is_some() {
+                Duration::from_secs(5).min(
+                    (started + Duration::from_secs(270)).saturating_duration_since(Instant::now()),
+                )
+            } else {
+                Duration::from_secs_f64(config.recovery.lock_wait_seconds)
+            },
         )?;
         let store = Store::open_locked(&path, now, &lock)?;
+        if let Some(session) = &processing {
+            store.compact_personal_until(
+                now,
+                &session.quota.root.join("snapshots"),
+                (started + Duration::from_secs(270)).min(Instant::now() + Duration::from_secs(2)),
+            )?;
+        }
         let snapshots = SnapshotStore::new(
             config.paths.data_dir.join("run_snapshots"),
             config
@@ -71,6 +103,8 @@ impl App {
         let transport = Box::new(HttpTransport::new(&config));
         let model_workers = config.recovery.model_workers;
         Ok(Self {
+            processing,
+            started,
             config,
             store,
             snapshots,
@@ -293,6 +327,9 @@ pub fn prepare_scheduled_archive(
     app: &App,
     request: &mut ReportRequest,
 ) -> Result<Option<Value>, ReportError> {
+    if app.config.report.profile == crate::config::ReportProfile::Personal {
+        return Ok(None);
+    }
     if !request.scheduled || request.period.source != crate::types::ReportSource::Archive {
         return Ok(None);
     }
@@ -313,6 +350,9 @@ pub fn prepare_scheduled_archive(
 }
 
 pub fn run_daily(mut request: ReportRequest, app: &App) -> Result<ReportOutcome, ReportError> {
+    if app.config.report.profile == crate::config::ReportProfile::Personal {
+        return personal::run(request, app, app.started);
+    }
     let started = Instant::now();
     let deadline = started + Duration::from_secs(app.config.recovery.run_budget_seconds);
     let now = request.context.started_at;
@@ -418,6 +458,14 @@ fn finish(
     let run = app.store.get(run_id)?;
     if run.phase == RunPhase::DbCommitted {
         return repair_run(app, run_id, now);
+    }
+    if app.store.is_personal_run(run_id)? {
+        return personal::finish(
+            app,
+            run_id,
+            started,
+            deadline.min(started + Duration::from_secs(270)),
+        );
     }
     let reference = SnapshotRef {
         path: run
@@ -608,7 +656,13 @@ fn stage(
 pub fn repair_run(app: &App, id: &str, now: DateTime<Utc>) -> Result<ReportOutcome, ReportError> {
     let path = Publisher::new(&app.config.paths.reports_dir, &app.store)?.publish(id, now)?;
     let run = app.store.get(id)?;
-    crate::archive::model_input::published(&app.config, id, run.markdown.as_deref().unwrap_or(""))?;
+    if !app.store.is_personal_run(id)? {
+        crate::archive::model_input::published(
+            &app.config,
+            id,
+            run.markdown.as_deref().unwrap_or(""),
+        )?;
+    }
     Ok(ReportOutcome {
         run_id: id.into(),
         target_date: run.target_date,

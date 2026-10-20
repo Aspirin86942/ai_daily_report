@@ -60,52 +60,74 @@ pub(crate) fn drain_before(
     before: Option<&str>,
 ) -> Result<(), ReportError> {
     let started = Instant::now();
+    let personal = config.report.profile == crate::config::ReportProfile::Personal;
+    if personal && Instant::now() >= deadline {
+        metrics.warnings.push("RUN_BUDGET_DEFERRED".into());
+        return Ok(());
+    }
     let verification = super::parse_identity::verified(config)?;
     let profile = verification.profile(config)?;
     verification.persist(config, store)?;
-    let versions = {
-        let mut stmt=store.conn.prepare("SELECT v.id,v.sha256,v.extension FROM versions v WHERE v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2)) AND NOT EXISTS(SELECT 1 FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=v.id AND e.profile=?1)")?;
-        let values = stmt
-            .query_map(params![&profile, before], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        values
-    };
-    let tx = store.conn.transaction()?;
-    for (version, hash, extension) in versions {
-        let id = identity(&["extraction", &hash, &extension, &profile]);
-        tx.execute("INSERT OR IGNORE INTO extractions(id,sha256,profile,extension,status) VALUES(?,?,?,?,'queued')",params![id,hash,profile,extension])?;
-        let inserted = tx.execute(
-            "INSERT OR IGNORE INTO version_extractions VALUES(?,?)",
-            params![version, id],
-        )?;
-        if inserted > 0 {
-            let status: String =
-                tx.query_row("SELECT status FROM extractions WHERE id=?", [&id], |r| {
-                    r.get(0)
-                })?;
-            if matches!(status.as_str(), "complete" | "partial") {
-                metrics.parse_reused += 1;
+    loop {
+        if personal && Instant::now() >= deadline {
+            break;
+        }
+        let versions = {
+            let mut stmt=store.conn.prepare("SELECT v.id,v.sha256,v.extension FROM versions v WHERE v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2)) AND NOT EXISTS(SELECT 1 FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=v.id AND e.profile=?1) ORDER BY v.observed_at DESC,v.id LIMIT ?3")?;
+            let values = stmt
+                .query_map(
+                    params![&profile, before, if personal { 128i64 } else { -1 }],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                        ))
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+            values
+        };
+        if versions.is_empty() {
+            break;
+        }
+        let tx = store.conn.transaction()?;
+        for (version, hash, extension) in versions {
+            let id = identity(&["extraction", &hash, &extension, &profile]);
+            tx.execute("INSERT OR IGNORE INTO extractions(id,sha256,profile,extension,status) VALUES(?,?,?,?,'queued')",params![id,hash,profile,extension])?;
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO version_extractions VALUES(?,?)",
+                params![version, id],
+            )?;
+            if inserted > 0 {
+                let status: String =
+                    tx.query_row("SELECT status FROM extractions WHERE id=?", [&id], |r| {
+                        r.get(0)
+                    })?;
+                if matches!(status.as_str(), "complete" | "partial") {
+                    metrics.parse_reused += 1;
+                }
             }
         }
+        tx.commit()?;
+        if !personal {
+            break;
+        }
     }
-    tx.commit()?;
     let jobs = {
-        let mut stmt=store.conn.prepare("SELECT e.id,e.sha256,e.extension,o.size_bytes FROM extractions e JOIN objects o ON o.sha256=e.sha256 WHERE (e.status='queued' OR e.id IN(SELECT value FROM metadata WHERE key LIKE 'retry:%')) AND e.attempts<3 AND e.profile=?1 AND EXISTS(SELECT 1 FROM version_extractions ve JOIN versions v ON v.id=ve.version_id WHERE ve.extraction_id=e.id AND v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2))) ORDER BY e.extension,o.size_bytes,e.id")?;
+        let mut stmt=store.conn.prepare("SELECT e.id,e.sha256,e.extension,o.size_bytes FROM extractions e JOIN objects o ON o.sha256=e.sha256 WHERE (e.status='queued' OR e.id IN(SELECT value FROM metadata WHERE key LIKE 'retry:%')) AND e.attempts<3 AND e.profile=?1 AND EXISTS(SELECT 1 FROM version_extractions ve JOIN versions v ON v.id=ve.version_id WHERE ve.extraction_id=e.id AND v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2))) ORDER BY CASE WHEN ?3>0 THEN (SELECT max(v.observed_at) FROM versions v JOIN version_extractions ve ON ve.version_id=v.id WHERE ve.extraction_id=e.id) END DESC,e.extension,o.size_bytes,e.id LIMIT ?3")?;
         let values = stmt
-            .query_map(params![&profile, before], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, i64>(3)? as u64,
-                ))
-            })?
+            .query_map(
+                params![&profile, before, if personal { 128i64 } else { -1 }],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, i64>(3)? as u64,
+                    ))
+                },
+            )?
             .collect::<Result<Vec<_>, _>>()?;
         values
     };
@@ -124,12 +146,12 @@ pub(crate) fn drain_before(
         let office = jobs
             .iter()
             .any(|(_, _, ext, _)| ext != ".pdf")
-            .then(|| registered(config, false, &verification))
+            .then(|| registered(config, false, &verification, deadline))
             .transpose()?;
         let pdf = jobs
             .iter()
             .any(|(_, _, ext, _)| ext == ".pdf")
-            .then(|| registered(config, true, &verification))
+            .then(|| registered(config, true, &verification, deadline))
             .transpose()?;
         let audit = serde_json::json!({
             "profile":profile,"engine_build":ai_daily_scanner_core::ENGINE_BUILD_IDENTITY,
@@ -160,6 +182,7 @@ pub(crate) fn drain_before(
         );
         let staging = store.root.join("staging");
         let output = store.root.join("extractions");
+        let quota = store.quota.clone();
         let (sender, receiver) = mpsc::sync_channel(workers * 2);
         std::thread::scope(|scope| -> Result<(), ReportError> {
             for _ in 0..workers {
@@ -169,6 +192,7 @@ pub(crate) fn drain_before(
                 let output = &output;
                 let office = &office;
                 let pdf = &pdf;
+                let quota = &quota;
                 scope.spawn(move || {
                     let mut session: Option<(bool, WorkerSession)> = None;
                     loop {
@@ -202,10 +226,14 @@ pub(crate) fn drain_before(
                         let is_pdf = job.extension == ".pdf";
                         let mut spawned = false;
                         let result = (|| {
+                            let mut reservation = quota
+                                .as_ref()
+                                .map(|q| q.reserve(config.archive.max_output_mib * 1024 * 1024))
+                                .transpose()?;
                             if job.size > config.archive.max_input_mib * 1024 * 1024 {
                                 return Err(error("FILE_TOO_LARGE"));
                             }
-                            if file_hash(&job.object)? != job.hash {
+                            if super::file_hash_bounded(&job.object, deadline)? != job.hash {
                                 return Err(error("ARCHIVE_OBJECT_CORRUPT"));
                             }
                             let worker = if is_pdf {
@@ -230,7 +258,8 @@ pub(crate) fn drain_before(
                                     &worker.command,
                                     &worker.identity,
                                     params,
-                                    Duration::from_secs(10),
+                                    Duration::from_secs(10)
+                                        .min(deadline.saturating_duration_since(Instant::now())),
                                 )
                                 .map_err(session_error)?;
                                 worker_session
@@ -242,6 +271,9 @@ pub(crate) fn drain_before(
                             let directory = tempfile::Builder::new()
                                 .prefix("parse-")
                                 .tempdir_in(staging)?;
+                            if let Some(reservation) = &mut reservation {
+                                reservation.track_empty_directory(directory.path())?;
+                            }
                             if config.archive.compress_extractions {
                                 // Unsupported filesystems keep the same readable format.
                                 if super::storage::compress(directory.path()).is_err() {
@@ -282,12 +314,30 @@ pub(crate) fn drain_before(
                                 worker.archive_parse(&request_id(), &request, timeout)
                             }
                             .map_err(session_error)?;
-                            verify_artifact(directory.path(), &artifact, &job.hash)?;
+                            verify_artifact_until(
+                                directory.path(),
+                                &artifact,
+                                &job.hash,
+                                Some(deadline),
+                            )?;
                             let destination = output.join(&job.id);
                             if destination.exists() {
-                                verify_artifact(&destination, &artifact, &job.hash)?;
+                                verify_artifact_until(
+                                    &destination,
+                                    &artifact,
+                                    &job.hash,
+                                    Some(deadline),
+                                )?;
                             } else {
+                                if let Some(reservation) = &mut reservation {
+                                    reservation.track(&destination)?;
+                                }
                                 fs::rename(directory.path(), &destination)?;
+                            }
+                            if let Some(reservation) = reservation {
+                                if destination.exists() && !directory.path().exists() {
+                                    reservation.commit(&[destination])?;
+                                }
                             }
                             Ok(artifact)
                         })();
@@ -366,6 +416,13 @@ pub(crate) fn drain_before(
                                 store.conn.execute("UPDATE file_metrics SET parse_ms=?,backend=?,lane=?,status=? WHERE collection_id=? AND version_id IN(SELECT version_id FROM version_extractions WHERE extraction_id=?)",params![elapsed as i64,artifact.parser_backend,artifact.worker_lane,status,metrics.run_id,job.id])?;
                             }
                             Err(e) => {
+                                if e.code == "PROCESSING_CACHE_FULL" {
+                                    defer_run_budget(store, &job.id)?;
+                                    if !metrics.warnings.iter().any(|w| w == e.code) {
+                                        metrics.warnings.push(e.code.into());
+                                    }
+                                    continue;
+                                }
                                 if Instant::now() >= deadline
                                     && (e.code == "PARSE_DEADLINE" || e.message == "PARSE_DEADLINE")
                                 {
@@ -408,7 +465,9 @@ pub(crate) fn drain_before(
     store.conn.execute("UPDATE file_metrics SET backend=(SELECT json_extract(e.manifest_json,'$.parser_backend') FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=file_metrics.version_id AND e.profile=?1),lane=(SELECT json_extract(e.manifest_json,'$.worker_lane') FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=file_metrics.version_id AND e.profile=?1) WHERE collection_id=?2 AND backend IS NULL", params![profile,metrics.run_id])?;
     metrics.parse_ms = started.elapsed().as_millis() as u64;
     let diff_started = Instant::now();
-    diff::prepare_changes(store, config, &profile, deadline, before)?;
+    if config.report.profile != crate::config::ReportProfile::Personal {
+        diff::prepare_changes(store, config, &profile, deadline, before)?;
+    }
     metrics.diff_ms = diff_started.elapsed().as_millis() as u64;
     Ok(())
 }
@@ -417,6 +476,7 @@ fn registered(
     config: &AppConfig,
     pdf: bool,
     verification: &super::parse_identity::Verification,
+    deadline: Instant,
 ) -> Result<RegisteredWorker, ReportError> {
     let program = if pdf {
         config.pdf_worker_path.clone()
@@ -435,7 +495,11 @@ fn registered(
         required_backends: vec![],
         required_extensions: vec![],
     };
-    let worker = register_worker(&command, Duration::from_secs(10))
+    let timeout = Duration::from_secs(10).min(deadline.saturating_duration_since(Instant::now()));
+    if timeout.is_zero() {
+        return Err(error("PARSE_DEADLINE"));
+    }
+    let worker = register_worker(&command, timeout)
         .map_err(|e| ReportError::new("ARCHIVE_WORKER_MISSING", format!("{e:?}")))?;
     verification.check_worker(config, pdf, &worker.identity.worker_build)?;
     Ok(worker)
@@ -459,6 +523,15 @@ pub fn verify_artifact(
     a: &ArchiveArtifact,
     hash: &str,
 ) -> Result<(), ReportError> {
+    verify_artifact_until(dir, a, hash, None)
+}
+
+fn verify_artifact_until(
+    dir: &std::path::Path,
+    a: &ArchiveArtifact,
+    hash: &str,
+    deadline: Option<Instant>,
+) -> Result<(), ReportError> {
     if a.version != 1 || a.raw_sha256 != hash || a.error.is_some() {
         return Err(error("ARCHIVE_EXTRACTION_INVALID"));
     }
@@ -467,7 +540,11 @@ pub fn verify_artifact(
         ("units.jsonl", &a.units_sha256),
         ("units.idx", &a.index_sha256),
     ] {
-        if file_hash(&dir.join(file))? != *expected {
+        let actual = match deadline {
+            Some(deadline) => super::file_hash_bounded(&dir.join(file), deadline)?,
+            None => file_hash(&dir.join(file))?,
+        };
+        if actual != *expected {
             return Err(error("ARCHIVE_EXTRACTION_CORRUPT"));
         }
     }

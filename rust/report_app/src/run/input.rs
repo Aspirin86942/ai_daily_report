@@ -269,6 +269,56 @@ fn notes(app: &App, context: &RunContext) -> Result<String, ReportError> {
         .replace('\r', "\n"))
 }
 
+pub(crate) fn personal_notes(
+    config: &crate::config::AppConfig,
+    context: &RunContext,
+    input: &str,
+) -> Result<String, ReportError> {
+    let path = config
+        .report
+        .notes_dir
+        .join(format!("{}.md", context.target_date));
+    reject_redirects(&path, "NOTES_PATH_REDIRECTED")?;
+    let mut bytes = Vec::new();
+    match File::open(&path) {
+        Ok(file) => {
+            file.take(8_004).read_to_end(&mut bytes)?;
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e.into()),
+    }
+    if bytes.len() > 8_003 || input.chars().count() > 2_000 {
+        return Err(ReportError::new(
+            "USER_INPUT_TOO_LARGE",
+            "单日补充最多 2,000 字，请缩短原文",
+        ));
+    }
+    let file_text = String::from_utf8(bytes)
+        .map_err(|_| ReportError::new("NOTES_ENCODING_INVALID", "补充须为 UTF-8"))?;
+    let mut seen = BTreeSet::new();
+    let mut paragraphs = Vec::new();
+    for text in [input, file_text.trim_start_matches('\u{feff}')] {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        for paragraph in normalized
+            .split("\n\n")
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            if seen.insert(paragraph.to_owned()) {
+                paragraphs.push(paragraph.to_owned());
+            }
+        }
+    }
+    let text = paragraphs.join("\n\n");
+    if text.chars().count() > 2_000 {
+        return Err(ReportError::new(
+            "USER_INPUT_TOO_LARGE",
+            "合并后的单日补充超过 2,000 字，请缩短原文",
+        ));
+    }
+    Ok(text)
+}
+
 pub(super) fn prepare(
     app: &App,
     request: &ReportRequest,

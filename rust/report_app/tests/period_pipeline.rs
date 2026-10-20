@@ -184,6 +184,62 @@ fn database_week_and_month_publish_without_scanner_and_repeat_reuses() {
 }
 
 #[test]
+fn personal_items_and_statement_labels_reach_both_period_prompts() {
+    use ai_daily_report::reports::{
+        data::ReportSource,
+        personal::{ItemKind, Material, PersonalItem, PersonalReport, Selection, StatementKind},
+    };
+    let f = Fixture::new(vec![response(weekly()), response(monthly())]);
+    let text = "报价由 100 调整到 120，仍待审批。";
+    let mut selection = Selection::default();
+    selection.summary.selected_chars = text.chars().count();
+    selection.materials.push(Material {
+        source: ReportSource::user(text, now()),
+        text: text.into(),
+        evidence: vec![],
+        priority: 0,
+    });
+    let context = RunContext::new(
+        "a".repeat(32),
+        now(),
+        NaiveDate::from_ymd_opt(2026, 10, 11).unwrap(),
+        String::new(),
+    )
+    .unwrap();
+    let mut report = PersonalReport::from_selection(&context, "work", &selection);
+    report.items = vec![
+        PersonalItem {
+            title: "报价调整".into(),
+            text: text.into(),
+            kind: ItemKind::Attention,
+            statement_kind: StatementKind::UserStatement,
+            source_ids: vec!["user_input".into()],
+        },
+        PersonalItem {
+            title: "跟进建议".into(),
+            text: "建议确认责任人。".into(),
+            kind: ItemKind::NextStep,
+            statement_kind: StatementKind::Suggestion,
+            source_ids: vec!["user_input".into()],
+        },
+    ];
+    report.validate().unwrap();
+    f.app.store.connection().unwrap().execute("UPDATE daily_reports SET raw_json=?,schema_version=5,report_kind='personal_daily' WHERE date='2026-10-11'",
+        [serde_json::to_string(&report).unwrap()]).unwrap();
+    run_report(f.request('b', false, false), &f.app).unwrap();
+    run_report(f.request('c', true, false), &f.app).unwrap();
+    for request in f.network.requests.lock().unwrap().iter() {
+        let text = request["messages"][1]["content"].as_str().unwrap();
+        assert!(
+            text.contains("仍待审批")
+                && text.contains("user_statement")
+                && text.contains("suggestion"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn period_preview_does_not_update_formal_table() {
     let f = Fixture::new(vec![response(monthly())]);
     let report = run_report(f.request('a', true, false), &f.app).unwrap();

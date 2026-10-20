@@ -9,7 +9,9 @@ use std::time::UNIX_EPOCH;
 use walkdir::WalkDir;
 
 mod access;
+mod bounded;
 use access::EntryAccess;
+pub use bounded::{discover_files_bounded, discover_files_bounded_from, DiscoveryCursor};
 
 /// Metadata-only recheck before opening an admitted source's data stream.
 pub fn local_candidate_is_readable(path: &Path, root: &Path) -> bool {
@@ -73,6 +75,7 @@ pub enum DiscoveryIssueKind {
     CloudUnavailable,
     UnknownReparse,
     OutsideRoot,
+    Budget,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
