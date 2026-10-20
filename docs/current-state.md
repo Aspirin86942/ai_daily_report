@@ -1,17 +1,21 @@
 # 当前运行与验收状态
 
-运行核验：2026-10-19 晚间（Asia/Shanghai；数据审计 23:10:48）。四个正式任务已于 23:05:54 切换为 `rust-20261019-reliability-01`，启用状态及 XML 均回读匹配。153 项积压于 23:06:31–23:06:45 独立补处理完成：118 项 complete、35 项保留 partial，新增失败 0，解析队列和待准备变化均为 0；未扫描源目录、未新增版本、模型调用 0。23:08 人工经调度器启动采集和补解析任务，窗口外均 skipped、退出 0；23:09:44 人工经调度器启动健康任务，退出 0，UTF-8 健康文件为 healthy。模型账本仍为 1,064；16、17、18 日正式报告、归档报告证据、153 份原件、原采集账本、96 条历史缺口及原 8 条解析失败均核对保持。既有报告质量仍为 partial。明早 10 月 20 日的真实日历触发尚未发生，不以本次人工调度和隔离测试代替；原验收 automation 继续暂停。
+运行核验：2026-10-20 15:05（Asia/Shanghai）。四个正式任务与两份配置已切换为 `rust-20261020-storage-08`，任务 XML 回读确认全部指向新包、不再引用旧包。切换前保存了四个任务 XML 和两份配置；旧包 `rust-20261019-reliability-01`、`rust-20261018-release-03`、`rust-20261017-archive-02` 及全部报告、数据库、日志均未改动。切换后 `doctor --strict` 退出 0，两个 Worker 握手通过，`archive drain` 返回 `parse_jobs 0`，归档库仍为 2,769 条提取、8 条原失败，未触发重新解析。
+
+2026-10-19 晚间四个正式任务切换为 `rust-20261019-reliability-01`，XML 均回读匹配。153 项积压于 23:06:31–23:06:45 独立补处理完成：118 项 complete、35 项保留 partial，新增失败 0，解析队列和待准备变化均为 0；未扫描源目录、未新增版本、模型调用 0。23:08 人工经调度器启动采集和补解析任务，窗口外均 skipped、退出 0；23:09:44 人工经调度器启动健康任务，退出 0，UTF-8 健康文件为 healthy。模型账本仍为 1,064；16、17、18 日正式报告、归档报告证据、153 份原件、原采集账本、96 条历史缺口及原 8 条解析失败均核对保持。既有报告质量仍为 partial。
 
 ## 正式任务
 
 | 任务 | 程序包 | 配置目录 | 触发 | 回读状态 |
 | --- | --- | --- | --- | --- |
-| AI Daily Report | .releases/rust-20261019-reliability-01 | config-rust | 每日 09:00（兜底 09:30、10:30）+ 登录后 1 分钟 | Ready、退出 0；最近真实发布仍为 10:30；下一次 10 月 20 日 09:00 |
-| AI Daily Report Collect | .releases/rust-20261019-reliability-01 | config-rust/archive-collector | 周一至五 09、11、13、15、17、18 点；登录和延后执行也受窗口限制 | Ready；23:08 人工调度验证窗口外 skipped、退出 0；最近真实采集仍为 18:00；下一次 10 月 20 日 09:00 |
-| AI Daily Report Parse | .releases/rust-20261019-reliability-01 | config-rust/archive-collector | 周一至五 09:05、09:35，之后每半小时至 17:35，末次 18:00；登录和延后启动受同一窗口限制 | Ready；23:08 人工调度验证窗口外 skipped、退出 0；下一次 10 月 20 日 09:05 |
-| AI Daily Report Health | .releases/rust-20261019-reliability-01 | config-rust | 每日 11:00、23:00 | Ready；23:09:44 人工调度退出 0、健康文件 healthy；下一次 10 月 20 日 11:00 |
+| AI Daily Report | .releases/rust-20261020-storage-08 | config-rust | 每日 09:00（兜底 09:30、10:30）+ 登录后 1 分钟 | Ready、最近一次退出 1（10 月 20 日 09:00 原包模型预算故障）；下一次 10 月 21 日 09:00 |
+| AI Daily Report Collect | .releases/rust-20261020-storage-08 | config-rust/archive-collector | 周一至五 09、11、13、15、17、18 点；登录和延后执行也受窗口限制 | Ready、15:00 采集退出 0；下一次 10 月 20 日 17:00 |
+| AI Daily Report Parse | .releases/rust-20261020-storage-08 | config-rust/archive-collector | 周一至五 09:05、09:35，之后每半小时至 17:35，末次 18:00；登录和延后启动受同一窗口限制 | Ready、15:05 解析退出 0（切换前由原包执行）；下一次 10 月 20 日 15:35 |
+| AI Daily Report Health | .releases/rust-20261020-storage-08 | config-rust | 每日 11:00、23:00 | Ready；下一次 10 月 20 日 23:00 |
 
-日报任务执行 `ai-daily-report.exe daily --scheduled`，`archive.daily_source` 为 archive，模型为 `deepseek-v4-flash`；三个日历触发器加登录兜底保持。采集任务执行 `collect --scheduled`，`allow_work_dir_for_model` 保持 false，窗口外在资源预算、归档锁和任何采集写入前返回 `skipped` 并记录原因；显式人工采集仍可运行。补解析任务执行 `archive drain --scheduled --max-seconds 120`，仅处理已归档原件与待准备变化，不扫描源目录、不调用模型，也不补齐采集覆盖。晨间新归档日报先准备目标日期材料；09:30 前仍有待办则暂缓且不调用模型，截止后保留明确缺口出报，既有冻结输入和正式发布保持。健康任务执行[健康通知脚本](../.releases/rust-20261019-reliability-01/scripts/health_notify.ps1)，由 Rust 原子写入 UTF-8 文件后读取，分别保留健康结论、程序失败和通知失败。完整程序路径和参数见[最终任务回读](../.artifacts/reliability-closure-20261019/tasks-final.json)。
+四个任务与两份配置已于 2026-10-20 15:05 切换到 `rust-20261020-storage-08`，Worker 路径同时指向该包的 Office 与 PDF 解析程序。切换证据、验证结果与回退方式见[本轮结果文档](plans/2026-10-20-architecture-storage-simplification-results.md)。原包 `rust-20261019-reliability-01` 保留，回退只需恢复切换前保存的任务 XML 与两份 Worker 路径。
+
+日报任务执行 `ai-daily-report.exe daily --scheduled`，`archive.daily_source` 为 archive，模型为 `deepseek-v4-flash`；三个日历触发器加登录兜底保持。采集任务执行 `collect --scheduled`，`allow_work_dir_for_model` 保持 false，窗口外在资源预算、归档锁和任何采集写入前返回 `skipped` 并记录原因；显式人工采集仍可运行。补解析任务执行 `archive drain --scheduled --max-seconds 120`，仅处理已归档原件与待准备变化，不扫描源目录、不调用模型，也不补齐采集覆盖。晨间新归档日报先准备目标日期材料；09:30 前仍有待办则暂缓且不调用模型，截止后保留明确缺口出报，既有冻结输入和正式发布保持。健康任务执行[健康通知脚本](../.releases/rust-20261020-storage-08/scripts/health_notify.ps1)，由 Rust 原子写入 UTF-8 文件后读取，分别保留健康结论、程序失败和通知失败。完整程序路径和参数见[切换执行记录](../.artifacts/architecture-storage-20261020/cutover-execution.json)。
 
 正式归档日报于 2026-10-17 10:50 按用户立即切换授权启用；2026-10-18 03:40 左右按本轮部署授权将日报与健康任务切换到 `rust-20261018-release-01`（包含定时链路可靠性、日报可读性、历史检索与工程清理）。部署门禁、`doctor --strict`、`doctor --check-model`（1 次合成请求）均通过，任务注册后回读一致；旧包与切换前任务 XML 保留。首份真实定时 v4 日报现已通过以下独立验收。
 
