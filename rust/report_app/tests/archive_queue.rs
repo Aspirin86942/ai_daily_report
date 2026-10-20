@@ -190,7 +190,10 @@ fn scheduled_preparation_refreshes_the_freeze_time_after_new_parses() {
     };
     use clap::Parser;
     let (_dir, config) = setup();
-    let observed = Utc::now() - chrono::Duration::days(1);
+    let now = Utc::now();
+    let target = types::target_date(now, None, true, config.schedule.due_time().unwrap()).unwrap();
+    // Before the scheduled report time the due report covers two calendar days ago.
+    let observed = types::utc_window(target).unwrap().0 + chrono::Duration::hours(12);
     let source = config.paths.work_dir.join("progress.txt");
     fs::write(&source, "原有审批条件。\n").unwrap();
     capture_without_parsing(&config, true, observed - chrono::Duration::days(1));
@@ -200,7 +203,7 @@ fn scheduled_preparation_refreshes_the_freeze_time_after_new_parses() {
     let mut request = Cli::parse_from(["app", "daily", "--scheduled", "--source", "archive"])
         .command
         .unwrap()
-        .report_request(&app.config, Utc::now(), types::new_run_id(), String::new())
+        .report_request(&app.config, now, types::new_run_id(), String::new())
         .unwrap();
     let initial = request.context.started_at;
     let prepared = run::prepare_scheduled_archive(&app, &mut request)

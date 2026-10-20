@@ -13,6 +13,13 @@ fn main() {
 
 fn dispatch() -> i32 {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args == ["parser-build"] {
+        return emit(&serde_json::json!({
+            "parser_content_identity": env!("AI_DAILY_PARSER_BUILD"),
+            "engine_build": env!("AI_DAILY_ENGINE_BUILD"),
+            "inputs": serde_json::from_str::<serde_json::Value>(include_str!(concat!(env!("OUT_DIR"), "/parser-build.json"))).expect("compiled parser inputs")
+        })).map_or(1, |()| 0);
+    }
     if args == ["hello"] {
         return emit(&worker_hello()).map_or(1, |()| 0);
     }
@@ -46,20 +53,18 @@ fn worker_session() -> i32 {
             .ok()
             .filter(|r| r.validate().is_ok());
             let response = match result {
-                Some(value) => {
-                    match ai_daily_scanner_core::parsers::light_text::parse_archive_text(&value) {
-                        Ok(artifact) => WorkerResponse {
-                            contract: CONTRACT.into(),
-                            protocol_version: PROTOCOL_VERSION,
-                            request_id: request.request_id.clone(),
-                            operation: request.operation,
-                            status: WorkerResponseStatus::Ok,
-                            result: Some(serde_json::to_value(artifact).unwrap()),
-                            error: None,
-                        },
-                        Err(code) => session_error(&request, code, false),
-                    }
-                }
+                Some(value) => match ai_daily_text_parser::parse_archive_text(&value) {
+                    Ok(artifact) => WorkerResponse {
+                        contract: CONTRACT.into(),
+                        protocol_version: PROTOCOL_VERSION,
+                        request_id: request.request_id.clone(),
+                        operation: request.operation,
+                        status: WorkerResponseStatus::Ok,
+                        result: Some(serde_json::to_value(artifact).unwrap()),
+                        error: None,
+                    },
+                    Err(code) => session_error(&request, code, false),
+                },
                 None => session_error(&request, "INVALID_REQUEST", false),
             };
             if emit(&response).is_err() {

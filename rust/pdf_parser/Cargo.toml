@@ -2,7 +2,6 @@
 name = "ai-daily-pdf-parser"
 version.workspace = true
 edition.workspace = true
-build = "../scanner_core/build.rs"
 
 [dependencies]
 pdfium-render.workspace = true
@@ -14,7 +13,7 @@ ai-daily-discovery = { path = "../discovery" }
 ai-daily-worker-contract = { path = "../worker_contract" }
 
 [build-dependencies]
-sha2.workspace = true
+ai-daily-build-identity = { path = "../build_identity" }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -78,6 +78,21 @@ $dependencies = foreach ($package in $metadata.packages | Sort-Object name, vers
     [ordered]@{ name = $package.name; version = $package.version; license = $package.license; source = $package.source; notices = $licensePaths }
 }
 Write-ReleaseJson -Path (Join-Path $outputPath 'licenses/dependencies.json') -Value @($dependencies)
+$officeBuild = & (Join-Path $outputPath 'ai-daily-office-parser.exe') parser-build | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0) { throw 'Office parser build inputs unavailable' }
+$pdfBuild = & (Join-Path $outputPath 'ai-daily-pdf-parser.exe') parser-build | ConvertFrom-Json
+if ($LASTEXITCODE -ne 0 -or $officeBuild.parser_content_identity -cne $pdfBuild.parser_content_identity -or $officeBuild.engine_build -cne $pdfBuild.engine_build) { throw 'Mixed parser content identities' }
+Write-ReleaseJson -Path (Join-Path $outputPath 'parser-build.json') -Value $officeBuild
+$parserFiles = [ordered]@{}
+foreach ($name in @('ai-daily-office-parser.exe', 'ai-daily-pdf-parser.exe', 'pdfium.dll')) {
+    $parserFiles[$name] = (Get-FileHash -LiteralPath (Join-Path $outputPath $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+}
+Write-ReleaseJson -Path (Join-Path $outputPath 'parser-manifest.json') -Value ([ordered]@{
+    schema = 'ai_daily_parser_manifest_v1'
+    parser_content_identity = $officeBuild.parser_content_identity
+    engine_build = $officeBuild.engine_build
+    files = $parserFiles
+})
 $files = foreach ($file in Get-ChildItem -LiteralPath $outputPath -Recurse -File | Sort-Object FullName) {
     [ordered]@{ path = $file.FullName.Substring($outputPath.Length + 1).Replace('\','/'); size = $file.Length; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
 }

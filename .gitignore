@@ -73,5 +73,6 @@ scripts/corpus/
 .artifacts/rust-migration/
 .artifacts/windows-operations*/
 .artifacts/reliability-closure*/
+.artifacts/architecture-storage-*/
 .releases/
 config-rust/

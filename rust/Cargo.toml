@@ -1,9 +1,11 @@
 [workspace]
 members = [
+    "build_identity",
     "discovery",
     "office_parser",
     "scanner_contract",
     "scanner_core",
+    "text_parser",
     "worker_contract",
     "report_app",
     "pdf_parser",

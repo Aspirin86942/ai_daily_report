@@ -1,0 +1,28 @@
+{
+  "schema": "ai_daily_parser_inputs_v1",
+  "sources": [
+    "build_identity/src",
+    "parser-inputs.json",
+    "build-inputs.json",
+    "report_app/src/archive/parse_request.rs",
+    "text_parser/src",
+    "office_parser/src",
+    "pdf_parser/src",
+    "scanner_contract/src",
+    "worker_contract/src",
+    "discovery/src",
+    "scanner_core/src/parsers",
+    "scanner_core/src/config.rs",
+    "scanner_core/src/source_allocation.rs",
+    "scanner_core/src/source_guard.rs",
+    "scanner_core/src/scheduler_adapter.rs",
+    "scanner_core/src/process.rs",
+    "scanner_core/src/session.rs",
+    "scanner_core/src/windows_job.rs"
+  ],
+  "dependency_roots": [
+    "ai-daily-text-parser",
+    "ai-daily-office-parser",
+    "ai-daily-pdf-parser"
+  ]
+}
