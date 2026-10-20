@@ -102,7 +102,9 @@ impl FactsResponse {
         }
         let mut selected = Vec::new();
         for (pending, facts) in [(false, self.facts), (true, self.pending)] {
-            for fact in facts {
+            for mut fact in facts {
+                let mut seen = BTreeSet::new();
+                fact.source_ids.retain(|id| seen.insert(id.clone()));
                 // Preserve a valid uncertain fact without presenting it as confirmed.
                 let pending = pending || fact.uncertainty.is_some();
                 if !bounded(&fact.topic, 120)
@@ -137,17 +139,84 @@ impl FactsResponse {
 }
 
 impl ComposedReport {
+    fn cited(fact: &SelectedFact, text: String) -> CitedText {
+        CitedText {
+            text,
+            fact_ids: vec![fact.fact_id.clone()],
+            source_ids: fact.fact.source_ids.clone(),
+        }
+    }
+
+    pub fn from_fact(fact: &SelectedFact, schema_version: u32) -> Self {
+        if fact.pending {
+            return Self::pending_from(fact, schema_version);
+        }
+        let mut details = vec![Self::cited(fact, fact.fact.detail.clone())];
+        details.extend(
+            fact.fact
+                .conditions
+                .iter()
+                .map(|condition| Self::cited(fact, format!("条件：{condition}"))),
+        );
+        Self {
+            schema_version,
+            overview: vec![Self::cited(fact, fact.fact.detail.clone())],
+            matters: vec![Matter {
+                matter_id: fact.matter_id.clone(),
+                title: fact.fact.topic.clone(),
+                background: fact
+                    .fact
+                    .background
+                    .as_ref()
+                    .map(|text| Self::cited(fact, text.clone())),
+                details,
+                status: fact
+                    .fact
+                    .status
+                    .as_ref()
+                    .map(|text| Self::cited(fact, text.clone())),
+            }],
+            pending: vec![],
+        }
+    }
+
     /// 成稿容量不足时本地构造的待确认片段：保留原文、事实编号与来源，不丢引用。
     pub fn pending_from(fact: &SelectedFact, schema_version: u32) -> Self {
+        let mut sections = vec![format!("{}：{}", fact.fact.topic, fact.fact.detail)];
+        if let Some(background) = &fact.fact.background {
+            sections.push(format!("背景：{background}"));
+        }
+        sections.extend(
+            fact.fact
+                .conditions
+                .iter()
+                .map(|condition| format!("条件：{condition}")),
+        );
+        if let Some(status) = &fact.fact.status {
+            sections.push(format!("状态：{status}"));
+        }
+        if let Some(uncertainty) = &fact.fact.uncertainty {
+            sections.push(format!("待确认说明：{uncertainty}"));
+        }
+        let mut pending = Vec::new();
+        let mut text = String::new();
+        for section in sections {
+            if !text.is_empty() && text.chars().count() + 1 + section.chars().count() > 6000 {
+                pending.push(Self::cited(fact, std::mem::take(&mut text)));
+            }
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&section);
+        }
+        if !text.is_empty() {
+            pending.push(Self::cited(fact, text));
+        }
         Self {
             schema_version,
             overview: vec![],
             matters: vec![],
-            pending: vec![CitedText {
-                text: format!("{}：{}", fact.fact.topic, fact.fact.detail),
-                fact_ids: vec![fact.fact_id.clone()],
-                source_ids: fact.fact.source_ids.clone(),
-            }],
+            pending,
         }
     }
 

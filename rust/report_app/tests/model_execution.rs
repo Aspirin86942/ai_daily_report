@@ -894,9 +894,14 @@ fn uncertain_facts_still_require_valid_structure_and_source_references() {
                 )
         };
         assert!(select(valid.clone()).unwrap()[0].pending);
+        let mut repeated = valid.clone();
+        repeated["facts"][0]["source_ids"] = json!(["s1", "s1"]);
+        let selected = select(repeated).unwrap();
+        assert!(selected[0].pending);
+        assert_eq!(selected[0].fact.source_ids, vec!["s1"]);
         for (field, value) in [
             ("source_ids", json!(["unknown"])),
-            ("source_ids", json!(["s1", "s1"])),
+            ("source_ids", json!(["s1", "unknown", "s1"])),
             ("source_ids", json!([])),
             ("uncertainty", json!("")),
             ("detail", json!("")),
@@ -907,6 +912,283 @@ fn uncertain_facts_still_require_valid_structure_and_source_references() {
             assert_eq!(select(invalid).unwrap_err().code, "MODEL_RESPONSE_INVALID");
         }
     }
+}
+
+#[test]
+fn composition_output_capacity_keeps_confirmed_facts_and_all_original_fields() {
+    let h = Harness::new();
+    let plan = h.plan(&[source("s1", "The original approval evidence.")]);
+    let mut content = facts("s1");
+    content["facts"][0]["background"] = json!("Background evidence.");
+    content["facts"][0]["conditions"] =
+        json!(["Excludes tax.", "Retrospective approval required."]);
+    content["facts"][0]["status"] = json!("Proposed.");
+    let detail = content["facts"][0]["detail"].as_str().unwrap().to_owned();
+    let network = Script::new(vec![Ok(response(content)), Ok(truncated())]);
+    let generated = h.runner(&network).generate(&plan).unwrap();
+    assert_eq!(
+        generated.local_composition_facts,
+        BTreeMap::from([(
+            "batch_000:000".into(),
+            "MODEL_CONTENT_UNIT_TOO_LARGE".into()
+        )])
+    );
+    assert!(!generated.facts[0].pending);
+    let report = generated.report.unwrap();
+    report.validate(&generated.facts).unwrap();
+    let matter = &report.matters[0];
+    assert_eq!(
+        matter.background.as_ref().unwrap().text,
+        "Background evidence."
+    );
+    assert_eq!(matter.status.as_ref().unwrap().text, "Proposed.");
+    assert_eq!(matter.details[0].text, detail);
+    assert_eq!(matter.details[1].text, "条件：Excludes tax.");
+    assert_eq!(
+        matter.details[2].text,
+        "条件：Retrospective approval required."
+    );
+    assert!(matter
+        .details
+        .iter()
+        .all(|item| item.fact_ids == ["batch_000:000"] && item.source_ids == ["s1"]));
+    assert!(report.pending.is_empty());
+    assert_eq!(network.count(), 2);
+    assert_eq!(h.calls()[1]["error_code"], "MODEL_OUTPUT_TRUNCATED");
+}
+
+#[test]
+fn invalid_composition_uses_verified_facts_without_accepting_unknown_citations() {
+    let mut h = Harness::new();
+    h.config.llm.invalid_response_retries = 0;
+    let plan = h.plan(&[source("s1", "The original approval evidence.")]);
+    let mut invalid = composed();
+    invalid["pending"] = json!([{
+        "text": "Untrusted claim.",
+        "fact_ids": ["unknown"],
+        "source_ids": ["s1"]
+    }]);
+    let network = Script::new(vec![Ok(response(facts("s1"))), Ok(response(invalid))]);
+    let generated = h.runner(&network).generate(&plan).unwrap();
+    assert_eq!(
+        generated.local_composition_facts,
+        BTreeMap::from([("batch_000:000".into(), "MODEL_RESPONSE_INVALID".into())])
+    );
+    assert!(!generated.facts[0].pending);
+    let report = generated.report.unwrap();
+    report.validate(&generated.facts).unwrap();
+    assert_eq!(
+        report.matters[0].details[0].text,
+        generated.facts[0].fact.detail
+    );
+    assert!(!serde_json::to_string(&report)
+        .unwrap()
+        .contains("Untrusted claim."));
+    assert_eq!(h.calls()[1]["error_code"], "MODEL_RESPONSE_INVALID");
+    assert_eq!(network.count(), 2);
+}
+
+#[test]
+fn composition_failure_stops_new_requests_but_reuses_later_saved_groups() {
+    let mut h = Harness::new();
+    h.config.llm.max_tokens = 2048;
+    h.config.llm.invalid_response_retries = 0;
+    let plan = h.plan(&[source("s1", "The original approval evidence.")]);
+    let content = json!({
+        "schema_version": 3,
+        "facts": (0..8).map(|index| {
+            let mut value = fact("s1");
+            value["topic"] = json!(format!("Topic {index}"));
+            value["detail"] = json!(format!("{index} {}", "detail ".repeat(300)));
+            value
+        }).collect::<Vec<_>>(),
+        "pending": []
+    });
+    let selected = serde_json::from_value::<FactsResponse>(content.clone())
+        .unwrap()
+        .select(
+            "batch_000",
+            &BTreeSet::from(["s1".into()]),
+            &BTreeSet::new(),
+            100_000,
+        )
+        .unwrap();
+    let groups = plan
+        .compose_groups(&h.config.llm, selected.clone())
+        .unwrap();
+    assert_eq!(groups.len(), 8);
+    let ComposeGroup::Step(saved_step) = &groups[7] else {
+        panic!("expected composition step");
+    };
+    let mut saved = ComposedReport::from_fact(&selected[7], 3);
+    saved.matters[0].details[0].text = "Saved verified phrasing.".into();
+    let network = Script::new(vec![
+        Ok(response(content)),
+        Ok(response(serde_json::to_value(saved).unwrap())),
+        Ok(invalid_body()),
+        Ok(invalid_body()),
+        Ok(invalid_body()),
+        Ok(invalid_body()),
+    ]);
+    h.runner(&network).execute(&plan.batches[0]).unwrap();
+    h.runner(&network).execute_complete(saved_step).unwrap();
+    let generated = h.runner(&network).generate_with_workers(&plan, 4).unwrap();
+    assert_eq!(network.count(), 6);
+    assert_eq!(generated.facts.len(), 8);
+    assert_eq!(generated.local_composition_facts.len(), 7);
+    assert_eq!(
+        generated
+            .local_composition_facts
+            .values()
+            .filter(|reason| reason.as_str() == "MODEL_COMPOSITION_LOCAL_REMAINDER")
+            .count(),
+        3
+    );
+    assert!(generated
+        .steps
+        .iter()
+        .any(|step| step.reused && step.effective.logical_step == saved_step.logical_step));
+    let report = generated.report.unwrap();
+    report.validate(&generated.facts).unwrap();
+    assert!(serde_json::to_string(&report)
+        .unwrap()
+        .contains("Saved verified phrasing."));
+}
+
+#[test]
+fn pending_fact_rendering_preserves_long_conditions_and_context() {
+    let selected: SelectedFact = serde_json::from_value(json!({
+        "fact_id":"f1", "pending":true, "matter_id":"m1", "fact":{
+            "topic":"Pending condition", "detail":"d".repeat(3900),
+            "background":"b".repeat(1900),
+            "conditions":(0..20).map(|i|format!("condition {i}: {}", "c".repeat(850))).collect::<Vec<_>>(),
+            "status":"Awaiting approval", "source_ids":["s1"],
+            "uncertainty":"The effective date is not confirmed."
+        }
+    }))
+    .unwrap();
+    let report = ComposedReport::pending_from(&selected, 4);
+    report
+        .validate_part(std::slice::from_ref(&selected))
+        .unwrap();
+    assert!(report.pending.len() > 1);
+    assert!(report
+        .pending
+        .iter()
+        .all(|item| item.text.chars().count() <= 6000));
+    let text = report
+        .pending
+        .iter()
+        .map(|item| item.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for original in std::iter::once(&selected.fact.detail)
+        .chain(selected.fact.background.iter())
+        .chain(&selected.fact.conditions)
+        .chain(selected.fact.status.iter())
+        .chain(selected.fact.uncertainty.iter())
+    {
+        assert!(text.contains(original));
+    }
+}
+
+#[test]
+fn short_source_aliases_restore_exact_ids_and_reject_unknown_aliases() {
+    for (returned, accepted) in [("s1", true), ("s99", false)] {
+        let mut h = Harness::new();
+        h.config.llm.max_retries = 1;
+        h.config.llm.invalid_response_retries = 0;
+        let real = format!("src_{}", "a".repeat(64));
+        let mut plan = h.plan(&[source(&real, "A verified approval condition.")]);
+        let old = plan.batches[0].clone();
+        let step = &mut plan.batches[0];
+        step.enable_source_aliases(&h.config.llm).unwrap();
+        old.validate(&h.config.llm).unwrap();
+        assert_ne!(old.bytes().unwrap(), step.bytes().unwrap());
+        let wire: Value =
+            serde_json::from_str(step.request["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(wire["sources"][0]["source_id"], "s1");
+        assert!(wire["target"].get("fact_source_aliases").is_none());
+        assert_eq!(step.target["fact_source_aliases"]["s1"], real);
+        let network = Script::new(vec![Ok(response(facts(returned)))]);
+        let result = h.runner(&network).execute(step);
+        if accepted {
+            let StepOutput::Facts(selected) = result.unwrap().output else {
+                panic!("expected facts");
+            };
+            assert_eq!(selected[0].fact.source_ids, vec![real]);
+        } else {
+            assert_eq!(result.unwrap_err().code, "MODEL_RESPONSE_INVALID");
+        }
+        assert_eq!(network.count(), 1);
+    }
+}
+
+#[test]
+fn source_aliases_remain_frozen_and_complete_after_splitting() {
+    let h = Harness::new();
+    let original = [
+        source("first_long_source", "First complete paragraph."),
+        source("second_long_source", "Second complete paragraph."),
+    ];
+    let mut plan = h.plan(&original);
+    let step = &mut plan.batches[0];
+    step.enable_source_aliases(&h.config.llm).unwrap();
+    let parent = step.identity().unwrap();
+    let children = step.split(&h.config.llm).unwrap();
+    let mut texts = BTreeMap::new();
+    for child in children {
+        child.validate(&h.config.llm).unwrap();
+        assert_eq!(child.parent_sha256.as_deref(), Some(parent.as_str()));
+        let aliases = child.target["fact_source_aliases"].as_object().unwrap();
+        assert_eq!(aliases.len(), child.source_ids().len());
+        for (alias, id) in aliases {
+            assert_eq!(&step.target["fact_source_aliases"][alias], id);
+        }
+        for entry in child.entries {
+            assert!(texts.insert(entry.source_id, entry.text).is_none());
+        }
+    }
+    assert_eq!(
+        texts,
+        original
+            .into_iter()
+            .map(|source| (source.source_id, source.text))
+            .collect()
+    );
+    let mut tampered = step.clone();
+    tampered.target["fact_source_aliases"]["s1"] = json!("unknown");
+    assert_eq!(
+        tampered.validate(&h.config.llm).unwrap_err().code,
+        "MODEL_PLAN_IDENTITY_MISMATCH"
+    );
+}
+
+#[test]
+fn duplicate_source_references_keep_the_original_response_and_need_no_retry() {
+    let h = Harness::new();
+    let plan = h.plan(&[source("s1", "A verified approval condition.")]);
+    let mut content = facts("s1");
+    content["facts"][0]["source_ids"] = json!(["s1", "s1"]);
+    let raw = response(content);
+    let expected = raw.body.clone();
+    let network = Script::new(vec![Ok(raw)]);
+    let first = h.runner(&network).execute(&plan.batches[0]).unwrap();
+    let StepOutput::Facts(selected) = first.output else {
+        panic!("expected facts");
+    };
+    assert_eq!(selected[0].fact.source_ids, vec!["s1"]);
+    assert_eq!(network.count(), 1);
+    let calls = h.calls();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["status"], "succeeded");
+    let reference = SnapshotRef {
+        path: calls[0]["response_path"].as_str().unwrap().into(),
+        sha256: calls[0]["response_sha256"].as_str().unwrap().into(),
+    };
+    assert_eq!(h.snapshots.read_bytes(&reference).unwrap(), expected);
+    assert!(h.runner(&network).execute(&plan.batches[0]).unwrap().reused);
+    assert_eq!(network.count(), 1);
 }
 
 #[test]
@@ -1141,6 +1423,86 @@ fn model_shrink_and_compose_capacity_never_discard_selected_facts() {
         "MODEL_COMPOSE_CAPACITY_INSUFFICIENT"
     );
     assert_eq!(network.count(), 1);
+}
+
+#[test]
+fn fact_batch_estimate_is_independent_of_unicode_width() {
+    let mut h = Harness::new();
+    h.config.llm.context_window_tokens = Some(1000000);
+    h.config.llm.verified_max_output_tokens = Some(32768);
+    h.config.llm.max_request_utf8_bytes = 160000;
+    h.config.llm.max_sources_per_batch = 64;
+    h.config.llm.max_batches = 1;
+    for character in ["x", "\u{5b57}", "\u{1f600}"] {
+        let text = character.repeat(1024);
+        let sources: Vec<_> = (0..32)
+            .map(|i| source(&format!("s{i:02}"), &text))
+            .collect();
+        let plan = plan::prepare(&h.config.llm, json!({}), &sources, json!({})).unwrap();
+        assert_eq!(plan.batches.len(), 1);
+        let batch = &plan.batches[0];
+        assert_eq!(batch.source_ids().len(), sources.len());
+        assert!(batch.entries.iter().all(|entry| entry.text == text));
+        assert_eq!(
+            batch
+                .entries
+                .iter()
+                .map(|entry| entry.text.chars().count())
+                .sum::<usize>(),
+            32768
+        );
+        batch.validate(&h.config.llm).unwrap();
+    }
+    assert!(h.calls().is_empty());
+}
+
+#[test]
+fn unicode_fact_batches_still_obey_request_byte_and_source_limits() {
+    let mut h = Harness::new();
+    h.config.llm.verified_max_output_tokens = Some(32768);
+    h.config.llm.max_request_utf8_bytes = 24000;
+    h.config.llm.max_sources_per_batch = 4;
+    let text = "\u{1f600}".repeat(1024);
+    let sources: Vec<_> = (0..16)
+        .map(|i| source(&format!("s{i:02}"), &text))
+        .collect();
+    let plan = plan::prepare(&h.config.llm, json!({}), &sources, json!({})).unwrap();
+    assert!(plan.batches.len() > 1);
+    let mut seen = BTreeSet::new();
+    for batch in &plan.batches {
+        assert!(batch.bytes().unwrap().len() <= h.config.llm.max_request_utf8_bytes);
+        assert!(batch.source_ids().len() <= h.config.llm.max_sources_per_batch);
+        for entry in &batch.entries {
+            assert_eq!(entry.text, text);
+            assert!(seen.insert(entry.source_id.clone()));
+        }
+        batch.validate(&h.config.llm).unwrap();
+    }
+    assert_eq!(seen.len(), sources.len());
+    assert!(h.calls().is_empty());
+}
+
+#[test]
+fn fact_batch_character_estimate_retains_output_headroom() {
+    let mut h = Harness::new();
+    h.config.llm.facts_max_tokens = 1024;
+    h.config.llm.max_batches = 1;
+    let text = "\u{5b57}".repeat(1024);
+    let sources = [
+        source("s1", &text),
+        source("s2", &text),
+        source("s3", &text),
+    ];
+    assert_eq!(
+        plan::prepare(&h.config.llm, json!({}), &sources, json!({}))
+            .unwrap_err()
+            .code,
+        "MODEL_BATCH_BUDGET_EXHAUSTED"
+    );
+    h.config.llm.max_batches = 2;
+    let plan = plan::prepare(&h.config.llm, json!({}), &sources, json!({})).unwrap();
+    assert_eq!(plan.batches.len(), 2);
+    assert!(h.calls().is_empty());
 }
 
 #[test]

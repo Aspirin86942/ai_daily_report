@@ -43,8 +43,10 @@ pub struct GeneratedContent {
     pub facts: Vec<SelectedFact>,
     pub report: Option<ComposedReport>,
     pub steps: Vec<StepResult>,
+    pub local_composition_facts: BTreeMap<String, String>,
 }
 
+#[derive(Clone)]
 pub struct ModelRunner<'a> {
     pub store: &'a Store,
     pub snapshots: &'a SnapshotStore,
@@ -96,8 +98,16 @@ fn validate_response(step: &PlannedStep, body: &[u8]) -> Result<StepOutput, Repo
             )?))
         }
         StepKind::Facts => {
-            let response: FactsResponse =
+            let mut response: FactsResponse =
                 serde_json::from_value(content).map_err(|_| contracts::invalid())?;
+            let aliases = step.source_aliases()?;
+            for fact in response.facts.iter_mut().chain(&mut response.pending) {
+                for source in &mut fact.source_ids {
+                    if let Some(original) = aliases.get(source) {
+                        *source = original.clone();
+                    }
+                }
+            }
             let unverified: BTreeSet<_> = step
                 .entries
                 .iter()
@@ -144,6 +154,8 @@ fn bind_composition(
         .map(|fact| (fact.fact_id.clone(), fact))
         .collect();
     let bind = |item: &mut contracts::CitedText| -> Result<(), ReportError> {
+        let mut seen = BTreeSet::new();
+        item.fact_ids.retain(|id| seen.insert(id.clone()));
         if item.fact_ids.is_empty() || item.fact_ids.iter().any(|id| !by_id.contains_key(id)) {
             return Err(contracts::invalid());
         }
@@ -653,11 +665,13 @@ impl ModelRunner<'_> {
                 facts,
                 report: None,
                 steps,
+                local_composition_facts: BTreeMap::new(),
             });
         }
         let composition_started = Instant::now();
         let mut parts = Vec::new();
         let mut degraded = BTreeSet::new();
+        let mut local_composition_facts = BTreeMap::new();
         let schema_version = if plan.batches.first().map(|batch| batch.version) == Some(5) {
             4
         } else {
@@ -674,6 +688,8 @@ impl ModelRunner<'_> {
         } else {
             plan.compose_groups(self.llm, confirmed)?
         };
+        let mut composition_runner = self.clone();
+        let mut local_composition_only = false;
         for groups in groups.chunks(usize::from(workers)) {
             let requests: Vec<_> = groups
                 .iter()
@@ -682,17 +698,43 @@ impl ModelRunner<'_> {
                     ComposeGroup::Degraded(_) => None,
                 })
                 .collect();
-            let mut results = self.execute_parallel(&requests).into_iter();
+            let mut results = composition_runner.execute_parallel(&requests).into_iter();
             for group in groups {
                 match group {
-                    ComposeGroup::Step(_) => {
-                        for result in results.next().unwrap()? {
-                            if let StepOutput::Compose(report) = &result.output {
-                                parts.push(report.clone());
+                    ComposeGroup::Step(step) => match results.next().unwrap() {
+                        Ok(results) => {
+                            for result in results {
+                                if let StepOutput::Compose(report) = &result.output {
+                                    parts.push(report.clone());
+                                }
+                                steps.push(result);
                             }
-                            steps.push(result);
                         }
-                    }
+                        Err(error)
+                            if matches!(
+                                error.code,
+                                "MODEL_CONTENT_UNIT_TOO_LARGE" | "MODEL_RESPONSE_INVALID"
+                            ) || local_composition_only
+                                && error.code == "RECOVERY_CONFIG_CHANGED" =>
+                        {
+                            // Discard invalid composition; the validated facts remain authoritative.
+                            // Later groups may reuse saved responses, but issue no further requests.
+                            local_composition_only = true;
+                            composition_runner.allow_new_calls = false;
+                            let reason = if error.code == "RECOVERY_CONFIG_CHANGED" {
+                                "MODEL_COMPOSITION_LOCAL_REMAINDER"
+                            } else {
+                                error.code
+                            };
+                            for fact in &step.facts {
+                                let report = ComposedReport::from_fact(fact, schema_version);
+                                report.validate_part(std::slice::from_ref(fact))?;
+                                parts.push(report);
+                                local_composition_facts.insert(fact.fact_id.clone(), reason.into());
+                            }
+                        }
+                        Err(error) => return Err(error),
+                    },
                     ComposeGroup::Degraded(fact) => {
                         degraded.insert(fact.fact_id.clone());
                         parts.push(ComposedReport::pending_from(fact, schema_version));
@@ -716,6 +758,7 @@ impl ModelRunner<'_> {
             facts,
             report,
             steps,
+            local_composition_facts,
         })
     }
 
@@ -911,6 +954,12 @@ mod tests {
         assert_eq!(report.matters[0].matter_id.as_deref(), Some("m1"));
         assert_eq!(report.overview[0].source_ids, vec!["s1"]);
         assert_eq!(report.matters[0].details[0].text, "verified detail");
+        report.validate_part(std::slice::from_ref(&fact)).unwrap();
+        report.overview[0].fact_ids.push("f1".into());
+        report.matters[0].details[0].fact_ids.push("f1".into());
+        bind_composition(&mut report, std::slice::from_ref(&fact)).unwrap();
+        assert_eq!(report.overview[0].fact_ids, vec!["f1"]);
+        assert_eq!(report.matters[0].details[0].fact_ids, vec!["f1"]);
         report.validate_part(std::slice::from_ref(&fact)).unwrap();
         let mut second = fact.clone();
         second.fact_id = "f2".into();

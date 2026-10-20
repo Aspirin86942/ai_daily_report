@@ -1,5 +1,8 @@
 use ai_daily_pdf_parser::{PdfError, PdfReader};
-use std::path::PathBuf;
+use std::{
+    path::PathBuf,
+    sync::{Mutex, MutexGuard, OnceLock},
+};
 
 fn source(path: &std::path::Path) -> String {
     let meta = std::fs::metadata(path).unwrap();
@@ -83,12 +86,22 @@ fn native_parse_preserves_page_ranges_and_character_limits() {
     );
 }
 
-fn reader() -> PdfReader {
-    let path = std::env::var_os("AI_DAILY_TEST_PDFIUM_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/pdfium/bin"));
-    PdfReader::open(&path)
-        .expect("prepare pinned PDFium using scripts/prepare_rust_dependencies.ps1")
+fn reader() -> MutexGuard<'static, PdfReader> {
+    static READER: OnceLock<Mutex<PdfReader>> = OnceLock::new();
+    READER
+        .get_or_init(|| {
+            let path = std::env::var_os("AI_DAILY_TEST_PDFIUM_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/pdfium/bin")
+                });
+            Mutex::new(
+                PdfReader::open(&path)
+                    .expect("prepare pinned PDFium using scripts/prepare_rust_dependencies.ps1"),
+            )
+        })
+        .lock()
+        .unwrap()
 }
 
 fn corpus(name: &str) -> PathBuf {

@@ -74,5 +74,6 @@ scripts/corpus/
 .artifacts/windows-operations*/
 .artifacts/reliability-closure*/
 .artifacts/architecture-storage-*/
+.artifacts/daily-capacity-*/
 .releases/
 config-rust/

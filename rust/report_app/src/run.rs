@@ -480,6 +480,18 @@ fn finish(
         deadline,
     };
     let generated = runner.generate_with_workers(&payload.plan, app.model_workers)?;
+    if !generated.local_composition_facts.is_empty() {
+        app.snapshots.put(
+            run_id,
+            "local-composition",
+            &serde_json::json!({
+                "version": 2,
+                "fact_ids": generated.local_composition_facts.keys().cloned().collect::<Vec<_>>(),
+                "reasons": generated.local_composition_facts,
+                "preserved": ["background", "detail", "conditions", "status", "citations"]
+            }),
+        )?;
+    }
     if payload.version == 4 {
         for (stage, elapsed) in [
             ("fact_extraction", generated.fact_wall_ms),

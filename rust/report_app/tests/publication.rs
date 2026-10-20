@@ -95,6 +95,64 @@ fn output_written_before_database_pointer_update_is_recoverable() {
 }
 
 #[test]
+fn large_output_publishes_and_recovers_without_ignoring_external_tail_edits() {
+    let f = Fixture::new();
+    let first = "6".repeat(32);
+    let second = "7".repeat(32);
+    let body = format!("# 日报\n{}\n结束。\n", "a".repeat(9 * 1024 * 1024));
+    f.stage(&first, &body);
+    let path = f.publisher().publish(&first, now()).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), body.as_bytes());
+    assert_eq!(f.publisher().publish(&first, now()).unwrap(), path);
+
+    let next = format!("{body}新增证据。\n");
+    f.stage(&second, &next);
+    // Reproduce an interrupted publication after the file was written.
+    fs::write(&path, &next).unwrap();
+    f.publisher().publish(&second, now()).unwrap();
+    assert_eq!(
+        f.store.current("2026-10-11").unwrap().unwrap().run_id,
+        second
+    );
+    assert!(f.store.calls(&second).unwrap().is_empty());
+
+    let external = format!("{body}人工修改。\n");
+    assert_eq!(external.len(), next.len());
+    fs::write(&path, &external).unwrap();
+    assert_eq!(
+        f.publisher().publish(&second, now()).unwrap_err().code,
+        "OUTPUT_CONFLICT"
+    );
+    assert_eq!(fs::read(&path).unwrap(), external.as_bytes());
+    let candidate = f
+        .publisher()
+        .root
+        .join("conflicts")
+        .join(format!("2026-10-11.{second}.md"));
+    assert_eq!(fs::read(candidate).unwrap(), next.as_bytes());
+}
+
+#[test]
+fn replacing_large_output_preserves_the_complete_previous_body() {
+    let f = Fixture::new();
+    let first = "8".repeat(32);
+    let second = "9".repeat(32);
+    let body = format!("# 原报告\n{}\n原始结尾。\n", "a".repeat(9 * 1024 * 1024));
+    f.stage(&first, &body);
+    f.publisher().publish(&first, now()).unwrap();
+    f.stage(&second, "# 更新报告\n");
+    let path = f.publisher().publish(&second, now()).unwrap();
+    assert_eq!(fs::read_to_string(path).unwrap(), "# 更新报告\n");
+    let backups: Vec<_> = fs::read_dir(f.publisher().root.join("conflicts"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with(".replaced.md"))
+        .collect();
+    assert_eq!(backups.len(), 1);
+    assert_eq!(fs::read(&backups[0]).unwrap(), body.as_bytes());
+}
+
+#[test]
 fn external_edits_are_preserved_and_candidate_is_saved_separately() {
     let f = Fixture::new();
     let id = "c".repeat(32);

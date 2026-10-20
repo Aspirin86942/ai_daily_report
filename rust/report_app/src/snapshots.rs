@@ -131,7 +131,7 @@ impl SnapshotStore {
         Ok(Self {
             root: fs::canonicalize(root)?,
             max_bytes,
-            max_file_bytes: max_bytes.min(128 * 1024 * 1024),
+            max_file_bytes: max_bytes.min(512 * 1024 * 1024),
             write_lock: Mutex::new(()),
         })
     }

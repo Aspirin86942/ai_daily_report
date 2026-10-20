@@ -5,6 +5,7 @@ use crate::{
     ReportError,
 };
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
@@ -18,20 +19,24 @@ pub struct Publisher<'a> {
 
 fn output_hash(path: &Path) -> Result<Option<String>, ReportError> {
     reject_redirects(path, "OUTPUT_PATH_REDIRECTED")?;
-    let file = match File::open(path) {
+    let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    let mut bytes = Vec::new();
-    file.take(8 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
-    if bytes.len() > 8 * 1024 * 1024 {
-        return Err(ReportError::new(
-            "OUTPUT_FILE_TOO_LARGE",
-            "既有报告文件超过大小上限",
-        ));
+    // Evidence appendices can exceed 8 MiB. Hash every byte with bounded memory.
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 65536];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
     }
-    Ok(Some(digest(&bytes)))
+    Ok(Some(ai_daily_worker_contract::archive::hex(
+        &hash.finalize(),
+    )))
 }
 
 fn plain_path(path: &Path) -> Result<PathBuf, ReportError> {

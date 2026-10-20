@@ -125,7 +125,46 @@ pub fn request_limit(llm: &Llm, output: u64) -> Result<usize, ReportError> {
 }
 
 impl PlannedStep {
+    pub(super) fn source_aliases(&self) -> Result<BTreeMap<String, String>, ReportError> {
+        let Some(value) = self.target.get("fact_source_aliases") else {
+            return Ok(BTreeMap::new());
+        };
+        let invalid = || ReportError::new("MODEL_PLAN_IDENTITY_MISMATCH", "来源短编号映射无效");
+        let aliases: BTreeMap<String, String> =
+            serde_json::from_value(value.clone()).map_err(|_| invalid())?;
+        if self.kind != StepKind::Facts
+            || aliases.len() != self.source_ids().len()
+            || aliases.values().cloned().collect::<BTreeSet<_>>() != self.source_ids()
+            || aliases.keys().any(|id| id.is_empty() || id.len() > 128)
+        {
+            return Err(invalid());
+        }
+        Ok(aliases)
+    }
+
+    pub fn enable_source_aliases(&mut self, llm: &Llm) -> Result<(), ReportError> {
+        if self.kind != StepKind::Facts {
+            return Err(ReportError::new(
+                "MODEL_PLAN_INVALID",
+                "仅事实提取步骤支持来源短编号",
+            ));
+        }
+        let aliases: BTreeMap<_, _> = self
+            .source_ids()
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| (format!("s{}", index + 1), id))
+            .collect();
+        self.target
+            .as_object_mut()
+            .ok_or_else(|| ReportError::new("MODEL_PLAN_INVALID", "模型计划目标格式无效"))?
+            .insert("fact_source_aliases".into(), serde_json::to_value(aliases)?);
+        self.rebuild(llm)?;
+        self.validate(llm)
+    }
+
     fn rebuild(&mut self, llm: &Llm) -> Result<(), ReportError> {
+        let aliases = self.source_aliases()?;
         if self.kind == StepKind::LegacySummary {
             let batch: super::legacy::LegacyBatch =
                 serde_json::from_value(self.target["legacy_batch"].clone())?;
@@ -189,6 +228,7 @@ impl PlannedStep {
         if let Some(target) = target.as_object_mut() {
             target.remove("archive_changes");
             target.remove("archive_excluded_changes");
+            target.remove("fact_source_aliases");
         }
         let mut sources = self.source_map.clone();
         if let Some(sources) = sources.as_object_mut() {
@@ -201,7 +241,19 @@ impl PlannedStep {
         let user = if compose {
             json!({"target":target,"facts":wire_facts(&self.facts)?,"sources":sources,"coverage":self.coverage})
         } else {
-            json!({"target":target,"sources":self.entries.iter().map(Entry::wire).collect::<Vec<_>>()})
+            let reverse: BTreeMap<_, _> = aliases.iter().map(|(alias, id)| (id, alias)).collect();
+            let sources: Vec<_> = self
+                .entries
+                .iter()
+                .map(|entry| {
+                    let mut value = entry.wire();
+                    if let Some(alias) = reverse.get(&entry.source_id) {
+                        value["source_id"] = json!(alias);
+                    }
+                    value
+                })
+                .collect();
+            json!({"target":target,"sources":sources})
         };
         let output = if compose {
             llm.max_tokens
@@ -362,6 +414,16 @@ impl PlannedStep {
     }
 
     fn retain_sources(&mut self) {
+        if self.kind == StepKind::Facts {
+            let ids = self.source_ids();
+            if let Some(aliases) = self
+                .target
+                .get_mut("fact_source_aliases")
+                .and_then(Value::as_object_mut)
+            {
+                aliases.retain(|_, id| id.as_str().is_some_and(|id| ids.contains(id)));
+            }
+        }
         if self.kind == StepKind::Compose {
             let ids: BTreeSet<_> = self
                 .facts
@@ -449,12 +511,12 @@ pub fn prepare(
         });
     }
     let limit = request_limit(llm, llm.facts_output_tokens())?;
-    // A planning estimate, not a token conversion: leave output room for the JSON
-    // fields and expanded conditions. Actual truncation splits the complete input.
+    // Estimate output room in characters so UTF-8 width does not fragment batches.
+    // The serialized request still has a byte limit; truncation splits all input.
     let text_budget = usize::try_from(llm.facts_output_tokens())
         .unwrap_or(usize::MAX)
         .saturating_mul(2);
-    let mut batches: Vec<PlannedStep> = Vec::new();
+    let mut batches: Vec<(PlannedStep, usize)> = Vec::new();
     let gaps = Vec::new();
     // All sources receive their first opportunity before additional depth blocks.
     while queues.iter().any(|(_, queue)| !queue.is_empty()) {
@@ -462,21 +524,15 @@ pub fn prepare(
             let Some(entry) = queue.pop_front() else {
                 continue;
             };
+            let entry_chars = entry.text.chars().count();
             let mut placed = false;
-            for batch in &mut batches {
+            for (batch, text_chars) in &mut batches {
                 let mut ids = batch.source_ids();
                 ids.insert(entry.source_id.clone());
                 if ids.len() > llm.max_sources_per_batch {
                     continue;
                 }
-                if batch
-                    .entries
-                    .iter()
-                    .map(|entry| entry.text.len())
-                    .sum::<usize>()
-                    .saturating_add(entry.text.len())
-                    > text_budget
-                {
+                if text_chars.saturating_add(entry_chars) > text_budget {
                     continue;
                 }
                 let mut candidate = batch.clone();
@@ -484,6 +540,7 @@ pub fn prepare(
                 candidate.rebuild(llm)?;
                 if candidate.bytes()?.len() <= limit {
                     *batch = candidate;
+                    *text_chars = text_chars.saturating_add(entry_chars);
                     placed = true;
                     break;
                 }
@@ -494,7 +551,7 @@ pub fn prepare(
                 batch.entries.push(entry.clone());
                 batch.rebuild(llm)?;
                 if batch.bytes()?.len() <= limit {
-                    batches.push(batch);
+                    batches.push((batch, entry_chars));
                     placed = true;
                 }
             }
@@ -510,10 +567,14 @@ pub fn prepare(
             }
         }
     }
+    let mut batches: Vec<_> = batches.into_iter().map(|(batch, _)| batch).collect();
     let used: BTreeSet<_> = batches.iter().flat_map(|b| b.source_ids()).collect();
     let source_map:Value=sources.iter().filter(|s|used.contains(&s.source_id)).map(|s|(s.source_id.clone(),json!({"path":s.path,"source_kind":s.source_kind,"text_unverified":s.text_unverified}))).collect();
     let coverage = json!({"scan":coverage,"planning_gaps":gaps});
-    for batch in &batches {
+    for batch in &mut batches {
+        if daily_version(&target) == 5 {
+            batch.enable_source_aliases(llm)?;
+        }
         batch.validate(llm)?;
     }
     Ok(DailyPlan {

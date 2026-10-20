@@ -103,6 +103,16 @@ pub fn prepare(config: &AppConfig, parent_id: &str, reason: &str) -> Result<Valu
         .filter(|step| step.starts_with("batch_"))
         .count();
     let reused_composition = recovery.reused_calls.len() - reused;
+    for batch in &mut input.plan.batches {
+        let prefix = format!("{}.", batch.logical_step);
+        let has_saved_result = recovery
+            .reused_calls
+            .keys()
+            .any(|step| *step == batch.logical_step || step.starts_with(&prefix));
+        if !has_saved_result && batch.target.get("fact_source_aliases").is_none() {
+            batch.enable_source_aliases(&config.llm)?;
+        }
+    }
     let parent_fingerprint = input.input_fingerprint.clone();
     let id = types::new_run_id();
     input.context = RunContext::new(
@@ -113,8 +123,14 @@ pub fn prepare(config: &AppConfig, parent_id: &str, reason: &str) -> Result<Valu
     )?;
     input.recovery_fingerprint = app.fingerprint(true)?;
     input.recovery_inputs = Some(recovery);
+    let steps = input
+        .plan
+        .batches
+        .iter()
+        .map(|step| step.identity())
+        .collect::<Result<Vec<_>, _>>()?;
     input.input_fingerprint = digest(&canonical_json(&json!({"parent":parent_fingerprint,
-        "context":input.context,"recovery":input.recovery_inputs}))?);
+        "context":input.context,"recovery":input.recovery_inputs,"steps":steps}))?);
     let note = format!("archive_recover:{parent_id}:{reason}");
     if let Err(failure) = run::prepare_frozen(&app, &input, true, &note) {
         let _ = app
