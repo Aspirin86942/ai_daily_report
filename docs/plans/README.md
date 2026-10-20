@@ -18,4 +18,8 @@
 
 ## 新计划与实施结果
 
+- [架构与存储精简计划](2026-10-20-architecture-storage-simplification-plan.md)：2026-10-20 内容与功能验收通过，变化采集尾延迟及实际空间回收尚未通过完整验收，未切换正式任务。[实施结果与证据](2026-10-20-architecture-storage-simplification-results.md)记录实际收益、原始性能数字和待回收清单。
+
+- [可再生内容清理结果](2026-10-18-project-cleanup-results.md)：2026-10-18 已完成；20 处缓存目录及已合并工作区清理，项目文件数据 65.07 → 51.52 GB，净减 13.55 GB。匹配运行文件和恢复环境保持，冻结回退源码迁移后 78 项测试通过，正式包及离线自检通过。
+
 - [历史测量与验收产物透明压缩实施计划](../superpowers/plans/2026-10-18-historical-artifact-compression.md)：2026-10-18 已完成；78 项维护测试及独立审查通过，16,641 个文件透明压缩和全量核验通过，目标释放 8.88 GB；项目文件数据占用 73.92 → 65.07 GB。范围、文件内容及恢复环境保留，生产模型调用 0；20:32 用户已追加 Git 提交、合并和发布授权。[实施结果与证据](../superpowers/plans/2026-10-18-historical-artifact-compression-results.md)。

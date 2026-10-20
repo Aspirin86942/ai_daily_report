@@ -5,8 +5,8 @@ use ai_daily_scanner_core::{
     session::{SessionError, SessionParams, WorkerSession},
 };
 use ai_daily_worker_contract::{
-    archive::{ArchiveArtifact, ArchiveRequest, ArchiveTextRequest},
-    ParseRequest, ParserBackend, ParserLimits, WorkerKind,
+    archive::{ArchiveArtifact, ArchiveRequest},
+    WorkerKind,
 };
 use chrono::Utc;
 use rusqlite::params;
@@ -15,7 +15,7 @@ use std::{
     fs,
     path::PathBuf,
     sync::{mpsc, Mutex},
-    time::{Duration, Instant, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
 
 #[derive(Clone)]
@@ -40,9 +40,7 @@ enum Event {
 }
 
 pub fn profile(config: &AppConfig) -> Result<String, ReportError> {
-    crate::run::hash(
-        &serde_json::json!({"archive_parser":1,"engine":ai_daily_scanner_core::ENGINE_BUILD_IDENTITY,"protocol":ai_daily_worker_contract::PROTOCOL_VERSION,"max_input_mib":config.archive.max_input_mib,"max_output_mib":config.archive.max_output_mib,"parse_seconds":config.archive.parse_seconds,"worker_memory_mib":config.archive.worker_memory_mib,"legacy_office_enabled":config.scanner.legacy_office_enabled,"csv_encodings":config.scanner.csv_encodings}),
-    )
+    super::parse_identity::profile(config)
 }
 
 pub fn drain(
@@ -62,7 +60,9 @@ pub(crate) fn drain_before(
     before: Option<&str>,
 ) -> Result<(), ReportError> {
     let started = Instant::now();
-    let profile = profile(config)?;
+    let verification = super::parse_identity::verified(config)?;
+    let profile = verification.profile(config)?;
+    verification.persist(config, store)?;
     let versions = {
         let mut stmt=store.conn.prepare("SELECT v.id,v.sha256,v.extension FROM versions v WHERE v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2)) AND NOT EXISTS(SELECT 1 FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=v.id AND e.profile=?1)")?;
         let values = stmt
@@ -124,13 +124,26 @@ pub(crate) fn drain_before(
         let office = jobs
             .iter()
             .any(|(_, _, ext, _)| ext != ".pdf")
-            .then(|| registered(config, false))
+            .then(|| registered(config, false, &verification))
             .transpose()?;
         let pdf = jobs
             .iter()
             .any(|(_, _, ext, _)| ext == ".pdf")
-            .then(|| registered(config, true))
+            .then(|| registered(config, true, &verification))
             .transpose()?;
+        let audit = serde_json::json!({
+            "profile":profile,"engine_build":ai_daily_scanner_core::ENGINE_BUILD_IDENTITY,
+            "parser_content_identity":ai_daily_scanner_core::PARSER_CONTENT_IDENTITY,
+            "office":office.as_ref().map(|w| &w.identity),
+            "pdf":pdf.as_ref().map(|w| &w.identity),
+            "office_sha256":office.as_ref().and_then(|_| verification.executable_hash(false)),
+            "pdf_sha256":pdf.as_ref().and_then(|_| verification.executable_hash(true))
+        });
+        let audit_id = crate::run::hash(&audit)?;
+        store.conn.execute(
+            "INSERT OR IGNORE INTO metadata(key,value) VALUES(?,?)",
+            params![format!("parser-build:{audit_id}"), audit.to_string()],
+        )?;
         metrics.worker_starts += u64::from(office.is_some()) + u64::from(pdf.is_some());
         let queue = Mutex::new(
             jobs.into_iter()
@@ -245,30 +258,23 @@ pub(crate) fn drain_before(
                                 job.extension.as_str(),
                                 ".txt" | ".md" | ".csv" | ".json" | ".log"
                             ) {
-                                let request = ArchiveTextRequest {
-                                    file_path: job.object.clone(),
-                                    file_type: job.extension.clone(),
-                                    raw_sha256: job.hash.clone(),
-                                    output_dir: directory.path().to_owned(),
-                                    max_input_bytes: config.archive.max_input_mib * 1024 * 1024,
-                                    max_output_bytes: config.archive.max_output_mib * 1024 * 1024,
-                                    timeout_ms: timeout.as_millis() as u64,
-                                    csv_encodings: config
-                                        .scanner
-                                        .csv_encodings
-                                        .clone()
-                                        .unwrap_or_else(|| {
-                                            vec![
-                                                "utf-8".into(),
-                                                "utf-8-sig".into(),
-                                                "gb18030".into(),
-                                            ]
-                                        }),
-                                };
+                                let request = super::parse_request::text(
+                                    config,
+                                    &job.object,
+                                    &job.extension,
+                                    &job.hash,
+                                    directory.path(),
+                                    timeout,
+                                );
                                 worker.archive_text(&request_id(), &request, timeout)
                             } else {
                                 let request = ArchiveRequest {
-                                    source: source_request(config, &job, timeout)?,
+                                    source: super::parse_request::source(
+                                        config,
+                                        &job.object,
+                                        &job.extension,
+                                        timeout,
+                                    )?,
                                     raw_sha256: job.hash.clone(),
                                     output_dir: directory.path().to_owned(),
                                     max_output_bytes: config.archive.max_output_mib * 1024 * 1024,
@@ -407,7 +413,11 @@ pub(crate) fn drain_before(
     Ok(())
 }
 
-fn registered(config: &AppConfig, pdf: bool) -> Result<RegisteredWorker, ReportError> {
+fn registered(
+    config: &AppConfig,
+    pdf: bool,
+    verification: &super::parse_identity::Verification,
+) -> Result<RegisteredWorker, ReportError> {
     let program = if pdf {
         config.pdf_worker_path.clone()
     } else {
@@ -425,60 +435,10 @@ fn registered(config: &AppConfig, pdf: bool) -> Result<RegisteredWorker, ReportE
         required_backends: vec![],
         required_extensions: vec![],
     };
-    register_worker(&command, Duration::from_secs(10))
-        .map_err(|e| ReportError::new("ARCHIVE_WORKER_MISSING", format!("{e:?}")))
-}
-fn source_request(
-    config: &AppConfig,
-    job: &Job,
-    timeout: Duration,
-) -> Result<ParseRequest, ReportError> {
-    let metadata = fs::metadata(&job.object)?;
-    let version = ai_daily_discovery::build_source_version(
-        metadata
-            .modified()?
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| error("ARCHIVE_MTIME_INVALID"))?
-            .as_nanos(),
-        metadata.len(),
-    );
-    let backend = match job.extension.as_str() {
-        ".pdf" => ParserBackend::RustPdfiumV3,
-        ".xlsx" => ParserBackend::RustXlsxBoundedV2,
-        ".xls" => ParserBackend::RustXlsCalamineV3,
-        ".doc" | ".ppt" => ParserBackend::RustLegacyOfficeV3,
-        _ => ParserBackend::RustOfficeOxideV2,
-    };
-    let limits = if job.extension == ".pdf" {
-        ParserLimits::Pdf {
-            max_pages: 10000,
-            excerpt_max_chars: 10000000,
-            selected_pages: None,
-        }
-    } else {
-        ParserLimits::Office {
-            legacy_office_enabled: config.scanner.legacy_office_enabled.unwrap_or(false),
-            excel_max_sheets: 1024,
-            excel_max_rows: 1048576,
-            excel_max_columns: 16384,
-            docx_max_paragraphs: 1000000,
-            docx_max_tables: 100000,
-            docx_table_max_rows: 1048576,
-            docx_table_max_cols: 16384,
-            pptx_max_slides: 100000,
-            pptx_include_notes: true,
-            document_excerpt_max_chars: 10000000,
-        }
-    };
-    Ok(ParseRequest {
-        file_path: job.object.to_string_lossy().into_owned(),
-        file_type: job.extension.clone(),
-        backend,
-        remaining_timeout_ms: timeout.as_millis() as u64,
-        max_file_size_bytes: config.archive.max_input_mib * 1024 * 1024,
-        parser_limits: limits,
-        expected_source_version: version,
-    })
+    let worker = register_worker(&command, Duration::from_secs(10))
+        .map_err(|e| ReportError::new("ARCHIVE_WORKER_MISSING", format!("{e:?}")))?;
+    verification.check_worker(config, pdf, &worker.identity.worker_build)?;
+    Ok(worker)
 }
 fn session_error(e: SessionError) -> ReportError {
     match e {

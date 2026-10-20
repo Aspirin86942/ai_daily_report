@@ -36,12 +36,14 @@ def check(ok):
     if not ok: raise C.WinError(C.get_last_error())
 
 def save(path,value):
+    reject_frozen_output(path)
     path.parent.mkdir(parents=True,exist_ok=True)
     temp=path.with_suffix(path.suffix+'.tmp')
     temp.write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
     os.replace(temp,path)
 
 def run(exe,config,arguments,out):
+    reject_frozen_output(out)
     out.mkdir(parents=True,exist_ok=True)
     job=K.CreateJobObjectW(None,None); check(job)
     limit=EXT(); limit.basic.flags=0x200|0x2000; limit.job_memory=3*1024**3
@@ -79,6 +81,7 @@ def run(exe,config,arguments,out):
     return result
 
 def configure(base,work,exe,scanner,read,parse):
+    reject_frozen_output(base)
     cfg=base/'config'; cfg.mkdir(parents=True,exist_ok=True)
     settings={'paths':{'work_dir':str(work),'data_dir':str(base/'data'),'db_dir':str(base/'data/db'),'reports_dir':str(base/'reports'),'log_dir':str(base/'logs')},'scanner':{**scanner,'office_worker_path':str(exe.parent/'ai-daily-office-parser.exe'),'pdf_worker_path':str(exe.parent/'ai-daily-pdf-parser.exe')},'archive':{'read_workers':read,'parse_workers':parse,'memory_mib':3072,'system_reserve_mib':2048,'parent_memory_mib':512,'worker_memory_mib':512}}
     # JSON is valid YAML; no configuration library is needed.
@@ -137,6 +140,7 @@ def choose_files(files,old_csv):
     return sorted(selected)
 
 def copy_subset(files,source,destination):
+    reject_frozen_output(destination)
     destination.mkdir(parents=True,exist_ok=True)
     for path in files:
         target=destination/path.relative_to(source); target.parent.mkdir(parents=True,exist_ok=True)
@@ -144,7 +148,13 @@ def copy_subset(files,source,destination):
 
 def percentile(values): return sorted(values)[math.ceil(.95*len(values))-1]
 
+def reject_frozen_output(path):
+    resolved=path.resolve()
+    if any((parent/'.frozen-evidence.json').exists() for parent in (resolved,*resolved.parents)):
+        raise RuntimeError('Frozen historical evidence is read-only; use a new benchmark output directory')
+
 def incrementals(root,corpus,files,exe,scanner,read,parse):
+    reject_frozen_output(root)
     base=root/'incremental'; work=base/'work'
     copy_subset(files,corpus,work)
     cold(base,work,exe,scanner,read,parse)
@@ -214,7 +224,9 @@ def incrementals(root,corpus,files,exe,scanner,read,parse):
 
 def main():
     parser=argparse.ArgumentParser(); parser.add_argument('--release',required=True,type=Path); parser.add_argument('--corpus',required=True,type=Path); parser.add_argument('--output',required=True,type=Path); parser.add_argument('--reference',required=True,type=Path); parser.add_argument('--phase',choices=['sample','full','incremental','all'],default='all'); args=parser.parse_args()
-    exe=args.release.resolve()/'ai-daily-report.exe'; corpus=args.corpus.resolve(); output=args.output.resolve(); output.mkdir(parents=True,exist_ok=True)
+    exe=args.release.resolve()/'ai-daily-report.exe'; corpus=args.corpus.resolve(); output=args.output.resolve()
+    reject_frozen_output(output)
+    output.mkdir(parents=True,exist_ok=True)
     files=sorted(p for p in corpus.rglob('*') if p.is_file() and p.relative_to(corpus).parts[0].startswith('batch-'))
     assert len(files)==2648,(len(files),'frozen corpus changed')
     assert sum(p.stat().st_size for p in files)==5420774249,'frozen corpus size changed'

@@ -505,7 +505,7 @@ fn execute_active_build(
             timing,
         );
     };
-    let route_stacks = match route_stack_fingerprints(version, &office_worker, &pdf_worker) {
+    let route_stacks = match route_stack_fingerprints(&office_worker, &pdf_worker) {
         Ok(value) => value,
         Err(message) => {
             return finish_active_error(
@@ -2118,21 +2118,20 @@ fn worker_fingerprint(worker: &RegisteredWorker) -> WorkerFingerprint {
 }
 
 fn route_stack_fingerprints(
-    version: &EngineIdentity,
     office_worker: &RegisteredWorker,
     pdf_worker: &RegisteredWorker,
 ) -> Result<RouteStackFingerprints, String> {
     Ok(RouteStackFingerprints {
-        text_like: RouteStackFingerprint::text(&version.engine_build)?,
+        text_like: RouteStackFingerprint::text(crate::PARSER_CONTENT_IDENTITY)?,
         modern_office: RouteStackFingerprint::modern_office(
-            &version.engine_build,
+            crate::PARSER_CONTENT_IDENTITY,
             &office_worker.identity.worker_contract_version,
-            &office_worker.identity.worker_build,
+            &office_worker.cache_identity()?,
         )?,
         pdf: RouteStackFingerprint::pdf(
-            &version.engine_build,
+            crate::PARSER_CONTENT_IDENTITY,
             &pdf_worker.identity.worker_contract_version,
-            &pdf_worker.identity.worker_build,
+            &pdf_worker.cache_identity()?,
         )?,
     })
 }

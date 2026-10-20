@@ -373,7 +373,7 @@ fn parse_profile_fingerprint_json(
         excerpt_policy_version: crate::source_allocation::EXCERPT_POLICY_VERSION,
         protocol_version,
         route_stack,
-        core_build_identity: env!("AI_DAILY_ENGINE_BUILD"),
+        core_build_identity: crate::PARSER_CONTENT_IDENTITY,
         max_file_size_bytes: profile.execution.max_file_size_bytes,
         default_timeout_ms: profile.execution.file_timeout_ms,
         timeout_by_extension_ms: &profile.execution.file_timeout_by_extension_ms,
@@ -1436,7 +1436,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_profile_fingerprint_includes_compiled_engine_build_identity() {
+    fn parse_profile_fingerprint_includes_compiled_parser_content_identity() {
         let profile = normalize_scanner_settings(&raw_profile(), ReportMode::Daily)
             .expect("normalized profile");
         let route = RouteStackFingerprint::text("worker-build").unwrap();
@@ -1447,7 +1447,7 @@ mod tests {
 
         assert_eq!(
             fingerprint["core_build_identity"],
-            env!("AI_DAILY_ENGINE_BUILD")
+            crate::PARSER_CONTENT_IDENTITY
         );
     }
 

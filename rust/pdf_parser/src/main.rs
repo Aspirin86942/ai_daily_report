@@ -8,6 +8,13 @@ fn main() {
 
 fn dispatch() -> i32 {
     let args: Vec<_> = std::env::args().skip(1).collect();
+    if args == ["parser-build"] {
+        return emit(&serde_json::json!({
+            "parser_content_identity": env!("AI_DAILY_PARSER_BUILD"),
+            "engine_build": env!("AI_DAILY_ENGINE_BUILD"),
+            "inputs": serde_json::from_str::<serde_json::Value>(include_str!(concat!(env!("OUT_DIR"), "/parser-build.json"))).expect("compiled parser inputs")
+        })).map_or(1, |()| 0);
+    }
     if args != ["hello"] && args != ["session"] {
         eprintln!("usage: ai-daily-pdf-parser <hello|session>");
         return 1;

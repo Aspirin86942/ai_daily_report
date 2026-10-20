@@ -1,5 +1,6 @@
 pub mod classifier;
 pub mod document;
+pub mod identity;
 pub mod light_text;
 pub mod office;
 
@@ -72,6 +73,13 @@ pub struct RegisteredWorker {
     pub command: WorkerCommand,
     pub identity: WorkerHello,
     pub rss_tracker: Option<WorkerRssTracker>,
+}
+
+impl RegisteredWorker {
+    pub fn cache_identity(&self) -> Result<String, String> {
+        identity::worker_content_identity(&self.command.program, Some(&self.identity.worker_build))
+            .map(|content| content.unwrap_or_else(|| self.identity.worker_build.clone()))
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

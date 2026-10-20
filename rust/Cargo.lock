@@ -9,6 +9,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "ai-daily-build-identity"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "ai-daily-discovery"
 version = "0.1.0"
 dependencies = [
@@ -25,15 +33,15 @@ dependencies = [
 name = "ai-daily-office-parser"
 version = "0.1.0"
 dependencies = [
+ "ai-daily-build-identity",
  "ai-daily-discovery",
- "ai-daily-scanner-core",
+ "ai-daily-text-parser",
  "ai-daily-worker-contract",
  "calamine",
  "office_oxide",
  "quick-xml 0.40.1",
  "serde",
  "serde_json",
- "sha2",
  "tempfile",
  "zip",
 ]
@@ -42,6 +50,7 @@ dependencies = [
 name = "ai-daily-pdf-parser"
 version = "0.1.0"
 dependencies = [
+ "ai-daily-build-identity",
  "ai-daily-discovery",
  "ai-daily-worker-contract",
  "pdfium-render",
@@ -88,11 +97,12 @@ dependencies = [
 name = "ai-daily-scanner-core"
 version = "0.1.0"
 dependencies = [
+ "ai-daily-build-identity",
  "ai-daily-discovery",
  "ai-daily-scanner-contract",
+ "ai-daily-text-parser",
  "ai-daily-worker-contract",
  "chrono",
- "encoding_rs",
  "rayon",
  "rusqlite",
  "serde",
@@ -101,6 +111,18 @@ dependencies = [
  "tempfile",
  "thiserror",
  "windows-sys",
+]
+
+[[package]]
+name = "ai-daily-text-parser"
+version = "0.1.0"
+dependencies = [
+ "ai-daily-scanner-contract",
+ "ai-daily-worker-contract",
+ "encoding_rs",
+ "serde_json",
+ "tempfile",
+ "thiserror",
 ]
 
 [[package]]

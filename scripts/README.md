@@ -83,6 +83,7 @@ $Manifest = Join-Path $Evidence 'manifest.json'
 | [coverage_release_evidence.py](coverage_release_evidence.py) | 将旧安装包、Git 状态与离线闸门日志绑定为证据 | `--bundle`、`--output`，可重复 `--gate-log`；依赖 `windows_release.py`；历史证据脚本，保留不删 | 验收证据 |
 | [verify_coverage_corpus.py](verify_coverage_corpus.py) | 通过已安装原生扫描器验证固定合成语料 | `--corpus`、`--output`；需旧 Python、原生扩展及匹配工作进程；历史证据脚本，保留不删 | 验收证据 |
 | [benchmark_archive.py](benchmark_archive.py) | 测量归档全文件、增量和无变化采集的耗时、资源与内容签名 | `--release`、`--corpus`、`--output`、`--reference`，可选 `--phase sample\|full\|incremental\|all`；Windows，零模型调用 | 验收证据 |
+| [deduplicate_historical_artifacts.py](deduplicate_historical_artifacts.py) | 对固定白名单内的冻结历史输入建立同卷硬链接，并保留逐文件核验与恢复日志 | Windows；`plan --project-root ... --output ...` 生成清单，`apply`、`verify`、`rollback` 必须同时指定 `--manifest` 和 `--sha256`；不处理正式归档及已有硬链接 | 历史材料维护 |
 | [benchmark_scanner.py](benchmark_scanner.py) | 通过旧 Python/native 链路输出冷/热扫描性能证据 | `--work-dir`、独立 `--state-dir`，可选 `--office-worker-path`、`--iterations`；需旧 Python 原生环境，输出 JSON/Markdown | 验收证据 |
 | [pdf_benchmark/generate_classifier_corpus.py](pdf_benchmark/generate_classifier_corpus.py) | 生成固定 PDF 分类器数值验证语料与清单 | `python scripts/pdf_benchmark/generate_classifier_corpus.py`；需 `reportlab`、`pypdf`；已有夹具跳过生成，保留基线 | 验收证据 |
 | [pdf_benchmark/generate_corpus.py](pdf_benchmark/generate_corpus.py) | 生成含中英文参考正文的合成 PDF 基准语料 | `python scripts/pdf_benchmark/generate_corpus.py`；需 `reportlab`；已有 PDF 和参考文本跳过生成 | 验收证据 |

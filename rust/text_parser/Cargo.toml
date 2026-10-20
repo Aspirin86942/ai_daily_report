@@ -1,0 +1,14 @@
+[package]
+name = "ai-daily-text-parser"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ai-daily-scanner-contract = { path = "../scanner_contract" }
+ai-daily-worker-contract = { path = "../worker_contract" }
+encoding_rs = "=0.8.35"
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

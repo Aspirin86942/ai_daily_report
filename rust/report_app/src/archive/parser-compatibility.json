@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "parser_content_identity": "sha256-parser-v1:bece0213933a8b31b30ebccfb4465bf8adbc3870f06665c974970c412a36f0d4",
+      "parameters": {
+        "protocol": 4,
+        "max_input_mib": 512,
+        "max_output_mib": 256,
+        "parse_seconds": 300,
+        "worker_memory_mib": 512,
+        "legacy_office_enabled": false,
+        "csv_encodings": null
+      },
+      "legacy_profile": "8c54a4ee4e9c9887adf37220b8bdd5e9484eefd7e7c33997d6fe0315271f197d",
+      "legacy_engine_build": "sha256-source-v1:2f73180603531c79fb47c921c6e51631f4c32fd8adac3ad10e7954289d9a7a11",
+      "office_sha256": "95d91c8d46262e77c04c91a7ccae4bd2b0fbfc3743f6599ba7b4c8ab0f308fa8",
+      "pdf_sha256": "84fdbb5518baa90d9e10784e2f5b42ef00afb43fdb93e68a075ab94092af45ab",
+      "pdfium_sha256": "79d4676b656cfb1abcea88f9ade3b4b0826c5200382db5f4ec72a636c598c118",
+      "evidence_sha256": "39043c97d20c8fd08d2ccbb19c6fca0f0695cdf4fe04872da6bafa9a1ba477e0"
+    }
+  ]
+}

@@ -7,8 +7,8 @@ edition.workspace = true
 ai-daily-discovery = { path = "../discovery" }
 ai-daily-scanner-contract = { path = "../scanner_contract" }
 ai-daily-worker-contract = { path = "../worker_contract" }
+ai-daily-text-parser = { path = "../text_parser" }
 chrono.workspace = true
-encoding_rs = "=0.8.35"
 rayon.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
@@ -17,7 +17,7 @@ sha2.workspace = true
 thiserror.workspace = true
 
 [build-dependencies]
-sha2.workspace = true
+ai-daily-build-identity = { path = "../build_identity" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "=0.61.2", features = [

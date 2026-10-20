@@ -9,7 +9,9 @@
 ## Project Structure and Contracts
 - rust/report_app contains the CLI, configuration, run orchestration, report store, snapshots, model execution, reports, publication, maintenance, operations and archive.
 - run_report dispatches daily/weekly/monthly reports. Daily orchestration holds the lock and delegates private steps in run/daily.rs; input preparation, recovery, model execution and publication keep their existing contracts.
-- rust/Cargo.toml contains report_app, scanner_core, scanner_contract, worker_contract, discovery, office_parser and pdf_parser. PyO3 is outside the active workspace.
+- rust/Cargo.toml contains report_app, scanner_core, scanner_contract, worker_contract, discovery, text_parser, office_parser, pdf_parser and the build-only build_identity helper. PyO3 is outside the active workspace. text_parser holds the shared text implementation without scanner orchestration or database dependencies.
+- Each parser/scanner build script calls build_identity so Cargo tracks shared build code as an explicit dependency. The helper is absent from runtime dependencies. Its metadata cache checks parser dependencies and all local manifests; source/profile/compiler checks remain active.
+- Full engine build identity remains the Worker audit identity. Parser cache identity uses rust/parser-inputs.json and verified parser manifests; output-affecting request construction must participate in this identity. Legacy archive compatibility entries require exact parameters, executable/PDFium hashes and retained equivalence evidence.
 - Current workers use protocol v4. Build all three executables together; retained old packages use their own matching workers.
 - archive uses independent schema v1 and stores immutable originals, full-text extractions and report evidence under data_dir/archive. Archive reports/frozen inputs use v4 and model plans v5; scan reports and historical recovery remain supported. Cache retention must never remove archive evidence.
 - scanner_core::store exposes its API through mod.rs and separates persistence responsibilities into private modules.
@@ -30,7 +32,7 @@
 - `scripts/benchmark_archive.py` measures all 2,648 frozen files, tunes read/parse workers, and checks content signatures. Run timing suites without concurrent builds/tests; retain failures, partial coverage and all-file timing CSVs. The unchanged-collection gate is 20 runs with P95 <= 5 seconds and zero source-body reads, parse starts and model calls.
 - `cargo test --manifest-path rust/Cargo.toml --workspace --locked` verifies the Rust workspace.
 - Build debug workers and examples before integration tests; put the pinned `pdfium.dll` beside the PDF worker. Source identity changes require rebuilding both workers.
-- `scripts/build_windows_release.ps1` builds the three production executables with static CRT in an isolated target directory and verifies the complete manifest. Never use the live legacy worker directory as its output.
+- `scripts/build_windows_release.ps1` builds the three production executables with static CRT in the shared `.artifacts/rust-migration/cargo-release` target directory and verifies the complete manifest. Reuse this default for normal releases and retain full debug information in the development cache. Never use the live legacy worker directory as its output.
 - Final gates: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, and the locked workspace tests, all with `--manifest-path rust/Cargo.toml`.
 
 ## Coding Style & Naming Conventions

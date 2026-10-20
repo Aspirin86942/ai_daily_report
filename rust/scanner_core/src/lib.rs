@@ -39,6 +39,7 @@ pub use scanner::{
 };
 
 pub const ENGINE_BUILD_IDENTITY: &str = env!("AI_DAILY_ENGINE_BUILD");
+pub const PARSER_CONTENT_IDENTITY: &str = env!("AI_DAILY_PARSER_BUILD");
 
 pub fn engine_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
