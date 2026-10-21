@@ -334,14 +334,28 @@ fn parse_queue(
     config: &AppConfig,
     now: DateTime<Utc>,
 ) -> Result<HealthCheck, ReportError> {
-    let queued: i64 = store.conn.query_row(
+    let personal = config.report.profile == crate::config::ReportProfile::Personal;
+    let pending = if personal {
+        Some(crate::archive::queue::pending_in(store, config, None)?)
+    } else {
+        None
+    };
+    let queued: i64 = if let Some(pending) = &pending {
+        pending["queued"].as_i64().unwrap_or(0)
+    } else {
+        store.conn.query_row(
         "SELECT count(*) FROM extractions WHERE status IN ('queued','running') OR id IN (SELECT value FROM metadata WHERE key LIKE 'retry:%')",
         [], |row| row.get(0),
-    )?;
-    let oldest: Option<String> = store.conn.query_row(
+    )?
+    };
+    let oldest: Option<String> = if let Some(pending) = &pending {
+        pending["oldest_observed_at"].as_str().map(str::to_owned)
+    } else {
+        store.conn.query_row(
         "SELECT min(v.observed_at) FROM versions v JOIN version_extractions ve ON ve.version_id=v.id JOIN extractions e ON e.id=ve.extraction_id WHERE v.pruned_at IS NULL AND (e.status IN ('queued','running') OR e.id IN (SELECT value FROM metadata WHERE key LIKE 'retry:%'))",
         [], |row| row.get(0),
-    )?;
+    )?
+    };
     let age = oldest
         .as_deref()
         .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
@@ -368,16 +382,29 @@ fn parse_queue(
         [],
         |r| r.get(0),
     )?;
+    let standby = pending
+        .as_ref()
+        .and_then(|p| p["standby_baselines"].as_u64())
+        .unwrap_or(0);
+    let unavailable = pending
+        .as_ref()
+        .and_then(|p| p["unavailable"].as_u64())
+        .unwrap_or(0);
     let evidence = json!({"queued":queued,"expired":expired,"read_gaps":gaps,"pending_changes":changes,"oldest_observed_at":oldest,"oldest_age_seconds":age,
+        "standby_baselines":standby,"unavailable":unavailable,
         "last_parse_run":last.map(|value|serde_json::from_str::<Value>(&value)).transpose()?});
     Ok(HealthCheck {
         code: "PARSE_QUEUE",
-        level: if queued == 0 && changes == 0 {
+        level: if queued == 0 && changes == 0 && unavailable == 0 {
             "ok"
         } else {
             "warning"
         },
-        message: if queued == 0 && changes == 0 {
+        message: if personal {
+            format!(
+                "日报材料待解析 {queued} 项、无法准备 {unavailable} 项；另有 {standby} 项基线待用"
+            )
+        } else if queued == 0 && changes == 0 {
             "归档解析队列为空".into()
         } else {
             format!("归档仍有 {queued} 个解析任务、{changes} 个变化依据未准备完成")

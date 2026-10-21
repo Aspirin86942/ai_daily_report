@@ -2,6 +2,7 @@
 pub mod cli;
 pub mod collect;
 pub mod config;
+mod demand;
 pub mod diff;
 pub mod maintenance;
 pub mod model_input;

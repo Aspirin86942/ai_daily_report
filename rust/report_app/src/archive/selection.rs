@@ -1,7 +1,8 @@
 //! Date-window selection; no publication-backlog query and no model calls.
 use super::{
+    demand::{self, MAX_FILES},
     diff,
-    model_input::{permitted, EvidenceRef},
+    model_input::EvidenceRef,
     store::{ArchiveStore, Version},
 };
 use crate::{
@@ -28,7 +29,6 @@ use std::{
 };
 
 const MAX_UNITS: usize = 5_000;
-const MAX_FILES: usize = 1_024;
 
 struct Candidate {
     version: Version,
@@ -157,21 +157,13 @@ pub(crate) fn prepare_at(
         if Instant::now() >= deadline || selected.summary.inspected_files >= MAX_FILES as u64 {
             break;
         }
-        let ids = {
-            let mut stmt = store.conn.prepare(
-                "SELECT v.document_id,v.id FROM versions v WHERE v.observed_at>=?1 AND v.observed_at<?2 AND v.baseline=0 AND v.document_id>?3 AND NOT EXISTS(SELECT 1 FROM versions n WHERE n.document_id=v.document_id AND n.observed_at<?2 AND (n.observed_at>v.observed_at OR (n.observed_at=v.observed_at AND n.rowid>v.rowid))) ORDER BY v.document_id LIMIT 128")?;
-            let rows = stmt
-                .query_map(params![start, end, cursor], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
+        let ids = demand::pairs(&store, &start, &end, &cursor)?;
         if ids.is_empty() {
             break;
         }
-        for (doc, id) in ids {
-            cursor = doc;
+        for pair in ids {
+            cursor = pair.document;
+            let id = pair.current;
             if Instant::now() >= deadline || selected.summary.inspected_files >= MAX_FILES as u64 {
                 break 'pages;
             }
@@ -189,11 +181,7 @@ pub(crate) fn prepare_at(
                     continue;
                 }
             };
-            if !permitted(config, Path::new(&version.path))
-                || Path::new(&version.path)
-                    .file_name()
-                    .is_some_and(|p| p.to_string_lossy().starts_with(".tmp-"))
-            {
+            if !demand::eligible(config, &version.path) {
                 selected.summary.omit("out_of_scope", &version.path);
                 continue;
             }
@@ -207,11 +195,7 @@ pub(crate) fn prepare_at(
                 );
                 continue;
             };
-            let prior: Option<String> = store.conn.query_row(
-                "SELECT id FROM versions WHERE document_id=? AND observed_at<? ORDER BY observed_at DESC,rowid DESC LIMIT 1",
-                params![version.document_id,start], |r| r.get(0),
-            ).optional()?;
-            let before = match prior {
+            let before = match pair.previous {
                 Some(id) => match (
                     store.version(&id),
                     extraction(&store, &id, &profile, &ready)?,

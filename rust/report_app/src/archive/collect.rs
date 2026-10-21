@@ -237,7 +237,12 @@ pub(super) fn result_value(
     operation: &str,
 ) -> Result<serde_json::Value, ReportError> {
     let mut value = serde_json::to_value(metrics)?;
-    let complete = metrics.errors == 0 && metrics.queued == 0;
+    let complete = metrics.errors == 0
+        && metrics.queued == 0
+        && !metrics
+            .warnings
+            .iter()
+            .any(|code| code == "PERSONAL_INPUT_UNAVAILABLE");
     value["operation"] = serde_json::json!(operation);
     value["status"] = serde_json::json!(if complete { "succeeded" } else { "partial" });
     value["execution_status"] = serde_json::json!("succeeded");
@@ -714,13 +719,13 @@ pub fn run(
     metrics.capture_ms = capture_started.elapsed().as_millis() as u64;
     drop(capture_headroom);
     parse::drain(config, &mut store, &mut metrics, deadline)?;
-    metrics.queued = store.conn.query_row(
-        "SELECT count(*) FROM extractions WHERE profile=? AND (status IN('queued','running') OR id IN(SELECT value FROM metadata WHERE key LIKE 'retry:%'))",
-        [parse::profile(config)?],
-        |r| r.get::<_, i64>(0),
-    )? as u64;
+    let pending = super::queue::pending_in(&store, config, None)?;
+    metrics.queued = pending["queued"].as_u64().unwrap_or(0);
+    if pending["unavailable"].as_u64().unwrap_or(0) > 0 {
+        metrics.warnings.push("PERSONAL_INPUT_UNAVAILABLE".into());
+    }
     metrics.wall_ms = started.elapsed().as_millis() as u64;
-    let status = if metrics.errors == 0 && metrics.queued == 0 {
+    let status = if metrics.errors == 0 && metrics.queued == 0 && pending["unavailable"] == 0 {
         "complete"
     } else {
         "partial"
@@ -1049,6 +1054,23 @@ pub fn free_disk(_path: &Path) -> Result<u64, ReportError> {
 mod tests {
     use super::*;
     use crate::processing_cache::ProcessingSession;
+
+    #[test]
+    fn material_status_distinguishes_missing_input_from_storage_warnings() {
+        let mut metrics = CollectionMetrics {
+            warnings: vec!["ARCHIVE_COMPRESSION_UNAVAILABLE".into()],
+            ..Default::default()
+        };
+        assert_eq!(
+            result_value(&metrics, "collect").unwrap()["material_status"],
+            "complete"
+        );
+        metrics.warnings.push("PERSONAL_INPUT_UNAVAILABLE".into());
+        assert_eq!(
+            result_value(&metrics, "collect").unwrap()["material_status"],
+            "partial"
+        );
+    }
 
     #[test]
     fn full_receipt_capacity_defers_only_that_file_and_can_resume() {

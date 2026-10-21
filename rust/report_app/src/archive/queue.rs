@@ -11,27 +11,36 @@ pub fn pending(config: &AppConfig, before: Option<&str>) -> Result<Value, Report
     pending_in(&store, config, before)
 }
 
-fn pending_in(
+pub(crate) fn pending_in(
     store: &ArchiveStore,
     config: &AppConfig,
     before: Option<&str>,
 ) -> Result<Value, ReportError> {
     let profile = parse::profile(config)?;
+    let scope = super::demand::scope(
+        config,
+        store,
+        before,
+        Instant::now() + Duration::from_secs(30),
+    )?;
     // Count one job per extraction, including versions not yet queued for this profile.
     let (queued, oldest): (i64, Option<String>) = store.conn.query_row(
         "WITH jobs AS (
-          SELECT e.id AS id,min(v.observed_at) AS observed_at
+          SELECT e.sha256||e.extension AS id,min(v.observed_at) AS observed_at
           FROM extractions e JOIN version_extractions ve ON ve.extraction_id=e.id
           JOIN versions v ON v.id=ve.version_id
           WHERE e.profile=?1 AND (e.status IN ('queued','running') OR e.id IN (SELECT value FROM metadata WHERE key LIKE 'retry:%'))
-          AND v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2)) GROUP BY e.id
+          AND v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2))
+          AND (?3 IS NULL OR v.id IN (SELECT value FROM json_each(?3))
+               OR e.id IN (SELECT value FROM metadata WHERE key LIKE 'retry:%')) GROUP BY e.id
           UNION ALL
-          SELECT 'unregistered:'||v.sha256||v.extension,min(v.observed_at)
+          SELECT v.sha256||v.extension,min(v.observed_at)
           FROM versions v WHERE v.pruned_at IS NULL AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2))
+          AND (?3 IS NULL OR v.id IN (SELECT value FROM json_each(?3)))
           AND NOT EXISTS(SELECT 1 FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=v.id AND e.profile=?1)
           GROUP BY v.sha256,v.extension
-        ) SELECT count(*),min(observed_at) FROM jobs",
-        params![profile, before],
+        ) SELECT count(DISTINCT id),min(observed_at) FROM jobs",
+        params![profile, before, scope],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
     let age = oldest
@@ -43,8 +52,30 @@ fn pending_in(
     } else {
         pending_changes(store, &profile, before)?
     };
+    let (standby, unavailable) = if scope.is_some() {
+        let standby: i64 = store.conn.query_row(
+            "SELECT count(*) FROM (SELECT v.sha256,v.extension FROM versions v
+             LEFT JOIN extractions e ON e.sha256=v.sha256 AND e.extension=v.extension AND e.profile=?1
+             WHERE v.baseline=1 AND v.pruned_at IS NULL
+             AND (e.id IS NULL OR (e.status NOT IN ('complete','partial') AND e.id NOT IN
+                  (SELECT value FROM metadata WHERE key LIKE 'retry:%')))
+             AND NOT EXISTS(SELECT 1 FROM versions needed WHERE needed.id IN (SELECT value FROM json_each(?2))
+                 AND needed.sha256=v.sha256 AND needed.extension=v.extension)
+             GROUP BY v.sha256,v.extension)", params![profile,scope], |r| r.get(0))?;
+        let unavailable: i64 = store.conn.query_row(
+            "SELECT count(*) FROM (SELECT v.sha256,v.extension FROM versions v
+             LEFT JOIN extractions e ON e.sha256=v.sha256 AND e.extension=v.extension AND e.profile=?1
+             WHERE v.id IN (SELECT value FROM json_each(?2)) AND
+             (v.pruned_at IS NOT NULL OR e.status IN ('failed','expired') OR
+              (e.status IN ('queued','running') AND e.attempts>=3)) GROUP BY v.sha256,v.extension)",
+            params![profile,scope], |r| r.get(0))?;
+        (standby, unavailable)
+    } else {
+        (0, 0)
+    };
     Ok(
-        json!({"queued":queued,"pending_changes":changes,"oldest_observed_at":oldest,"oldest_age_seconds":age}),
+        json!({"queued":queued,"pending_changes":changes,"oldest_observed_at":oldest,
+        "oldest_age_seconds":age,"standby_baselines":standby,"unavailable":unavailable}),
     )
 }
 
@@ -263,14 +294,20 @@ fn drain_store(
     let remaining = pending_in(&store, config, before.as_deref())?;
     metrics.queued = remaining["queued"].as_u64().unwrap_or(0);
     let changes = remaining["pending_changes"].as_u64().unwrap_or(0);
+    let unavailable = remaining["unavailable"].as_u64().unwrap_or(0);
     let mut value = collect::result_value(&metrics, "parse")?;
     value["pending_changes"] = json!(changes);
-    if changes > 0 {
+    value["standby_baselines"] = remaining["standby_baselines"].clone();
+    value["unavailable"] = json!(unavailable);
+    if changes > 0 || unavailable > 0 {
         value["status"] = json!("partial");
         value["material_status"] = json!("partial");
     }
     value["target_date"] = json!(target_date);
     let mut reasons = metrics.warnings.clone();
+    if unavailable > 0 {
+        reasons.push("PERSONAL_INPUT_UNAVAILABLE".into());
+    }
     if changes > 0 {
         reasons.push("ARCHIVE_CHANGE_PENDING".into());
     }
@@ -283,7 +320,7 @@ fn drain_store(
         value["execution_status"] = json!("failed");
         value["error_code"] = json!(error.code);
         "parse_failed"
-    } else if metrics.errors == 0 && metrics.queued == 0 && changes == 0 {
+    } else if metrics.errors == 0 && metrics.queued == 0 && changes == 0 && unavailable == 0 {
         "parse_complete"
     } else {
         "parse_partial"
