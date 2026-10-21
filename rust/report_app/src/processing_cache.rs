@@ -90,6 +90,7 @@ impl ProcessingSession {
     ) -> Result<crate::archive::store::ArchiveStore, ReportError> {
         let mut store = crate::archive::store::ArchiveStore::open_collection(config, true)?;
         store.quota = Some(Arc::clone(&self.quota));
+        crate::archive::collect::recover_captures(&mut store)?;
         crate::archive::retention::prune(&mut store, self.quota.now, self.quota.deadline)?;
         Ok(store)
     }
@@ -268,6 +269,10 @@ impl CacheQuota {
 
     pub(crate) fn deadline(&self) -> Instant {
         self.deadline
+    }
+
+    pub(crate) fn now(&self) -> DateTime<Utc> {
+        self.now
     }
 
     pub fn write(self: &Arc<Self>, path: &Path, bytes: &[u8]) -> Result<(), ReportError> {

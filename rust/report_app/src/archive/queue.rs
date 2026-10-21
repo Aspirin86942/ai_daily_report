@@ -73,9 +73,15 @@ pub(crate) fn pending_in(
     } else {
         (0, 0)
     };
+    let (capture_pending, baseline_deferred) = if scope.is_some() {
+        super::observation::counts(store, before)?
+    } else {
+        (0, 0)
+    };
     Ok(
         json!({"queued":queued,"pending_changes":changes,"oldest_observed_at":oldest,
-        "oldest_age_seconds":age,"standby_baselines":standby,"unavailable":unavailable}),
+        "oldest_age_seconds":age,"standby_baselines":standby,"unavailable":unavailable,
+        "capture_pending":capture_pending,"baseline_deferred":baseline_deferred}),
     )
 }
 
@@ -293,13 +299,19 @@ fn drain_store(
     metrics.wall_ms = started.elapsed().as_millis() as u64;
     let remaining = pending_in(&store, config, before.as_deref())?;
     metrics.queued = remaining["queued"].as_u64().unwrap_or(0);
+    metrics.capture_pending = remaining["capture_pending"].as_u64().unwrap_or(0);
+    metrics.baseline_deferred = remaining["baseline_deferred"].as_u64().unwrap_or(0);
     let changes = remaining["pending_changes"].as_u64().unwrap_or(0);
     let unavailable = remaining["unavailable"].as_u64().unwrap_or(0);
     let mut value = collect::result_value(&metrics, "parse")?;
     value["pending_changes"] = json!(changes);
     value["standby_baselines"] = remaining["standby_baselines"].clone();
     value["unavailable"] = json!(unavailable);
-    if changes > 0 || unavailable > 0 {
+    if changes > 0
+        || unavailable > 0
+        || metrics.capture_pending > 0
+        || metrics.baseline_deferred > 0
+    {
         value["status"] = json!("partial");
         value["material_status"] = json!("partial");
     }
@@ -307,6 +319,12 @@ fn drain_store(
     let mut reasons = metrics.warnings.clone();
     if unavailable > 0 {
         reasons.push("PERSONAL_INPUT_UNAVAILABLE".into());
+    }
+    if metrics.capture_pending > 0 {
+        reasons.push("CAPTURE_CONTENT_UNAVAILABLE".into());
+    }
+    if metrics.baseline_deferred > 0 {
+        reasons.push("BASELINE_CAPTURE_DEFERRED".into());
     }
     if changes > 0 {
         reasons.push("ARCHIVE_CHANGE_PENDING".into());
@@ -320,7 +338,7 @@ fn drain_store(
         value["execution_status"] = json!("failed");
         value["error_code"] = json!(error.code);
         "parse_failed"
-    } else if metrics.errors == 0 && metrics.queued == 0 && changes == 0 && unavailable == 0 {
+    } else if value["material_status"] == "complete" {
         "parse_complete"
     } else {
         "parse_partial"

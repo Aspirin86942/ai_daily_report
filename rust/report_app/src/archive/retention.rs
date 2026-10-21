@@ -1,12 +1,9 @@
 //! Personal processing retention. This entry point requires the processing lock.
 use super::{error, store::ArchiveStore};
-use crate::{
-    processing_cache::{check_deadline, MAX_INPUT_BYTES, MAX_OUTPUT_BYTES},
-    ReportError,
-};
+use crate::{processing_cache::check_deadline, ReportError};
 use chrono::{DateTime, Utc};
 use rusqlite::params;
-use std::{path::Path, time::Instant};
+use std::{collections::BTreeSet, path::Path, time::Instant};
 
 pub fn prune(
     store: &mut ArchiveStore,
@@ -23,28 +20,18 @@ pub fn prune(
         release(store, &path, now)?;
         quota.remove(&path)?;
     }
-    // Free completed old materials before admitting the next fixed-size writer.
-    let headroom = MAX_INPUT_BYTES + MAX_OUTPUT_BYTES;
-    if quota.available_bytes()? < headroom {
-        for path in quota.reclaim_candidates()? {
-            check_deadline(deadline)?;
-            if quota.available_bytes()? >= headroom {
-                break;
-            }
-            release(store, &path, now)?;
-            quota.remove(&path)?;
-        }
-    }
     let cutoff = (now - chrono::Duration::days(7)).to_rfc3339();
     loop {
         check_deadline(deadline)?;
         let ids = {
             let mut statement = store.conn.prepare(
-                "SELECT id FROM versions WHERE pruned_at IS NOT NULL
+                "SELECT v.id FROM versions v WHERE v.pruned_at IS NOT NULL AND v.observed_at<?1
+                 AND EXISTS(SELECT 1 FROM versions n WHERE n.document_id=v.document_id AND n.observed_at<?1
+                     AND (n.observed_at>v.observed_at OR (n.observed_at=v.observed_at AND n.rowid>v.rowid)))
                  AND id NOT IN(SELECT current_version FROM documents WHERE current_version IS NOT NULL)
                  AND id NOT IN(SELECT version_id FROM report_versions) LIMIT 128")?;
             let rows = statement
-                .query_map([], |r| r.get::<_, String>(0))?
+                .query_map([&cutoff], |r| r.get::<_, String>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
             rows
         };
@@ -93,6 +80,71 @@ pub fn prune(
     }
     store.conn.pragma_update(None, "incremental_vacuum", 128)?;
     Ok(())
+}
+
+/// One deterministic pass: unneeded intermediate versions, then standby bodies.
+/// Snapshots and staging receipts are only subject to expiry/recovery, never
+/// capacity eviction. Protected hashes cover every alias and parser result.
+pub(crate) fn reclaim(
+    store: &mut ArchiveStore,
+    bytes: u64,
+    protected: &BTreeSet<String>,
+    now: DateTime<Utc>,
+    deadline: Instant,
+) -> Result<u64, ReportError> {
+    let quota = store
+        .quota
+        .clone()
+        .ok_or_else(|| error("PROCESSING_LOCK_REQUIRED"))?;
+    if quota.available_bytes()? >= bytes {
+        return Ok(0);
+    }
+    let protected = serde_json::to_string(protected)?;
+    let mut candidates = Vec::new();
+    let archive_root = crate::processing_cache::normalized(&store.root);
+    for path in quota.reclaim_candidates()? {
+        check_deadline(deadline)?;
+        let relative = path.strip_prefix(&archive_root).ok();
+        let area = relative
+            .and_then(|r| r.components().next())
+            .map(|p| p.as_os_str().to_string_lossy());
+        let id = path.file_name().unwrap_or_default().to_string_lossy();
+        let hash: Option<String> = match area.as_deref() {
+            Some("objects") => Some(id.to_string()),
+            Some("extractions") => {
+                use rusqlite::OptionalExtension;
+                store
+                    .conn
+                    .query_row("SELECT sha256 FROM extractions WHERE id=?", [&*id], |r| {
+                        r.get(0)
+                    })
+                    .optional()?
+            }
+            _ => continue,
+        };
+        let Some(hash) = hash else { continue };
+        let (needed, current): (bool, bool) = store.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM versions WHERE sha256=?1 AND id IN(SELECT value FROM json_each(?2)))
+                 OR EXISTS(SELECT 1 FROM extractions e JOIN metadata m ON m.key='retry:'||e.id WHERE e.sha256=?1),
+             EXISTS(SELECT 1 FROM versions v JOIN documents d ON d.current_version=v.id WHERE v.sha256=?1)",
+            params![hash, protected], |r| Ok((r.get(0)?,r.get(1)?)),
+        )?;
+        if !needed {
+            candidates.push((current, path));
+        }
+    }
+    // Stable sort keeps the ledger's age/path order within each priority.
+    candidates.sort_by_key(|(current, _)| *current);
+    let used = quota.used_bytes()?;
+    for (_, path) in candidates {
+        check_deadline(deadline)?;
+        if quota.available_bytes()? >= bytes {
+            break;
+        }
+        release(store, &path, now)?;
+        quota.remove(&path)?;
+    }
+    Ok(used.saturating_sub(quota.used_bytes()?))
 }
 
 fn release(store: &mut ArchiveStore, path: &Path, now: DateTime<Utc>) -> Result<(), ReportError> {

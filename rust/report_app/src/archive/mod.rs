@@ -2,10 +2,11 @@
 pub mod cli;
 pub mod collect;
 pub mod config;
-mod demand;
+pub(crate) mod demand;
 pub mod diff;
 pub mod maintenance;
 pub mod model_input;
+pub(crate) mod observation;
 pub mod parse;
 mod parse_identity;
 mod parse_request;

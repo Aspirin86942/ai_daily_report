@@ -49,6 +49,29 @@ fn snapshots(app: &App) -> Result<SnapshotStore, ReportError> {
     )
 }
 
+fn ensure_snapshot_space(
+    app: &App,
+    end: &str,
+    bytes: u64,
+    deadline: Instant,
+) -> Result<(), ReportError> {
+    let session = app
+        .processing
+        .as_ref()
+        .ok_or_else(|| ReportError::new("PROCESSING_LOCK_REQUIRED", "缺少处理会话"))?;
+    if session.quota.available_bytes()? < bytes {
+        let mut store = session.open_archive(&app.config)?;
+        let now = session.quota.now();
+        let protected =
+            crate::archive::demand::protected(&app.config, &store, Some(end), now, deadline)?;
+        crate::archive::retention::reclaim(&mut store, bytes, &protected, now, deadline)?;
+    }
+    // Exercise the same admission check as the writer; the processing lock
+    // prevents another collector from consuming this space before its write.
+    drop(session.quota.reserve(bytes)?);
+    Ok(())
+}
+
 pub fn run(
     mut request: ReportRequest,
     app: &App,
@@ -159,7 +182,14 @@ pub fn run(
             recovery_fingerprint: app.fingerprint(true)?,
         };
         let snapshots = snapshots(app)?;
-        let reference = snapshots.put(id, "personal-input", &serde_json::to_value(&input)?)?;
+        let bytes = crate::snapshots::canonical_json(&serde_json::to_value(&input)?)?;
+        ensure_snapshot_space(
+            app,
+            &input.context.window_end_utc.to_rfc3339(),
+            2 * bytes.len() as u64,
+            deadline,
+        )?;
+        let reference = snapshots.put_bytes(id, "personal-input", &bytes)?;
         app.store.prepare(
             id,
             &reference,
@@ -242,6 +272,10 @@ pub fn finish(
         let transport = PersonalTransport {
             app,
             selection: &input.selection,
+            end: input.context.window_end_utc.to_rfc3339(),
+            snapshot_bytes: 2 * plan.bytes()?.len() as u64
+                + crate::snapshots::RESPONSE_RESERVATION_BYTES,
+            deadline,
         };
         let runner = ModelRunner {
             store: &app.store,
@@ -363,6 +397,9 @@ pub fn finish(
 struct PersonalTransport<'a> {
     app: &'a App,
     selection: &'a Selection,
+    end: String,
+    snapshot_bytes: u64,
+    deadline: Instant,
 }
 impl PersonalTransport<'_> {
     fn check(&self) -> Result<(), ReportError> {
@@ -393,6 +430,7 @@ impl PersonalTransport<'_> {
 impl ModelTransport for PersonalTransport<'_> {
     fn prepare(&self) -> Result<(), ReportError> {
         self.check()?;
+        ensure_snapshot_space(self.app, &self.end, self.snapshot_bytes, self.deadline)?;
         self.app.transport.prepare()
     }
     fn send(&self, request: &[u8], timeout: Duration) -> Result<HttpResponse, TransportFailure> {

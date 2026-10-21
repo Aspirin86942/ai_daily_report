@@ -390,19 +390,33 @@ fn parse_queue(
         .as_ref()
         .and_then(|p| p["unavailable"].as_u64())
         .unwrap_or(0);
+    let capture_pending = pending
+        .as_ref()
+        .and_then(|p| p["capture_pending"].as_u64())
+        .unwrap_or(0);
+    let baseline_deferred = pending
+        .as_ref()
+        .and_then(|p| p["baseline_deferred"].as_u64())
+        .unwrap_or(0);
     let evidence = json!({"queued":queued,"expired":expired,"read_gaps":gaps,"pending_changes":changes,"oldest_observed_at":oldest,"oldest_age_seconds":age,
         "standby_baselines":standby,"unavailable":unavailable,
+        "capture_pending":capture_pending,"baseline_deferred":baseline_deferred,
         "last_parse_run":last.map(|value|serde_json::from_str::<Value>(&value)).transpose()?});
     Ok(HealthCheck {
         code: "PARSE_QUEUE",
-        level: if queued == 0 && changes == 0 && unavailable == 0 {
+        level: if queued == 0
+            && changes == 0
+            && unavailable == 0
+            && capture_pending == 0
+            && baseline_deferred == 0
+        {
             "ok"
         } else {
             "warning"
         },
         message: if personal {
             format!(
-                "日报材料待解析 {queued} 项、无法准备 {unavailable} 项；另有 {standby} 项基线待用"
+                "日报材料待解析 {queued} 项、比较材料无法准备 {unavailable} 项；发现变化但未取得正文 {capture_pending} 项；初始基线待补采 {baseline_deferred} 项、已采待用 {standby} 项"
             )
         } else if queued == 0 && changes == 0 {
             "归档解析队列为空".into()

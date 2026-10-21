@@ -124,6 +124,8 @@ pub struct SnapshotStore {
     quota: Option<Arc<crate::processing_cache::CacheQuota>>,
 }
 
+pub(crate) const RESPONSE_RESERVATION_BYTES: u64 = 2 * 1024 * 1024;
+
 impl SnapshotStore {
     pub fn new(root: PathBuf, max_bytes: u64) -> Result<Self, ReportError> {
         let root = std::path::absolute(root)?;
@@ -154,7 +156,7 @@ impl SnapshotStore {
         // has two logical paths. Hold this capacity before authorizing a request.
         self.quota
             .as_ref()
-            .map(|q| q.reserve(2 * 1024 * 1024))
+            .map(|q| q.reserve(RESPONSE_RESERVATION_BYTES))
             .transpose()
     }
 

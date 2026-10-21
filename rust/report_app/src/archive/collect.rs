@@ -41,6 +41,12 @@ pub struct CollectionMetrics {
     pub model_calls: u64,
     pub memory_budget_mib: u64,
     pub queued: u64,
+    #[serde(default)]
+    pub capture_pending: u64,
+    #[serde(default)]
+    pub baseline_deferred: u64,
+    #[serde(default)]
+    pub reclaimed_bytes: u64,
     pub warnings: Vec<String>,
 }
 
@@ -54,6 +60,7 @@ struct CaptureJob {
     baseline: bool,
     audit: bool,
     audit_only: bool,
+    priority: u8,
 }
 struct Capture {
     job: CaptureJob,
@@ -68,6 +75,10 @@ struct Captured {
     _reservation: Option<DiskReservation>,
     cache_reservation: Option<crate::processing_cache::CacheReservation>,
 }
+
+// Receipts include paths and fingerprints. Their atomic writer reserves both
+// the temporary and final JSON bytes; enforce the bound used for admission.
+const MAX_CAPTURE_RECEIPT_BYTES: u64 = 256 * 1024;
 
 struct DiskReservation {
     bytes: u64,
@@ -112,7 +123,7 @@ struct CaptureReceipt {
     temp: Option<PathBuf>,
 }
 
-pub(super) fn recover_captures(store: &mut ArchiveStore) -> Result<(), ReportError> {
+pub(crate) fn recover_captures(store: &mut ArchiveStore) -> Result<(), ReportError> {
     for entry in fs::read_dir(store.root.join("staging"))? {
         if let Some(quota) = &store.quota {
             crate::processing_cache::check_deadline(quota.deadline())?;
@@ -166,7 +177,14 @@ fn register_receipt(store: &mut ArchiveStore, receipt: &CaptureReceipt) -> Resul
         params![v.sha256, v.size_bytes as i64, v.observed_at],
     )?;
     tx.execute("INSERT OR IGNORE INTO versions(id,document_id,parent_id,sha256,path,extension,size_bytes,modified_at,observed_at,collection_id,baseline) VALUES(?,?,?,?,?,?,?,?,?,?,?)",params![v.id,v.document_id,v.parent_id,v.sha256,v.path,v.extension,v.size_bytes as i64,v.modified_at,v.observed_at,receipt.run,v.baseline])?;
-    tx.execute("UPDATE documents SET fs_id=?,guard=?,current_version=?,audit_day=? WHERE id=? AND (current_version IS ? OR current_version=?)",params![receipt.fs_id,receipt.guard,v.id,receipt.day,v.document_id,v.parent_id,v.id])?;
+    let updated = tx.execute("UPDATE documents SET fs_id=?,guard=?,current_version=?,audit_day=? WHERE id=? AND (current_version IS ? OR current_version=?)",params![receipt.fs_id,receipt.guard,v.id,receipt.day,v.document_id,v.parent_id,v.id])?;
+    if store.quota.is_some() && updated > 0 {
+        super::observation::captured(&tx, &v.document_id)?;
+        tx.execute(
+            "UPDATE gaps SET resolved_at=? WHERE path=? AND resolved_at IS NULL AND code='CAPTURE_CONTENT_UNAVAILABLE'",
+            params![v.observed_at, v.path],
+        )?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -239,16 +257,27 @@ pub(super) fn result_value(
     let mut value = serde_json::to_value(metrics)?;
     let complete = metrics.errors == 0
         && metrics.queued == 0
-        && !metrics
-            .warnings
-            .iter()
-            .any(|code| code == "PERSONAL_INPUT_UNAVAILABLE");
+        && metrics.capture_pending == 0
+        && metrics.baseline_deferred == 0
+        && !metrics.warnings.iter().any(|code| {
+            matches!(
+                code.as_str(),
+                "PERSONAL_INPUT_UNAVAILABLE" | "COLLECTION_DEADLINE" | "RUN_BUDGET_DEFERRED"
+            )
+        });
     value["operation"] = serde_json::json!(operation);
     value["status"] = serde_json::json!(if complete { "succeeded" } else { "partial" });
     value["execution_status"] = serde_json::json!("succeeded");
     value["material_status"] = serde_json::json!(if complete { "complete" } else { "partial" });
     value["publication_status"] = serde_json::json!("not_applicable");
-    value["reason_codes"] = serde_json::json!(metrics.warnings);
+    let mut reasons = metrics.warnings.clone();
+    if metrics.capture_pending > 0 {
+        reasons.push("CAPTURE_CONTENT_UNAVAILABLE".into());
+    }
+    if metrics.baseline_deferred > 0 {
+        reasons.push("BASELINE_CAPTURE_DEFERRED".into());
+    }
+    value["reason_codes"] = serde_json::json!(reasons);
     Ok(value)
 }
 
@@ -568,7 +597,13 @@ pub fn run(
         )?;
         tx.execute("UPDATE gaps SET resolved_at=? WHERE code='FILE_MISSING' AND path=? AND resolved_at IS NULL",params![timestamp,file.path])?;
         let audit = audit_day.as_deref() != Some(day.as_str());
-        if parent.is_some() && guard.is_some() && old_guard == guard && !audit {
+        let pending_capture = personal
+            && tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=?)",
+                [format!("capture:{doc}")],
+                |r| r.get::<_, bool>(0),
+            )?;
+        if parent.is_some() && guard.is_some() && old_guard == guard && !audit && !pending_capture {
             metrics.unchanged += 1;
             continue;
         }
@@ -577,6 +612,31 @@ pub fn run(
             .map(|id| tx.query_row("SELECT sha256 FROM versions WHERE id=?", [id], |r| r.get(0)))
             .transpose()?;
         let audit_only = old_guard.is_some() && old_guard == guard;
+        let changed = if personal {
+            super::observation::observe(
+                &tx,
+                &doc,
+                super::observation::fingerprint(
+                    guard.as_deref(),
+                    file.size_bytes,
+                    &file.modified_at,
+                ),
+                parent.is_some() && !audit_only || parent.is_none() && !base,
+                &timestamp,
+            )?
+        } else {
+            false
+        };
+        let priority = if changed {
+            0
+        } else if parent.is_some() {
+            1
+        } else {
+            2
+        };
+        if personal && changed {
+            super::observation::record_gap(&tx, &doc, &run_id)?;
+        }
         jobs.push_back(CaptureJob {
             file,
             document: doc,
@@ -584,9 +644,10 @@ pub fn run(
             known_hash,
             fs_id,
             guard,
-            baseline: base,
+            baseline: base && !changed,
             audit,
             audit_only,
+            priority,
         });
     }
     for root in complete_roots {
@@ -640,92 +701,112 @@ pub fn run(
     if free < config.archive.warn_free_mib * 1024 * 1024 {
         metrics.warnings.push("LOW_DISK_SPACE".into());
     }
-    let job_queue = Mutex::new(jobs);
-    let disk_pending = Arc::new(Mutex::new(0));
-    let cache = store.quota.clone();
-    // Capturing originals must leave room for at least one bounded parse.
-    let capture_headroom = cache
-        .as_ref()
-        .map(|quota| quota.reserve(crate::processing_cache::MAX_OUTPUT_BYTES))
-        .transpose()?;
     let capture_started = Instant::now();
-    let staging = store.root.join("staging");
-    let (sender, receiver) = mpsc::sync_channel(config.archive.read_workers * 2);
-    std::thread::scope(|scope| -> Result<(), ReportError> {
-        for _ in 0..config.archive.read_workers {
-            let sender = sender.clone();
-            let queue = &job_queue;
-            let staging = &staging;
-            let disk_pending = &disk_pending;
-            let cache = &cache;
-            scope.spawn(move || loop {
-                let Some(mut job) = queue.lock().unwrap().pop_front() else {
-                    break;
-                };
-                let time = Instant::now();
-                let result = if time >= deadline {
-                    Err(error("COLLECTION_DEADLINE"))
-                } else {
-                    capture(
-                        &job,
-                        staging,
-                        config,
-                        deadline,
-                        disk_pending,
-                        cache.as_ref(),
-                    )
-                    .or_else(|e| {
-                        if e.code == "SOURCE_CHANGED" || e.code == "SOURCE_BUSY" {
-                            let fresh = fs::metadata(&job.file.path)?;
-                            job.file.size_bytes = fresh.len();
-                            let identity =
-                                archive_identity(Path::new(&job.file.path)).ok().flatten();
-                            (job.fs_id, job.guard) = identity
-                                .map(|(id, guard)| (Some(id), Some(guard)))
-                                .unwrap_or_default();
-                            job.audit_only = false;
-                            capture(
-                                &job,
-                                staging,
-                                config,
-                                deadline,
-                                disk_pending,
-                                cache.as_ref(),
-                            )
-                        } else {
-                            Err(e)
-                        }
-                    })
-                };
-                if sender
-                    .send(Capture {
-                        job,
-                        result,
-                        elapsed: time.elapsed().as_millis() as u64,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            });
+    if personal {
+        match capture_personal(config, &mut store, jobs, now, deadline, &mut metrics) {
+            Err(e) if e.code == "PROCESSING_DEADLINE" => {
+                metrics.errors += 1;
+                metrics.warnings.push("COLLECTION_DEADLINE".into());
+                store.gap(
+                    &run_id,
+                    None,
+                    "COLLECTION_DEADLINE",
+                    "采集时间预算已用完，保留未完成的采集记录。",
+                )?;
+            }
+            result => result?,
         }
-        drop(sender);
-        for capture in receiver {
-            let at = now + chrono::Duration::from_std(started.elapsed()).unwrap_or_default();
-            persist_capture(&mut store, &run_id, &day, at, capture, &mut metrics)?;
-        }
-        Ok(())
-    })?;
+    } else {
+        let job_queue = Mutex::new(jobs);
+        let disk_pending = Arc::new(Mutex::new(0));
+        let cache = store.quota.clone();
+        // Capturing originals must leave room for at least one bounded parse.
+        let capture_headroom = cache
+            .as_ref()
+            .map(|quota| quota.reserve(crate::processing_cache::MAX_OUTPUT_BYTES))
+            .transpose()?;
+        let staging = store.root.join("staging");
+        let (sender, receiver) = mpsc::sync_channel(config.archive.read_workers * 2);
+        std::thread::scope(|scope| -> Result<(), ReportError> {
+            for _ in 0..config.archive.read_workers {
+                let sender = sender.clone();
+                let queue = &job_queue;
+                let staging = &staging;
+                let disk_pending = &disk_pending;
+                let cache = &cache;
+                scope.spawn(move || loop {
+                    let Some(mut job) = queue.lock().unwrap().pop_front() else {
+                        break;
+                    };
+                    let time = Instant::now();
+                    let result = if time >= deadline {
+                        Err(error("COLLECTION_DEADLINE"))
+                    } else {
+                        capture(
+                            &job,
+                            staging,
+                            config,
+                            deadline,
+                            disk_pending,
+                            cache.as_ref(),
+                        )
+                        .or_else(|e| {
+                            if e.code == "SOURCE_CHANGED" || e.code == "SOURCE_BUSY" {
+                                let fresh = fs::metadata(&job.file.path)?;
+                                job.file.size_bytes = fresh.len();
+                                let identity =
+                                    archive_identity(Path::new(&job.file.path)).ok().flatten();
+                                (job.fs_id, job.guard) = identity
+                                    .map(|(id, guard)| (Some(id), Some(guard)))
+                                    .unwrap_or_default();
+                                job.audit_only = false;
+                                capture(
+                                    &job,
+                                    staging,
+                                    config,
+                                    deadline,
+                                    disk_pending,
+                                    cache.as_ref(),
+                                )
+                            } else {
+                                Err(e)
+                            }
+                        })
+                    };
+                    if sender
+                        .send(Capture {
+                            job,
+                            result,
+                            elapsed: time.elapsed().as_millis() as u64,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                });
+            }
+            drop(sender);
+            for capture in receiver {
+                let at = now + chrono::Duration::from_std(started.elapsed()).unwrap_or_default();
+                persist_capture(&mut store, &run_id, &day, at, capture, &mut metrics)?;
+            }
+            Ok(())
+        })?;
+        drop(capture_headroom);
+    }
     metrics.capture_ms = capture_started.elapsed().as_millis() as u64;
-    drop(capture_headroom);
     parse::drain(config, &mut store, &mut metrics, deadline)?;
     let pending = super::queue::pending_in(&store, config, None)?;
     metrics.queued = pending["queued"].as_u64().unwrap_or(0);
+    if personal {
+        (metrics.capture_pending, metrics.baseline_deferred) =
+            super::observation::counts(&store, None)?;
+    }
     if pending["unavailable"].as_u64().unwrap_or(0) > 0 {
         metrics.warnings.push("PERSONAL_INPUT_UNAVAILABLE".into());
     }
     metrics.wall_ms = started.elapsed().as_millis() as u64;
-    let status = if metrics.errors == 0 && metrics.queued == 0 && pending["unavailable"] == 0 {
+    let status = if result_value(&metrics, "collect")?["material_status"] == "complete" {
         "complete"
     } else {
         "partial"
@@ -740,6 +821,208 @@ pub fn run(
         ],
     )?;
     Ok(metrics)
+}
+
+fn capture_personal(
+    config: &AppConfig,
+    store: &mut ArchiveStore,
+    jobs: VecDeque<CaptureJob>,
+    now: DateTime<Utc>,
+    deadline: Instant,
+    metrics: &mut CollectionMetrics,
+) -> Result<(), ReportError> {
+    let started = Instant::now();
+    let deadline = deadline - Duration::from_secs(2);
+    let quota = store
+        .quota
+        .clone()
+        .ok_or_else(|| error("PROCESSING_LOCK_REQUIRED"))?;
+    let mut protected = match super::demand::protected(config, store, None, now, deadline) {
+        Err(e) if e.code == "PROCESSING_DEADLINE" => {
+            metrics.errors += 1;
+            metrics.warnings.push("COLLECTION_DEADLINE".into());
+            store.gap(
+                &metrics.run_id,
+                None,
+                "COLLECTION_DEADLINE",
+                "需求查询未完成，保留现有材料。",
+            )?;
+            return Ok(());
+        }
+        other => other?,
+    };
+    let mut jobs: Vec<_> = jobs.into_iter().collect();
+    jobs.sort_by_key(|job| job.priority);
+    for job in jobs.iter().filter(|job| job.priority == 0) {
+        crate::processing_cache::check_deadline(deadline)?;
+        protect_capture(store, job, now, &mut protected)?;
+    }
+    let staging = store.root.join("staging");
+    let disk_pending = Arc::new(Mutex::new(0));
+    for mut job in jobs {
+        if Instant::now() >= deadline {
+            metrics.errors += 1;
+            metrics.warnings.push("COLLECTION_DEADLINE".into());
+            store.gap(
+                &metrics.run_id,
+                None,
+                "COLLECTION_DEADLINE",
+                "采集时间预算已用完，未完成的正文仍待采集。",
+            )?;
+            break;
+        }
+        let at = Instant::now();
+        let mut headroom = None;
+        let mut audited_bytes = 0;
+        let mut retried = false;
+        let result = loop {
+            if Instant::now() >= deadline {
+                break Err(error("COLLECTION_DEADLINE"));
+            }
+            if !job.audit_only || job.known_hash.is_none() {
+                if job.file.size_bytes > crate::processing_cache::MAX_INPUT_BYTES {
+                    break Err(error("FILE_TOO_LARGE"));
+                }
+                let required = job.file.size_bytes
+                    + crate::processing_cache::MAX_OUTPUT_BYTES
+                    + 2 * MAX_CAPTURE_RECEIPT_BYTES;
+                if job.priority == 0 {
+                    match super::retention::reclaim(store, required, &protected, now, deadline) {
+                        Ok(bytes) => metrics.reclaimed_bytes += bytes,
+                        Err(e) => break Err(e),
+                    }
+                }
+                if quota.available_bytes()? < required {
+                    break Err(error("PROCESSING_CACHE_FULL"));
+                }
+                headroom = Some(quota.reserve(crate::processing_cache::MAX_OUTPUT_BYTES)?);
+            }
+            let result = capture(
+                &job,
+                &staging,
+                config,
+                deadline,
+                &disk_pending,
+                Some(&quota),
+            );
+            match result {
+                Ok(captured)
+                    if job.audit_only && job.known_hash.as_ref() != Some(&captured.hash) =>
+                {
+                    // Audits read without allocating a copy. Only a confirmed
+                    // mismatch promotes the job and admits a bounded copy.
+                    audited_bytes += captured.bytes;
+                    job.audit_only = false;
+                    job.priority = 0;
+                    job.baseline = false;
+                    super::observation::observe(
+                        &store.conn,
+                        &job.document,
+                        super::observation::fingerprint(
+                            job.guard.as_deref(),
+                            job.file.size_bytes,
+                            &job.file.modified_at,
+                        ),
+                        true,
+                        &now.to_rfc3339(),
+                    )?;
+                    super::observation::record_gap(&store.conn, &job.document, &metrics.run_id)?;
+                    protect_capture(store, &job, now, &mut protected)?;
+                }
+                Err(e) if !retried && matches!(e.code, "SOURCE_CHANGED" | "SOURCE_BUSY") => {
+                    headroom = None;
+                    retried = true;
+                    let fresh = match fs::metadata(&job.file.path) {
+                        Ok(value) => value,
+                        Err(_) => break Err(e),
+                    };
+                    job.file.size_bytes = fresh.len();
+                    job.file.modified_at = DateTime::<Utc>::from(fresh.modified()?).to_rfc3339();
+                    let old_guard = job.guard.clone();
+                    let identity = archive_identity(Path::new(&job.file.path)).ok().flatten();
+                    (job.fs_id, job.guard) = identity
+                        .map(|(id, guard)| (Some(id), Some(guard)))
+                        .unwrap_or_default();
+                    if old_guard != job.guard || e.code == "SOURCE_CHANGED" {
+                        job.audit_only = false;
+                        job.priority = 0;
+                        job.baseline = false;
+                        super::observation::observe(
+                            &store.conn,
+                            &job.document,
+                            super::observation::fingerprint(
+                                job.guard.as_deref(),
+                                job.file.size_bytes,
+                                &job.file.modified_at,
+                            ),
+                            true,
+                            &now.to_rfc3339(),
+                        )?;
+                        super::observation::record_gap(
+                            &store.conn,
+                            &job.document,
+                            &metrics.run_id,
+                        )?;
+                        protect_capture(store, &job, now, &mut protected)?;
+                    }
+                }
+                other => break other,
+            }
+        };
+        metrics.bytes_read += audited_bytes;
+        if job.priority == 2
+            && result
+                .as_ref()
+                .is_err_and(|e| e.code == "PROCESSING_CACHE_FULL")
+        {
+            // The durable inventory and baseline_deferred count already describe
+            // this optional work. Repeated full-cache polls need no per-file rows.
+            metrics.capture_work_ms += at.elapsed().as_millis() as u64;
+            continue;
+        }
+        let document = job.document.clone();
+        let required = job.priority == 0;
+        let run = metrics.run_id.clone();
+        persist_capture(
+            store,
+            &run,
+            &local_day(now),
+            now + chrono::Duration::from_std(started.elapsed()).unwrap_or_default(),
+            Capture {
+                job,
+                result,
+                elapsed: at.elapsed().as_millis() as u64,
+            },
+            metrics,
+        )?;
+        drop(headroom);
+        if required {
+            let current: Option<String> = store.conn.query_row(
+                "SELECT current_version FROM documents WHERE id=?",
+                [&document],
+                |r| r.get(0),
+            )?;
+            protected.extend(current);
+        }
+    }
+    Ok(())
+}
+
+fn protect_capture(
+    store: &ArchiveStore,
+    job: &CaptureJob,
+    now: DateTime<Utc>,
+    protected: &mut BTreeSet<String>,
+) -> Result<(), ReportError> {
+    protected.extend(job.parent.clone());
+    let (start, _) =
+        crate::types::utc_window(now.with_timezone(&crate::types::shanghai()).date_naive())?;
+    let previous: Option<String> = store.conn.query_row(
+        "SELECT id FROM versions WHERE document_id=? AND observed_at<? ORDER BY observed_at DESC,rowid DESC LIMIT 1",
+        params![job.document, start.to_rfc3339()], |r| r.get(0),
+    ).optional()?;
+    protected.extend(previous);
+    Ok(())
 }
 
 fn capture(
@@ -821,7 +1104,7 @@ fn capture(
         return Err(error("SOURCE_CHANGED"));
     }
     let hash = ai_daily_worker_contract::archive::hex(&hash.finalize());
-    if audit_only && Some(&hash) != job.known_hash.as_ref() {
+    if audit_only && Some(&hash) != job.known_hash.as_ref() && quota.is_none() {
         // An identity-preserving change discovered by the daily audit needs one copy.
         use std::io::{Seek, SeekFrom};
         file.seek(SeekFrom::Start(0))?;
@@ -891,6 +1174,14 @@ fn persist_capture(
         Err(e) => {
             metrics.errors += 1;
             store.gap(run, Some(&job.file.path), e.code, &e.message)?;
+            if store.quota.is_some() && job.priority == 0 {
+                store.gap(
+                    run,
+                    Some(&job.file.path),
+                    "CAPTURE_CONTENT_UNAVAILABLE",
+                    "发现文件变化，但尚未取得该版本正文。",
+                )?;
+            }
             store.conn.execute(
                 "INSERT INTO file_metrics(collection_id,path,capture_ms,status) VALUES(?,?,?,?)",
                 params![run, job.file.path, elapsed as i64, e.code],
@@ -930,28 +1221,32 @@ fn persist_capture(
     if !unchanged {
         // Commit the observation before moving its bytes. A crash on either side
         // of the rename can recover the same observed version, even if the source changes.
-        let receipt = store.put_json(
-            &receipt_path,
-            &CaptureReceipt {
-                version: super::store::Version {
-                    id: version_id.clone(),
-                    document_id: job.document.clone(),
-                    parent_id: job.parent.clone(),
-                    sha256: captured.hash.clone(),
-                    path: job.file.path.clone(),
-                    extension: job.file.extension.clone(),
-                    size_bytes: job.file.size_bytes,
-                    modified_at: captured.modified.clone(),
-                    observed_at: observed.clone(),
-                    baseline: job.baseline && job.parent.is_none(),
-                },
-                run: run.into(),
-                day: day.into(),
-                fs_id: job.fs_id.clone(),
-                guard: job.guard.clone(),
-                temp: temp_path.clone(),
+        let receipt = CaptureReceipt {
+            version: super::store::Version {
+                id: version_id.clone(),
+                document_id: job.document.clone(),
+                parent_id: job.parent.clone(),
+                sha256: captured.hash.clone(),
+                path: job.file.path.clone(),
+                extension: job.file.extension.clone(),
+                size_bytes: job.file.size_bytes,
+                modified_at: captured.modified.clone(),
+                observed_at: observed.clone(),
+                baseline: job.baseline && job.parent.is_none(),
             },
-        );
+            run: run.into(),
+            day: day.into(),
+            fs_id: job.fs_id.clone(),
+            guard: job.guard.clone(),
+            temp: temp_path.clone(),
+        };
+        let receipt = if store.quota.is_some()
+            && serde_json::to_vec(&receipt)?.len() as u64 > MAX_CAPTURE_RECEIPT_BYTES
+        {
+            Err(error("PROCESSING_CACHE_FULL"))
+        } else {
+            store.put_json(&receipt_path, &receipt)
+        };
         if let Err(e) = receipt {
             if store.quota.is_some() && e.code == "PROCESSING_CACHE_FULL" {
                 // The original's reservation is still owned by `captured`.
@@ -959,6 +1254,14 @@ fn persist_capture(
                 // eligible for a later collection and no version is published.
                 metrics.errors += 1;
                 store.gap(run, Some(&job.file.path), e.code, &e.message)?;
+                if job.priority == 0 {
+                    store.gap(
+                        run,
+                        Some(&job.file.path),
+                        "CAPTURE_CONTENT_UNAVAILABLE",
+                        "发现文件变化，但尚未取得该版本正文。",
+                    )?;
+                }
                 store.conn.execute(
                     "INSERT INTO file_metrics(collection_id,path,capture_ms,status) VALUES(?,?,?,?)",
                     params![run, job.file.path, elapsed as i64, e.code],
@@ -1010,6 +1313,9 @@ fn persist_capture(
         "UPDATE gaps SET resolved_at=? WHERE path=? AND resolved_at IS NULL",
         params![observed, job.file.path],
     )?;
+    if store.quota.is_some() {
+        super::observation::captured(&tx, &job.document)?;
+    }
     if !unchanged {
         tx.execute("INSERT INTO file_metrics(collection_id,path,version_id,capture_ms,bytes_read,status) VALUES(?,?,?,?,?,?)",params![run,job.file.path,version,elapsed as i64,captured.bytes as i64,"captured"])?;
     }
@@ -1054,6 +1360,555 @@ pub fn free_disk(_path: &Path) -> Result<u64, ReportError> {
 mod tests {
     use super::*;
     use crate::processing_cache::ProcessingSession;
+
+    const MIB: usize = 1024 * 1024;
+
+    fn capacity_setup() -> (tempfile::TempDir, AppConfig) {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("config")).unwrap();
+        fs::create_dir(dir.path().join("work")).unwrap();
+        fs::write(dir.path().join("config/settings.yaml"),
+            r#"{"paths":{"work_dir":"work"},"report":{"profile":"personal"},"archive":{"daily_source":"archive"}}"#).unwrap();
+        let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
+        (dir, config)
+    }
+
+    fn capacity_store(config: &AppConfig, now: DateTime<Utc>) -> (ProcessingSession, ArchiveStore) {
+        let session = ProcessingSession::at(
+            &config.paths.data_dir.join("daily_cache"),
+            now,
+            Instant::now() + Duration::from_secs(30),
+            24 * MIB as u64,
+            MIB as u64,
+            Duration::ZERO,
+        )
+        .unwrap();
+        let store = session.open_archive(config).unwrap();
+        (session, store)
+    }
+
+    fn seed_body(
+        store: &mut ArchiveStore,
+        config: &AppConfig,
+        name: &str,
+        byte: u8,
+        now: DateTime<Utc>,
+    ) -> (String, String) {
+        let source = config.paths.work_dir.join(name);
+        let body = vec![byte; 4 * MIB];
+        fs::write(&source, &body).unwrap();
+        let hash = crate::snapshots::digest(&body);
+        let object = store.object(&hash).unwrap();
+        if !object.exists() {
+            store.quota.as_ref().unwrap().write(&object, &body).unwrap();
+        }
+        let run = new_run_id();
+        let document = identity(&[name]);
+        let version = identity(&[name, &hash]);
+        store
+            .conn
+            .execute(
+                "INSERT INTO collections(id,started_at,status,baseline) VALUES(?,?,'complete',1)",
+                params![run, now.to_rfc3339()],
+            )
+            .unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO documents(id,root,path,extension,baseline) VALUES(?,?,?,'.txt',1)",
+                params![
+                    document,
+                    config.paths.work_dir.to_str().unwrap(),
+                    source.to_str().unwrap()
+                ],
+            )
+            .unwrap();
+        register_receipt(
+            store,
+            &CaptureReceipt {
+                version: super::super::store::Version {
+                    id: version.clone(),
+                    document_id: document.clone(),
+                    parent_id: None,
+                    sha256: hash,
+                    path: source.to_str().unwrap().into(),
+                    extension: ".txt".into(),
+                    size_bytes: body.len() as u64,
+                    modified_at: now.to_rfc3339(),
+                    observed_at: now.to_rfc3339(),
+                    baseline: true,
+                },
+                run,
+                day: local_day(now),
+                fs_id: None,
+                guard: None,
+                temp: None,
+            },
+        )
+        .unwrap();
+        (document, version)
+    }
+
+    fn capacity_job(
+        store: &ArchiveStore,
+        config: &AppConfig,
+        name: &str,
+        parent: Option<(String, String)>,
+        now: DateTime<Utc>,
+    ) -> CaptureJob {
+        let source = config.paths.work_dir.join(name);
+        let baseline = parent.is_none();
+        let (document, version) = parent
+            .map(|(d, v)| (d, Some(v)))
+            .unwrap_or_else(|| (identity(&[name]), None));
+        if baseline {
+            store
+                .conn
+                .execute(
+                    "INSERT OR IGNORE INTO documents(id,root,path,extension,baseline) VALUES(?,?,?,'.txt',1)",
+                    params![
+                        document,
+                        config.paths.work_dir.to_str().unwrap(),
+                        source.to_str().unwrap()
+                    ],
+                )
+                .unwrap();
+        }
+        let known_hash = version.as_ref().map(|id| store.version(id).unwrap().sha256);
+        let file = DiscoveredFileOut {
+            file_identity: document.clone(),
+            path: source.to_str().unwrap().into(),
+            extension: ".txt".into(),
+            modified_at: now.to_rfc3339(),
+            size_bytes: fs::metadata(source).unwrap().len(),
+            source_version: "test".into(),
+            source_guard_kind: None,
+            source_guard_sha256: None,
+        };
+        super::super::observation::observe(
+            &store.conn,
+            &document,
+            super::super::observation::fingerprint(None, file.size_bytes, &file.modified_at),
+            !baseline,
+            &now.to_rfc3339(),
+        )
+        .unwrap();
+        CaptureJob {
+            file,
+            document,
+            parent: version,
+            known_hash,
+            fs_id: None,
+            guard: None,
+            baseline,
+            audit: false,
+            audit_only: false,
+            priority: if baseline { 2 } else { 0 },
+        }
+    }
+
+    fn capture_run(
+        store: &mut ArchiveStore,
+        config: &AppConfig,
+        now: DateTime<Utc>,
+        jobs: Vec<CaptureJob>,
+    ) -> CollectionMetrics {
+        let run_id = new_run_id();
+        store
+            .conn
+            .execute(
+                "INSERT INTO collections(id,started_at,status,baseline) VALUES(?,?,'running',0)",
+                params![run_id, now.to_rfc3339()],
+            )
+            .unwrap();
+        let mut metrics = CollectionMetrics {
+            run_id,
+            ..Default::default()
+        };
+        for job in &jobs {
+            super::super::observation::record_gap(&store.conn, &job.document, &metrics.run_id)
+                .unwrap();
+        }
+        capture_personal(
+            config,
+            store,
+            jobs.into(),
+            now,
+            Instant::now() + Duration::from_secs(20),
+            &mut metrics,
+        )
+        .unwrap();
+        metrics
+    }
+
+    #[test]
+    fn changed_body_precedes_baseline_and_shared_previous_bytes_survive_pressure() {
+        let (_dir, config) = capacity_setup();
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(1);
+        let (session, mut store) = capacity_store(&config, old);
+        let changed = seed_body(&mut store, &config, "changed.txt", b'a', old);
+        seed_body(&mut store, &config, "alias.txt", b'a', old);
+        seed_body(&mut store, &config, "standby-1.txt", b'b', old);
+        seed_body(&mut store, &config, "standby-2.txt", b'c', old);
+        let previous = store.version(&changed.1).unwrap();
+        drop(store);
+        drop(session);
+        let (session, mut store) = capacity_store(&config, now);
+        fs::write(config.paths.work_dir.join("changed.txt"), vec![b'd'; MIB]).unwrap();
+        fs::write(
+            config.paths.work_dir.join("late-baseline.txt"),
+            vec![b'e'; 2 * MIB],
+        )
+        .unwrap();
+        let baseline = capacity_job(&store, &config, "late-baseline.txt", None, now);
+        let change = capacity_job(&store, &config, "changed.txt", Some(changed), now);
+        let metrics = capture_run(&mut store, &config, now, vec![baseline, change]);
+        assert_eq!((metrics.versions, metrics.errors), (1, 0));
+        assert_eq!(metrics.reclaimed_bytes, 8 * MIB as u64);
+        assert!(store.object(&previous.sha256).unwrap().is_file());
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM versions WHERE sha256=? AND pruned_at IS NULL",
+                    [previous.sha256],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            super::super::observation::counts(&store, None).unwrap(),
+            (0, 1)
+        );
+        assert!(session.quota.used_bytes().unwrap() <= 24 * MIB as u64);
+        let used = session.quota.used_bytes().unwrap();
+        let retry = capacity_job(&store, &config, "late-baseline.txt", None, now);
+        let retry = capture_run(&mut store, &config, now, vec![retry]);
+        assert_eq!((retry.versions, retry.reclaimed_bytes), (0, 0));
+        assert_eq!(session.quota.used_bytes().unwrap(), used);
+        assert_eq!(
+            store
+                .conn
+                .query_row("SELECT count(*) FROM file_metrics", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn unchanged_integrity_audit_reads_without_eviction_or_copy() {
+        let (_dir, config) = capacity_setup();
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(1);
+        let (session, mut store) = capacity_store(&config, old);
+        let source = seed_body(&mut store, &config, "audit.txt", b'a', old);
+        seed_body(&mut store, &config, "standby.txt", b'b', old);
+        drop(store);
+        drop(session);
+        let (session, mut store) = capacity_store(&config, now);
+        let mut job = capacity_job(&store, &config, "audit.txt", Some(source), now);
+        job.audit_only = true;
+        job.audit = true;
+        job.priority = 1;
+        let used = session.quota.used_bytes().unwrap();
+        let metrics = capture_run(&mut store, &config, now, vec![job]);
+        assert_eq!(metrics.bytes_read, 4 * MIB as u64);
+        assert_eq!(
+            (
+                metrics.versions,
+                metrics.bytes_written,
+                metrics.reclaimed_bytes
+            ),
+            (0, 0, 0)
+        );
+        assert_eq!(used, session.quota.used_bytes().unwrap());
+        assert_eq!(
+            super::super::observation::counts(&store, None).unwrap(),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn deferred_capture_intent_survives_an_identical_observation() {
+        let (_dir, config) = capacity_setup();
+        let now = Utc::now();
+        let (_session, store) = capacity_store(&config, now);
+        fs::write(config.paths.work_dir.join("pending.txt"), b"first").unwrap();
+        let job = capacity_job(&store, &config, "pending.txt", None, now);
+        let observe = |fingerprint: &str, changed| {
+            super::super::observation::observe(
+                &store.conn,
+                &job.document,
+                fingerprint.to_owned(),
+                changed,
+                &now.to_rfc3339(),
+            )
+            .unwrap()
+        };
+        assert!(observe("second", false));
+        assert!(observe("second", false));
+        assert_eq!(
+            super::super::observation::counts(&store, None).unwrap(),
+            (1, 0)
+        );
+        super::super::observation::captured(&store.conn, &job.document).unwrap();
+        assert_eq!(
+            super::super::observation::counts(&store, None).unwrap(),
+            (0, 1)
+        );
+    }
+
+    #[test]
+    fn protection_reads_beyond_selection_limit_and_keeps_pending_preimages() {
+        let (_dir, config) = capacity_setup();
+        let now = Utc::now();
+        let old = now - chrono::Duration::days(2);
+        let (session, mut store) = capacity_store(&config, old);
+        let (_, seed) = seed_body(&mut store, &config, "seed.txt", b'a', old);
+        let pending = seed_body(&mut store, &config, "pending.txt", b'b', old);
+        let (_, last) = seed_body(&mut store, &config, "last.txt", b'c', old);
+        store
+            .conn
+            .execute(
+                "UPDATE versions SET baseline=0,observed_at=? WHERE id=?",
+                params![now.to_rfc3339(), last],
+            )
+            .unwrap();
+        let tx = store.conn.transaction().unwrap();
+        for index in 0..1_030 {
+            let id = format!("document-{index:04}");
+            let path = config.paths.work_dir.join(format!("copy-{index}.txt"));
+            tx.execute("INSERT INTO documents(id,root,path,extension,baseline,current_version) VALUES(?,?,?,'.txt',0,?)",
+                params![id,config.paths.work_dir.to_str().unwrap(),path.to_str().unwrap(),id]).unwrap();
+            tx.execute("INSERT INTO versions(id,document_id,sha256,path,extension,size_bytes,modified_at,observed_at,collection_id,baseline)
+                SELECT ?1,?1,sha256,?2,extension,size_bytes,modified_at,?3,collection_id,0 FROM versions WHERE id=?4",
+                params![id,path.to_str().unwrap(),now.to_rfc3339(),seed]).unwrap();
+        }
+        tx.commit().unwrap();
+        super::super::observation::observe(
+            &store.conn,
+            &pending.0,
+            "changed".into(),
+            true,
+            &now.to_rfc3339(),
+        )
+        .unwrap();
+        let protected = super::super::demand::protected(
+            &config,
+            &store,
+            None,
+            now,
+            Instant::now() + Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(protected.len(), 1_032);
+        assert!(protected.contains(&last));
+        assert!(protected.contains(&pending.1));
+        let used = session.quota.used_bytes().unwrap();
+        let failed = super::super::demand::protected(&config, &store, None, now, Instant::now());
+        assert_eq!(failed.unwrap_err().code, "PROCESSING_DEADLINE");
+        assert_eq!(session.quota.used_bytes().unwrap(), used);
+    }
+
+    #[test]
+    fn expired_capture_receipt_recovers_observation_before_pruning_bytes() {
+        let (_dir, config) = capacity_setup();
+        let old = Utc::now() - chrono::Duration::days(8);
+        let (session, store) = capacity_store(&config, old);
+        fs::write(config.paths.work_dir.join("recover.txt"), b"observed").unwrap();
+        let job = capacity_job(&store, &config, "recover.txt", None, old);
+        let run = new_run_id();
+        store
+            .conn
+            .execute(
+                "INSERT INTO collections(id,started_at,status,baseline) VALUES(?,?,'running',1)",
+                params![run, old.to_rfc3339()],
+            )
+            .unwrap();
+        let hash = crate::snapshots::digest(b"observed");
+        let temp = store.root.join("staging/recover.tmp");
+        session.quota.write(&temp, b"observed").unwrap();
+        let receipt = CaptureReceipt {
+            version: super::super::store::Version {
+                id: identity(&["recovered-version"]),
+                document_id: job.document.clone(),
+                parent_id: None,
+                sha256: hash.clone(),
+                path: job.file.path,
+                extension: ".txt".into(),
+                size_bytes: 8,
+                modified_at: old.to_rfc3339(),
+                observed_at: old.to_rfc3339(),
+                baseline: true,
+            },
+            run,
+            day: local_day(old),
+            fs_id: None,
+            guard: None,
+            temp: Some(temp),
+        };
+        store
+            .put_json(&store.root.join("staging/capture-recover.json"), &receipt)
+            .unwrap();
+        drop(store);
+        drop(session);
+        let (_session, store) = capacity_store(&config, Utc::now());
+        let current: String = store
+            .conn
+            .query_row(
+                "SELECT current_version FROM documents WHERE id=?",
+                [job.document],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(current, receipt.version.id);
+        assert!(!store.object(&hash).unwrap().exists());
+        assert!(store
+            .conn
+            .query_row(
+                "SELECT pruned_at IS NOT NULL FROM versions WHERE id=?",
+                [current],
+                |r| r.get::<_, bool>(0)
+            )
+            .unwrap());
+    }
+
+    #[test]
+    fn exhausted_capture_budget_keeps_durable_gap_and_comparison_body() {
+        let (_dir, config) = capacity_setup();
+        let now = Utc::now();
+        let (_session, mut store) = capacity_store(&config, now);
+        let previous = seed_body(
+            &mut store,
+            &config,
+            "deadline.txt",
+            b'a',
+            now - chrono::Duration::days(1),
+        );
+        let before = store.version(&previous.1).unwrap();
+        fs::write(config.paths.work_dir.join("deadline.txt"), b"changed").unwrap();
+        let job = capacity_job(&store, &config, "deadline.txt", Some(previous), now);
+        let run_id = new_run_id();
+        store
+            .conn
+            .execute(
+                "INSERT INTO collections(id,started_at,status,baseline) VALUES(?,?,'running',0)",
+                params![run_id, now.to_rfc3339()],
+            )
+            .unwrap();
+        super::super::observation::record_gap(&store.conn, &job.document, &run_id).unwrap();
+        let mut metrics = CollectionMetrics {
+            run_id,
+            ..Default::default()
+        };
+        capture_personal(
+            &config,
+            &mut store,
+            vec![job].into(),
+            now,
+            Instant::now(),
+            &mut metrics,
+        )
+        .unwrap();
+        assert_eq!((metrics.versions, metrics.bytes_read), (0, 0));
+        assert!(store.object(&before.sha256).unwrap().is_file());
+        assert_eq!(
+            super::super::observation::counts(&store, None).unwrap().0,
+            1
+        );
+        assert_eq!(store.conn.query_row("SELECT count(*) FROM gaps WHERE code='CAPTURE_CONTENT_UNAVAILABLE' AND resolved_at IS NULL",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+    }
+
+    #[test]
+    fn shared_extraction_is_protected_across_versions() {
+        let (_dir, config) = capacity_setup();
+        let old = Utc::now() - chrono::Duration::days(1);
+        let (session, mut store) = capacity_store(&config, old);
+        let (_, original) = seed_body(&mut store, &config, "original.txt", b'a', old);
+        let (_, alias) = seed_body(&mut store, &config, "alias.txt", b'a', old);
+        let hash = store.version(&original).unwrap().sha256;
+        let extraction = identity(&["extraction", &hash]);
+        store.conn.execute("INSERT INTO extractions(id,sha256,profile,extension,status) VALUES(?,?,'test','.txt','complete')",params![extraction,hash]).unwrap();
+        for id in [&original, &alias] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO version_extractions VALUES(?,?)",
+                    params![id, extraction],
+                )
+                .unwrap();
+        }
+        let directory = store.extraction_dir(&extraction).unwrap();
+        let path = directory.join("content.txt");
+        let mut reservation = session.quota.reserve(100).unwrap();
+        reservation.track(&directory).unwrap();
+        fs::create_dir(&directory).unwrap();
+        fs::write(&path, b"shared parsed body").unwrap();
+        reservation.commit(&[directory]).unwrap();
+        drop(store);
+        drop(session);
+        let (_session, mut store) = capacity_store(&config, Utc::now());
+        let protected = BTreeSet::from([alias]);
+        assert_eq!(
+            super::super::retention::reclaim(
+                &mut store,
+                23 * MIB as u64,
+                &protected,
+                Utc::now(),
+                Instant::now() + Duration::from_secs(10)
+            )
+            .unwrap(),
+            0
+        );
+        assert!(path.is_file());
+        assert!(store.version(&original).is_ok());
+        assert!(
+            super::super::retention::reclaim(
+                &mut store,
+                23 * MIB as u64,
+                &BTreeSet::new(),
+                Utc::now(),
+                Instant::now() + Duration::from_secs(10)
+            )
+            .unwrap()
+                > 0
+        );
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn failed_deletion_keeps_bytes_accounted_and_marks_content_unavailable() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (_dir, config) = capacity_setup();
+        let old = Utc::now() - chrono::Duration::days(1);
+        let (session, mut store) = capacity_store(&config, old);
+        let (_, id) = seed_body(&mut store, &config, "locked.txt", b'a', old);
+        let object = store.object(&store.version(&id).unwrap().sha256).unwrap();
+        drop(store);
+        drop(session);
+        let (session, mut store) = capacity_store(&config, Utc::now());
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ)
+            .open(&object)
+            .unwrap();
+        let used = session.quota.used_bytes().unwrap();
+        assert!(super::super::retention::reclaim(
+            &mut store,
+            22 * MIB as u64,
+            &BTreeSet::new(),
+            Utc::now(),
+            Instant::now() + Duration::from_secs(10)
+        )
+        .is_err());
+        assert!(object.exists());
+        assert_eq!(session.quota.used_bytes().unwrap(), used);
+        assert!(store.version(&id).is_err());
+        drop(held);
+    }
 
     #[test]
     fn material_status_distinguishes_missing_input_from_storage_warnings() {
@@ -1137,6 +1992,7 @@ mod tests {
             baseline: true,
             audit: false,
             audit_only: false,
+            priority: 0,
         };
         let quota = &session.quota;
         let occupied = quota

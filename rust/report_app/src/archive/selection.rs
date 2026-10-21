@@ -103,11 +103,23 @@ pub(crate) fn prepare_at(
     let end = request.context.window_end_utc.to_rfc3339();
     let ready = prepared_at.to_rfc3339();
     let profile = super::parse::profile(config)?;
+    let uncaptured: i64 = store.conn.query_row(
+        "SELECT count(DISTINCT g.path) FROM gaps g JOIN collections c ON c.id=g.collection_id
+         WHERE g.code='CAPTURE_CONTENT_UNAVAILABLE' AND c.started_at>=?1 AND c.started_at<?2
+         AND (g.resolved_at IS NULL OR g.resolved_at>=?2)",
+        params![start, end],
+        |r| r.get(0),
+    )?;
+    if uncaptured > 0 {
+        selected.summary.incomplete_inventory = true;
+        gap(&mut selected, "CAPTURE_CONTENT_UNAVAILABLE", "",
+            &format!("发现 {uncaptured} 个文件变化，但未取得目标日期内的正文；不能据此判断具体完成事项。"));
+    }
     let incomplete: bool = store.conn.query_row(
         "SELECT NOT EXISTS(SELECT 1 FROM metadata WHERE key='baseline') OR EXISTS(SELECT 1 FROM metadata WHERE key='baseline_building' OR key LIKE 'discovery_cursor:%') OR EXISTS(SELECT 1 FROM gaps g JOIN collections c ON c.id=g.collection_id WHERE c.started_at>=?1 AND c.started_at<?2 AND g.resolved_at IS NULL)",
         params![start,end], |r| r.get(0),
     )?;
-    selected.summary.incomplete_inventory = incomplete;
+    selected.summary.incomplete_inventory |= incomplete;
     if incomplete {
         gap(
             &mut selected,

@@ -81,6 +81,22 @@ pub(crate) fn drain_before(
         }
         result => result?,
     };
+    let protected = if personal {
+        let now = store
+            .quota
+            .as_ref()
+            .map_or_else(Utc::now, |quota| quota.now());
+        match super::demand::protected(config, store, before, now, deadline) {
+            Ok(versions) => Some(versions),
+            Err(e) if e.code == "PROCESSING_DEADLINE" => {
+                metrics.warnings.push("RUN_BUDGET_DEFERRED".into());
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
+    };
     loop {
         if personal && Instant::now() >= deadline {
             break;
@@ -172,6 +188,26 @@ pub(crate) fn drain_before(
         };
         if jobs.is_empty() {
             break;
+        }
+        if let Some(protected) = &protected {
+            let now = store
+                .quota
+                .as_ref()
+                .map_or_else(Utc::now, |quota| quota.now());
+            match super::retention::reclaim(
+                store,
+                config.archive.max_output_mib * 1024 * 1024,
+                protected,
+                now,
+                deadline,
+            ) {
+                Ok(bytes) => metrics.reclaimed_bytes += bytes,
+                Err(e) if e.code == "PROCESSING_DEADLINE" => {
+                    metrics.warnings.push("RUN_BUDGET_DEFERRED".into());
+                    break;
+                }
+                Err(e) => return Err(e),
+            }
         }
         attempted.extend(jobs.iter().map(|(id, _, _, _)| id.clone()));
         let previous_jobs = metrics.parse_jobs;

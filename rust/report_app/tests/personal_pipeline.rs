@@ -126,6 +126,74 @@ fn publishes_one_request_and_repairs_after_processing_content_expires() {
 }
 
 #[test]
+fn report_reclaims_standby_bytes_for_input_and_model_snapshots() {
+    use ai_daily_report::{
+        archive::{identity, store::ArchiveStore},
+        processing_cache::ProcessingSession,
+    };
+    use std::time::Instant;
+    let (_dir, config) = setup();
+    let old = Utc::now() - chrono::Duration::days(2);
+    let root = config.paths.data_dir.join("daily_cache");
+    let session = ProcessingSession::at(
+        &root,
+        old,
+        Instant::now() + Duration::from_secs(30),
+        8 * 1024 * 1024,
+        1024 * 1024,
+        Duration::ZERO,
+    )
+    .unwrap();
+    let store = session.open_archive(&config).unwrap();
+    // Two 3 MiB standby objects leave less space than the existing 2 MiB
+    // response reservation. A report must reclaim one before its model call.
+    let objects: Vec<_> = (0..2)
+        .map(|i| {
+            let hash = identity(&[&i.to_string()]);
+            let path = store.object(&hash).unwrap();
+            let mut reservation = session.quota.reserve(3 * 1024 * 1024).unwrap();
+            reservation.track(&path).unwrap();
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, vec![b'a'; 3 * 1024 * 1024]).unwrap();
+            reservation.commit(std::slice::from_ref(&path)).unwrap();
+            path
+        })
+        .collect();
+    drop(store);
+    drop(session);
+    let now = Utc::now();
+    let mut app = App::open(config, now).unwrap();
+    app.processing = None;
+    app.processing = Some(
+        ProcessingSession::at(
+            &root,
+            now,
+            Instant::now() + Duration::from_secs(30),
+            8 * 1024 * 1024,
+            1024 * 1024,
+            Duration::ZERO,
+        )
+        .unwrap(),
+    );
+    let sent = Arc::new(AtomicUsize::new(0));
+    app.transport = Box::new(Model {
+        sent: sent.clone(),
+        invalid: false,
+    });
+    let day = now
+        .with_timezone(&ai_daily_report::types::shanghai())
+        .date_naive()
+        .pred_opt()
+        .unwrap();
+    let output = run_daily(request(day, true), &app).unwrap();
+    assert_eq!(output.action, "published");
+    assert_eq!(sent.load(Ordering::SeqCst), 1);
+    assert!(objects.iter().any(|path| !path.exists()));
+    assert!(app.processing.as_ref().unwrap().quota.used_bytes().unwrap() <= 8 * 1024 * 1024);
+    assert!(ArchiveStore::open_collection(&app.config, false).is_ok());
+}
+
+#[test]
 fn date_budget_survives_reopen_and_ignores_legacy_budget_switch() {
     let (_dir, config) = setup();
     let sent = Arc::new(AtomicUsize::new(0));

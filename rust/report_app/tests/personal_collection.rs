@@ -201,7 +201,14 @@ fn expired_bodies_keep_current_fingerprint_and_leave_legacy_archive_untouched() 
         .gaps
         .iter()
         .any(|gap| gap.code == "PREVIOUS_CONTENT_UNAVAILABLE"));
-    assert_eq!(queue::pending(&config, None).unwrap()["unavailable"], 1);
+    let end = request(changed_at, changed_at)
+        .context
+        .window_end_utc
+        .to_rfc3339();
+    assert_eq!(
+        queue::pending(&config, Some(&end)).unwrap()["unavailable"],
+        1
+    );
 }
 
 #[test]
@@ -335,6 +342,81 @@ fn capture_only(
     let mut bounded = config.clone();
     bounded.archive.system_reserve_mib = u64::MAX;
     collect::run(&bounded, baseline, at).unwrap()
+}
+
+#[test]
+fn older_reports_require_explicit_preparation() {
+    let (_dir, config) = setup();
+    let target = Utc::now() - chrono::Duration::days(3);
+    let source = config.paths.work_dir.join("older.txt");
+    fs::write(&source, "amount 100\n").unwrap();
+    capture_only(&config, true, target - chrono::Duration::days(1));
+    fs::write(&source, "amount 120\n").unwrap();
+    capture_only(&config, false, target);
+    let default = queue::execute(&config, false, None, 120, Utc::now()).unwrap();
+    assert_eq!(default["parse_jobs"], 0);
+    let explicit = queue::execute(
+        &config,
+        false,
+        Some(target.with_timezone(&shanghai()).date_naive()),
+        120,
+        Utc::now(),
+    )
+    .unwrap();
+    assert_eq!(explicit["parse_jobs"], 2, "{explicit}");
+}
+
+#[test]
+fn uncaptured_change_is_visible_with_empty_parse_queue_and_late_capture_keeps_day_gap() {
+    let (_dir, config) = setup();
+    let now = Utc::now();
+    let source = config.paths.work_dir.join("oversized.txt");
+    fs::write(&source, "before\n").unwrap();
+    capture_only(&config, true, now - chrono::Duration::days(1));
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&source)
+        .unwrap()
+        .set_len(51 * 1024 * 1024)
+        .unwrap();
+    let result = collect::run(&config, false, now).unwrap();
+    assert_eq!(
+        (result.versions, result.queued, result.capture_pending),
+        (0, 0, 1)
+    );
+    let day = now.with_timezone(&shanghai()).date_naive();
+    let health = ai_daily_report::health::check(&config, day, now).unwrap();
+    let check = health
+        .checks
+        .iter()
+        .find(|c| c.code == "PARSE_QUEUE")
+        .unwrap();
+    assert_eq!(check.level, "warning");
+    assert_eq!(check.evidence["capture_pending"], 1);
+    let selected = selection::prepare(
+        &config,
+        &request(now, now),
+        Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(selected
+        .gaps
+        .iter()
+        .any(|g| g.code == "CAPTURE_CONTENT_UNAVAILABLE"));
+    fs::write(&source, "after\n").unwrap();
+    let later = now + chrono::Duration::days(1);
+    let result = capture_only(&config, false, later);
+    assert_eq!((result.versions, result.capture_pending), (1, 0));
+    let selected = selection::prepare(
+        &config,
+        &request(later, now),
+        Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(selected
+        .gaps
+        .iter()
+        .any(|g| g.code == "CAPTURE_CONTENT_UNAVAILABLE"));
 }
 
 #[test]

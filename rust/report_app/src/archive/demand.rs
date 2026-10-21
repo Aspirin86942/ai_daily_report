@@ -4,7 +4,7 @@ use crate::{
     config::{AppConfig, ReportProfile},
     types, ReportError,
 };
-use chrono::{DateTime, NaiveDate};
+use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::params;
 use std::{collections::BTreeSet, path::Path, time::Instant};
 
@@ -56,7 +56,7 @@ pub(crate) fn pairs(
 }
 
 /// JSON is a bounded SQL membership parameter, not a second persistent queue.
-/// Without a target, prepare each retained day's final version and its pre-day version.
+/// Without a target, only today's and yesterday's reports need preparation.
 pub(crate) fn scope(
     config: &AppConfig,
     store: &ArchiveStore,
@@ -66,47 +66,95 @@ pub(crate) fn scope(
     if config.report.profile != ReportProfile::Personal {
         return Ok(None);
     }
-    let days = if let Some(end) = before {
+    let now = store
+        .quota
+        .as_ref()
+        .map_or_else(Utc::now, |quota| quota.now());
+    let days = days(before, now)?;
+    let mut versions = BTreeSet::new();
+    for day in days {
+        collect_pairs(config, store, day, deadline, Some(MAX_FILES), &mut versions)?;
+    }
+    Ok(Some(serde_json::to_string(&versions)?))
+}
+
+fn days(before: Option<&str>, now: DateTime<Utc>) -> Result<Vec<NaiveDate>, ReportError> {
+    Ok(if let Some(end) = before {
         let end =
             DateTime::parse_from_rfc3339(end).map_err(|_| super::error("ARCHIVE_TIME_INVALID"))?;
         vec![(end.with_timezone(&types::shanghai()) - chrono::Duration::days(1)).date_naive()]
     } else {
-        let mut statement = store.conn.prepare(
-            "SELECT DISTINCT date(observed_at,'+8 hours') FROM versions
-             WHERE baseline=0 AND pruned_at IS NULL ORDER BY 1 DESC",
-        )?;
-        let dates = statement
-            .query_map([], |row| row.get::<_, String>(0))?
-            .collect::<Result<Vec<_>, _>>()?;
-        dates
-            .into_iter()
-            .map(|day| {
-                NaiveDate::parse_from_str(&day, "%Y-%m-%d")
-                    .map_err(|_| super::error("ARCHIVE_TIME_INVALID"))
-            })
-            .collect::<Result<Vec<_>, _>>()?
-    };
+        let today = now.with_timezone(&types::shanghai()).date_naive();
+        vec![today - chrono::Duration::days(1), today]
+    })
+}
+
+/// Reclamation must finish the complete query. A selection limit is not proof
+/// that the unvisited versions are unused; errors leave all candidates intact.
+pub(crate) fn protected(
+    config: &AppConfig,
+    store: &ArchiveStore,
+    before: Option<&str>,
+    now: DateTime<Utc>,
+    deadline: Instant,
+) -> Result<BTreeSet<String>, ReportError> {
     let mut versions = BTreeSet::new();
-    for day in days {
+    let mut dates = days(None, now)?;
+    if before.is_some() {
+        dates.extend(days(before, now)?);
+    }
+    dates.sort();
+    dates.dedup();
+    for day in dates {
+        collect_pairs(config, store, day, deadline, None, &mut versions)?;
+        // A changed file can be waiting for its first successful copy. Its
+        // existing comparison body must survive reclamation by another job.
         let (start, end) = types::utc_window(day)?;
-        let mut cursor = String::new();
-        let mut inspected = 0;
-        while inspected < MAX_FILES {
+        let mut statement = store.conn.prepare(
+            "SELECT d.path,d.current_version,
+             (SELECT v.id FROM versions v WHERE v.document_id=d.id AND v.observed_at<?1
+              ORDER BY v.observed_at DESC,v.rowid DESC LIMIT 1)
+             FROM metadata m JOIN documents d ON m.key='capture:'||d.id
+             WHERE json_extract(m.value,'$.changed_at')>=?1 AND json_extract(m.value,'$.changed_at')<?2",
+        )?;
+        let mut rows = statement.query(params![start.to_rfc3339(), end.to_rfc3339()])?;
+        while let Some(row) = rows.next()? {
             crate::processing_cache::check_deadline(deadline)?;
-            let page = pairs(store, &start.to_rfc3339(), &end.to_rfc3339(), &cursor)?;
-            if page.is_empty() {
-                break;
-            }
-            for pair in page {
-                crate::processing_cache::check_deadline(deadline)?;
-                inspected += 1;
-                cursor = pair.document;
-                if eligible(config, &pair.path) {
-                    versions.insert(pair.current);
-                    versions.extend(pair.previous);
-                }
+            if eligible(config, &row.get::<_, String>(0)?) {
+                versions.extend(row.get::<_, Option<String>>(1)?);
+                versions.extend(row.get::<_, Option<String>>(2)?);
             }
         }
     }
-    Ok(Some(serde_json::to_string(&versions)?))
+    Ok(versions)
+}
+
+fn collect_pairs(
+    config: &AppConfig,
+    store: &ArchiveStore,
+    day: NaiveDate,
+    deadline: Instant,
+    limit: Option<usize>,
+    versions: &mut BTreeSet<String>,
+) -> Result<(), ReportError> {
+    let (start, end) = types::utc_window(day)?;
+    let mut cursor = String::new();
+    let mut inspected = 0;
+    while limit.is_none_or(|limit| inspected < limit) {
+        crate::processing_cache::check_deadline(deadline)?;
+        let page = pairs(store, &start.to_rfc3339(), &end.to_rfc3339(), &cursor)?;
+        if page.is_empty() {
+            break;
+        }
+        for pair in page {
+            crate::processing_cache::check_deadline(deadline)?;
+            inspected += 1;
+            cursor = pair.document;
+            if eligible(config, &pair.path) {
+                versions.insert(pair.current);
+                versions.extend(pair.previous);
+            }
+        }
+    }
+    Ok(())
 }
