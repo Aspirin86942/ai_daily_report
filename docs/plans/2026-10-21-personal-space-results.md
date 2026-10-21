@@ -1,10 +1,10 @@
 # 个人日报采集空间分配实施与验收（2026-10-21）
 
-已完成本地实施、625 项工作区测试、两项独立程序包验收和隔离资源测量。候选包为 `.releases/rust-20261021-personal-space-01`，尚未切换正式任务。本轮真实模型调用为 0；模型行为验证使用本地合成响应。未提交或推送 Git，未清理历史业务数据、旧程序包或验收产物。
+已完成实施、625 项工作区测试、独立程序包验收和隔离资源测量，并于 13:24 按授权上线 `.releases/rust-20261021-personal-space-02`。13:26 回读确认四个正式任务和两份配置均已使用新版。本轮真实模型调用为 0；模型行为验证使用本地合成响应。
 
-四个正式任务回读仍使用 `rust-20261021-personal-demand-02`，状态均为 `Ready`。原 11:00 采集中 1,456 项容量暂缓属于初始基线首份正文缺失；它们不再被定义为必须清零的积压。上述历史数量不代表本轮重新运行生产采集的结果。
+当前四个正式任务均启用且为 `Ready`，触发器、执行身份、时限和其他设置核对一致，两份配置均通过严格自检。新版正式采集后有 1,400 项初始基线尚未取得正文；这些基线只在剩余空间内补采，不作为必须清零的积压。
 
-完整机器可读证据：[verification.json](../../.artifacts/personal-space-20261021/verification.json)。正式任务只读回执：[production-readback.json](../../.artifacts/personal-space-20261021/production-readback.json)。
+上线及运行证据：[runtime-verification.json](../../.artifacts/personal-space-20261021/deployment-01/runtime-verification.json)。此前候选包 `.releases/rust-20261021-personal-space-01` 的隔离验收证据：[verification.json](../../.artifacts/personal-space-20261021/verification.json)。两组证据分别记录隔离行为与正式运行结果。
 
 本次行为如下：
 
@@ -44,4 +44,24 @@
 
 实现入口：[采集顺序与准入](../../rust/report_app/src/archive/collect.rs)、[需求及保护](../../rust/report_app/src/archive/demand.rs)、[回收](../../rust/report_app/src/archive/retention.rs)、[待采状态](../../rust/report_app/src/archive/observation.rs)、[日报快照空间](../../rust/report_app/src/run/personal.rs)。规则复用现有 SQLite、锁、额度账本和恢复机制。
 
-本次验收证明候选包在隔离环境中的行为。正式环境切换、下一次真实定时采集及日报的效果尚未验收；本次保留当前正式程序与配置。
+上线验收结果（13:24—13:26）：
+
+| 检查 | 正式运行结果 |
+|---|---|
+| 发布构建 | 基于提交 `23394c4` 重新构建；三个可执行文件与已验收候选逐项哈希一致 |
+| 程序包 | 462 条清单记录通过；含清单共 463 文件、31,854,144 字节，约 30.38 MiB；两项独立包验收重新执行通过 |
+| 任务与配置 | 四任务与两份 Worker 配置切换完成；两份 `doctor --strict` 通过，任务均启用且为 `Ready` |
+| 实际采集 | 进程耗时 5.377 秒；检查 2,781 个文件，补采 30 个初始基线版本，解析启动 0 |
+| 实际补解析 | 进程耗时 0.370 秒；新增错误 0，所需待解析、待准备变化及不可用比较材料均为 0 |
+| 材料缺口 | 变化正文待采 0；初始基线待补采 1,400 项，其中 8 项超过 50 MiB；已采待用基线 680 项 |
+| 缓存 | 实际逻辑字节 993,548,088（947.52 MiB）；含完整控制池额度为 1,056,439,729（1,007.50 MiB），低于 1 GiB |
+| 本次容量回收 | 0；本次正式采集补采基线，没有触发容量淘汰 |
+| 健康 | `warning`：初始基线材料不全，以及 10 月 20 日历史日报的 `BASELINE_WINDOW_GAP` |
+| 历史保持 | 203 份报告、报告库五张表、1,644 条模型调用账本、旧归档索引核对一致；处理库完整性通过，外键错误 0 |
+| 真实模型调用 | 0 |
+
+正式采集的 30 个新版本均为初始基线，不能将本次结果描述成已在真实变化压力下触发回收。变化优先和共享内容保护的压力证据来自前述隔离回归。采集输出的 8 项错误均为 `FILE_TOO_LARGE`，正常容量暂缓通过汇总表达，没有追加逐文件容量错误。
+
+切换前任务 XML、配置字节和哈希见[部署备份](../../.artifacts/personal-space-20261021/deployment-01/before)，原包 `.releases/rust-20261021-personal-demand-02` 保留。切换脚本包含失败恢复；人工恢复时先暂停四个任务并确认运行结束，验证备份哈希，恢复两份配置及原任务 XML，再核对路径、启用状态和严格自检。处理库与缓存账本副本用于审计，不可脱离处理文件单独覆盖恢复。上线没有执行数据库迁移。
+
+本次正式验收使用手动 CLI 运行。下一次自然定时补解析为 10 月 21 日 13:35、采集为 15:00、日报为 10 月 22 日 09:00；这些自然触发的实际效果尚未验收。完整切换与保持证据见[部署回执](../../.artifacts/personal-space-20261021/deployment-01/deployment.json)、[最终任务回读](../../.artifacts/personal-space-20261021/deployment-01/final-task-readback.json)和[历史保持核验](../../.artifacts/personal-space-20261021/deployment-01/preservation.json)。
