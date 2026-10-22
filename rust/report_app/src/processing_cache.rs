@@ -58,7 +58,9 @@ impl ProcessingSession {
             deadline,
             MAX_BYTES,
             CONTROL_BYTES,
-            Duration::from_secs(5),
+            // A collector can hold this shared lock for its full 120-second run.
+            // Waiting still consumes the caller's original application budget.
+            Duration::from_secs(120),
         )
     }
 

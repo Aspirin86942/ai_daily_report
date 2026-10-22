@@ -13,7 +13,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 struct Model {
@@ -70,6 +70,154 @@ fn request(day: NaiveDate, save: bool) -> ReportRequest {
         scheduled: false,
         regeneration_reason: None,
     }
+}
+
+struct ResponseVersionModel {
+    sent: Arc<AtomicUsize>,
+    version: Option<Value>,
+    invalid_source: bool,
+    extra_field: bool,
+}
+
+impl ModelTransport for ResponseVersionModel {
+    fn send(&self, body: &[u8], timeout: Duration) -> Result<HttpResponse, TransportFailure> {
+        let mut response = Model {
+            sent: self.sent.clone(),
+            invalid: self.invalid_source,
+        }
+        .send(body, timeout)?;
+        let mut envelope: Value = serde_json::from_slice(&response.body).unwrap();
+        let content = &mut envelope["choices"][0]["message"]["content"];
+        let mut value: Value = serde_json::from_str(content.as_str().unwrap()).unwrap();
+        value.as_object_mut().unwrap().remove("schema_version");
+        if let Some(version) = &self.version {
+            value["schema_version"] = version.clone();
+        }
+        if self.extra_field {
+            value["unexpected"] = json!(true);
+        }
+        *content = json!(value.to_string());
+        response.body = serde_json::to_vec(&envelope).unwrap();
+        Ok(response)
+    }
+}
+
+#[test]
+fn personal_response_version_omission_preserves_content_validation_and_date_budget() {
+    for (version, invalid_source, extra_field, valid) in [
+        (None, false, false, true),
+        (Some(json!(5)), false, false, true),
+        (Some(json!(4)), false, false, false),
+        (Some(Value::Null), false, false, false),
+        (Some(json!("5")), false, false, false),
+        (None, true, false, false),
+        (None, false, true, false),
+    ] {
+        let (_dir, config) = setup();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let mut app = App::open(config, Utc::now()).unwrap();
+        app.transport = Box::new(ResponseVersionModel {
+            sent: sent.clone(),
+            version: version.clone(),
+            invalid_source,
+            extra_field,
+        });
+        let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let outcome = run_daily(request(day, true), &app).unwrap();
+        let run = app.store.get(&outcome.run_id).unwrap();
+        let report: Value = serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
+        assert_eq!(report["schema_version"], 5);
+        assert_eq!(
+            report["items"].as_array().unwrap().len(),
+            usize::from(valid)
+        );
+        assert_eq!(
+            report["gaps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gap| gap["code"] == "MODEL_RESPONSE_INVALID"),
+            !valid,
+            "version={version:?}, invalid_source={invalid_source}, extra_field={extra_field}"
+        );
+        let calls = sent.load(Ordering::SeqCst);
+        assert_eq!(
+            app.store
+                .personal_calls("personal_work", &day.to_string())
+                .unwrap(),
+            calls as u64
+        );
+        if valid {
+            assert_eq!(calls, 1);
+            assert!(outcome.markdown.contains("仍待审批"));
+        }
+        // Published evidence keeps its mandatory version even when the provider omitted it.
+        let mut missing_version = report;
+        missing_version
+            .as_object_mut()
+            .unwrap()
+            .remove("schema_version");
+        assert!(
+            serde_json::from_value::<ai_daily_report::reports::personal::PersonalReport>(
+                missing_version
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn report_waits_for_collection_beyond_five_seconds_without_resetting_its_budget() {
+    use ai_daily_report::processing_cache::{ProcessingSession, CONTROL_BYTES, MAX_BYTES};
+
+    let (_dir, config) = setup();
+    let session = ProcessingSession::at(
+        &config.paths.data_dir.join("daily_cache"),
+        Utc::now(),
+        Instant::now() + Duration::from_secs(30),
+        MAX_BYTES,
+        CONTROL_BYTES,
+        Duration::ZERO,
+    )
+    .unwrap();
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(5_500));
+        drop(session);
+    });
+    let started = Instant::now();
+    let result = App::open_started(config, Utc::now(), started);
+    holder.join().unwrap();
+    let app = result.unwrap();
+    assert!(started.elapsed() >= Duration::from_secs(5));
+    assert_eq!(app.started, started);
+    let calls: i64 = app
+        .store
+        .connection()
+        .unwrap()
+        .query_row("SELECT count(*) FROM report_model_calls", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(calls, 0);
+}
+
+#[test]
+fn collection_lock_wait_respects_the_remaining_deadline() {
+    use ai_daily_report::processing_cache::ProcessingSession;
+    use ai_daily_report::store::locking::ReportLock;
+
+    let (_dir, config) = setup();
+    let root = config.paths.data_dir.join("daily_cache");
+    let _held = ReportLock::acquire(&root.join("processing"), "personal", Duration::ZERO).unwrap();
+    let started = Instant::now();
+    let error =
+        ProcessingSession::acquire(&config, Utc::now(), started + Duration::from_millis(150))
+            .err()
+            .unwrap();
+    assert_eq!(error.code, "REPORT_ALREADY_RUNNING");
+    assert!(started.elapsed() < Duration::from_secs(2));
+    assert!(!root.join(".cache-ledger.json").exists());
+    assert!(!config.paths.db_dir.join("reports.sqlite3").exists());
 }
 
 #[test]

@@ -1,0 +1,20 @@
+{
+  "source_unchanged": true,
+  "project_count": 18,
+  "task_count": 42,
+  "evidence_references_checked": 30,
+  "browser_checks": [
+    "overview",
+    "five_active_projects",
+    "project_details",
+    "unknown_date_save",
+    "timeline"
+  ],
+  "browser_console_errors": 0,
+  "delivered_files": {
+    "审计项目看板-数据-梳理版.json": "b50122aecef7edcab8d124672d34a7818fd1d63528f766b0df8385e67a784d47",
+    "审计项目看板-梳理版.html": "9d282d07da135b7756b90cc00c8a9c7a3544b80234f2ff08a8ad03a53a2a63e1",
+    "梳理依据.json": "8016502ab56d16601297b8b1706047c7034dea8bbf215742c2af2e34a5e10e1f",
+    "梳理说明.txt": "a4509add1376165ea6f555e35a61e55509305c5cde297bc733a8364bee3f9c6f"
+  }
+}

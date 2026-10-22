@@ -2,7 +2,8 @@ use super::plan::{payload, PlannedStep, StepKind};
 use crate::{
     config::Llm,
     reports::personal::{
-        body_chars, validate_items, PersonalItem, Selection, MAX_BODY_CHARS, MAX_ITEMS,
+        body_chars, validate_items, PersonalItem, Selection, StatementKind, MAX_BODY_CHARS,
+        MAX_ITEMS,
     },
     snapshots::{canonical_json, digest},
     types::RunContext,
@@ -10,7 +11,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub const PROMPT: &str = include_str!("../../../../templates/personal_daily_prompt_v5.md");
 
@@ -116,15 +117,23 @@ pub struct PersonalOutput {
 
 pub(super) fn validate_response(
     step: &PlannedStep,
-    value: Value,
+    mut value: Value,
 ) -> Result<PersonalOutput, ReportError> {
+    if step.kind != StepKind::PersonalSummary || step.version != 6 {
+        return Err(super::contracts::invalid());
+    }
+    // The frozen personal request fixes the response format. Some providers omit
+    // its version tag; explicit versions and all content still validate below.
+    if let Some(object) = value.as_object_mut() {
+        object.entry("schema_version").or_insert(json!(5));
+    }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
     struct Response {
         schema_version: u32,
         items: Vec<PersonalItem>,
     }
-    let response: Response =
+    let mut response: Response =
         serde_json::from_value(value).map_err(|_| super::contracts::invalid())?;
     if response.schema_version != 5 || response.items.is_empty() {
         return Err(super::contracts::invalid());
@@ -135,6 +144,23 @@ pub(super) fn validate_response(
         .iter()
         .map(|m| m.source.clone())
         .collect();
+    let unverified: BTreeSet<_> = sources
+        .iter()
+        .filter(|source| source.unverified())
+        .map(|source| source.source_id.as_str())
+        .collect();
+    for item in &mut response.items {
+        if item.statement_kind == StatementKind::Observed
+            && item
+                .source_ids
+                .iter()
+                .any(|id| unverified.contains(id.as_str()))
+        {
+            // Source certainty bounds the model's claim; the final report still
+            // enforces every source identity and displays the uncertainty label.
+            item.statement_kind = StatementKind::Uncertain;
+        }
+    }
     validate_items(&response.items, &sources).map_err(|_| super::contracts::invalid())?;
     let priorities: BTreeMap<_, _> = selection
         .materials

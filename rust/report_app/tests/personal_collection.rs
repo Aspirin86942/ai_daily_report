@@ -28,6 +28,71 @@ fn setup() -> (tempfile::TempDir, AppConfig) {
     (dir, config)
 }
 
+#[test]
+fn model_observations_of_unverified_files_publish_as_uncertain_with_evidence() {
+    use ai_daily_report::{
+        model::transport::{HttpResponse, ModelTransport, TransportFailure},
+        run::{run_daily, App},
+    };
+    use serde_json::Value;
+
+    struct ObservedModel;
+    impl ModelTransport for ObservedModel {
+        fn send(&self, body: &[u8], _: Duration) -> Result<HttpResponse, TransportFailure> {
+            let request: Value = serde_json::from_slice(body).unwrap();
+            let input: Value =
+                serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+            let source = &input["sources"][0];
+            assert_eq!(source["text_unverified"], true);
+            let content = json!({"items":[{
+                "title":"报价调整待确认", "text":"报价为 120 元，仍待审批。",
+                "kind":"attention", "statement_kind":"observed", "source_ids":[source["source_id"]]
+            }]});
+            Ok(HttpResponse {
+                status: 200,
+                retry_after: None,
+                body: serde_json::to_vec(&json!({"choices":[{"finish_reason":"stop","message":{"content":content.to_string()}}]})).unwrap(),
+            })
+        }
+    }
+
+    let (_dir, mut config) = setup();
+    config.llm.context_window_tokens = Some(128_000);
+    config.llm.verified_max_output_tokens = Some(8_192);
+    config.llm.max_tokens = 4_096;
+    config.recovery.enforce_model_budgets = false;
+    let now = Utc::now();
+    let day = now - chrono::Duration::days(1);
+    let path = config.paths.work_dir.join("approval.txt");
+    collect::run(&config, true, day - chrono::Duration::days(1)).unwrap();
+    fs::write(&path, "报价为 120 元，仍待审批。\n").unwrap();
+    collect::run(&config, false, day).unwrap();
+    let mut app = App::open(config, now).unwrap();
+    app.transport = Box::new(ObservedModel);
+    let mut input = request(now, day);
+    input.save = true;
+    input.dry_run = false;
+    let output = run_daily(input, &app).unwrap();
+    assert_eq!(output.model_calls, 1, "{}", output.markdown);
+    assert!(output.markdown.contains("**待确认：**"));
+    assert!(output.markdown.contains("120 元，仍待审批"));
+    let record = app.store.get(&output.run_id).unwrap();
+    let mut report: ai_daily_report::reports::personal::PersonalReport =
+        serde_json::from_str(record.report_json.as_deref().unwrap()).unwrap();
+    assert_eq!(report.items.len(), 1);
+    assert_eq!(
+        report.items[0].statement_kind,
+        ai_daily_report::reports::personal::StatementKind::Uncertain
+    );
+    assert!(!report.evidence.is_empty());
+    report.validate().unwrap();
+    report.items[0].statement_kind = ai_daily_report::reports::personal::StatementKind::Observed;
+    assert!(
+        report.validate().is_err(),
+        "published evidence must still reject false confirmation"
+    );
+}
+
 fn request(now: DateTime<Utc>, observed: DateTime<Utc>) -> ReportRequest {
     let day = observed.with_timezone(&shanghai()).date_naive();
     ReportRequest {
@@ -58,6 +123,71 @@ fn table(amount: u64) -> String {
         ));
     }
     text
+}
+
+#[test]
+fn workbook_headings_keep_independent_evidence_without_inventing_row_ranges() {
+    use ai_daily_report::reports::personal::{PersonalReport, TEMPLATE};
+
+    let (_dir, config) = setup();
+    let now = Utc::now();
+    let target = now - chrono::Duration::days(1);
+    collect::run(&config, true, now - chrono::Duration::days(2)).unwrap();
+    fs::write(
+        config.paths.work_dir.join("approval.xlsx"),
+        include_bytes!("fixtures/personal-headings.xlsx"),
+    )
+    .unwrap();
+    let changed = collect::run(&config, false, target).unwrap();
+    assert_eq!(
+        (changed.errors, changed.versions, changed.parse_jobs),
+        (0, 1, 1)
+    );
+    let request = request(Utc::now() + chrono::Duration::seconds(1), target);
+    let selected =
+        selection::prepare(&config, &request, Instant::now() + Duration::from_secs(30)).unwrap();
+    selected.validate().unwrap();
+    let refs: Vec<_> = selected
+        .materials
+        .iter()
+        .flat_map(|m| &m.evidence)
+        .collect();
+    assert!(refs
+        .iter()
+        .any(|r| r.ranges.is_empty() && r.quote.contains("Approval")));
+    assert!(refs
+        .iter()
+        .any(|r| !r.ranges.is_empty() && r.quote.contains("120")));
+    let report = PersonalReport::from_selection(&request.context, "work", &selected);
+    report.validate().unwrap();
+    let body = report.render(TEMPLATE).unwrap();
+    assert!(body.contains("Approval"));
+    assert!(body.contains("120"));
+    assert!(body.contains(&refs[0].quote_sha256));
+
+    for field in ["quote_sha256", "input_start", "raw_sha256", "ranges"] {
+        let mut tampered = selected.clone();
+        let reference = tampered
+            .materials
+            .iter_mut()
+            .flat_map(|material| &mut material.evidence)
+            .find(|r| {
+                if field == "ranges" {
+                    !r.ranges.is_empty()
+                } else {
+                    r.ranges.is_empty()
+                }
+            })
+            .unwrap();
+        match field {
+            "quote_sha256" => reference.quote_sha256 = "0".repeat(64),
+            "input_start" => reference.input_start += 1,
+            "raw_sha256" => reference.raw_sha256 = "0".repeat(64),
+            "ranges" => reference.ranges[0].end = reference.ranges[0].start,
+            _ => unreachable!(),
+        }
+        assert!(tampered.validate().is_err(), "accepted tampered {field}");
+    }
 }
 
 #[test]

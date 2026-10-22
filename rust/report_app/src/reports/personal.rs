@@ -203,7 +203,9 @@ fn validate_evidence(
                 && source.content_sha256.as_deref() != Some(&r.raw_sha256)
             || r.input_start != offset
             || r.input_end != offset + r.quote.chars().count()
-            || r.ranges.is_empty()
+            // Parser-generated headings have no original row/page range. Their
+            // exact text remains bound to the archived unit and its fingerprints.
+            || r.ranges.iter().any(|range| range.validate().is_err())
             || r.version_id.is_empty()
             || r.extraction_id.is_empty()
             || r.unit_id.is_empty()
