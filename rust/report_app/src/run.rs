@@ -28,7 +28,7 @@ use crate::{
     publish::Publisher,
     reports::{self, data::DailyReport},
     snapshots::{canonical_json, digest, SnapshotRef, SnapshotStore},
-    store::{locking::ReportLock, StagedReport, Store},
+    store::{locking::ReportLock, RunRecord, StagedReport, Store},
     types::{ReportOutcome, ReportRequest, RunPhase},
     ReportError,
 };
@@ -650,6 +650,26 @@ fn stage(
         output_path,
         action: action.into(),
         model_calls: app.store.calls(run_id)?.len() as u64,
+    })
+}
+
+fn reuse_report(
+    app: &App,
+    run_id: &str,
+    current: RunRecord,
+    now: DateTime<Utc>,
+) -> Result<ReportOutcome, ReportError> {
+    let path =
+        Publisher::new(&app.config.paths.reports_dir, &app.store)?.publish(&current.run_id, now)?;
+    app.store.finish_observation(run_id, &current, now)?;
+    Ok(ReportOutcome {
+        run_id: run_id.into(),
+        target_date: current.target_date,
+        quality: current.quality.unwrap(),
+        markdown: current.markdown.unwrap(),
+        output_path: Some(path),
+        action: "reused".into(),
+        model_calls: 0,
     })
 }
 

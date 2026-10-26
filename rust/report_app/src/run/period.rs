@@ -1,4 +1,4 @@
-use super::{deadline_check, hash, repair_run, scan_stable, App};
+use super::{deadline_check, hash, repair_run, reuse_report, scan_stable, App};
 use crate::{
     config::ModelPricing,
     model::{
@@ -35,15 +35,44 @@ struct PeriodInput {
 }
 
 fn daily_context(reports: Vec<Value>) -> Vec<Value> {
-    reports.into_iter().map(|report|{
-        let mut data=json!({"date":report["date"]});
-        for field in ["schema_version","report_kind","quality","completed_work","work_summary","next_plan","summary_items","verification_items","content","user_notes","items","selection"] {
-            if !report[field].is_null(){data[field]=report[field].clone();}
-        }
-        if let Some(gaps)=report["gaps"].as_array(){data["gaps"]=json!(gaps.iter().map(|gap|&gap["message"]).collect::<Vec<_>>());}
-        if let Some(sources)=report["sources"].as_array(){data["sources"]=json!(sources.iter().map(|s|json!({"source_id":s["source_id"],"relative_path":s["relative_path"],"source_kind":s["source_kind"]})).collect::<Vec<_>>());}
-        data
-    }).collect()
+    reports
+        .into_iter()
+        .map(|report| {
+            let mut data = json!({"date": report["date"]});
+            for field in [
+                "schema_version",
+                "report_kind",
+                "quality",
+                "completed_work",
+                "work_summary",
+                "next_plan",
+                "summary_items",
+                "verification_items",
+                "content",
+                "user_notes",
+                "items",
+                "selection",
+            ] {
+                if !report[field].is_null() {
+                    data[field] = report[field].clone();
+                }
+            }
+            if let Some(gaps) = report["gaps"].as_array() {
+                data["gaps"] = json!(gaps.iter().map(|gap| &gap["message"]).collect::<Vec<_>>());
+            }
+            if let Some(sources) = report["sources"].as_array() {
+                data["sources"] = json!(sources
+                    .iter()
+                    .map(|source| json!({
+                        "source_id": source["source_id"],
+                        "relative_path": source["relative_path"],
+                        "source_kind": source["source_kind"],
+                    }))
+                    .collect::<Vec<_>>());
+            }
+            data
+        })
+        .collect()
 }
 
 pub fn run_period(mut request: ReportRequest, app: &App) -> Result<ReportOutcome, ReportError> {
@@ -56,7 +85,7 @@ pub fn run_period(mut request: ReportRequest, app: &App) -> Result<ReportOutcome
     let started = Instant::now();
     let deadline = started + Duration::from_secs(app.config.recovery.run_budget_seconds);
     let now = request.context.started_at;
-    let _lock = ReportLock::acquire(
+    let lock = ReportLock::acquire(
         &app.store.path,
         &app.config.report.scope_id,
         Duration::from_secs_f64(app.config.recovery.lock_wait_seconds),
@@ -68,7 +97,7 @@ pub fn run_period(mut request: ReportRequest, app: &App) -> Result<ReportOutcome
         "monthly"
     };
     request.context.config_fingerprint = app.fingerprint(false)?;
-    app.store.recover_interrupted(now, &_lock)?;
+    app.store.recover_interrupted(now, &lock)?;
     if request.save {
         for pending in app
             .store
@@ -88,102 +117,14 @@ pub fn run_period(mut request: ReportRequest, app: &App) -> Result<ReportOutcome
     let id = &request.context.run_id;
     app.store.create(&request.context, kind, id, None, now)?;
     let result = (|| {
-        app.store.set_scanning(id, now)?;
-        deadline_check(deadline)?;
-        let mut model_paths = Vec::new();
-        let (reports, missing, file_context, sources, quality) =
-            if request.period.source == ReportSource::Db {
-                let (reports, missing) = app
-                    .store
-                    .reports_in_range(request.period.start, request.period.end)?;
-                for source in reports
-                    .iter()
-                    .flat_map(|r| r["sources"].as_array().into_iter().flatten())
-                {
-                    if let Some(path) = source["coverage_limits"]["archive"]["path"]
-                        .as_str()
-                        .or_else(|| source["coverage_limits"]["personal"]["absolute_path"].as_str())
-                    {
-                        model_paths.push(path.to_owned());
-                    }
-                }
-                model_paths.sort();
-                model_paths.dedup();
-                let partial = !missing.is_empty()
-                    || reports
-                        .iter()
-                        .any(|r| r["quality"] == "partial" || r["quality"] == "unavailable");
-                (
-                    daily_context(reports),
-                    missing,
-                    String::new(),
-                    vec![],
-                    if partial { "partial" } else { "complete" },
-                )
-            } else {
-                let scan = scan_stable(app, &request, deadline)?;
-                if scan.envelope.status == ai_daily_scanner_contract::EngineStatus::Error {
-                    return Err(ReportError::new("SCAN_UNAVAILABLE", "周月报扫描未能完成"));
-                }
-                let quality =
-                    if scan.envelope.status == ai_daily_scanner_contract::EngineStatus::Partial {
-                        "partial"
-                    } else {
-                        "complete"
-                    };
-                let sources = scan
-                    .sources
-                    .iter()
-                    .map(serde_json::to_value)
-                    .collect::<Result<Vec<_>, _>>()?;
-                (vec![], vec![], scan.envelope.file_context, sources, quality)
-            };
-        let target = json!({"week_label":request.period.label,"year_month":request.period.label,"date_range":format!("{} ~ {}",request.period.start,request.period.end),"data_source":if request.period.source==ReportSource::Db{"已保存日报"}else{"文件扫描"},"reports_summary":String::from_utf8(canonical_json(&json!({"reports":reports,"user_statement":request.input}))?).unwrap(),"missing_days":missing.join("、"),"file_context":file_context});
-        let step = PlannedStep::period(&app.config.llm, step_kind, target)?;
-        let fingerprint = hash(
-            &json!({"version":3,"step":step,"source":request.period.source,"config":request.context.config_fingerprint}),
-        )?;
-        let payload = PeriodInput {
-            version: 3,
-            context: request.context.clone(),
-            period: request.period.clone(),
-            quality: quality.into(),
-            save: request.save,
-            step,
-            template: if step_kind == StepKind::Weekly {
-                period::WEEK_TEMPLATE
-            } else {
-                period::MONTH_TEMPLATE
-            }
-            .into(),
-            input_fingerprint: fingerprint,
-            recovery_fingerprint: app.fingerprint(true)?,
-            model_pricing: app.config.recovery.model_pricing.clone(),
-            model_paths,
-        };
-        let reference = app
-            .snapshots
-            .put(id, "period-input", &serde_json::to_value(&payload)?)?;
-        app.store
-            .prepare(id, &reference, &payload.input_fingerprint, &sources, now)?;
+        let payload = prepare(app, &request, now, deadline)?;
         if request.save {
             if let Some(current) = app
                 .store
                 .current_period(kind, &request.period.label)?
                 .filter(|r| r.input_fingerprint.as_deref() == Some(&payload.input_fingerprint))
             {
-                let path = Publisher::new(&app.config.paths.reports_dir, &app.store)?
-                    .publish(&current.run_id, now)?;
-                app.store.finish_observation(id, &current, now)?;
-                return Ok(ReportOutcome {
-                    run_id: id.clone(),
-                    target_date: current.target_date,
-                    quality: current.quality.unwrap(),
-                    markdown: current.markdown.unwrap(),
-                    output_path: Some(path),
-                    action: "reused".into(),
-                    model_calls: 0,
-                });
+                return reuse_report(app, id, current, now);
             }
         }
         finish(app, id, now, started, deadline)
@@ -192,6 +133,106 @@ pub fn run_period(mut request: ReportRequest, app: &App) -> Result<ReportOutcome
         app.store.fail(id, error.code, false, now)?;
     }
     result
+}
+
+fn prepare(
+    app: &App,
+    request: &ReportRequest,
+    now: DateTime<Utc>,
+    deadline: Instant,
+) -> Result<PeriodInput, ReportError> {
+    let id = &request.context.run_id;
+    app.store.set_scanning(id, now)?;
+    deadline_check(deadline)?;
+    let mut model_paths = Vec::new();
+    let (reports, missing, file_context, sources, quality) = if request.period.source
+        == ReportSource::Db
+    {
+        let (reports, missing) = app
+            .store
+            .reports_in_range(request.period.start, request.period.end)?;
+        for source in reports
+            .iter()
+            .flat_map(|report| report["sources"].as_array().into_iter().flatten())
+        {
+            if let Some(path) = source["coverage_limits"]["archive"]["path"]
+                .as_str()
+                .or_else(|| source["coverage_limits"]["personal"]["absolute_path"].as_str())
+            {
+                model_paths.push(path.to_owned());
+            }
+        }
+        model_paths.sort();
+        model_paths.dedup();
+        let partial = !missing.is_empty()
+            || reports
+                .iter()
+                .any(|report| report["quality"] == "partial" || report["quality"] == "unavailable");
+        (
+            daily_context(reports),
+            missing,
+            String::new(),
+            vec![],
+            if partial { "partial" } else { "complete" },
+        )
+    } else {
+        let scan = scan_stable(app, request, deadline)?;
+        if scan.envelope.status == ai_daily_scanner_contract::EngineStatus::Error {
+            return Err(ReportError::new("SCAN_UNAVAILABLE", "周月报扫描未能完成"));
+        }
+        let quality = if scan.envelope.status == ai_daily_scanner_contract::EngineStatus::Partial {
+            "partial"
+        } else {
+            "complete"
+        };
+        let sources = scan
+            .sources
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        (vec![], vec![], scan.envelope.file_context, sources, quality)
+    };
+    let target = json!({
+        "week_label": request.period.label,
+        "year_month": request.period.label,
+        "date_range": format!("{} ~ {}", request.period.start, request.period.end),
+        "data_source": if request.period.source == ReportSource::Db { "已保存日报" } else { "文件扫描" },
+        "reports_summary": String::from_utf8(canonical_json(&json!({
+            "reports": reports,
+            "user_statement": request.input,
+        }))?).unwrap(),
+        "missing_days": missing.join("、"),
+        "file_context": file_context,
+    });
+    let step_kind = period::kind(&request.period);
+    let step = PlannedStep::period(&app.config.llm, step_kind, target)?;
+    let fingerprint = hash(
+        &json!({"version":3,"step":step,"source":request.period.source,"config":request.context.config_fingerprint}),
+    )?;
+    let payload = PeriodInput {
+        version: 3,
+        context: request.context.clone(),
+        period: request.period.clone(),
+        quality: quality.into(),
+        save: request.save,
+        step,
+        template: if step_kind == StepKind::Weekly {
+            period::WEEK_TEMPLATE
+        } else {
+            period::MONTH_TEMPLATE
+        }
+        .into(),
+        input_fingerprint: fingerprint,
+        recovery_fingerprint: app.fingerprint(true)?,
+        model_pricing: app.config.recovery.model_pricing.clone(),
+        model_paths,
+    };
+    let reference = app
+        .snapshots
+        .put(id, "period-input", &serde_json::to_value(&payload)?)?;
+    app.store
+        .prepare(id, &reference, &payload.input_fingerprint, &sources, now)?;
+    Ok(payload)
 }
 
 fn finish(

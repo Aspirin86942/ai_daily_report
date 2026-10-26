@@ -1,6 +1,8 @@
-use super::{deadline_check, finish, finish_guarded, input, scan_stable, stage, App, FrozenInput};
+use super::{
+    deadline_check, finish, finish_guarded, input, reuse_report, scan_stable, stage, App,
+    FrozenInput,
+};
 use crate::{
-    publish::Publisher,
     reports::data::DailyReport,
     types::{ReportOutcome, ReportRequest},
     ReportError,
@@ -202,18 +204,7 @@ pub(super) fn run_new(
             if current.publication_fingerprint.as_deref()
                 == Some(&payload.publication_fingerprint()?)
             {
-                let path = Publisher::new(&app.config.paths.reports_dir, &app.store)?
-                    .publish(&current.run_id, now)?;
-                app.store.finish_observation(run_id, &current, now)?;
-                return Ok(ReportOutcome {
-                    run_id: run_id.clone(),
-                    target_date: current.target_date,
-                    quality: current.quality.unwrap(),
-                    markdown: current.markdown.unwrap(),
-                    output_path: Some(path),
-                    action: "reused".into(),
-                    model_calls: 0,
-                });
+                return reuse_report(app, run_id, current, now);
             }
             let mut report: DailyReport = serde_json::from_str(
                 current

@@ -240,6 +240,59 @@ fn personal_items_and_statement_labels_reach_both_period_prompts() {
 }
 
 #[test]
+fn period_reuse_keeps_publication_identity_and_preserves_external_edits() {
+    for month in [false, true] {
+        let f = Fixture::new(vec![response(if month { monthly() } else { weekly() })]);
+        let published = run_report(f.request('a', month, true), &f.app).unwrap();
+        let reused = run_report(f.request('b', month, true), &f.app).unwrap();
+        assert_eq!(reused.run_id, "b".repeat(32));
+        assert_eq!(reused.action, "reused");
+        assert_eq!(reused.markdown, published.markdown);
+        assert_eq!(reused.output_path, published.output_path);
+        assert_eq!(reused.model_calls, 0);
+        let observation = f.app.store.get(&reused.run_id).unwrap();
+        assert!(matches!(
+            observation.status,
+            ai_daily_report::store::RunStatus::Succeeded
+        ));
+        assert_eq!(
+            observation.phase,
+            ai_daily_report::types::RunPhase::Prepared
+        );
+        assert_eq!(
+            observation.previous_run_id.as_deref(),
+            Some(published.run_id.as_str())
+        );
+
+        let path = published.output_path.as_ref().unwrap();
+        fs::write(path, "用户修改").unwrap();
+        let request = f.request('c', month, true);
+        let label = request.period.label.clone();
+        assert_eq!(
+            run_report(request, &f.app).unwrap_err().code,
+            "OUTPUT_CONFLICT"
+        );
+        assert_eq!(fs::read_to_string(path).unwrap(), "用户修改");
+        let failed = f.app.store.get(&"c".repeat(32)).unwrap();
+        assert!(matches!(
+            failed.status,
+            ai_daily_report::store::RunStatus::Failed
+        ));
+        assert_eq!(failed.error_code.as_deref(), Some("OUTPUT_CONFLICT"));
+        assert_eq!(
+            f.app
+                .store
+                .current_period(if month { "monthly" } else { "weekly" }, &label)
+                .unwrap()
+                .unwrap()
+                .run_id,
+            published.run_id
+        );
+        assert_eq!(f.calls(), 1);
+    }
+}
+
+#[test]
 fn period_preview_does_not_update_formal_table() {
     let f = Fixture::new(vec![response(monthly())]);
     let report = run_report(f.request('a', true, false), &f.app).unwrap();
