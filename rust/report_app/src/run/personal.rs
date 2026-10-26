@@ -38,7 +38,7 @@ pub struct PersonalInput {
     pub recovery_fingerprint: String,
 }
 
-fn snapshots(app: &App) -> Result<SnapshotStore, ReportError> {
+pub(crate) fn snapshots(app: &App) -> Result<SnapshotStore, ReportError> {
     let session = app.processing.as_ref().ok_or_else(|| {
         ReportError::new("RECOVERY_CONFIG_CHANGED", "个人日报恢复需要 personal 配置")
     })?;
@@ -94,6 +94,14 @@ pub fn run(
         .recover_interrupted(request.context.started_at, &lock)?;
     request.context.config_fingerprint = app.fingerprint(false)?;
     let date = request.context.target_date.to_string();
+    if request.regeneration_reason.is_some() && request.input.is_empty() {
+        if let Some(current) = app.store.current(&date)? {
+            if let Some(report) = current.report_json.as_deref() {
+                let report: serde_json::Value = serde_json::from_str(report)?;
+                request.input = report["user_notes"].as_str().unwrap_or("").to_owned();
+            }
+        }
+    }
     if request.save && !request.dry_run && request.regeneration_reason.is_none() {
         if let Some(current) = app.store.current(&date)? {
             let mut result = super::repair_run(app, &current.run_id, Utc::now())?;
@@ -142,6 +150,23 @@ pub fn run(
             Utc::now(),
             deadline,
         );
+        if request
+            .regeneration_reason
+            .as_deref()
+            .is_some_and(|reason| reason.starts_with("automatic_personal_recovery:"))
+        {
+            let ready = preparation
+                .as_ref()
+                .map_err(|e| ReportError::new(e.code, e.message.clone()))?;
+            if ready["queued"].as_u64().unwrap_or(0) > 0
+                || ready["unavailable"].as_u64().unwrap_or(0) > 0
+            {
+                return Err(ReportError::new(
+                    "PERSONAL_RECOVERY_WAITING",
+                    "历史日报材料仍在准备，保留原报告并等待后续重试",
+                ));
+            }
+        }
         let mut selection =
             crate::archive::selection::prepare_at(&app.config, &request, deadline, Utc::now())?;
         if let Err(e) = preparation {
@@ -282,7 +307,6 @@ pub fn finish(
             snapshots: &snapshots,
             transport: &transport,
             llm: &app.config.llm,
-            recovery: &app.config.recovery,
             recovery_inputs: None,
             allow_new_calls: run.config_fingerprint == app.fingerprint(false)?,
             run_id: id,
@@ -336,17 +360,39 @@ pub fn finish(
         ));
     }
     report.retain_cited();
-    let markdown = loop {
-        let body = report.render(&input.template)?;
-        if body.len() <= MAX_REPORT_BYTES {
-            break body;
+    if report.items.is_empty() {
+        if let Some(current) = app.store.current(&run.target_date)? {
+            if current.run_id != id {
+                let previous: serde_json::Value =
+                    serde_json::from_str(current.report_json.as_deref().unwrap_or("{}"))?;
+                if previous["items"]
+                    .as_array()
+                    .is_some_and(|items| !items.is_empty())
+                {
+                    return Err(ReportError::new(
+                        "PERSONAL_RECOVERY_INCOMPLETE",
+                        "恢复未形成有效总结，保留已发布的有效内容",
+                    ));
+                }
+            }
         }
-        if report.items.pop().is_none() {
+    }
+    let markdown = loop {
+        report.evidence_attachment = None;
+        report.evidence_attachment = report.render_attachment(&input.template)?;
+        if report.output_bytes("") <= MAX_REPORT_BYTES {
+            let body = report.render(&input.template)?;
+            if report.output_bytes(&body) <= MAX_REPORT_BYTES {
+                break body;
+            }
+        }
+        if report.items.len() <= 1 {
             return Err(ReportError::new(
                 "PERSONAL_REPORT_TOO_LARGE",
-                "用户原文及必要说明超过报告上限",
+                "完整事项及其依据超过报告上限，未发布不完整摘要",
             ));
         }
+        report.items.pop();
         report.quality = "partial".into();
         if !report
             .gaps
@@ -376,6 +422,11 @@ pub fn finish(
             publication_fingerprint:&fingerprint(&json!({"input":input.input_fingerprint,"report":value,"template":input.template}))?,
         },now)?;
         (Some(publisher.publish(id, now)?), "published")
+    };
+    let markdown = if run.run_kind == "preview" {
+        report.render_preview(&input.template)?
+    } else {
+        markdown
     };
     let model_calls = app.store.calls(id)?.len() as u64;
     app.store.compact_personal_until(

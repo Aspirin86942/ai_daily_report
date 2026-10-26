@@ -1,7 +1,7 @@
 use super::files::{read_bytes, read_envelope, read_json, write_envelope};
 use crate::{
     cli::BackfillArgs,
-    model::recovery::{FrozenCall, JobBudget},
+    model::recovery::{FrozenCall, JobContext},
     run::{self, App, FrozenInput},
     snapshots::{canonical_json, digest, fingerprint, reject_redirects},
     store::{locking::ReportLock, RunStatus},
@@ -22,7 +22,7 @@ use std::{
     time::Duration,
 };
 fn error(code: &'static str) -> ReportError {
-    ReportError::new(code, "补跑计划、预算或已保存材料不符合要求")
+    ReportError::new(code, "补跑计划或已保存材料不符合要求")
 }
 fn dates(
     start: NaiveDate,
@@ -275,8 +275,6 @@ pub fn run(app: &App, args: &BackfillArgs, now: DateTime<Utc>) -> Result<Value, 
         || args.refresh_preflight
         || args.plan.is_some()
         || args.generate_candidates
-        || args.token_budget.is_some()
-        || args.cost_budget_microunits.is_some()
     {
         return Err(error("BACKFILL_OPTIONS_INVALID"));
     }
@@ -290,10 +288,6 @@ pub fn run(app: &App, args: &BackfillArgs, now: DateTime<Utc>) -> Result<Value, 
     if args.dry_run {
         return Ok(json!({"preflight":preflight(app,start,end,now)?,"new_model_calls":0}));
     }
-    let cap = args
-        .call_budget
-        .filter(|n| *n <= 100000)
-        .ok_or_else(|| error("BACKFILL_CALL_BUDGET_REQUIRED"))?;
     let preflight_path = args
         .preflight
         .as_ref()
@@ -321,11 +315,8 @@ pub fn run(app: &App, args: &BackfillArgs, now: DateTime<Utc>) -> Result<Value, 
         let old = dir.join("state.json");
         let (baseline, backup_hash) = if old.exists() {
             let state = read_json(&old)?;
-            if state["start_date"] != start.to_string()
-                || state["end_date"] != end.to_string()
-                || state["call_budget"] != cap
-            {
-                return Err(error("BACKFILL_BUDGET_CHANGED"));
+            if state["start_date"] != start.to_string() || state["end_date"] != end.to_string() {
+                return Err(error("BACKFILL_RANGE_CHANGED"));
             }
             let baseline = state["baseline_call_id"]
                 .as_i64()
@@ -342,15 +333,12 @@ pub fn run(app: &App, args: &BackfillArgs, now: DateTime<Utc>) -> Result<Value, 
             // An existing unregistered backup needs review; never replace it.
             (app.store.last_call_id()?, app.store.backup(&backup)?)
         };
-        let value = json!({"version":3,"job_id":new_run_id(),"start_date":start.to_string(),"end_date":end.to_string(),"baseline_call_id":baseline,"call_budget":cap,"backup_sha256":backup_hash});
+        let value = json!({"version":3,"job_id":new_run_id(),"start_date":start.to_string(),"end_date":end.to_string(),"baseline_call_id":baseline,"backup_sha256":backup_hash});
         write_envelope(&jobfile, "job", &value)?;
         value
     };
-    if jobvalue["start_date"] != start.to_string()
-        || jobvalue["end_date"] != end.to_string()
-        || jobvalue["call_budget"] != cap
-    {
-        return Err(error("BACKFILL_BUDGET_CHANGED"));
+    if jobvalue["start_date"] != start.to_string() || jobvalue["end_date"] != end.to_string() {
+        return Err(error("BACKFILL_RANGE_CHANGED"));
     }
     let job = jobvalue["job_id"]
         .as_str()
@@ -363,7 +351,6 @@ pub fn run(app: &App, args: &BackfillArgs, now: DateTime<Utc>) -> Result<Value, 
     {
         return Err(error("BACKFILL_BACKUP_CHANGED"));
     }
-    app.store.register_backfill_budget(job, baseline, cap)?;
     let statepath = dir.join("state-v3.json");
     if initial.is_none() && dir.join("state.json").exists() {
         let old = read_json(&dir.join("state.json"))?;
@@ -371,13 +358,12 @@ pub fn run(app: &App, args: &BackfillArgs, now: DateTime<Utc>) -> Result<Value, 
             || old["end_date"] != jobvalue["end_date"]
             || old["baseline_call_id"] != jobvalue["baseline_call_id"]
             || old["backup_sha256"] != jobvalue["backup_sha256"]
-            || old["call_budget"] != jobvalue["call_budget"]
         {
             return Err(error("BACKFILL_STATE_INVALID"));
         }
         initial = Some(old);
     }
-    let mut state=read_state(app,job,&statepath)?.or(initial).unwrap_or_else(||json!({"start_date":start.to_string(),"end_date":end.to_string(),"total_dates":selected.len(),"call_budget":cap,"baseline_call_id":baseline,"backup_sha256":jobvalue["backup_sha256"],"dates":{},"created_at":now.to_rfc3339()}));
+    let mut state=read_state(app,job,&statepath)?.or(initial).unwrap_or_else(||json!({"start_date":start.to_string(),"end_date":end.to_string(),"total_dates":selected.len(),"baseline_call_id":baseline,"backup_sha256":jobvalue["backup_sha256"],"dates":{},"created_at":now.to_rfc3339()}));
     state["job_id"] = json!(job);
     state["version"] = json!(3);
     state.as_object_mut().unwrap().remove("stop_reason");
@@ -448,13 +434,7 @@ pub fn run(app: &App, args: &BackfillArgs, now: DateTime<Utc>) -> Result<Value, 
                 }
             }
             let mut recovery = input.recovery_inputs.take().unwrap_or_default();
-            recovery.job_budget = Some(JobBudget {
-                job_id: job.into(),
-                tokens_limit: u64::MAX,
-                calls_limit: cap,
-                cost_limit_microunits: None,
-                revision_sha256: None,
-            });
+            recovery.job_budget = Some(JobContext::new(job.into()));
             input.recovery_inputs = Some(recovery);
             input.input_fingerprint = fingerprint(
                 &json!({"input":input.input_fingerprint,"backfill":job,"run":input.context.run_id,"recovery":input.recovery_inputs}),
@@ -490,11 +470,7 @@ pub fn run(app: &App, args: &BackfillArgs, now: DateTime<Utc>) -> Result<Value, 
                 entry["error_code"] = json!(e.code);
                 if matches!(
                     e.code,
-                    "BACKFILL_CALL_BUDGET_EXHAUSTED"
-                        | "MODEL_CALL_BUDGET_EXHAUSTED"
-                        | "MODEL_HTTP_401"
-                        | "MODEL_HTTP_403"
-                        | "MODEL_CREDENTIAL_MISSING"
+                    "MODEL_HTTP_401" | "MODEL_HTTP_403" | "MODEL_CREDENTIAL_MISSING"
                 ) {
                     state["stop_reason"] = json!(e.code);
                 }
@@ -525,7 +501,7 @@ pub fn run(app: &App, args: &BackfillArgs, now: DateTime<Utc>) -> Result<Value, 
             ],
         )?;
     }
-    let mut index=format!("# 历史日报补录：{start} 至 {end}\n\n已保存并核验 {complete} / {} 天，累计调用 {} / {cap} 次。\n\n历史补录依据当前文件的修改时间和现有内容，无法还原已覆盖的历史版本。OCR 文字需核对原件。\n\n| 日期 | 状态 | 日报 |\n| --- | --- | --- |\n",selected.len(),state["calls_used"]);
+    let mut index=format!("# 历史日报补录：{start} 至 {end}\n\n已保存并核验 {complete} / {} 天，累计调用 {} 次。\n\n历史补录依据当前文件的修改时间和现有内容，无法还原已覆盖的历史版本。OCR 文字需核对原件。\n\n| 日期 | 状态 | 日报 |\n| --- | --- | --- |\n",selected.len(),state["calls_used"]);
     for date in selected {
         let date = date.to_string();
         let row = &state["dates"][&date];
@@ -589,9 +565,6 @@ fn coverage_command(
             || args.dry_run
             || args.generate_candidates
             || args.plan.is_some()
-            || args.call_budget.is_some()
-            || args.token_budget.is_some()
-            || args.cost_budget_microunits.is_some()
             || !args.dates.is_empty()
             || !args.gap_codes.is_empty()
             || args.scope_root.is_some()
@@ -611,13 +584,6 @@ fn coverage_command(
                     .scope_root
                     .as_deref()
                     .ok_or_else(|| error("BACKFILL_OPTIONS_INVALID"))?,
-                calls_limit: args
-                    .call_budget
-                    .ok_or_else(|| error("BACKFILL_OPTIONS_INVALID"))?,
-                tokens_limit: args
-                    .token_budget
-                    .ok_or_else(|| error("BACKFILL_OPTIONS_INVALID"))?,
-                cost_limit_microunits: args.cost_budget_microunits,
                 refresh: args.refresh_preflight,
             },
             now,
@@ -628,9 +594,6 @@ fn coverage_command(
         && !args.dry_run
         && !args.refresh_preflight
         && args.scope_root.is_none()
-        && args.call_budget.is_none()
-        && args.token_budget.is_none()
-        && args.cost_budget_microunits.is_none()
         && args.dates.is_empty()
         && args.gap_codes.is_empty()
     {

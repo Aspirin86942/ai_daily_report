@@ -89,6 +89,7 @@ pub(crate) fn counts(
     let changes: i64 = store.conn.query_row(
         "SELECT count(*) FROM metadata m JOIN documents d ON m.key='capture:'||d.id
          WHERE json_extract(m.value,'$.changed_at') IS NOT NULL
+         AND d.missing_count<2
          AND (?1 IS NULL OR (json_extract(m.value,'$.changed_at')<?1
              AND json_extract(m.value,'$.changed_at')>=?2))",
         params![before, start],
@@ -96,10 +97,42 @@ pub(crate) fn counts(
     )?;
     let baselines: i64 = store.conn.query_row(
         "SELECT count(*) FROM documents d WHERE d.baseline=1 AND d.current_version IS NULL
+         AND d.missing_count<2
          AND NOT EXISTS(SELECT 1 FROM metadata m WHERE m.key='capture:'||d.id
              AND json_extract(m.value,'$.changed_at') IS NOT NULL)",
         [],
         |r| r.get(0),
     )?;
     Ok((changes as u64, baselines as u64))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_missing_capture_is_not_a_live_queue_item_and_keeps_evidence() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ArchiveStore::at(dir.path(), true).unwrap();
+        store.conn.execute("INSERT INTO documents(id,root,path,extension,baseline,missing_count) VALUES('d','root','gone.txt','.txt',0,1)",[]).unwrap();
+        store.conn.execute("INSERT INTO metadata(key,value) VALUES('capture:d',?)",
+            [serde_json::json!({"fingerprint":"saved","changed_at":"2026-10-23T01:00:00+00:00"}).to_string()]).unwrap();
+        assert_eq!(counts(&store, None).unwrap().0, 1);
+        store
+            .conn
+            .execute("UPDATE documents SET missing_count=2 WHERE id='d'", [])
+            .unwrap();
+        assert_eq!(counts(&store, None).unwrap().0, 0);
+        assert_eq!(
+            store
+                .conn
+                .query_row(
+                    "SELECT count(*) FROM metadata WHERE key='capture:d'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
 }

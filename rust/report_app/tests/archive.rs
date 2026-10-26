@@ -446,7 +446,6 @@ fn formal_daily_reads_concurrency_setting_and_reuses_success_on_recovery() {
     config.llm.context_window_tokens = Some(128000);
     config.llm.verified_max_output_tokens = Some(32768);
     config.llm.max_tokens = 512;
-    config.recovery.max_calls_per_run = 32;
     config.llm.max_sources_per_batch = 1;
     collect::run(&config, true, Utc::now() - chrono::Duration::days(2)).unwrap();
     for i in 0..8 {
@@ -548,7 +547,6 @@ fn archive_recovery_reuses_successful_composition_without_new_fact_requests() {
     config.llm.verified_max_output_tokens = Some(32768);
     config.llm.max_tokens = 512;
     config.llm.max_sources_per_batch = 1;
-    config.recovery.max_calls_per_run = 64;
     collect::run(&config, true, Utc::now() - chrono::Duration::days(2)).unwrap();
     for index in 0..16 {
         fs::write(

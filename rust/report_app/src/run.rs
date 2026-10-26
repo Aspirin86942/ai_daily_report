@@ -328,6 +328,7 @@ pub fn prepare_scheduled_archive(
     request: &mut ReportRequest,
 ) -> Result<Option<Value>, ReportError> {
     if app.config.report.profile == crate::config::ReportProfile::Personal {
+        crate::personal_recovery::scheduled_request(app, request)?;
         return Ok(None);
     }
     if !request.scheduled || request.period.source != crate::types::ReportSource::Archive {
@@ -507,8 +508,6 @@ fn finish(
             "冻结输入对应的业务配置已经改变",
         ));
     }
-    let mut limits = app.config.recovery.clone();
-    limits.model_pricing = payload.model_pricing.clone();
     let transport = crate::archive::model_input::ProtectedTransport {
         config: &app.config,
         input: &payload,
@@ -519,7 +518,6 @@ fn finish(
         snapshots: &app.snapshots,
         transport: &transport,
         llm: &app.config.llm,
-        recovery: &limits,
         recovery_inputs: payload.recovery_inputs.as_ref(),
         allow_new_calls: same_config,
         run_id,

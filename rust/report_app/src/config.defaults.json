@@ -8,7 +8,7 @@
     "invalid_response_retries":1
   },
   "report": {"profile":"evidence", "scope_id":"personal_work", "root_alias":"work", "timezone":"Asia/Shanghai", "default_target":"previous_calendar_day", "notes_dir":"data/report_notes"},
-  "recovery": {"enforce_model_budgets":true,"missed_days_policy":"latest_due_day_with_gap_notice","max_calls_per_run":12,"max_calls_per_calendar_day":30,"run_budget_seconds":900,"lock_wait_seconds":5.0,"max_tokens_per_run":null,"max_tokens_per_calendar_day":null,"max_cost_per_run_microunits":null,"max_cost_per_calendar_day_microunits":null,"model_pricing":null},
+  "recovery": {"missed_days_policy":"latest_due_day_with_gap_notice","run_budget_seconds":900,"lock_wait_seconds":5.0},
   "retention": {"input_snapshot_days":14,"terminal_run_days":30,"snapshot_max_mib":512},
   "schedule": {"task_name":"AI Daily Report","local_time":"09:00","logon_catchup":true,"wake_to_run":false,"allow_on_battery":true,"stop_on_battery":false,"restart_count":2,"restart_interval_minutes":15,"execution_limit_minutes":20},
   "scanner": {},

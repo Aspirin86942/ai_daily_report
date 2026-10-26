@@ -1,5 +1,5 @@
 use super::*;
-use crate::{model::recovery::FrozenCall, store::revisions::JobBudgetRevision};
+use crate::model::recovery::FrozenCall;
 use std::collections::BTreeMap;
 
 fn retained(app: &App, job: &str, record: &Value) -> Result<Vec<Value>, ReportError> {
@@ -275,7 +275,6 @@ pub fn recover(
     path: &Path,
     reason: &str,
     note: &str,
-    calls_limit: Option<u64>,
     revise_runtime: bool,
     now: DateTime<Utc>,
 ) -> Result<PathBuf, ReportError> {
@@ -309,7 +308,6 @@ pub fn recover(
         if base["config_fingerprint"] != app.fingerprint(false)?
             || base["retained_calls_sha256"] != fingerprint(&json!(calls))?
             || base["algorithm_fingerprint"] == algorithm_fingerprint()?
-            || calls_limit.is_some_and(|n| base["calls_limit"] != n)
         {
             return Err(error("COVERAGE_RUNTIME_REVISION_INVALID"));
         }
@@ -319,7 +317,10 @@ pub fn recover(
         return Ok(output);
     }
     if let Some((existing, _)) = &base {
-        if existing["version"] == 3 && calls_limit.is_none_or(|n| existing["calls_limit"] == n) {
+        if existing["version"] == 3
+            && existing["retained_call_ids"]
+                == json!(calls.iter().map(|row| &row["call_id"]).collect::<Vec<_>>())
+        {
             validate_current(app, &plan, &hash, &dir)?;
             return Ok(chain.last().unwrap().2.clone());
         }
@@ -327,35 +328,7 @@ pub fn recover(
     if chain.len() > 32 {
         return Err(error("COVERAGE_RECOVERY_LIMIT"));
     }
-    let mut job_budget = budget(app, &plan)?;
-    let mut pending_revision = None;
-    let limit = calls_limit.unwrap_or(job_budget.calls_limit);
-    if limit < job_budget.calls_limit || limit > 10000 {
-        return Err(error("COVERAGE_BUDGET_INVALID"));
-    }
-    if limit > job_budget.calls_limit {
-        let old = app.store.job_budget_revisions(&plan.job_id)?;
-        let revision = JobBudgetRevision {
-            version: if old.is_empty() { 1 } else { 2 },
-            job_id: plan.job_id.clone(),
-            plan_sha256: hash.clone(),
-            previous_calls_limit: job_budget.calls_limit,
-            calls_limit: limit,
-            tokens_limit: job_budget.tokens_limit,
-            cost_limit_microunits: job_budget.cost_limit_microunits,
-            pricing: plan.pricing.clone(),
-            retained_call_ids: calls
-                .iter()
-                .map(|r| r["call_id"].as_i64().unwrap())
-                .collect(),
-            retained_calls_sha256: fingerprint(&json!(calls))?,
-            authorization_note: note.into(),
-            previous_revision_sha256: old.last().map(|(_, sha)| sha.clone()),
-            previous_tokens_limit: old.last().map(|(r, _)| r.tokens_limit),
-        };
-        pending_revision = Some(revision);
-        job_budget.calls_limit = limit;
-    }
+    let job = job_context(&plan);
     let events = events::Events::open(&dir, &plan.job_id, &hash)?;
     let mut inputs = BTreeMap::new();
     let mut successes = 0;
@@ -426,7 +399,7 @@ pub fn recover(
                 )?;
                 input.recovery_fingerprint = app.fingerprint(true)?;
                 input.recovery_inputs = Some(RecoveryInputs {
-                    job_budget: Some(job_budget.clone()),
+                    job_budget: Some(job.clone()),
                     reused_calls: reused,
                     prior_calls: prior,
                 });
@@ -442,7 +415,7 @@ pub fn recover(
                 item,
                 &dir,
                 Some(RecoveryInputs {
-                    job_budget: Some(job_budget.clone()),
+                    job_budget: Some(job.clone()),
                     ..Default::default()
                 }),
                 now,
@@ -453,18 +426,15 @@ pub fn recover(
     if successes == 0 {
         return Err(error("COVERAGE_RECOVERY_SUCCESS_REQUIRED"));
     }
-    if let Some(revision) = pending_revision {
-        job_budget.revision_sha256 = Some(app.store.register_job_budget_revision(&revision)?);
-    }
     let mut prepared = BTreeMap::new();
     for (date, mut input) in inputs {
         if input["version"] == 3 {
-            input["recovery_inputs"]["job_budget"] = json!(job_budget);
+            input["recovery_inputs"]["job_budget"] = json!(job);
         } else {
-            input["job_budget"] = json!(job_budget);
+            input["job_budget"] = json!(job);
         }
         input["input_fingerprint"] = json!(fingerprint(
-            &json!({"input":input["input_fingerprint"],"budget":job_budget})
+            &json!({"input":input["input_fingerprint"],"job":job})
         )?);
         prepared.insert(date, self::prepared(app, &input)?);
     }
@@ -475,7 +445,7 @@ pub fn recover(
         &dir.join("execution-amendment.json"),
         "amendment",
     )?;
-    let value = json!({"version":3,"job_id":plan.job_id,"plan_sha256":hash,"previous_recovery_sha256":base.as_ref().map(|(_,sha)|sha),"previous_amendment_sha256":amendment.as_ref().map(|(_,sha)|sha),"created_at":now.to_rfc3339(),"reason":reason,"authorization_note":note,"previous_config_fingerprint":plan.config_fingerprint,"previous_algorithm_fingerprint":plan.algorithm_fingerprint,"config_fingerprint":app.fingerprint(false)?,"algorithm_fingerprint":algorithm_fingerprint()?,"calls_limit":limit,"retained_call_ids":calls.iter().map(|r|r["call_id"].clone()).collect::<Vec<_>>(),"retained_calls_sha256":fingerprint(&json!(calls))?,"budget_revision_sha256":job_budget.revision_sha256,"prepared_runs":prepared});
+    let value = json!({"version":3,"job_id":plan.job_id,"plan_sha256":hash,"previous_recovery_sha256":base.as_ref().map(|(_,sha)|sha),"previous_amendment_sha256":amendment.as_ref().map(|(_,sha)|sha),"created_at":now.to_rfc3339(),"reason":reason,"authorization_note":note,"previous_config_fingerprint":plan.config_fingerprint,"previous_algorithm_fingerprint":plan.algorithm_fingerprint,"config_fingerprint":app.fingerprint(false)?,"algorithm_fingerprint":algorithm_fingerprint()?,"retained_call_ids":calls.iter().map(|r|r["call_id"].clone()).collect::<Vec<_>>(),"retained_calls_sha256":fingerprint(&json!(calls))?,"prepared_runs":prepared});
     let output = dir.join(if chain.is_empty() {
         "execution-recovery.json".into()
     } else {

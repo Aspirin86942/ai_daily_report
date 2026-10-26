@@ -2,8 +2,7 @@ mod events;
 mod recovery;
 use super::files::{read_bytes, read_envelope, relative_path, write_envelope, write_immutable};
 use crate::{
-    config::ModelPricing,
-    model::recovery::{JobBudget, RecoveryInputs},
+    model::recovery::{JobContext, RecoveryInputs},
     publish::Publisher,
     run::{self, App, FrozenInput},
     snapshots::{digest, fingerprint, reject_redirects, valid_hash, SnapshotRef},
@@ -59,12 +58,18 @@ pub struct RepairPlan {
     pub reports_root: PathBuf,
     pub config_fingerprint: String,
     pub algorithm_fingerprint: String,
-    pub pricing: Option<ModelPricing>,
-    pub calls_limit: u64,
-    pub tokens_limit: u64,
-    pub cost_limit_microunits: Option<u64>,
-    pub worst_tokens_per_call: u64,
-    pub worst_cost_per_call_microunits: Option<u64>,
+    #[serde(default, skip_serializing)]
+    pub pricing: Option<Value>,
+    #[serde(default, skip_serializing)]
+    pub calls_limit: Option<Value>,
+    #[serde(default, skip_serializing)]
+    pub tokens_limit: Option<Value>,
+    #[serde(default, skip_serializing)]
+    pub cost_limit_microunits: Option<Value>,
+    #[serde(default, skip_serializing)]
+    pub worst_tokens_per_call: Option<Value>,
+    #[serde(default, skip_serializing)]
+    pub worst_cost_per_call_microunits: Option<Value>,
     pub refreshed: bool,
     pub dates: Vec<RepairDate>,
 }
@@ -72,9 +77,6 @@ pub struct PlanRequest<'a> {
     pub dates: &'a [NaiveDate],
     pub gap_codes: &'a [String],
     pub scope_root: &'a Path,
-    pub calls_limit: u64,
-    pub tokens_limit: u64,
-    pub cost_limit_microunits: Option<u64>,
     pub refresh: bool,
 }
 pub(super) fn error(code: &'static str) -> ReportError {
@@ -157,9 +159,6 @@ pub fn make_plan(
         || request.dates.iter().collect::<BTreeSet<_>>().len() != request.dates.len()
         || request.gap_codes.is_empty()
         || request.gap_codes.len() > 64
-        || request.calls_limit > 10000
-        || request.tokens_limit == 0
-        || request.cost_limit_microunits.is_some() && app.config.recovery.model_pricing.is_none()
     {
         return Err(error("COVERAGE_PLAN_INVALID"));
     }
@@ -245,12 +244,6 @@ pub fn make_plan(
         dates.push(item);
     }
     dates.sort_by(|a, b| a.date.cmp(&b.date));
-    let output = app
-        .config
-        .llm
-        .max_tokens
-        .max(app.config.llm.facts_output_tokens());
-    let worst = app.config.llm.max_request_utf8_bytes as u64 + 1024 + output;
     let plan = RepairPlan {
         version: 3,
         job_id: format!("coverage_{}", types::new_run_id()),
@@ -261,17 +254,12 @@ pub fn make_plan(
         reports_root: app.config.paths.reports_dir.clone(),
         config_fingerprint: app.fingerprint(false)?,
         algorithm_fingerprint: algorithm_fingerprint()?,
-        pricing: app.config.recovery.model_pricing.clone(),
-        calls_limit: request.calls_limit,
-        tokens_limit: request.tokens_limit,
-        cost_limit_microunits: request.cost_limit_microunits,
-        worst_tokens_per_call: worst,
-        worst_cost_per_call_microunits: app
-            .config
-            .recovery
-            .model_pricing
-            .as_ref()
-            .map(|p| crate::model::budget::cost(worst - output, output, p)),
+        pricing: None,
+        calls_limit: None,
+        tokens_limit: None,
+        cost_limit_microunits: None,
+        worst_tokens_per_call: None,
+        worst_cost_per_call_microunits: None,
         refreshed: request.refresh,
         dates,
     };
@@ -321,12 +309,8 @@ pub(super) fn load(app: &App, path: &Path) -> Result<(RepairPlan, String, PathBu
         || !same_path(&plan.work_root, &app.config.paths.work_dir)
         || !same_path(&plan.db_path, &app.store.path)
         || !same_path(&plan.reports_root, &app.config.paths.reports_dir)
-        || serde_json::to_value(&plan.pricing)?
-            != serde_json::to_value(&app.config.recovery.model_pricing)?
         || plan.dates.is_empty()
         || plan.dates.len() > 31
-        || plan.calls_limit > 10000
-        || plan.tokens_limit == 0
         || !valid_hash(&plan.config_fingerprint)
         || !valid_hash(&plan.algorithm_fingerprint)
     {
@@ -377,25 +361,8 @@ fn request(app: &App, date: NaiveDate, now: DateTime<Utc>) -> Result<ReportReque
         regeneration_reason: None,
     })
 }
-pub(super) fn budget(app: &App, plan: &RepairPlan) -> Result<JobBudget, ReportError> {
-    let revisions = app.store.job_budget_revisions(&plan.job_id)?;
-    Ok(if let Some((head, sha)) = revisions.last() {
-        JobBudget {
-            job_id: plan.job_id.clone(),
-            calls_limit: head.calls_limit,
-            tokens_limit: head.tokens_limit,
-            cost_limit_microunits: head.cost_limit_microunits,
-            revision_sha256: Some(sha.clone()),
-        }
-    } else {
-        JobBudget {
-            job_id: plan.job_id.clone(),
-            calls_limit: plan.calls_limit,
-            tokens_limit: plan.tokens_limit,
-            cost_limit_microunits: plan.cost_limit_microunits,
-            revision_sha256: None,
-        }
-    })
+pub(super) fn job_context(plan: &RepairPlan) -> JobContext {
+    JobContext::new(plan.job_id.clone())
 }
 fn prepare_input(
     app: &App,
@@ -496,7 +463,7 @@ fn prepare_input(
         return Err(error("COVERAGE_INPUT_UNAVAILABLE"));
     }
     input.recovery_inputs = Some(recovery.unwrap_or(RecoveryInputs {
-        job_budget: Some(budget(app, plan)?),
+        job_budget: Some(job_context(plan)),
         ..Default::default()
     }));
     input.input_fingerprint =

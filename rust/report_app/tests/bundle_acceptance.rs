@@ -303,8 +303,6 @@ fn standalone_bundle_runs_reports_recovery_and_scheduling_without_python() {
         "2026-10-09",
         "--preflight",
         preflight["preflight"].as_str().unwrap(),
-        "--call-budget",
-        "0",
     ];
     assert_eq!(ok!(&backfill_args)["complete"], true);
     assert_eq!(ok!(&backfill_args)["complete"], true);
@@ -342,7 +340,7 @@ fn standalone_bundle_runs_reports_recovery_and_scheduling_without_python() {
 
 #[test]
 #[ignore = "requires AI_DAILY_TEST_BUNDLE; standalone personal package acceptance"]
-fn standalone_personal_bundle_keeps_date_budget_and_independent_evidence() {
+fn standalone_personal_bundle_exceeds_old_quotas_and_keeps_independent_evidence() {
     let bundle =
         fs::canonicalize(std::env::var_os("AI_DAILY_TEST_BUNDLE").expect("bundle required"))
             .unwrap();
@@ -362,6 +360,7 @@ fn standalone_personal_bundle_keeps_date_budget_and_independent_evidence() {
     fs::write(config.join("settings.yaml"),json!({
         "paths":{"work_dir":work,"data_dir":data,"db_dir":root.join("db"),"reports_dir":root.join("reports"),"log_dir":root.join("logs")},
         "report":{"profile":"personal"},
+        "recovery":{"enforce_model_budgets":true,"max_calls_per_run":0,"max_calls_per_calendar_day":0,"max_tokens_per_run":0,"max_tokens_per_calendar_day":0,"max_cost_per_run_microunits":0,"max_cost_per_calendar_day_microunits":0},
         "archive":{"daily_source":"archive","run_seconds":120,"read_workers":1,"parse_workers":1},
         "schedule":{"local_time":"00:00","execution_limit_minutes":6},
         "llm":{"base_url":format!("http://127.0.0.1:{}",server.port),"model_id":"synthetic-local",
@@ -424,17 +423,28 @@ fn standalone_personal_bundle_keeps_date_budget_and_independent_evidence() {
     let date = target.to_string();
     let dry = ok!(&["daily", "--target-date", &date, "--dry-run"]);
     assert_eq!(dry["model_calls"], 0);
+    // Separate CLI processes prove that neither old configuration limits nor the
+    // persistent personal date count blocks later requests or publication.
+    for count in 1..=4 {
+        let preview = ok!(&["daily", "--target-date", &date, "--no-save"]);
+        assert_eq!(preview["model_calls"], 1);
+        assert_eq!(server.calls(), count);
+    }
     let started = Instant::now();
     let report = ok!(&["daily", "--scheduled"]);
     let elapsed = started.elapsed().as_millis();
     assert_eq!(report["target_date"], date);
     assert_eq!(report["model_calls"], 1);
-    assert_eq!(server.calls(), 1);
+    assert_eq!(server.calls(), 5);
     let path = PathBuf::from(report["output_path"].as_str().unwrap());
     let body = fs::read_to_string(&path).unwrap();
     assert!(body.len() <= 100_000 && body.contains("100") && body.contains("120"));
     assert!(body.contains("仍待审批") && body.contains("建议"));
     let reports = rusqlite::Connection::open(root.join("db/reports.sqlite3")).unwrap();
+    let call_count: i64 = reports
+        .query_row("SELECT count(*) FROM report_model_calls", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(call_count, 5);
     let raw: String = reports
         .query_row(
             "SELECT raw_json FROM daily_reports WHERE date=?",
@@ -449,7 +459,7 @@ fn standalone_personal_bundle_keeps_date_budget_and_independent_evidence() {
     assert!(saved.selection.selected_chars <= 20_000);
     assert_eq!(saved.schema_version, 5);
     assert_eq!(ok!(&["daily", "--scheduled"])["model_calls"], 0);
-    assert_eq!(server.calls(), 1);
+    assert_eq!(server.calls(), 5);
     let search = ok!(&["search", "--query", "报价", "--format", "json"]);
     assert!(search["total"].as_u64().unwrap() > 0);
     let (_, health, error) = run(
@@ -484,7 +494,7 @@ fn standalone_personal_bundle_keeps_date_budget_and_independent_evidence() {
     ok!(&["archive", "drain"]);
     ok!(&["repair-output", "--target-date", &date]);
     assert_eq!(fs::read_to_string(path).unwrap(), body);
-    assert_eq!(server.calls(), 1);
+    assert_eq!(server.calls(), 5);
     for kind in ["daily", "collect", "parse", "health"] {
         let plan = ok!(&[
             "task",
@@ -521,6 +531,7 @@ fn standalone_personal_bundle_keeps_date_budget_and_independent_evidence() {
             "status":"passed","bundle":bundle,"daily_duration_ms":elapsed,"output_bytes":body.len(),
             "cache_logical_bytes":cache_bytes,"selected_chars":saved.selection.selected_chars,
             "local_http_requests":server.calls(),"remote_model_calls":0,"real_tasks_changed":0,
+            "same_date_previews":4,"published_on_call":5,"legacy_zero_quotas_ignored":true,
             "observation_clock":"isolated fixture","checks":checks,"loaded_modules":loaded
         }))
         .unwrap(),

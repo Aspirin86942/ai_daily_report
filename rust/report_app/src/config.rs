@@ -96,17 +96,9 @@ pub struct ModelPricing {
 pub struct Recovery {
     #[serde(default = "default_model_workers")]
     pub model_workers: u8,
-    pub enforce_model_budgets: bool,
     pub missed_days_policy: String,
-    pub max_calls_per_run: u64,
-    pub max_calls_per_calendar_day: u64,
     pub run_budget_seconds: u64,
     pub lock_wait_seconds: f64,
-    pub max_tokens_per_run: Option<u64>,
-    pub max_tokens_per_calendar_day: Option<u64>,
-    pub max_cost_per_run_microunits: Option<u64>,
-    pub max_cost_per_calendar_day_microunits: Option<u64>,
-    pub model_pricing: Option<ModelPricing>,
 }
 
 fn default_model_workers() -> u8 {
@@ -480,6 +472,21 @@ impl AppConfig {
             .unwrap_or_else(|| program_dir.join("ai-daily-pdf-parser.exe"));
         let scanner: ScannerSettings =
             serde_json::from_value(scanner).map_err(|_| invalid("scanner"))?;
+        // Old saved settings may contain quota options. They no longer affect execution.
+        if let Some(recovery) = settings["recovery"].as_object_mut() {
+            for key in [
+                "enforce_model_budgets",
+                "max_calls_per_run",
+                "max_calls_per_calendar_day",
+                "max_tokens_per_run",
+                "max_tokens_per_calendar_day",
+                "max_cost_per_run_microunits",
+                "max_cost_per_calendar_day_microunits",
+                "model_pricing",
+            ] {
+                recovery.remove(key);
+            }
+        }
         let mut config = Self {
             program_dir: program_dir.clone(),
             config_dir,
@@ -640,44 +647,11 @@ impl AppConfig {
         }
         let recovery = &self.recovery;
         if recovery.missed_days_policy != "latest_due_day_with_gap_notice"
-            || recovery.max_calls_per_run == 0
-            || recovery.max_calls_per_calendar_day < recovery.max_calls_per_run
             || recovery.run_budget_seconds == 0
             || !recovery.lock_wait_seconds.is_finite()
             || !(0.0..=60.0).contains(&recovery.lock_wait_seconds)
         {
             return Err(invalid("recovery"));
-        }
-        if recovery.max_tokens_per_run == Some(0) || recovery.max_tokens_per_calendar_day == Some(0)
-        {
-            return Err(invalid("recovery token 预算"));
-        }
-        for (run, day) in [
-            (
-                recovery.max_tokens_per_run,
-                recovery.max_tokens_per_calendar_day,
-            ),
-            (
-                recovery.max_cost_per_run_microunits,
-                recovery.max_cost_per_calendar_day_microunits,
-            ),
-        ] {
-            if matches!((run, day), (Some(a), Some(b)) if b < a) {
-                return Err(invalid("recovery 每日预算不得小于单次预算"));
-            }
-        }
-        if recovery.model_pricing.is_none()
-            && (recovery.max_cost_per_run_microunits.is_some()
-                || recovery.max_cost_per_calendar_day_microunits.is_some())
-        {
-            return Err(invalid("recovery.model_pricing"));
-        }
-        if recovery.model_pricing.as_ref().is_some_and(|pricing| {
-            pricing.rate_version.trim().is_empty()
-                || pricing.rate_version.len() > 128
-                || !["CNY", "USD"].contains(&pricing.currency.as_str())
-        }) {
-            return Err(invalid("recovery.model_pricing"));
         }
         if self.retention.input_snapshot_days == 0
             || self.retention.terminal_run_days < self.retention.input_snapshot_days
@@ -701,7 +675,7 @@ impl AppConfig {
 
     pub fn config_check(&self) -> Value {
         json!({"status":"ok", "config_dir":self.config_dir, "timezone":self.report.timezone,
-            "local_date":Utc::now().with_timezone(&shanghai()).date_naive(), "enforce_model_budgets":self.recovery.enforce_model_budgets,
+            "local_date":Utc::now().with_timezone(&shanghai()).date_naive(),
             "max_attempts":self.llm.max_retries, "model_limits_verified":self.llm.context_window_tokens.is_some() && self.llm.verified_max_output_tokens.is_some()})
     }
 }

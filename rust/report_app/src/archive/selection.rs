@@ -375,6 +375,14 @@ pub(crate) fn prepare_at(
                         selected.materials.push(material);
                     }
                 }
+                Err(error) if error.code == "MATERIAL_TOO_LARGE" => {
+                    selected.summary.omit("budget", &candidate.version.path);
+                }
+                Err(error) if error.code == "MATERIAL_EMPTY" => {
+                    selected
+                        .summary
+                        .omit("no_usable_text", &candidate.version.path);
+                }
                 Err(_) => {
                     selected
                         .summary

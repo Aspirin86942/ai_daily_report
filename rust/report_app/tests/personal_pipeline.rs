@@ -72,11 +72,217 @@ fn request(day: NaiveDate, save: bool) -> ReportRequest {
     }
 }
 
+struct OfflineModel(Arc<AtomicUsize>);
+impl ModelTransport for OfflineModel {
+    fn send(&self, _: &[u8], _: Duration) -> Result<HttpResponse, TransportFailure> {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        Err(TransportFailure::Timeout)
+    }
+}
+
+#[test]
+fn historical_timeout_stays_visible_and_scheduled_recovery_preserves_notes() {
+    use ai_daily_report::{health, personal_recovery, run::prepare_scheduled_archive};
+    let (_dir, config) = setup();
+    let now = Utc::now();
+    let today = now
+        .with_timezone(&ai_daily_report::types::shanghai())
+        .date_naive();
+    let day = today - chrono::Duration::days(3);
+    let sent = Arc::new(AtomicUsize::new(0));
+    let mut app = App::open(config.clone(), now).unwrap();
+    app.transport = Box::new(OfflineModel(sent.clone()));
+    let first = run_daily(request(day, true), &app).unwrap();
+    assert_eq!(
+        sent.load(Ordering::SeqCst),
+        1,
+        "one outage must not consume all date reservations"
+    );
+    let calls = app.store.calls(&first.run_id).unwrap();
+    assert_eq!(calls[0]["status"], "unknown");
+    assert_eq!(calls[0]["error_code"], "MODEL_TIMEOUT");
+    let original = fs::read(first.output_path.as_ref().unwrap()).unwrap();
+    let future = now + chrono::Duration::hours(30);
+    let check = health::check(&config, today.pred_opt().unwrap(), future).unwrap();
+    let historical = check
+        .checks
+        .iter()
+        .find(|c| c.code == "HISTORICAL_REPORT_ATTENTION")
+        .unwrap();
+    assert_eq!(historical.level, "error");
+    assert_eq!(
+        historical.evidence["reports"][0]["target_date"],
+        day.to_string()
+    );
+
+    let mut due = request(today.pred_opt().unwrap(), true);
+    due.input.clear();
+    run_daily(due, &app).unwrap();
+    let mut scheduled = request(today.pred_opt().unwrap(), true);
+    scheduled.scheduled = true;
+    scheduled.input.clear();
+    prepare_scheduled_archive(&app, &mut scheduled).unwrap();
+    assert_eq!(scheduled.context.target_date, day);
+    assert!(scheduled.input.contains("100"));
+    app.transport = Box::new(Model {
+        sent: sent.clone(),
+        invalid: false,
+    });
+    let recovered = run_daily(scheduled, &app).unwrap();
+    assert_ne!(recovered.run_id, first.run_id);
+    assert!(recovered.markdown.contains("仍待审批"));
+    assert_eq!(sent.load(Ordering::SeqCst), 2);
+    assert!(
+        personal_recovery::issues(&app.store.connection().unwrap(), "personal_work", now)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        app.store
+            .get(&first.run_id)
+            .unwrap()
+            .markdown
+            .unwrap()
+            .as_bytes(),
+        original
+    );
+    assert_eq!(
+        app.store.calls(&first.run_id).unwrap()[0]["status"],
+        "unknown"
+    );
+}
+
+#[test]
+fn recovery_after_repeated_timeouts_needs_no_quota_grant_and_keeps_useful_report() {
+    let (_dir, config) = setup();
+    let day = Utc::now()
+        .with_timezone(&ai_daily_report::types::shanghai())
+        .date_naive()
+        .pred_opt()
+        .unwrap();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let mut app = App::open(config.clone(), Utc::now()).unwrap();
+    app.transport = Box::new(OfflineModel(sent.clone()));
+    for _ in 0..4 {
+        let mut retry = request(day, true);
+        retry.regeneration_reason = Some("retry after transport failure".into());
+        run_daily(retry, &app).unwrap();
+    }
+    assert_eq!(sent.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        app.store
+            .personal_calls("personal_work", &day.to_string())
+            .unwrap(),
+        4
+    );
+    drop(app);
+    let mut app = App::open(config, Utc::now()).unwrap();
+    app.transport = Box::new(Model {
+        sent: sent.clone(),
+        invalid: false,
+    });
+    let mut retry = request(day, true);
+    retry.scheduled = true;
+    ai_daily_report::run::prepare_scheduled_archive(&app, &mut retry).unwrap();
+    let result = run_daily(retry, &app).unwrap();
+    assert!(result.markdown.contains("仍待审批"));
+    assert_eq!(
+        app.store
+            .personal_calls("personal_work", &day.to_string())
+            .unwrap(),
+        5
+    );
+    assert!(ai_daily_report::personal_recovery::issues(
+        &app.store.connection().unwrap(),
+        "personal_work",
+        Utc::now()
+    )
+    .unwrap()
+    .is_empty());
+    app.transport = Box::new(OfflineModel(sent.clone()));
+    let mut failed = request(day, true);
+    failed.regeneration_reason = Some("verify failed regeneration protection".into());
+    assert_eq!(
+        run_daily(failed, &app).unwrap_err().code,
+        "PERSONAL_RECOVERY_INCOMPLETE"
+    );
+    assert_eq!(
+        app.store.current(&day.to_string()).unwrap().unwrap().run_id,
+        result.run_id
+    );
+    assert_eq!(sent.load(Ordering::SeqCst), 6);
+}
+
+#[test]
+fn recovery_alert_survives_material_expiry_without_extending_retention() {
+    use ai_daily_report::personal_recovery;
+    let (_dir, config) = setup();
+    let now = Utc::now();
+    let day = now
+        .with_timezone(&ai_daily_report::types::shanghai())
+        .date_naive()
+        .pred_opt()
+        .unwrap();
+    let mut app = App::open(config.clone(), now).unwrap();
+    app.transport = Box::new(OfflineModel(Arc::new(AtomicUsize::new(0))));
+    run_daily(request(day, true), &app).unwrap();
+    let later = now + chrono::Duration::days(9);
+    let issues =
+        personal_recovery::issues(&app.store.connection().unwrap(), "personal_work", later)
+            .unwrap();
+    assert_eq!(issues.len(), 1);
+    assert!(!issues[0].material_window_open);
+    assert!(personal_recovery::material_dates(&config, later)
+        .unwrap()
+        .is_empty());
+}
+
 struct ResponseVersionModel {
     sent: Arc<AtomicUsize>,
     version: Option<Value>,
     invalid_source: bool,
     extra_field: bool,
+}
+
+#[test]
+fn unpublished_failure_alert_survives_diagnostic_compaction() {
+    use ai_daily_report::personal_recovery;
+    let (_dir, config) = setup();
+    let now = Utc::now();
+    let past = now - chrono::Duration::days(40);
+    let app = App::open(config, now).unwrap();
+    let context = RunContext::new(
+        new_run_id(),
+        past,
+        past.with_timezone(&ai_daily_report::types::shanghai())
+            .date_naive(),
+        String::new(),
+    )
+    .unwrap();
+    app.store
+        .create(&context, "report", &context.run_id, None, past)
+        .unwrap();
+    app.store.register_personal_run(&context.run_id).unwrap();
+    app.store
+        .fail(&context.run_id, "MODEL_TIMEOUT", false, past)
+        .unwrap();
+    app.store
+        .compact_personal(
+            now,
+            &app.processing
+                .as_ref()
+                .unwrap()
+                .quota
+                .root
+                .join("snapshots"),
+        )
+        .unwrap();
+    assert!(app.store.get(&context.run_id).is_err());
+    let issues =
+        personal_recovery::issues(&app.store.connection().unwrap(), "personal_work", now).unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0].reason_codes, vec!["MODEL_TIMEOUT"]);
+    assert!(!issues[0].material_window_open);
 }
 
 impl ModelTransport for ResponseVersionModel {
@@ -103,7 +309,7 @@ impl ModelTransport for ResponseVersionModel {
 }
 
 #[test]
-fn personal_response_version_omission_preserves_content_validation_and_date_budget() {
+fn personal_response_version_omission_preserves_content_validation_and_call_audit() {
     for (version, invalid_source, extra_field, valid) in [
         (None, false, false, true),
         (Some(json!(5)), false, false, true),
@@ -247,6 +453,16 @@ fn publishes_one_request_and_repairs_after_processing_content_expires() {
     assert_eq!(value["schema_version"], 5);
     assert_eq!(app.store.reports_in_range(day, day).unwrap().0.len(), 1);
     let path = output.output_path.unwrap();
+    let evidence: ai_daily_report::reports::personal::EvidenceAttachment =
+        serde_json::from_value(value["evidence_attachment"].clone()).unwrap();
+    let evidence_path = path.parent().unwrap().join(evidence.link(&day.to_string()));
+    assert_eq!(
+        fs::read_to_string(&evidence_path).unwrap(),
+        evidence.markdown
+    );
+    assert!(output.markdown.contains(&evidence.link(&day.to_string())));
+    assert!(!output.markdown.contains("## 用户补充原文"));
+    assert!(output.markdown.len() + evidence.markdown.len() <= 100_000);
     let original = fs::read(&path).unwrap();
     drop(app);
     let future = Utc::now() + chrono::Duration::days(8);
@@ -256,14 +472,44 @@ fn publishes_one_request_and_repairs_after_processing_content_expires() {
         .unwrap()
         .open_archive(&app.config)
         .unwrap();
-    fs::remove_file(&path).unwrap(); // isolated publication-repair fixture
+    fs::remove_file(&evidence_path).unwrap(); // isolated publication-repair fixture
+    let health = ai_daily_report::health::check(&app.config, day, future).unwrap();
+    assert!(health
+        .checks
+        .iter()
+        .any(|check| check.code == "REPORT_EVIDENCE_MISMATCH" && check.level == "error"));
+    // Repair must restore a missing attachment even while the summary is intact.
+    ai_daily_report::run::repair_output(&app, &day.to_string(), future).unwrap();
+    assert_eq!(
+        fs::read_to_string(&evidence_path).unwrap(),
+        evidence.markdown
+    );
+    fs::remove_file(&path).unwrap();
+    fs::remove_file(&evidence_path).unwrap();
     app.transport = Box::new(Model {
         sent: sent.clone(),
         invalid: true,
     });
     let repaired = run_daily(request(day, true), &app).unwrap();
     assert_eq!(repaired.action, "existing");
-    assert_eq!(fs::read(path).unwrap(), original);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(
+        fs::read_to_string(&evidence_path).unwrap(),
+        evidence.markdown
+    );
+    let health = ai_daily_report::health::check(&app.config, day, future).unwrap();
+    assert!(!health
+        .checks
+        .iter()
+        .any(|check| check.code == "REPORT_EVIDENCE_MISMATCH"));
+    fs::write(&evidence_path, "人工修改的依据").unwrap();
+    let error = ai_daily_report::run::repair_output(&app, &day.to_string(), future).unwrap_err();
+    assert_eq!(error.code, "REPORT_EVIDENCE_CONFLICT");
+    assert_eq!(
+        fs::read_to_string(&evidence_path).unwrap(),
+        "人工修改的依据"
+    );
+    assert_eq!(fs::read(&path).unwrap(), original);
     assert_eq!(sent.load(Ordering::SeqCst), 1);
     assert_eq!(
         app.store
@@ -271,6 +517,107 @@ fn publishes_one_request_and_repairs_after_processing_content_expires() {
             .unwrap(),
         1
     );
+}
+
+#[test]
+fn attachment_failure_prevents_publication_and_repair_uses_stored_bytes() {
+    let (_dir, config) = setup();
+    let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let mut app = App::open(config, Utc::now()).unwrap();
+    app.transport = Box::new(Model {
+        sent: sent.clone(),
+        invalid: false,
+    });
+    let month = app.config.paths.reports_dir.join("2026-10");
+    fs::create_dir_all(&month).unwrap();
+    let blocker = month.join("attachments");
+    fs::write(&blocker, "occupied").unwrap();
+    assert!(run_daily(request(day, true), &app).is_err());
+    assert!(app.store.current(&day.to_string()).unwrap().is_none());
+    assert!(!month.join("2026-10-19.md").exists());
+    fs::remove_file(blocker).unwrap(); // isolated fixture, not a production attachment
+    let repaired = ai_daily_report::run::repair_output(&app, &day.to_string(), Utc::now()).unwrap();
+    assert!(repaired.output_path.unwrap().is_file());
+    assert!(fs::read_dir(month.join("attachments"))
+        .unwrap()
+        .next()
+        .is_some());
+    assert_eq!(sent.load(Ordering::SeqCst), 1);
+}
+
+struct OversizedSummaryModel {
+    sent: Arc<AtomicUsize>,
+    too_many_items: bool,
+}
+
+impl ModelTransport for OversizedSummaryModel {
+    fn send(&self, request: &[u8], timeout: Duration) -> Result<HttpResponse, TransportFailure> {
+        let mut response = Model {
+            sent: self.sent.clone(),
+            invalid: false,
+        }
+        .send(request, timeout)?;
+        if self.sent.load(Ordering::SeqCst) == 1 {
+            let mut envelope: Value = serde_json::from_slice(&response.body).unwrap();
+            let content = &mut envelope["choices"][0]["message"]["content"];
+            let mut report: Value = serde_json::from_str(content.as_str().unwrap()).unwrap();
+            if self.too_many_items {
+                report["items"] = json!(vec![report["items"][0].clone(); 6]);
+            } else {
+                report["items"][0]["text"] =
+                    json!(format!("{}仍待审批，条件通过后生效。", "字".repeat(600)));
+            }
+            *content = json!(report.to_string());
+            response.body = serde_json::to_vec(&envelope).unwrap();
+        }
+        Ok(response)
+    }
+}
+
+#[test]
+fn oversized_summaries_retry_without_cutting_off_conditions_or_whole_items() {
+    for too_many_items in [false, true] {
+        let (_dir, config) = setup();
+        let sent = Arc::new(AtomicUsize::new(0));
+        let mut app = App::open(config, Utc::now()).unwrap();
+        app.transport = Box::new(OversizedSummaryModel {
+            sent: sent.clone(),
+            too_many_items,
+        });
+        let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let output = run_daily(request(day, true), &app).unwrap();
+        assert_eq!(sent.load(Ordering::SeqCst), 2);
+        assert!(output.markdown.contains("条件满足后生效"));
+        assert!(output.markdown.contains("待确认"));
+        let run = app.store.get(&output.run_id).unwrap();
+        let report: ai_daily_report::reports::personal::PersonalReport =
+            serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
+        assert!(ai_daily_report::reports::personal::body_chars(&report.items) <= 600);
+        assert!(report.items.len() <= 5);
+        assert!(!report.items.is_empty());
+        assert_eq!(
+            app.store.calls(&output.run_id).unwrap()[0]["error_code"],
+            "MODEL_RESPONSE_INVALID"
+        );
+    }
+}
+
+#[test]
+fn no_save_preview_carries_evidence_without_publishing_files() {
+    let (_dir, config) = setup();
+    let mut app = App::open(config, Utc::now()).unwrap();
+    app.transport = Box::new(Model {
+        sent: Arc::new(AtomicUsize::new(0)),
+        invalid: false,
+    });
+    let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+    let preview = run_daily(request(day, false), &app).unwrap();
+    assert!(preview.output_path.is_none());
+    assert!(preview.markdown.contains("[查看依据](#item-1)"));
+    assert!(preview.markdown.contains("id=\"item-1\""));
+    assert!(preview.markdown.contains("## 用户补充原文"));
+    assert!(!app.config.paths.reports_dir.join("2026-10").exists());
 }
 
 #[test]
@@ -342,30 +689,27 @@ fn report_reclaims_standby_bytes_for_input_and_model_snapshots() {
 }
 
 #[test]
-fn date_budget_survives_reopen_and_ignores_legacy_budget_switch() {
+fn repeated_previews_survive_reopen_and_compaction_without_date_limit() {
     let (_dir, config) = setup();
     let sent = Arc::new(AtomicUsize::new(0));
     let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
-    for attempt in 0..4 {
+    for _ in 0..4 {
         let mut app = App::open(config.clone(), Utc::now()).unwrap();
         app.transport = Box::new(Model {
             sent: sent.clone(),
             invalid: false,
         });
         let output = run_daily(request(day, false), &app).unwrap();
-        assert_eq!(output.model_calls, if attempt < 3 { 1 } else { 0 });
-        if attempt == 3 {
-            assert!(output.markdown.contains("模型"));
-        }
+        assert_eq!(output.model_calls, 1);
     }
-    assert_eq!(sent.load(Ordering::SeqCst), 3);
+    assert_eq!(sent.load(Ordering::SeqCst), 4);
     {
         let app = App::open(config.clone(), Utc::now() + chrono::Duration::days(31)).unwrap();
         assert_eq!(
             app.store
                 .personal_calls("personal_work", &day.to_string())
                 .unwrap(),
-            3
+            4
         );
         let count: i64 = app
             .store
@@ -384,14 +728,15 @@ fn date_budget_survives_reopen_and_ignores_legacy_budget_switch() {
         invalid: false,
     });
     run_daily(request(day.succ_opt().unwrap(), false), &app).unwrap();
-    assert_eq!(sent.load(Ordering::SeqCst), 4);
+    assert_eq!(sent.load(Ordering::SeqCst), 5);
 }
 
 #[test]
 fn invalid_sources_never_publish_as_facts_and_requests_remain_bounded() {
-    let (_dir, config) = setup();
+    let (_dir, mut config) = setup();
+    config.llm.invalid_response_retries = 1;
     let sent = Arc::new(AtomicUsize::new(0));
-    for _ in 0..4 {
+    for attempt in 1..=4 {
         let mut app = App::open(config.clone(), Utc::now()).unwrap();
         app.transport = Box::new(Model {
             sent: sent.clone(),
@@ -407,8 +752,9 @@ fn invalid_sources_never_publish_as_facts_and_requests_remain_bounded() {
         let report: Value = serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
         assert!(report["items"].as_array().unwrap().is_empty());
         assert!(report["user_notes"].as_str().unwrap().contains("100"));
+        assert_eq!(sent.load(Ordering::SeqCst), attempt * 2);
     }
-    assert_eq!(sent.load(Ordering::SeqCst), 3);
+    assert_eq!(sent.load(Ordering::SeqCst), 8);
 }
 
 #[test]
@@ -540,8 +886,8 @@ fn personal_operation_logs_have_separate_retention_and_preserve_legacy_logs() {
         None,
         Some(&day),
         &Err(ai_daily_report::ReportError::new(
-            "PERSONAL_CALL_LIMIT",
-            "date budget exhausted",
+            "PERSONAL_INPUT_EXPIRED",
+            "saved input expired",
         )),
     )
     .unwrap();

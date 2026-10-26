@@ -108,3 +108,32 @@ fn current_report_survives_snapshot_expiration_and_maintenance_record_is_idempot
     );
     assert!(!canonical_json(&json!({"body":body})).unwrap().is_empty());
 }
+
+#[test]
+fn unfinished_backfill_keeps_call_evidence_without_quota_metadata() {
+    let (_dir, app) = fixture();
+    let (id, path) = preview(&app, 60, Some("backfill:job"), json!({"job":"job"}));
+    let conn = app.store.connection().unwrap();
+    conn.execute(
+        "INSERT INTO report_metadata(key,value) VALUES('backfill_state:job','{}')",
+        [],
+    )
+    .unwrap();
+    conn.execute("INSERT INTO report_model_calls(run_id,generation_id,request_fingerprint,logical_step,attempt,call_date,status,usage_json,started_at) VALUES(?,?,'request','batch_000',1,'2026-08-01','succeeded','{\"job_id\":\"job\"}','2026-08-01T00:00:00Z')",rusqlite::params![id,id]).unwrap();
+    assert_eq!(
+        retention::cleanup(&app, now(), true).unwrap().deleted_files,
+        0
+    );
+    assert!(path.is_file());
+    assert_eq!(app.store.calls(&id).unwrap().len(), 1);
+    conn.execute(
+        "INSERT INTO report_metadata(key,value) VALUES('backfill_complete:job','{}')",
+        [],
+    )
+    .unwrap();
+    assert_eq!(
+        retention::cleanup(&app, now(), true).unwrap().deleted_files,
+        1
+    );
+    assert!(!path.exists());
+}

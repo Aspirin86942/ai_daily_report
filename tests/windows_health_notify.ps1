@@ -62,7 +62,7 @@ function Get-HealthTempFiles {
 # log_dir health file like the real program, then returns the requested exit
 # code. A non-zero exit after a healthy report reproduces the scheduled-log
 # write failure that happens after the report has already been written.
-function New-HealthStub([string]$Path, [string]$Status, [int]$ExitCode, [bool]$FailScheduledLog) {
+function New-HealthStub([string]$Path, [string]$Status, [int]$ExitCode, [bool]$FailScheduledLog, [string]$HistoricalDate = '') {
     $stubText = @'
 param()
 $out = $null
@@ -89,6 +89,9 @@ $report = [ordered]@{
     generated_at = '2026-10-18T16:30:00+00:00'
 }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
+if ('__HISTORICAL__') {
+    $report.checks += [ordered]@{ code = 'HISTORICAL_REPORT_ATTENTION'; level = 'error'; message = 'Historical report needs recovery'; evidence = @{ reports = @(@{ target_date = '__HISTORICAL__' }) } }
+}
 [IO.Directory]::CreateDirectory($logDir) | Out-Null
 $json = $report | ConvertTo-Json -Depth 10
 [IO.File]::WriteAllText($out, $json, $utf8)
@@ -107,6 +110,7 @@ if (__FAILLOG__ -eq 1) {
 exit __EXIT__
 '@
     $stubText = $stubText.Replace('__STATUS__', $Status).Replace('__FAILLOG__', $(if ($FailScheduledLog) { '1' } else { '0' })).Replace('__EXIT__', [string]$ExitCode)
+    $stubText = $stubText.Replace('__HISTORICAL__', $HistoricalDate)
     [IO.File]::WriteAllText($Path, $stubText, $utf8)
 }
 
@@ -311,6 +315,22 @@ Assert-Test ([string]$healthyHealth.json.execution_status -eq 'succeeded') 'Heal
 Assert-Test ([int]$healthyHealth.json.program_exit_code -eq 0) 'Healthy run health file must record the program exit code'
 Assert-Test (@($healthyHealth.json.tasks).Count -eq 4) 'Healthy run health file must carry four task readbacks'
 Assert-Test (-not (Test-Path -LiteralPath (Join-Path $healthyLogDir 'health-execution-error.json'))) 'Healthy run must not write an execution error record'
+
+# Historical dates participate in deduplication even when the general code is unchanged.
+$historical = New-IsolatedConfig (Join-Path $root 'logic-historical') 'Historical Health Probe'
+$historicalStub = Join-Path $root 'stub-health-historical.ps1'
+New-HealthStub $historicalStub 'unhealthy' 2 $false '2026-10-23'
+$null = & $script -Program $historicalStub -ConfigDirectory $historical.config -NoNotify
+Assert-Test ($LASTEXITCODE -eq 1) 'Historical issue must retain the unhealthy script result'
+$historicalLog = Join-Path (Join-Path $historical.data 'logs') 'health-notify.log'
+Assert-Test (@(Get-Content -LiteralPath $historicalLog).Count -eq 1) 'First historical issue must be logged'
+$null = & $script -Program $historicalStub -ConfigDirectory $historical.config -NoNotify
+Assert-Test (@(Get-Content -LiteralPath $historicalLog).Count -eq 1) 'Unchanged historical issue must be deduplicated within the day'
+New-HealthStub $historicalStub 'unhealthy' 2 $false '2026-10-24'
+$null = & $script -Program $historicalStub -ConfigDirectory $historical.config -NoNotify
+Assert-Test (@(Get-Content -LiteralPath $historicalLog).Count -eq 2) 'A different unresolved date must produce a new notification record'
+$historicalState = [IO.File]::ReadAllText((Join-Path (Join-Path $historical.data 'logs') 'health-notify-state.json'), $utf8Strict) | ConvertFrom-Json
+Assert-Test ([string]$historicalState.codes -like '*HISTORICAL_REPORT_ATTENTION:2026-10-24*') 'Notification state must identify the historical target date'
 
 # Phase A.7: warning/unhealthy keep the exit-1 script contract only when the
 # program exit code matches the verdict mapping.

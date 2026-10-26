@@ -12,6 +12,7 @@ pub struct HttpResponse {
 #[derive(Debug, Clone, Copy)]
 pub enum TransportFailure {
     Timeout,
+    ConnectTimeout,
     Connection,
     Interrupted,
     InvalidResponse,
@@ -23,6 +24,7 @@ impl TransportFailure {
     pub fn code(self) -> &'static str {
         match self {
             Self::Timeout => "MODEL_TIMEOUT",
+            Self::ConnectTimeout => "MODEL_CONNECT_TIMEOUT",
             Self::Connection => "MODEL_CONNECTION_FAILED",
             Self::Interrupted => "MODEL_RESPONSE_INTERRUPTED",
             Self::InvalidResponse => "MODEL_RESPONSE_TOO_LARGE",
@@ -31,7 +33,10 @@ impl TransportFailure {
         }
     }
     pub fn retryable(self) -> bool {
-        matches!(self, Self::Timeout | Self::Connection | Self::Interrupted)
+        matches!(
+            self,
+            Self::Timeout | Self::ConnectTimeout | Self::Connection | Self::Interrupted
+        )
     }
 }
 
@@ -91,6 +96,7 @@ impl ModelTransport for HttpTransport {
         }
         let error = || ReportError::new("MODEL_TRANSPORT_INVALID", "模型地址或代理配置无效");
         let mut builder = Client::builder()
+            .connect_timeout(Duration::from_secs(10))
             .redirect(Policy::none())
             .retry(retry::never())
             .no_proxy();
@@ -124,7 +130,9 @@ impl ModelTransport for HttpTransport {
             .body(request.to_vec())
             .send()
             .map_err(|error| {
-                if error.is_timeout() {
+                if error.is_timeout() && error.is_connect() {
+                    TransportFailure::ConnectTimeout
+                } else if error.is_timeout() {
                     TransportFailure::Timeout
                 } else if error.is_connect() {
                     TransportFailure::Connection

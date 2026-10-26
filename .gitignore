@@ -76,5 +76,6 @@ scripts/corpus/
 .artifacts/architecture-storage-*/
 .artifacts/daily-capacity-*/
 .artifacts/personal-*/
+.artifacts/model-quota-removal-*/
 .releases/
 config-rust/

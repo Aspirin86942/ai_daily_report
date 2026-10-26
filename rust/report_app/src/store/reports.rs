@@ -54,11 +54,19 @@ fn validate_report(context_json: &str, report: &Value, markdown: &str) -> Result
         let personal: crate::reports::personal::PersonalReport =
             serde_json::from_value(report.clone())?;
         personal.validate()?;
-        if markdown.len() > crate::reports::personal::MAX_REPORT_BYTES {
+        if personal.output_bytes(markdown) > crate::reports::personal::MAX_REPORT_BYTES {
             return Err(ReportError::new(
                 "PERSONAL_REPORT_TOO_LARGE",
                 "日报与依据超过文件上限",
             ));
+        }
+        if let Some(attachment) = &personal.evidence_attachment {
+            if !markdown.contains(&format!("]({})", attachment.link(&personal.date))) {
+                return Err(ReportError::new(
+                    "PERSONAL_REPORT_INVALID",
+                    "正文缺少完整依据附件链接",
+                ));
+            }
         }
     }
     Ok(())

@@ -15,6 +15,9 @@ pub const MAX_INPUT_CHARS: usize = 20_000;
 pub const MAX_USER_CHARS: usize = 2_000;
 pub const MAX_BODY_CHARS: usize = 1_500;
 pub const MAX_ITEMS: usize = 10;
+// Historical v5 reports retain their original validation limits.
+pub const MAX_SUMMARY_CHARS: usize = 600;
+pub const MAX_SUMMARY_ITEMS: usize = 5;
 pub const MAX_REPORT_BYTES: usize = 100_000;
 pub const TEMPLATE: &str = include_str!("../../../../templates/personal_daily_template_v5.md");
 
@@ -48,9 +51,14 @@ impl SelectionSummary {
     }
     pub fn partial(&self) -> bool {
         self.incomplete_inventory
-            || ["budget", "read_failed", "comparison_unavailable"]
-                .iter()
-                .any(|key| self.omissions.get(*key).is_some_and(|n| *n > 0))
+            || [
+                "budget",
+                "read_failed",
+                "comparison_unavailable",
+                "no_usable_text",
+            ]
+            .iter()
+            .any(|key| self.omissions.get(*key).is_some_and(|n| *n > 0))
     }
 }
 
@@ -219,6 +227,31 @@ fn validate_evidence(
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct EvidenceAttachment {
+    pub markdown: String,
+    pub sha256: String,
+}
+
+impl EvidenceAttachment {
+    pub fn link(&self, date: &str) -> String {
+        format!("attachments/{date}.{}.md", self.sha256)
+    }
+
+    pub fn validate(&self) -> Result<(), ReportError> {
+        if self.markdown.is_empty()
+            || self.markdown.len() > MAX_REPORT_BYTES
+            || self.markdown.contains('\r')
+            || self.markdown.starts_with('\u{feff}')
+            || digest(self.markdown.as_bytes()) != self.sha256
+        {
+            return Err(invalid("依据附件内容或指纹无效"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PersonalReport {
     pub schema_version: u32,
     pub report_kind: String,
@@ -236,6 +269,8 @@ pub struct PersonalReport {
     pub selection: SelectionSummary,
     pub gaps: Vec<CoverageGap>,
     pub user_notes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_attachment: Option<EvidenceAttachment>,
 }
 
 impl PersonalReport {
@@ -274,10 +309,17 @@ impl PersonalReport {
             selection: selection.summary.clone(),
             gaps: selection.gaps.clone(),
             user_notes: selection.user_notes(),
+            evidence_attachment: None,
         }
     }
 
     pub fn validate(&self) -> Result<(), ReportError> {
+        if let Some(attachment) = &self.evidence_attachment {
+            attachment.validate()?;
+            if self.items.len() > MAX_SUMMARY_ITEMS || body_chars(&self.items) > MAX_SUMMARY_CHARS {
+                return Err(invalid("个人日报正文最多 600 字、5 个重点"));
+            }
+        }
         let window = utc_window(parse_date(&self.date)?)?;
         let utc = |s: &str| {
             DateTime::parse_from_rfc3339(s)
@@ -351,8 +393,65 @@ impl PersonalReport {
     }
 
     pub fn render(&self, template: &str) -> Result<String, ReportError> {
+        let attachment = match &self.evidence_attachment {
+            Some(attachment) => Some(attachment.clone()),
+            None => self.render_attachment(template)?,
+        };
+        let link = attachment.as_ref().map(|a| a.link(&self.date));
+        self.render_view(template, false, link.as_deref().unwrap_or(""))
+    }
+
+    /// Both views use the same frozen template. Old inline templates stay inline.
+    pub fn render_attachment(
+        &self,
+        template: &str,
+    ) -> Result<Option<EvidenceAttachment>, ReportError> {
+        if !template.starts_with("{% if evidence_only %}") {
+            return Ok(None);
+        }
+        let markdown = self.render_view(template, true, "")?;
+        Ok(Some(EvidenceAttachment {
+            sha256: digest(markdown.as_bytes()),
+            markdown,
+        }))
+    }
+
+    pub fn output_bytes(&self, markdown: &str) -> usize {
+        markdown.len()
+            + self
+                .evidence_attachment
+                .as_ref()
+                .map_or(0, |a| a.markdown.len())
+    }
+
+    /// A no-save preview has no files to link to, so carry its evidence inline.
+    pub fn render_preview(&self, template: &str) -> Result<String, ReportError> {
+        let body = self.render_view(template, false, "")?;
+        Ok(match &self.evidence_attachment {
+            Some(attachment) => format!("{body}\n{}", attachment.markdown),
+            None => body,
+        })
+    }
+
+    fn render_view(
+        &self,
+        template: &str,
+        evidence_only: bool,
+        evidence_link: &str,
+    ) -> Result<String, ReportError> {
         self.validate()?;
         let mut value = serde_json::to_value(self)?;
+        value["evidence_only"] = json!(evidence_only);
+        value["evidence_link"] = json!(evidence_link);
+        let mut gaps = Vec::<serde_json::Value>::new();
+        for gap in &self.gaps {
+            if let Some(group) = gaps.iter_mut().find(|g| g["message"] == gap.message) {
+                group["count"] = json!(group["count"].as_u64().unwrap_or(0) + 1);
+            } else {
+                gaps.push(json!({"message":gap.message,"count":1}));
+            }
+        }
+        value["gaps_grouped"] = json!(gaps);
         value["sources_view"] = json!(self
             .sources
             .iter()

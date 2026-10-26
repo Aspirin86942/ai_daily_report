@@ -5,6 +5,7 @@ pub mod health;
 pub mod maintenance;
 pub mod model;
 pub mod operations;
+pub mod personal_recovery;
 pub mod processing_cache;
 pub mod publish;
 pub mod reports;
@@ -33,6 +34,8 @@ impl ReportError {
                 | "SOURCE_BUSY"
                 | "SOURCE_CHANGED"
                 | "MODEL_TIMEOUT"
+                | "MODEL_CONNECT_TIMEOUT"
+                | "PERSONAL_RECOVERY_WAITING"
                 | "MODEL_RESPONSE_INTERRUPTED"
         )
     }

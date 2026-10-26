@@ -1,4 +1,3 @@
-pub mod budget;
 pub mod contracts;
 pub mod legacy;
 pub mod personal;
@@ -8,7 +7,7 @@ pub mod slicing;
 pub mod transport;
 
 use crate::{
-    config::{Llm, Recovery},
+    config::Llm,
     snapshots::{canonical_json, digest, SnapshotRef, SnapshotStore},
     store::{CallCompletion, CallReservation, Store},
     ReportError,
@@ -54,7 +53,6 @@ pub struct ModelRunner<'a> {
     pub snapshots: &'a SnapshotStore,
     pub transport: &'a dyn ModelTransport,
     pub llm: &'a Llm,
-    pub recovery: &'a Recovery,
     pub recovery_inputs: Option<&'a recovery::RecoveryInputs>,
     pub allow_new_calls: bool,
     pub run_id: &'a str,
@@ -253,7 +251,7 @@ impl ModelRunner<'_> {
         let mut effective = root.clone();
         for row in calls {
             let usage: Value = serde_json::from_str(row["usage_json"].as_str().unwrap_or("{}"))?;
-            let audit = &usage["reserved_budget"]["request_audit"];
+            let audit = request_audit(&usage);
             if audit["model_plan_version"] != root.version || audit["root_plan_sha256"] != root_sha
             {
                 return Err(ReportError::new(
@@ -322,7 +320,7 @@ impl ModelRunner<'_> {
                 .map(|job| job.job_id.as_str());
             let (parent, row) = pin.read(self.store, &run, job_id)?;
             let usage: Value = serde_json::from_str(row["usage_json"].as_str().unwrap_or("{}"))?;
-            let audit = &usage["reserved_budget"]["request_audit"];
+            let audit = request_audit(&usage);
             if root.kind != StepKind::Compose || audit["root_plan_sha256"] == root.identity()? {
                 let plan_ref: SnapshotRef = serde_json::from_value(audit["plan_revision"].clone())
                     .map_err(|_| {
@@ -373,7 +371,7 @@ impl ModelRunner<'_> {
                     )?;
                     let usage: Value =
                         serde_json::from_str(row["usage_json"].as_str().unwrap_or("{}"))?;
-                    let audit = &usage["reserved_budget"]["request_audit"];
+                    let audit = request_audit(&usage);
                     if audit["root_plan_sha256"] != root.identity()? {
                         continue;
                     }
@@ -445,32 +443,17 @@ impl ModelRunner<'_> {
                 self.snapshots
                     .put(self.run_id, "model-plan", &serde_json::to_value(&step)?)?;
             let audit = json!({"model_plan_version":root.version,"root_plan_sha256":root.identity()?,"plan_revision":revision,"source_ranges":source_ranges(&step),"response_schema_sha256":step.schema_sha256,"prompt_sha256":step.prompt_sha256});
-            let mut reservation = budget::Reservation::new(
-                self.llm,
-                self.recovery,
-                bytes.len(),
-                step.request["max_tokens"].as_u64().unwrap(),
-                audit,
-            );
-            if let Some(job) = self
+            let job_id = self
                 .recovery_inputs
                 .and_then(|inputs| inputs.job_budget.as_ref())
-            {
-                reservation.job_id = Some(job.job_id.clone());
-                reservation.job_tokens_limit = Some(job.tokens_limit);
-                reservation.job_calls_limit = Some(job.calls_limit);
-                reservation.job_cost_limit_microunits = job.cost_limit_microunits;
-                if let Some(revision) = &job.revision_sha256 {
-                    reservation.request_audit["job_calls_revision_sha256"] = json!(revision);
-                }
-            }
+                .map(|job| job.job_id.as_str());
             let call_id = self.store.reserve_call(CallReservation {
                 run_id: self.run_id,
                 fingerprint: &identity,
                 logical_step: &step.logical_step,
                 request: &request,
-                budget: &reservation,
-                recovery: self.recovery,
+                job_id,
+                audit: &audit,
                 max_attempts: self.llm.max_retries,
                 now: self.now(),
             })?;
@@ -494,7 +477,8 @@ impl ModelRunner<'_> {
                     })?;
                     (
                         ReportError::new(failure.code(), "模型通信未取得完整响应"),
-                        failure.retryable(),
+                        // Retry a personal transport failure on a later scheduled run.
+                        failure.retryable() && step.kind != StepKind::PersonalSummary,
                         None,
                     )
                 }
@@ -539,7 +523,8 @@ impl ModelRunner<'_> {
                                 "MODEL_HTTP_ERROR",
                                 format!("模型服务返回 HTTP {}", response.status),
                             ),
-                            matches!(response.status, 408 | 429 | 500..=599),
+                            matches!(response.status, 408 | 429 | 500..=599)
+                                && step.kind != StepKind::PersonalSummary,
                             response.retry_after,
                         )
                     } else {
@@ -858,6 +843,13 @@ fn source_ranges(step: &PlannedStep) -> Value {
     Value::Object(ranges)
 }
 
+/// Retained calls use the former budget envelope; new calls store only audit metadata.
+pub(crate) fn request_audit(usage: &Value) -> &Value {
+    usage
+        .get("request_audit")
+        .unwrap_or(&usage["reserved_budget"]["request_audit"])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -894,10 +886,8 @@ mod tests {
         for row in rows {
             let (call, status, path, sha, usage) = row.unwrap();
             let usage: Value = serde_json::from_str(&usage).unwrap();
-            let reference: SnapshotRef = serde_json::from_value(
-                usage["reserved_budget"]["request_audit"]["plan_revision"].clone(),
-            )
-            .unwrap();
+            let reference: SnapshotRef =
+                serde_json::from_value(request_audit(&usage)["plan_revision"].clone()).unwrap();
             let plan_bytes = std::fs::read(root.join(&reference.path)).unwrap();
             assert_eq!(digest(&plan_bytes), reference.sha256);
             let step: PlannedStep = serde_json::from_slice(&plan_bytes).unwrap();

@@ -197,8 +197,6 @@ pub struct BackfillArgs {
     pub end_date: Option<NaiveDate>,
     #[arg(long)]
     pub preflight: Option<PathBuf>,
-    #[arg(long)]
-    pub call_budget: Option<u64>,
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
     pub workers: u8,
     #[arg(long)]
@@ -227,10 +225,6 @@ pub struct BackfillArgs {
     pub generate_candidates: bool,
     #[arg(long)]
     pub publish_candidates: Option<PathBuf>,
-    #[arg(long)]
-    pub token_budget: Option<u64>,
-    #[arg(long)]
-    pub cost_budget_microunits: Option<u64>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -242,12 +236,6 @@ pub enum CoverageCommand {
         gap_codes: Vec<String>,
         #[arg(long)]
         scope_root: PathBuf,
-        #[arg(long)]
-        call_budget: u64,
-        #[arg(long)]
-        token_budget: u64,
-        #[arg(long)]
-        cost_budget_microunits: Option<u64>,
         #[arg(long)]
         refresh_preflight: bool,
     },
@@ -268,8 +256,6 @@ pub enum CoverageCommand {
         reason: String,
         #[arg(long)]
         authorization_note: String,
-        #[arg(long)]
-        calls_limit: Option<u64>,
         #[arg(long)]
         revise_runtime: bool,
     },

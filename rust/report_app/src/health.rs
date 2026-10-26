@@ -218,6 +218,20 @@ fn published_report(
             json!({"run_id": run_id, "path": display_path(&path)}),
         ));
     }
+    let report_json: Option<String> = connection.query_row(
+        "SELECT report_json FROM report_runs WHERE run_id=?",
+        [&run_id],
+        |row| row.get(0),
+    )?;
+    if let Err(error) =
+        crate::publish::verify_attachment(&path, report_json.as_deref().unwrap_or("{}"))
+    {
+        return Ok(HealthCheck::error(
+            "REPORT_EVIDENCE_MISMATCH",
+            format!("{target} 日报依据附件未通过核对"),
+            json!({"run_id":run_id,"error_code":error.code}),
+        ));
+    }
     Ok(HealthCheck::ok(
         "REPORT_NOT_PUBLISHED",
         format!(
@@ -229,7 +243,12 @@ fn published_report(
 
 fn run_attention(connection: &Connection, now: DateTime<Utc>) -> Result<HealthCheck, ReportError> {
     let pending: i64 = connection.query_row(
-        "SELECT count(*) FROM report_runs WHERE run_kind='report' AND phase IN ('prepared','generating','db_committed') AND status!='succeeded' AND COALESCE(error_code,'')!='RUN_SUPERSEDED' AND COALESCE(regeneration_reason,'') NOT LIKE 'coverage_publish:%'",
+        "SELECT count(*) FROM report_runs r WHERE run_kind='report' AND phase IN ('prepared','generating','db_committed') AND status!='succeeded' AND COALESCE(error_code,'')!='RUN_SUPERSEDED' AND COALESCE(regeneration_reason,'') NOT LIKE 'coverage_publish:%'
+         AND NOT EXISTS(SELECT 1 FROM daily_reports d JOIN report_runs p ON p.run_id=d.current_run_id
+             WHERE p.scope_id=r.scope_id AND p.target_date=r.target_date AND p.created_at>r.created_at
+             AND p.status='succeeded' AND p.phase='published'
+             AND (COALESCE(json_extract(p.report_json,'$.schema_version'),0)!=5
+                 OR json_array_length(p.report_json,'$.items')>0 OR p.quality='no_changes'))",
         [],
         |row| row.get(0),
     )?;
@@ -239,6 +258,8 @@ fn run_attention(connection: &Connection, now: DateTime<Utc>) -> Result<HealthCh
     let mut published_statement = connection.prepare(
         "SELECT scope_id,target_date,MAX(COALESCE(finished_at,created_at)) FROM report_runs \
          WHERE run_kind='report' AND status='succeeded' AND phase='published' \
+         AND (COALESCE(json_extract(report_json,'$.schema_version'),0)!=5 \
+             OR json_array_length(report_json,'$.items')>0 OR quality='no_changes') \
          GROUP BY scope_id,target_date",
     )?;
     let published: Vec<(String, String, String)> = published_statement
@@ -533,6 +554,25 @@ pub fn check(
                     "运行状态无法核对：报告库结构不可用",
                     json!({}),
                 )),
+            }
+            if config.report.profile == crate::config::ReportProfile::Personal {
+                match crate::personal_recovery::issues(connection, &config.report.scope_id, now) {
+                    Ok(issues) => {
+                        let missing = issues.iter().filter(|issue| issue.missing_summary).count();
+                        checks.push(HealthCheck {
+                            code: "HISTORICAL_REPORT_ATTENTION",
+                            level: if missing > 0 { "error" } else if issues.is_empty() { "ok" } else { "warning" },
+                            message: if issues.is_empty() { "没有未恢复的个人日报异常".into() }
+                                else { format!("{} 个历史日报仍需恢复，其中 {missing} 个缺少有效总结；告警保留至有效发布完成", issues.len()) },
+                            evidence: json!({"reports":issues}),
+                        });
+                    }
+                    Err(_) => checks.push(HealthCheck::error(
+                        "DATABASE_INTEGRITY",
+                        "历史日报异常无法核对",
+                        json!({}),
+                    )),
+                }
             }
             let partial: Option<String> = connection.query_row(
                 "SELECT r.report_json FROM report_runs r JOIN daily_reports d ON d.current_run_id=r.run_id WHERE d.date=? AND r.quality='partial'",

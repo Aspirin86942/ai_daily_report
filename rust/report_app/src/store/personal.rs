@@ -1,11 +1,11 @@
-//! Per-target-date counters outlive runs and detailed request retention.
+//! Personal run accounting and bounded diagnostic retention.
 use super::Store;
 use crate::ReportError;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
 
 impl Store {
-    /// Called with the report lock held. Final report bytes and date counters are
+    /// Called with the report lock held. Final report bytes and call counts are
     /// permanent; personal processing references and repeat-run detail are bounded.
     pub fn compact_personal(
         &self,
@@ -228,11 +228,11 @@ fn used(conn: &Connection, key: &str) -> Result<u64, ReportError> {
         None => Ok(0),
         Some(value) => serde_json::from_str::<Value>(&value)?["used"]
             .as_u64()
-            .ok_or_else(|| ReportError::new("PERSONAL_BUDGET_INVALID", "已用额度记录无效")),
+            .ok_or_else(|| ReportError::new("PERSONAL_CALL_RECORD_INVALID", "调用计数记录无效")),
     }
 }
 
-pub(super) fn reserve(conn: &Connection, run: &Value) -> Result<(), ReportError> {
+pub(super) fn record_call(conn: &Connection, run: &Value) -> Result<(), ReportError> {
     let personal: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM report_metadata WHERE key=? AND value='5')",
         [format!(
@@ -250,15 +250,9 @@ pub(super) fn reserve(conn: &Connection, run: &Value) -> Result<(), ReportError>
         run["target_date"].as_str().unwrap_or("")
     );
     let count = used(conn, &key)?;
-    if count >= 3 {
-        return Err(ReportError::new(
-            "PERSONAL_CALL_LIMIT",
-            "目标日期的 3 次请求额度已用完",
-        ));
-    }
     conn.execute(
         "INSERT INTO report_metadata(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        params![key, json!({"used":count+1,"last_run_id":run["run_id"]}).to_string()],
+        params![key, json!({"used":count.saturating_add(1),"last_run_id":run["run_id"]}).to_string()],
     )?;
     Ok(())
 }

@@ -56,7 +56,7 @@ pub(crate) fn pairs(
 }
 
 /// JSON is a bounded SQL membership parameter, not a second persistent queue.
-/// Without a target, only today's and yesterday's reports need preparation.
+/// Default preparation also includes unresolved report dates within retention.
 pub(crate) fn scope(
     config: &AppConfig,
     store: &ArchiveStore,
@@ -70,7 +70,12 @@ pub(crate) fn scope(
         .quota
         .as_ref()
         .map_or_else(Utc::now, |quota| quota.now());
-    let days = days(before, now)?;
+    let mut days = days(before, now)?;
+    if before.is_none() {
+        days.extend(crate::personal_recovery::material_dates(config, now)?);
+        days.sort();
+        days.dedup();
+    }
     let mut versions = BTreeSet::new();
     for day in days {
         collect_pairs(config, store, day, deadline, Some(MAX_FILES), &mut versions)?;
@@ -100,6 +105,7 @@ pub(crate) fn protected(
 ) -> Result<BTreeSet<String>, ReportError> {
     let mut versions = BTreeSet::new();
     let mut dates = days(None, now)?;
+    dates.extend(crate::personal_recovery::material_dates(config, now)?);
     if before.is_some() {
         dates.extend(days(before, now)?);
     }

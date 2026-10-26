@@ -52,10 +52,7 @@ report:
 recovery:
   # 同时执行的模型请求数，范围 1-4；调整并发不会改变冻结请求的身份。
   model_workers: 1
-  enforce_model_budgets: false
   missed_days_policy: "latest_due_day_with_gap_notice"
-  max_calls_per_run: 12
-  max_calls_per_calendar_day: 30
   # personal 日报固定总预算 300 秒，270 秒后停止启动新工作。
   run_budget_seconds: 300
   lock_wait_seconds: 5

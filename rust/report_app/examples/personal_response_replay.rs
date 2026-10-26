@@ -85,7 +85,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshots: &snapshots,
         transport: &transport,
         llm: &config.llm,
-        recovery: &config.recovery,
         recovery_inputs: None,
         allow_new_calls: true,
         run_id: id,
@@ -101,9 +100,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     report.retain_cited();
     let initial_items = report.items.len();
     let body = loop {
-        let body = report.render(&input.template)?;
-        if body.len() <= MAX_REPORT_BYTES {
-            break body;
+        report.evidence_attachment = None;
+        report.evidence_attachment = report.render_attachment(&input.template)?;
+        if report.output_bytes("") <= MAX_REPORT_BYTES {
+            let body = report.render(&input.template)?;
+            if report.output_bytes(&body) <= MAX_REPORT_BYTES {
+                break body;
+            }
         }
         report
             .items

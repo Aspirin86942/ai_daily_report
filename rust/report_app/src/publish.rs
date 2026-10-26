@@ -1,4 +1,5 @@
 use crate::{
+    reports::personal::{EvidenceAttachment, PersonalReport},
     snapshots::{digest, reject_redirects},
     store::{RunRecord, Store},
     types::{parse_date, RunPhase},
@@ -37,6 +38,32 @@ fn output_hash(path: &Path) -> Result<Option<String>, ReportError> {
     Ok(Some(ai_daily_worker_contract::archive::hex(
         &hash.finalize(),
     )))
+}
+
+fn attachment(report_json: &str) -> Result<Option<(String, EvidenceAttachment)>, ReportError> {
+    let value: serde_json::Value = serde_json::from_str(report_json)?;
+    if value["evidence_attachment"].is_null() {
+        return Ok(None);
+    }
+    let report: PersonalReport = serde_json::from_value(value)?;
+    report.validate()?;
+    Ok(report.evidence_attachment.map(|a| (report.date, a)))
+}
+
+pub(crate) fn verify_attachment(target: &Path, report_json: &str) -> Result<(), ReportError> {
+    if let Some((date, evidence)) = attachment(report_json)? {
+        let path = target
+            .parent()
+            .ok_or_else(|| ReportError::new("OUTPUT_PATH_INVALID", "日报路径缺少目录"))?
+            .join(evidence.link(&date));
+        if output_hash(&path)?.as_deref() != Some(&evidence.sha256) {
+            return Err(ReportError::new(
+                "REPORT_EVIDENCE_MISMATCH",
+                "依据附件缺失或内容已改变",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn plain_path(path: &Path) -> Result<PathBuf, ReportError> {
@@ -116,6 +143,36 @@ impl<'a> Publisher<'a> {
         Ok(path)
     }
 
+    fn publish_attachment(&self, run: &RunRecord, target: &Path) -> Result<(), ReportError> {
+        let Some((date, evidence)) = attachment(run.report_json.as_deref().unwrap_or("{}"))? else {
+            return Ok(());
+        };
+        let path = target.parent().unwrap().join(evidence.link(&date));
+        self.check(&path)?;
+        if let Some(hash) = output_hash(&path)? {
+            if hash == evidence.sha256 {
+                return Ok(());
+            }
+            return Err(ReportError::new(
+                "REPORT_EVIDENCE_CONFLICT",
+                "已有依据附件被修改，保留原文件",
+            ));
+        }
+        fs::create_dir_all(path.parent().unwrap())?;
+        self.check(&path)?;
+        let mut temporary = tempfile::NamedTempFile::new_in(path.parent().unwrap())?;
+        temporary.write_all(evidence.markdown.as_bytes())?;
+        temporary.as_file().sync_all()?;
+        // The content hash gives each revision an immutable name. Linking the
+        // complete temporary file never overwrites an existing attachment.
+        if let Err(error) = fs::hard_link(temporary.path(), &path) {
+            if error.kind() != std::io::ErrorKind::AlreadyExists {
+                return Err(error.into());
+            }
+        }
+        verify_attachment(target, run.report_json.as_deref().unwrap_or("{}"))
+    }
+
     pub fn publish(&self, run_id: &str, now: DateTime<Utc>) -> Result<PathBuf, ReportError> {
         let run = self.store.get(run_id)?;
         if !matches!(run.phase, RunPhase::DbCommitted | RunPhase::Published)
@@ -182,6 +239,7 @@ impl<'a> Publisher<'a> {
             ));
         }
         if existing == run.expected_sha256 {
+            self.publish_attachment(&run, &target)?;
             if run.phase == RunPhase::DbCommitted {
                 self.store
                     .mark_published(run_id, existing.as_deref().unwrap(), now)?;
@@ -200,6 +258,8 @@ impl<'a> Publisher<'a> {
                 "已有报告被外部修改，候选正文已保存到冲突目录",
             ));
         }
+        // Publish the attachment first; a visible summary must have usable evidence.
+        self.publish_attachment(&run, &target)?;
         fs::create_dir_all(target.parent().unwrap())?;
         self.check(&target)?;
         let mut temporary = tempfile::NamedTempFile::new_in(target.parent().unwrap())?;

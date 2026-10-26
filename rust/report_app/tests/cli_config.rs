@@ -123,7 +123,7 @@ fn merge_precedence_and_scanner_replacement_are_explicit() {
     let config = AppConfig::load_with_env(directory.path(), Some(&config_dir), &env).unwrap();
     assert_eq!(config.llm.model_id, "environment-model");
     assert_eq!(config.api_key(), "synthetic-env-token");
-    assert!(!config.recovery.enforce_model_budgets);
+    assert!(config.config_check().get("enforce_model_budgets").is_none());
     assert_eq!(config.scanner.allowed_extensions.unwrap(), [".txt"]);
     assert_eq!(config.scanner.max_workers, None);
 }
@@ -140,10 +140,6 @@ fn malformed_or_retired_configuration_fails_without_exposing_credentials() {
         ("llm: []\n", "CONFIG_INVALID"),
         ("llm:\n  max_retries: 4\n", "CONFIG_INVALID"),
         ("schedule:\n  local_time: '9:00'\n", "CONFIG_INVALID"),
-        (
-            "recovery:\n  max_cost_per_run_microunits: 1\n",
-            "CONFIG_INVALID",
-        ),
     ] {
         fs::write(&path, format!("paths:\n  work_dir: work\n{extra}")).unwrap();
         assert_eq!(
@@ -269,4 +265,23 @@ fn invalid_response_retries_is_excluded_from_recovery_fingerprint() {
         baseline.fingerprint(false).unwrap(),
         changed.fingerprint(false).unwrap()
     );
+}
+
+#[test]
+fn retired_quota_settings_are_ignored_and_quota_flags_are_removed() {
+    let (_dir,config) = test_config("recovery:\n  enforce_model_budgets: true\n  max_calls_per_run: 0\n  max_calls_per_calendar_day: 0\n  max_tokens_per_run: 0\n  max_tokens_per_calendar_day: 0\n  max_cost_per_run_microunits: 0\n  max_cost_per_calendar_day_microunits: 0\n");
+    let value = serde_json::to_value(config.recovery).unwrap();
+    assert!(value.get("max_calls_per_run").is_none());
+    assert!(value.get("enforce_model_budgets").is_none());
+    assert!(Cli::try_parse_from([
+        "app",
+        "daily",
+        "--regenerate",
+        "--reason",
+        "retry",
+        "--additional-model-calls",
+        "1"
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from(["app", "backfill", "--call-budget", "1"]).is_err());
 }

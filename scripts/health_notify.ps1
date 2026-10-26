@@ -186,7 +186,11 @@ try {
     }
     $notify = ($report.status -ne 'healthy') -or ($missing.Count -gt 0) -or ($badResult.Count -gt 0) -or ($anomalies.Count -gt 0)
     $badCodes = @($badResult | ForEach-Object { 'TASK_LAST_RESULT:' + $_.name + ':' + $_.last_result })
-    $codes = (($failing | ForEach-Object { $_.code }) + ($missing | ForEach-Object { 'TASK_MISSING' }) + $badCodes + $anomalies | Sort-Object -Unique) -join ','
+    $codes = (($failing | ForEach-Object {
+        if ($_.code -eq 'HISTORICAL_REPORT_ATTENTION') {
+            foreach ($item in $_.evidence.reports) { 'HISTORICAL_REPORT_ATTENTION:' + $item.target_date }
+        } else { $_.code }
+    }) + ($missing | ForEach-Object { 'TASK_MISSING' }) + $badCodes + $anomalies | Sort-Object -Unique) -join ','
     $already = $null -ne $state -and $state.date -eq $date -and $state.codes -eq $codes
 
     $notified = $false

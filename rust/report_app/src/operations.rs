@@ -610,7 +610,6 @@ pub fn model_check(app: &App, now: DateTime<Utc>) -> Result<Value, ReportError> 
             snapshots: &app.snapshots,
             transport: app.transport.as_ref(),
             llm: &app.config.llm,
-            recovery: &app.config.recovery,
             recovery_inputs: None,
             allow_new_calls: true,
             run_id: &context.run_id,

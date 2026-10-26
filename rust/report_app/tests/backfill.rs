@@ -49,7 +49,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("config")).unwrap();
         fs::create_dir(dir.path().join("work")).unwrap();
-        fs::write(dir.path().join("config/settings.yaml"),"paths:\n  work_dir: work\nllm:\n  max_request_utf8_bytes: 64000\n  context_window_tokens: 100000\n  verified_max_output_tokens: 8192\n  max_tokens: 4096\nrecovery:\n  enforce_model_budgets: false\n").unwrap();
+        fs::write(dir.path().join("config/settings.yaml"),"paths:\n  work_dir: work\nllm:\n  max_request_utf8_bytes: 64000\n  context_window_tokens: 100000\n  verified_max_output_tokens: 8192\n  max_tokens: 4096\n").unwrap();
         let mut config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
         let workers = Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug");
         config.office_worker_path =
@@ -75,7 +75,7 @@ impl Fixture {
             network,
         }
     }
-    fn args(&self, cap: u64) -> BackfillArgs {
+    fn args(&self) -> BackfillArgs {
         let start = ai_daily_report::types::parse_date("2026-10-10").unwrap();
         let end = ai_daily_report::types::parse_date("2026-10-11").unwrap();
         let path = backfill::preflight(&self.app, start, end, now()).unwrap();
@@ -88,8 +88,6 @@ impl Fixture {
             "2026-10-11",
             "--preflight",
             path.to_str().unwrap(),
-            "--call-budget",
-            &cap.to_string(),
         ])
         .unwrap();
         match cli.command.unwrap() {
@@ -104,7 +102,7 @@ impl Fixture {
 #[test]
 fn preflight_backfill_repeat_and_consistent_backup_preserve_formal_reports() {
     let f = Fixture::new();
-    let args = f.args(2);
+    let args = f.args();
     assert_eq!(f.sent(), 0);
     let first = backfill::run(&f.app, &args, now()).unwrap();
     assert_eq!(first["complete"], true);
@@ -135,33 +133,25 @@ fn preflight_backfill_repeat_and_consistent_backup_preserve_formal_reports() {
     assert_eq!(f.sent(), 2);
 }
 #[test]
-fn no_model_mode_and_explicit_budget_remain_effective_when_optional_limits_are_off() {
+fn no_model_mode_is_explicit_and_ordinary_backfill_needs_no_quota() {
     let f = Fixture::new();
-    let mut args = f.args(0);
+    let mut args = f.args();
     args.only_no_model = true;
     let state = backfill::run(&f.app, &args, now()).unwrap();
     assert_eq!(f.sent(), 0);
     assert_eq!(state["dates"]["2026-10-10"]["status"], "complete");
     assert!(state["dates"]["2026-10-11"].is_null());
-    let f = Fixture::new();
-    let mut args = f.args(1);
-    let first = backfill::run(&f.app, &args, now()).unwrap();
-    assert_eq!(f.sent(), 1);
-    assert_eq!(first["stop_reason"], "BACKFILL_CALL_BUDGET_EXHAUSTED");
-    let again = backfill::run(&f.app, &args, now()).unwrap();
-    assert_eq!(f.sent(), 1);
-    assert_eq!(again["calls_used"], 1);
-    args.call_budget = Some(2);
-    assert_eq!(
-        backfill::run(&f.app, &args, now()).unwrap_err().code,
-        "BACKFILL_BUDGET_CHANGED"
-    );
-    assert_eq!(f.sent(), 1);
+    args.only_no_model = false;
+    let complete = backfill::run(&f.app, &args, now()).unwrap();
+    assert_eq!(complete["complete"], true);
+    assert_eq!(f.sent(), 2);
+    assert!(complete.get("call_budget").is_none());
 }
+
 #[test]
 fn preflight_input_and_progress_tampering_are_rejected() {
     let f = Fixture::new();
-    let args = f.args(2);
+    let args = f.args();
     let path = args.preflight.as_ref().unwrap();
     let mut plan: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
     plan["preflight"]["dates"][0]["date"] = json!("2026-09-01");
@@ -172,7 +162,7 @@ fn preflight_input_and_progress_tampering_are_rejected() {
     );
     assert_eq!(f.sent(), 0);
     let f = Fixture::new();
-    let args = f.args(2);
+    let args = f.args();
     backfill::run(&f.app, &args, now()).unwrap();
     let path = f
         .app

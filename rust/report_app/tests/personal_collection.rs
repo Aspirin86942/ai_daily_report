@@ -29,6 +29,118 @@ fn setup() -> (tempfile::TempDir, AppConfig) {
 }
 
 #[test]
+fn budget_and_no_text_omissions_are_distinct_from_read_failures() {
+    let (_dir, mut config) = setup();
+    config.archive.system_reserve_mib = 0;
+    let now = Utc::now();
+    let day = now - chrono::Duration::days(1);
+    collect::run(&config, true, day - chrono::Duration::days(1)).unwrap();
+    fs::write(
+        config.paths.work_dir.join("large.txt"),
+        "完整材料。".repeat(5_000),
+    )
+    .unwrap();
+    fs::write(config.paths.work_dir.join("small.txt"), "报价仍待审批。\n").unwrap();
+    fs::write(
+        config.paths.work_dir.join("image.pdf"),
+        include_bytes!("../../../tests/fixtures/pdf_classifier/no_text_image_01.pdf"),
+    )
+    .unwrap();
+    let collected = collect::run(&config, false, day).unwrap();
+    assert_eq!(collected.errors, 0);
+    let selected = selection::prepare(
+        &config,
+        &request(Utc::now() + chrono::Duration::seconds(1), day),
+        Instant::now() + Duration::from_secs(30),
+    )
+    .unwrap();
+    assert!(
+        !selected.materials.is_empty(),
+        "collection={collected:?}; selection={:?}",
+        selected.summary
+    );
+    assert!(
+        selected
+            .summary
+            .omissions
+            .get("budget")
+            .copied()
+            .unwrap_or(0)
+            > 0
+    );
+    assert_eq!(
+        selected
+            .summary
+            .omissions
+            .get("read_failed")
+            .copied()
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(selected.summary.omissions.get("no_usable_text"), Some(&1));
+    let report = ai_daily_report::reports::personal::PersonalReport::from_selection(
+        &request(Utc::now(), day).context,
+        "work",
+        &selected,
+    );
+    assert_eq!(report.quality, "partial");
+    assert!(report
+        .render_attachment(ai_daily_report::reports::personal::TEMPLATE)
+        .unwrap()
+        .unwrap()
+        .markdown
+        .contains("无可提取文字：1"));
+    assert!(!selected
+        .gaps
+        .iter()
+        .any(|gap| gap.code == "MATERIAL_UNAVAILABLE"));
+}
+
+#[test]
+fn historical_report_keeps_its_material_in_the_default_drain_scope() {
+    use ai_daily_report::store::Store;
+    let (_dir, mut config) = setup();
+    config.archive.system_reserve_mib = 0;
+    let now = Utc::now();
+    let target = now - chrono::Duration::days(3);
+    let path = config.paths.work_dir.join("history.txt");
+    fs::write(&path, "before\n").unwrap();
+    collect::run(&config, true, target - chrono::Duration::days(1)).unwrap();
+    fs::write(&path, "after\n").unwrap();
+    capture_only(&config, false, target);
+    assert_eq!(queue::pending(&config, None).unwrap()["queued"], 0);
+    let store = Store::open(&config.paths.db_dir.join("reports.sqlite3"), now).unwrap();
+    let context = RunContext::new(
+        new_run_id(),
+        now,
+        target.with_timezone(&shanghai()).date_naive(),
+        String::new(),
+    )
+    .unwrap();
+    store
+        .create(&context, "report", &context.run_id, None, now)
+        .unwrap();
+    store.register_personal_run(&context.run_id).unwrap();
+    store.connection().unwrap().execute("UPDATE report_runs SET status='failed',report_json=? WHERE run_id=?",
+        rusqlite::params![json!({"schema_version":5,"quality":"partial","items":[],"selection":{"observed_files":1},"gaps":[{"code":"PARSE_UNAVAILABLE"}]}).to_string(),context.run_id]).unwrap();
+    assert_eq!(queue::pending(&config, None).unwrap()["queued"], 2);
+    let result = queue::execute(&config, false, None, 120, now).unwrap();
+    assert_eq!(result["parse_jobs"], 2, "{result}");
+    assert_eq!(result["queued"], 0);
+    assert_eq!(
+        ai_daily_report::personal_recovery::issues(
+            &store.connection().unwrap(),
+            "personal_work",
+            now
+        )
+        .unwrap()
+        .len(),
+        1,
+        "parsing alone does not resolve a missing report summary"
+    );
+}
+
+#[test]
 fn model_observations_of_unverified_files_publish_as_uncertain_with_evidence() {
     use ai_daily_report::{
         model::transport::{HttpResponse, ModelTransport, TransportFailure},
@@ -60,7 +172,6 @@ fn model_observations_of_unverified_files_publish_as_uncertain_with_evidence() {
     config.llm.context_window_tokens = Some(128_000);
     config.llm.verified_max_output_tokens = Some(8_192);
     config.llm.max_tokens = 4_096;
-    config.recovery.enforce_model_budgets = false;
     let now = Utc::now();
     let day = now - chrono::Duration::days(1);
     let path = config.paths.work_dir.join("approval.txt");
@@ -160,7 +271,11 @@ fn workbook_headings_keep_independent_evidence_without_inventing_row_ranges() {
         .any(|r| !r.ranges.is_empty() && r.quote.contains("120")));
     let report = PersonalReport::from_selection(&request.context, "work", &selected);
     report.validate().unwrap();
-    let body = report.render(TEMPLATE).unwrap();
+    let body = report
+        .render_attachment(TEMPLATE)
+        .unwrap()
+        .unwrap()
+        .markdown;
     assert!(body.contains("Approval"));
     assert!(body.contains("120"));
     assert!(body.contains(&refs[0].quote_sha256));

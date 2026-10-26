@@ -209,7 +209,6 @@ pub(crate) fn drain_before(
                 Err(e) => return Err(e),
             }
         }
-        attempted.extend(jobs.iter().map(|(id, _, _, _)| id.clone()));
         let previous_jobs = metrics.parse_jobs;
         let available = available_memory_mib()?;
         let budget = config
@@ -499,6 +498,7 @@ pub(crate) fn drain_before(
                 for event in receiver {
                     match event {
                         Event::Start(id, ack) => {
+                            attempted.insert(id.clone());
                             // A resumed parse is real work even when its source is unchanged.
                             store.conn.execute(
                             "INSERT OR IGNORE INTO file_metrics(collection_id,path,version_id,status)
@@ -607,10 +607,7 @@ pub(crate) fn drain_before(
             || metrics.warnings.iter().any(|code| {
                 matches!(
                     code.as_str(),
-                    "MEMORY_RESERVE"
-                        | "DISK_RESERVE"
-                        | "PROCESSING_CACHE_FULL"
-                        | "RUN_BUDGET_DEFERRED"
+                    "MEMORY_RESERVE" | "DISK_RESERVE" | "RUN_BUDGET_DEFERRED"
                 )
             })
         {

@@ -224,7 +224,7 @@ fn prepare(
         .into(),
         input_fingerprint: fingerprint,
         recovery_fingerprint: app.fingerprint(true)?,
-        model_pricing: app.config.recovery.model_pricing.clone(),
+        model_pricing: None,
         model_paths,
     };
     let reference = app
@@ -274,8 +274,6 @@ fn finish(
             "周月报业务配置已经改变",
         ));
     }
-    let mut limits = app.config.recovery.clone();
-    limits.model_pricing = payload.model_pricing.clone();
     let transport = crate::archive::model_input::PathsTransport {
         config: &app.config,
         paths: &payload.model_paths,
@@ -286,7 +284,6 @@ fn finish(
         snapshots: &app.snapshots,
         transport: &transport,
         llm: &app.config.llm,
-        recovery: &limits,
         recovery_inputs: None,
         allow_new_calls: same,
         run_id: id,

@@ -451,7 +451,7 @@ pub fn cached(
     let rows = store.generation_calls(&owner.generation_id, &root.logical_step)?;
     for row in rows.iter().rev() {
         let usage: Value = serde_json::from_str(row["usage_json"].as_str().unwrap_or("{}"))?;
-        let audit = &usage["reserved_budget"]["request_audit"];
+        let audit = super::request_audit(&usage);
         if audit["revision"] != 1 {
             continue;
         }

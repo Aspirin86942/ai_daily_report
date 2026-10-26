@@ -3,7 +3,7 @@ use crate::{
     config::Llm,
     reports::personal::{
         body_chars, validate_items, PersonalItem, Selection, StatementKind, MAX_BODY_CHARS,
-        MAX_ITEMS,
+        MAX_ITEMS, MAX_SUMMARY_CHARS, MAX_SUMMARY_ITEMS,
     },
     snapshots::{canonical_json, digest},
     types::RunContext,
@@ -36,7 +36,8 @@ pub fn prepare(
             prompt_sha256: String::new(),
             schema_sha256: String::new(),
             target: json!({"date":context.target_date,"window_start_utc":context.window_start_utc,
-                "window_end_utc":context.window_end_utc,"selection":selection}),
+                "window_end_utc":context.window_end_utc,"selection":selection,
+                "summary_limits":{"max_chars":MAX_SUMMARY_CHARS,"max_items":MAX_SUMMARY_ITEMS}}),
             entries: vec![],
             facts: vec![],
             source_map: json!(selection
@@ -162,6 +163,21 @@ pub(super) fn validate_response(
         }
     }
     validate_items(&response.items, &sources).map_err(|_| super::contracts::invalid())?;
+    if !step.target["summary_limits"].is_null() {
+        if step.target["summary_limits"]
+            != json!({"max_chars":MAX_SUMMARY_CHARS,"max_items":MAX_SUMMARY_ITEMS})
+            || response.items.len() > MAX_SUMMARY_ITEMS
+            || body_chars(&response.items) > MAX_SUMMARY_CHARS
+        {
+            // Let the existing bounded retry request a complete concise response;
+            // cutting text here could remove conditions or change a conclusion.
+            return Err(super::contracts::invalid());
+        }
+        return Ok(PersonalOutput {
+            items: response.items,
+            omitted: 0,
+        });
+    }
     let priorities: BTreeMap<_, _> = selection
         .materials
         .iter()

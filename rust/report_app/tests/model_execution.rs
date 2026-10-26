@@ -1,7 +1,6 @@
 use ai_daily_report::{
     config::AppConfig,
     model::{
-        budget::{charged, Reservation},
         contracts::{ComposedReport, FactsResponse, SelectedFact},
         plan::{self, ComposeGroup, DailyPlan},
         slicing::{union_chars, InputUnit, SourceInput},
@@ -39,7 +38,7 @@ impl Harness {
     fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("config")).unwrap();
-        fs::write(dir.path().join("config/settings.yaml"),"paths:\n  work_dir: work\nllm:\n  max_request_utf8_bytes: 64000\n  context_window_tokens: 100000\n  verified_max_output_tokens: 8192\n  max_tokens: 4096\nrecovery:\n  enforce_model_budgets: false\n").unwrap();
+        fs::write(dir.path().join("config/settings.yaml"),"paths:\n  work_dir: work\nllm:\n  max_request_utf8_bytes: 64000\n  context_window_tokens: 100000\n  verified_max_output_tokens: 8192\n  max_tokens: 4096\n").unwrap();
         let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
         let store = Store::open(&dir.path().join("reports.sqlite3"), now()).unwrap();
         let snapshots = SnapshotStore::new(dir.path().join("snapshots"), 8 * 1024 * 1024).unwrap();
@@ -90,7 +89,6 @@ impl Harness {
             snapshots: &self.snapshots,
             transport,
             llm: &self.config.llm,
-            recovery: &self.config.recovery,
             recovery_inputs: None,
             allow_new_calls: true,
             run_id: &self.context.run_id,
@@ -322,13 +320,9 @@ fn rate_limit_and_unknown_connection_are_retried_once_by_the_application() {
     );
     assert_eq!(calls[2]["attempt"], 3);
     assert_eq!(network.count(), 3);
-    let reservation: Reservation = serde_json::from_value(
-        serde_json::from_str::<Value>(calls[1]["usage_json"].as_str().unwrap()).unwrap()
-            ["reserved_budget"]
-            .clone(),
-    )
-    .unwrap();
-    assert!(reservation.total() > 0);
+    let usage: Value = serde_json::from_str(calls[1]["usage_json"].as_str().unwrap()).unwrap();
+    assert!(usage["request_audit"]["plan_revision"].is_object());
+    assert!(usage.get("reserved_budget").is_none());
 }
 
 #[test]
@@ -394,16 +388,13 @@ fn unknown_results_keep_reservations_and_total_attempt_limit_survives_resume() {
             .execute(&plan.batches[0])
             .unwrap_err()
             .code,
-        "MODEL_STEP_BUDGET_EXHAUSTED"
+        "MODEL_STEP_ATTEMPTS_EXHAUSTED"
     );
     assert_eq!(network.count(), 1);
     assert_eq!(h.calls()[0]["status"], "unknown");
     let usage: Value = serde_json::from_str(h.calls()[0]["usage_json"].as_str().unwrap()).unwrap();
-    let budget: Reservation = serde_json::from_value(usage["reserved_budget"].clone()).unwrap();
-    assert_eq!(
-        charged("unknown", &budget, &json!({"total_tokens":1})).0,
-        budget.total()
-    );
+    assert!(usage.get("total_tokens").is_none());
+    assert!(usage["request_audit"].is_object());
 }
 
 #[test]
@@ -526,19 +517,12 @@ fn extraction_capacity_is_independent_of_batch_count_and_composition() {
 }
 
 #[test]
-fn facts_use_16384_tokens_and_large_reservations_remain_valid() {
+fn facts_use_verified_16384_token_output_capacity() {
     let mut h = Harness::new();
     h.config.llm.verified_max_output_tokens = Some(32768);
     let plan = h.plan(&[source("s1", "材料。")]);
     assert_eq!(plan.batches[0].request["max_tokens"], 16384);
-    let reservation = Reservation::new(
-        &h.config.llm,
-        &h.config.recovery,
-        h.config.llm.max_request_utf8_bytes,
-        16384,
-        json!({}),
-    );
-    reservation.validate().unwrap();
+    plan.batches[0].check_capacity(&h.config.llm).unwrap();
 }
 
 #[test]
@@ -564,6 +548,24 @@ fn split_recovery_in_a_new_generation_reuses_parent_failure_and_successful_child
     );
     let parent = h.store.get(&h.context.run_id).unwrap();
     let mut recovery = RecoveryInputs::default();
+    // A retained truncated parent still uses the old envelope. Recovery must
+    // combine its split plan with new-format successful child call records.
+    let old = &h.calls()[0];
+    let mut usage: Value = serde_json::from_str(old["usage_json"].as_str().unwrap()).unwrap();
+    let audit = usage
+        .as_object_mut()
+        .unwrap()
+        .remove("request_audit")
+        .unwrap();
+    usage["reserved_budget"] = json!({"request_audit":audit,"job_id":null});
+    h.store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE report_model_calls SET usage_json=? WHERE call_id=?",
+            rusqlite::params![usage.to_string(), old["call_id"].as_i64().unwrap()],
+        )
+        .unwrap();
     for row in h.calls() {
         let pin = FrozenCall::freeze(&parent, &row).unwrap();
         if pin.status == "succeeded" {
@@ -1192,34 +1194,15 @@ fn duplicate_source_references_keep_the_original_response_and_need_no_retry() {
 }
 
 #[test]
-fn disabled_cumulative_budgets_still_keep_audited_usage() {
-    let mut h = Harness::new();
-    h.config.recovery.max_tokens_per_run = Some(1);
-    h.config.recovery.max_calls_per_run = 0;
+fn model_calls_keep_reported_usage_and_request_audit_without_quotas() {
+    let h = Harness::new();
     let plan = h.plan(&[source("s1", "材料。")]);
     let network = Script::new(vec![Ok(response(facts("s1")))]);
     h.runner(&network).execute(&plan.batches[0]).unwrap();
     let usage: Value = serde_json::from_str(h.calls()[0]["usage_json"].as_str().unwrap()).unwrap();
     assert_eq!(usage["total_tokens"], 180);
-    assert_eq!(usage["budget_limits_enforced"], false);
-}
-
-#[test]
-fn enabled_budget_is_reserved_transactionally_before_network() {
-    let mut h = Harness::new();
-    h.config.recovery.enforce_model_budgets = true;
-    h.config.recovery.max_tokens_per_run = Some(1);
-    let plan = h.plan(&[source("s1", "材料。")]);
-    let network = Script::new(vec![]);
-    assert_eq!(
-        h.runner(&network)
-            .execute(&plan.batches[0])
-            .unwrap_err()
-            .code,
-        "MODEL_TOKEN_BUDGET_EXHAUSTED"
-    );
-    assert_eq!(network.count(), 0);
-    assert!(h.calls().is_empty());
+    assert!(usage["request_audit"]["plan_revision"].is_object());
+    assert!(usage.get("reserved_budget").is_none());
 }
 
 #[test]
@@ -1348,45 +1331,6 @@ fn pinned_success_can_be_reused_by_a_new_generation_but_modified_rows_cannot() {
         "MODEL_REUSE_CALL_MISMATCH"
     );
     assert_eq!(network.count(), 1);
-}
-
-#[test]
-fn unknown_money_uses_the_frozen_rate_and_success_uses_reported_usage() {
-    use ai_daily_report::{config::ModelPricing, model::budget::cost};
-    let h = Harness::new();
-    let mut recovery = h.config.recovery.clone();
-    let pricing = ModelPricing {
-        rate_version: "fixture-v1".into(),
-        currency: "CNY".into(),
-        input_per_million_microunits: 1_000_000,
-        output_per_million_microunits: 2_000_000,
-    };
-    recovery.model_pricing = Some(pricing.clone());
-    let reservation = Reservation::new(&h.config.llm, &recovery, 100, 200, json!({}));
-    reservation.validate().unwrap();
-    assert_eq!(
-        charged(
-            "unknown",
-            &reservation,
-            &json!({"prompt_tokens":1,"completion_tokens":1})
-        ),
-        (1324, Some(cost(1124, 200, &pricing)))
-    );
-    assert_eq!(
-        charged(
-            "succeeded",
-            &reservation,
-            &json!({"prompt_tokens":100,"completion_tokens":80})
-        ),
-        (180, Some(260))
-    );
-    let usage = charged(
-        "succeeded",
-        &reservation,
-        &json!({"prompt_tokens":100,"completion_tokens":80,"total_tokens":3000}),
-    );
-    assert_eq!(usage.0, 3000);
-    assert!(usage.1.unwrap() >= reservation.cost_upper_microunits.unwrap());
 }
 
 #[test]

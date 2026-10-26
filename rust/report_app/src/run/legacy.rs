@@ -111,7 +111,6 @@ pub(super) fn finish(
                     snapshots: &app.snapshots,
                     transport: app.transport.as_ref(),
                     llm: &app.config.llm,
-                    recovery: &app.config.recovery,
                     recovery_inputs: Some(&recovery),
                     allow_new_calls: true,
                     run_id: &run.run_id,
@@ -185,7 +184,7 @@ pub(super) fn finish(
                 let usage: Value =
                     serde_json::from_str(row["usage_json"].as_str().unwrap_or("{}"))?;
                 let entries =
-                    &usage["reserved_budget"]["request_audit"]["source_ranges"][&source.source_id];
+                    &crate::model::request_audit(&usage)["source_ranges"][&source.source_id];
                 if !entries.is_null() {
                     attempted.extend(serde_json::from_value::<Vec<TextRange>>(entries.clone())?);
                     unknown |= matches!(row["status"].as_str(), Some("unknown" | "reserved"));

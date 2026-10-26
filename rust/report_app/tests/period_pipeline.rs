@@ -72,7 +72,7 @@ impl Fixture {
     fn new(replies: Vec<HttpResponse>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("config")).unwrap();
-        fs::write(dir.path().join("config/settings.yaml"),"paths:\n  work_dir: nonexistent\nllm:\n  max_request_utf8_bytes: 64000\n  context_window_tokens: 100000\n  verified_max_output_tokens: 8192\n  max_tokens: 4096\nrecovery:\n  enforce_model_budgets: false\n").unwrap();
+        fs::write(dir.path().join("config/settings.yaml"),"paths:\n  work_dir: nonexistent\nllm:\n  max_request_utf8_bytes: 64000\n  context_window_tokens: 100000\n  verified_max_output_tokens: 8192\n  max_tokens: 4096\n").unwrap();
         let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
         let mut app = App::open(config, now()).unwrap();
         let network = Arc::new(Network {

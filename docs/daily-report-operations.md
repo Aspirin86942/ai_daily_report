@@ -21,19 +21,23 @@ ai-daily-report.exe list | Out-Host
 
 ## 报告结构
 
-`report.profile: personal` 使用报告 v5、冻结输入 v5 和模型计划 v6。正文为进展、留意、下一步；用户陈述、观察、待确认和程序建议有明确标签。每项附来源，文件来源的关键原文、前后值、位置、观察时间与指纹保存在同一份 Markdown 中。文件与数据库结构化副本校验通过后原子发布，处理缓存清理后仍可阅读和修复。
+`report.profile: personal` 使用报告 v5、冻结输入 v5 和模型计划 v6。新日报提炼 3～5 个重点，事项标题与文字合计 300～600 个 Unicode 字符，材料不足或无变化时允许更短；报告总标题、链接、材料范围说明和附件不计入事项正文字符数。用户陈述、观察、待确认和程序建议有明确标签，同一事项的状态与下一步集中说明。
+
+正文保留关键数字、条件和待确认状态，每项通过“查看依据”链接跳到附件中的完整来源列表。“完整依据”链接打开同月 `attachments/YYYY-MM-DD.<内容指纹>.md`，保留用户原文、来源摘录、前后值、版本、位置、观察时间和指纹；相同缺口说明合并计数，具体定位在附件中保留。正文与附件合计最多 100,000 字节。
+
+正文和附件模板一起冻结，最终附件字节及哈希随报告保存到数据库。程序先原子保存附件，再发布正文；重新生成使用新附件名称并保留旧附件。附件缺失可以恢复，已被人工修改的附件保留并报告冲突，健康检查同时核对附件。处理缓存过期不影响已发布内容的修复。历史报告没有附件字段时继续使用原有内嵌依据，读取时保留原来的 10 项、1,500 字校验范围。`--no-save` 预览在同一段输出后附上完整依据，链接在预览内部跳转，不创建正式文件。
 
 个人日报只检查目标日的首尾版本，首日基线不作为工作进展。单侧最多比较 5,000 个单元，优先选入截止、阻塞、状态和关键字段变化；整体最多 20,000 字。读取失败、缺少前版、遍历未完成和未选范围均保留说明。只有观察完整且没有有效材料时才返回 `no_changes`。
 
 人工补充放在 `report.notes_dir/YYYY-MM-DD.md`，也可使用 `daily --target-date YYYY-MM-DD -i "补充内容"`。两处内容正规化换行并按完整重复段落合并，合计最多 2,000 字；超限返回 `USER_INPUT_TOO_LARGE`，原文件保持。用户原文随报告保存。
 
-同一日期的预览、普通重跑、恢复和重新生成共享 3 次模型请求额度，发送前事务预占；失败、超时、未知结果和进程中断均不退还，`enforce_model_budgets: false` 不关闭此上限。格式或引用无效时才在剩余额度和时间内重试，篇幅过长按完整事项减量。失败结果保留用户原文及材料范围，不生成未经支持的成果。已发布有限结果的自动重跑直接复用。
+预览、普通重跑、恢复和重新生成均不受累计模型额度限制。每次发送前事务记录请求，失败、超时、未知结果和进程中断均保留审计。个人模型通信失败后本轮停止，后续触发可继续恢复；格式、引用无效或新请求超过 5 项、600 字时，在单步骤尝试上限和运行期限内重新生成完整响应，避免截断金额、条件或待确认状态。正文与完整依据超过文件总大小限制时按完整事项及其依据减量，并保留省略说明。失败结果保留用户原文及材料范围；已有有效日报在恢复失败时保持，历史异常由健康检查持续跟踪。
 
-`data_dir/daily_cache` 包含原件临时副本、解析产物、冻结输入、请求和响应，合计最多 1 GiB、7 天。每次写入先预留容量；单输入最多 50 MiB，单解析产物最多 16 MiB，空间不足时暂缓。旧正文过期后仍保留当前文件指纹，后续变化缺少可比较前版时如实说明。明细最多保留 30 天，数据库明细 8 MiB、`log_dir/personal` 调度日志 2 MiB；日期额度和日报汇总长期保留。汇总中的 `elapsed_ms` 是从该运行创建到结束的时间，包含中断后等待恢复的时间；单次执行耗时保存在调度日志。旧 `data_dir/archive` 不在这些自动清理规则内。
+`data_dir/daily_cache` 包含原件临时副本、解析产物、冻结输入、请求和响应，合计最多 1 GiB、7 天。每次写入先预留容量；单输入最多 50 MiB，单解析产物最多 16 MiB，空间不足时暂缓。旧正文过期后仍保留当前文件指纹，后续变化缺少可比较前版时如实说明。明细最多保留 30 天，数据库明细 8 MiB、`log_dir/personal` 调度日志 2 MiB；日期调用计数和日报汇总长期保留。汇总中的 `elapsed_ms` 是从该运行创建到结束的时间，包含中断后等待恢复的时间；单次执行耗时保存在调度日志。旧 `data_dir/archive` 不在这些自动清理规则内。
 
 采集和补解析每轮最多 120 秒。每次最多检查 10,000 个新目录条目，页内按路径排序，续点跨进程保存；恢复目录枚举需要重放此前名称，这部分也检查时间，但不计为新的元数据检查。目录变化可能造成遗漏，分页观察明确记录缺口且不据此判断删除或重命名。日报补解析后再固定可用解析的截止时刻；文件观察时间仍严格属于目标日。
 
-`repair-output` 只需报告库中的最终内容即可修复 v5。未发布输入超过 7 天后不再恢复该输入，返回 `PERSONAL_INPUT_EXPIRED`；重新选材仍受原日期额度限制。`archive verify-collection` 检查当前 profile 的处理库，`archive verify/recover/prune` 继续针对旧归档。
+`repair-output` 只需报告库中的最终内容即可修复 v5。未发布输入超过 7 天后不再恢复该输入，返回 `PERSONAL_INPUT_EXPIRED`；重新选材使用仍然保存的材料，无须追加调用额度。`archive verify-collection` 检查当前 profile 的处理库，`archive verify/recover/prune` 继续针对旧归档。
 
 以下六节结构、分批事实生成和旧归档恢复说明适用于 `evidence` 与历史报告。
 
@@ -56,7 +60,7 @@ ai-daily-report.exe search --reindex | Out-Host
 
 ## 调用与配置
 
-配置顺序为 `settings.yaml`、`settings.windows.yaml`、`.secrets.yaml`，再应用 `DAILY_REPORT_<SECTION>__<FIELD>` 环境变量。配置目录父目录下的 `.env` 支持单行 `KEY=value`、引号和注释；不展开变量，进程环境优先。未知配置及退休选项明确报错。
+配置顺序为 `settings.yaml`、`settings.windows.yaml`、`.secrets.yaml`，再应用 `DAILY_REPORT_<SECTION>__<FIELD>` 环境变量。配置目录父目录下的 `.env` 支持单行 `KEY=value`、引号和注释；不展开变量，进程环境优先。未知配置及退休选项明确报错；已删除的模型额度配置字段作为兼容例外被忽略，不参与执行或新快照。
 
 `llm.max_request_utf8_bytes` 控制单次请求的 UTF-8 字节上限，当前值为 `160000`。`llm.facts_max_tokens` 单独控制事实提取输出，默认 `16384`，实际值取配置值与已验证模型输出上限中的较小值；`llm.max_tokens` 控制成稿、周报和月报。单次响应的独立字节上限为 128 KiB，事实输出不再挤占其他批次的成稿空间。
 
@@ -70,22 +74,22 @@ ai-daily-report.exe search --reindex | Out-Host
 
 待确认事实直接由已验证的事实正文与引用生成待确认条目，不再请求模型改写。确定事实按实际数量、字节数和输出容量分组，同主题事实相邻；每组事实 JSON 按成稿输出上限的两倍字节规划。Rust 合并全部正文与待确认，概览最多五条，每个事实编号都须在正文或待确认出现。使用指定日期的 `backfill --dry-run` 检查输入分批，零模型调用；事实提取完成后才能确定实际成稿组数。`daily --dry-run` 按来源准备归档或扫描输入，不调用模型。
 
-累计次数、token 和金额预算由 `recovery.enforce_model_budgets` 控制。当前业务选择为关闭，示例配置保持关闭；实际调用与未知用量继续记录。每个请求仍有最多三次尝试、请求容量、超时和整个运行截止时间。模型响应结构或引用无效时，按 `llm.invalid_response_retries`（默认 1）额外重试，与 `max_retries` 共享单步骤总尝试上限；成稿容量不足时自动拆分，单条事实仍放不下则转为待确认并保留引用。显式补跑和覆盖修复的作业预算独立有效。
+累计次数、token 和金额额度模块已删除，包括个人日期额度、运行和自然日额度、补报及覆盖修复作业额度。旧 `recovery.enforce_model_budgets`、`max_calls_per_*`、`max_tokens_per_*`、`max_cost_per_*_microunits` 与 `model_pricing` 配置可读取但不再生效；实际调用与未知用量继续记录。每个请求仍有最多三次尝试、请求容量、超时和整个运行截止时间。模型响应结构或引用无效时，按 `llm.invalid_response_retries`（默认 1）额外重试，与 `max_retries` 共享单步骤总尝试上限；成稿容量不足时自动拆分，单条事实仍放不下则转为待确认并保留引用。补报和覆盖修复直接按已核验计划运行，无须填写预算或追加次数；已完成作业仍不能重复发送请求。
 
-事实提取成功后被冻结，成稿失败可复用已有事实。拆分后的步骤有独立编号和父请求哈希；恢复时复用已记录的截断结果和成功子批次，只执行缺失部分。请求体与响应原字节保存到 `data_dir/run_snapshots`。未知调用保持未知并计入预算，恢复不会清空消耗。程序不自动更换服务商、模型或请求格式。当前归档日报使用模型计划 v5、报告格式 v4；保留的扫描日报使用模型计划 v4、报告格式 v3，较早未完成的 v3 模型计划由保留的旧包和对应配置恢复。`truncation_policy` 与 `max_strategy_changes` 只用于旧格式恢复。
+事实提取成功后被冻结，成稿失败可复用已有事实。拆分后的步骤有独立编号和父请求哈希；恢复时复用已记录的截断结果和成功子批次，只执行缺失部分。请求体与响应原字节保存到 `data_dir/run_snapshots`。未知调用保持未知，恢复保留原调用记录与累计计数。程序不自动更换服务商、模型或请求格式。当前归档日报使用模型计划 v5、报告格式 v4；保留的扫描日报使用模型计划 v4、报告格式 v3，较早未完成的 v3 模型计划由保留的旧包和对应配置恢复。`truncation_policy` 与 `max_strategy_changes` 只用于旧格式恢复。
 
 `rust-20261018-release-03` 起，单份快照上限为 128 MiB，并且不能超过 `retention.snapshot_max_mib` 配置的总容量。当前总容量为 512 MiB。较大的完整归档输入可以保存和恢复，读写仍验证 SHA-256；模型响应与单次请求各自的大小限制不受影响。
 
 ## 恢复与补跑
 
-归档日报因步骤重试额度耗尽等原因无法直接续跑时，先运行 `archive recover --run-id <原运行> --reason "授权恢复原因"`。该命令不调用模型：它核验冻结输入、请求与响应哈希，准备新的恢复运行并关联成功事实及成稿响应；旧运行标记为已被替代，原输入、响应和调用账本保留。随后运行 `daily --target-date YYYY-MM-DD --source archive`，正式日报会接续新恢复运行。事实请求沿用冻结计划，成稿仅在计划及请求完全一致时复用；分组或提示词变化时重新准备对应步骤。恢复准备返回的 `run_id`、`reused_fact_steps`、`reused_composition_steps` 和零模型调用应单独留档。
+归档日报因步骤尝试次数用完等原因无法直接续跑时，先运行 `archive recover --run-id <原运行> --reason "授权恢复原因"`。该命令不调用模型：它核验冻结输入、请求与响应哈希，准备新的恢复运行并关联成功事实及成稿响应；旧运行标记为已被替代，原输入、响应和调用账本保留。随后运行 `daily --target-date YYYY-MM-DD --source archive`，正式日报会接续新恢复运行。事实请求沿用冻结计划，成稿仅在计划及请求完全一致时复用；分组或提示词变化时重新准备对应步骤。恢复准备返回的 `run_id`、`reused_fact_steps`、`reused_composition_steps` 和零模型调用应单独留档。
 
 归档成稿使用短事项编号辅助模型分组；真实事项编号和来源编号由程序按已验证的 `fact_ids` 回填。概览和待确认中没有事实编号的附加说明不进入正文。未知事实编号仍然拒绝；混合不同事项或遗漏输入事实时完整拆分，所有原始响应继续保存。
 
 ```powershell
 ai-daily-report.exe repair-output --target-date 2026-10-11 | Out-Host
 ai-daily-report.exe backfill --start-date 2026-10-01 --end-date 2026-10-11 --dry-run | Out-Host
-ai-daily-report.exe backfill --start-date 2026-10-01 --end-date 2026-10-11 --preflight <预检文件> --call-budget <已授权作业次数> --workers 2 | Out-Host
+ai-daily-report.exe backfill --start-date 2026-10-01 --end-date 2026-10-11 --preflight <预检文件> --workers 2 | Out-Host
 ```
 
 `repair-output` 根据已提交数据库重放原正文，零扫描、零模型调用。正文被人工修改时保留文件并返回冲突。正常报告命令可继续未完成的冻结运行。
@@ -110,14 +114,14 @@ ai-daily-report.exe health --target-date 2026-10-17 --format json | Out-Host
 ## 覆盖修复
 
 ```powershell
-ai-daily-report.exe coverage plan --dates 2026-10-11 --gap-codes MODEL_INPUT_BOUNDED --scope-root <已批准范围> --call-budget 6 --token-budget 200000 --refresh-preflight | Out-Host
+ai-daily-report.exe coverage plan --dates 2026-10-11 --gap-codes MODEL_INPUT_BOUNDED --scope-root <已批准范围> --refresh-preflight | Out-Host
 ai-daily-report.exe coverage generate --plan <plan.json> --workers 2 | Out-Host
 ai-daily-report.exe coverage publish --candidates <候选清单> | Out-Host
-ai-daily-report.exe coverage recover --plan <plan.json> --reason "继续失败成稿" --authorization-note "本次授权说明" --calls-limit 9 | Out-Host
+ai-daily-report.exe coverage recover --plan <plan.json> --reason "继续失败成稿" --authorization-note "本次授权说明" | Out-Host
 ai-daily-report.exe coverage amend --plan <plan.json> --reason "全部失败后修订参数" | Out-Host
 ```
 
-准备、生成候选和发布为三个明确动作。候选正文与差异材料保存在隔离作业目录；发布前重新核对计划、原文件、原日报及候选哈希。恢复保留同一作业身份、成功请求和旧消耗；新增预算通过追加记录表达。未知调用阻止部分成功恢复。`--revise-runtime` 仅用于明确确认同一配置下运行实现身份的变化，不自动改写输入。
+准备、生成候选和发布为三个明确动作。候选正文与差异材料保存在隔离作业目录；发布前重新核对计划、原文件、原日报及候选哈希。恢复保留同一作业身份、成功请求和历史调用；每次根据当前调用清单生成可核验的恢复记录。未知调用阻止部分成功恢复。`--revise-runtime` 仅用于明确确认同一配置下运行实现身份的变化，不自动改写输入。
 
 ## OCR 与保留策略
 

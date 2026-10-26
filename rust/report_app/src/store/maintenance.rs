@@ -1,5 +1,4 @@
 use super::*;
-use crate::snapshots::fingerprint;
 use std::{fs, io::Read};
 
 impl Store {
@@ -33,41 +32,9 @@ impl Store {
         drop(backup);
         file_sha(destination)
     }
-    pub fn register_backfill_budget(
-        &self,
-        job: &str,
-        baseline: i64,
-        limit: u64,
-    ) -> Result<(), ReportError> {
-        if baseline < 0 || limit > 100000 || job.is_empty() {
-            return Err(ReportError::new("BACKFILL_BUDGET_INVALID", "补跑预算无效"));
-        }
-        let key = format!("backfill_budget:{job}");
-        let value = json!({"baseline_call_id":baseline,"calls_limit":limit});
-        let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let prior: Option<String> = tx
-            .query_row(
-                "SELECT value FROM report_metadata WHERE key=?",
-                [&key],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(prior) = prior {
-            if fingerprint(&serde_json::from_str(&prior)?)? != fingerprint(&value)? {
-                return Err(ReportError::new(
-                    "BACKFILL_BUDGET_CHANGED",
-                    "补跑必须保留原始预算与消耗起点",
-                ));
-            }
-        } else {
-            tx.execute(
-                "INSERT INTO report_metadata(key,value) VALUES(?,?)",
-                params![key, value.to_string()],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
+    pub fn job_calls(&self, job: &str) -> Result<Vec<Value>, ReportError> {
+        query(&self.connection()?,
+            "SELECT call_id,run_id,status,error_code,usage_json,request_sha256,response_sha256 FROM report_model_calls WHERE COALESCE(json_extract(usage_json,'$.job_id'),json_extract(usage_json,'$.reserved_budget.job_id'))=? ORDER BY call_id", [job])
     }
     pub fn calls_after(&self, baseline: i64) -> Result<u64, ReportError> {
         Ok(self.connection()?.query_row(

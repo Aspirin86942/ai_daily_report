@@ -132,6 +132,7 @@ fn execute(
                 }
                 let preparation =
                     ai_daily_report::run::prepare_scheduled_archive(&app, &mut request)?;
+                target_date = Some(request.context.target_date.to_string());
                 if let Some(ready) = &preparation {
                     if ready["action"] == "deferred" {
                         return Ok(ready.clone());
@@ -203,12 +204,9 @@ fn execute(
                     dates,
                     gap_codes,
                     scope_root,
-                    call_budget,
-                    token_budget,
-                    cost_budget_microunits,
                     refresh_preflight,
                 } => {
-                    serde_json::json!({"plan":coverage::make_plan(&app,coverage::PlanRequest{dates:&dates,gap_codes:&gap_codes,scope_root:&scope_root,calls_limit:call_budget,tokens_limit:token_budget,cost_limit_microunits:cost_budget_microunits,refresh:refresh_preflight},now)?})
+                    serde_json::json!({"plan":coverage::make_plan(&app,coverage::PlanRequest{dates:&dates,gap_codes:&gap_codes,scope_root:&scope_root,refresh:refresh_preflight},now)?})
                 }
                 CoverageCommand::Generate { plan, workers } => {
                     app.model_workers = workers;
@@ -221,10 +219,9 @@ fn execute(
                     plan,
                     reason,
                     authorization_note,
-                    calls_limit,
                     revise_runtime,
                 } => {
-                    serde_json::json!({"recovery":coverage::recover(&app,&plan,&reason,&authorization_note,calls_limit,revise_runtime,now)?})
+                    serde_json::json!({"recovery":coverage::recover(&app,&plan,&reason,&authorization_note,revise_runtime,now)?})
                 }
                 CoverageCommand::Amend { plan, reason } => {
                     serde_json::json!({"amendment":coverage::amend(&app,&plan,&reason,now)?})

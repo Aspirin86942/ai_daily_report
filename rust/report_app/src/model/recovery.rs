@@ -27,18 +27,62 @@ pub struct FrozenCall {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct JobBudget {
+pub struct JobContext {
     pub job_id: String,
-    pub tokens_limit: u64,
-    pub calls_limit: u64,
-    pub cost_limit_microunits: Option<u64>,
-    pub revision_sha256: Option<String>,
+    // Keep retained snapshot bytes stable without applying former quota fields.
+    // New jobs leave these fields absent, including formerly nullable fields.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "legacy_field",
+        rename = "tokens_limit"
+    )]
+    _tokens_limit: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "legacy_field",
+        rename = "calls_limit"
+    )]
+    _calls_limit: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "legacy_field",
+        rename = "cost_limit_microunits"
+    )]
+    _cost_limit_microunits: Option<Value>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "legacy_field",
+        rename = "revision_sha256"
+    )]
+    _revision_sha256: Option<Value>,
+}
+
+fn legacy_field<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+impl JobContext {
+    pub fn new(job_id: String) -> Self {
+        Self {
+            job_id,
+            _tokens_limit: None,
+            _calls_limit: None,
+            _cost_limit_microunits: None,
+            _revision_sha256: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecoveryInputs {
-    pub job_budget: Option<JobBudget>,
+    pub job_budget: Option<JobContext>,
     pub reused_calls: BTreeMap<String, FrozenCall>,
     pub prior_calls: Vec<FrozenCall>,
 }
@@ -93,7 +137,12 @@ impl FrozenCall {
             return Err(mismatch());
         }
         let usage: Value = serde_json::from_str(row["usage_json"].as_str().unwrap_or("{}"))?;
-        if usage["reserved_budget"]["job_id"].as_str() != job_id {
+        if usage
+            .get("job_id")
+            .unwrap_or(&usage["reserved_budget"]["job_id"])
+            .as_str()
+            != job_id
+        {
             return Err(ReportError::new(
                 "MODEL_REUSE_JOB_MISMATCH",
                 "引用调用不属于当前覆盖作业",

@@ -66,7 +66,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir(dir.path().join("config")).unwrap();
         fs::create_dir_all(dir.path().join("work/scope")).unwrap();
-        fs::write(dir.path().join("config/settings.yaml"),"paths:\n  work_dir: work\nllm:\n  max_request_utf8_bytes: 64000\n  context_window_tokens: 100000\n  verified_max_output_tokens: 8192\n  max_tokens: 4096\nrecovery:\n  enforce_model_budgets: false\n").unwrap();
+        fs::write(dir.path().join("config/settings.yaml"),"paths:\n  work_dir: work\nllm:\n  max_request_utf8_bytes: 64000\n  context_window_tokens: 100000\n  verified_max_output_tokens: 8192\n  max_tokens: 4096\n").unwrap();
         let mut config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
         let workers = std::env::var_os("AI_DAILY_TEST_WORKER_DIR")
             .map(PathBuf::from)
@@ -130,16 +130,13 @@ impl Fixture {
             body_path,
         }
     }
-    fn plan(&self, refresh: bool, limit: u64) -> PathBuf {
+    fn plan(&self, refresh: bool) -> PathBuf {
         coverage::make_plan(
             &self.app,
             PlanRequest {
                 dates: &[self.date],
                 gap_codes: &["MODEL_INPUT_BOUNDED".into()],
                 scope_root: &self.app.config.paths.work_dir.join("scope"),
-                calls_limit: limit,
-                tokens_limit: 1_000_000,
-                cost_limit_microunits: None,
                 refresh,
             },
             now(),
@@ -153,7 +150,7 @@ impl Fixture {
 #[test]
 fn candidate_generation_and_publication_are_separate_and_idempotent() {
     let f = Fixture::new(replies());
-    let plan = f.plan(true, 4);
+    let plan = f.plan(true);
     assert_eq!(f.sent(), 0);
     let manifest = coverage::generate(&f.app, &plan, now()).unwrap();
     assert_eq!(f.sent(), 2);
@@ -178,7 +175,7 @@ fn candidate_generation_and_publication_are_separate_and_idempotent() {
 #[test]
 fn source_changes_and_modified_candidates_are_rejected_without_extra_calls() {
     let f = Fixture::new(replies());
-    let plan = f.plan(true, 4);
+    let plan = f.plan(true);
     fs::write(
         f.app.config.paths.work_dir.join("scope/approval.md"),
         "changed",
@@ -190,7 +187,7 @@ fn source_changes_and_modified_candidates_are_rejected_without_extra_calls() {
     );
     assert_eq!(f.sent(), 0);
     let f = Fixture::new(replies());
-    let plan = f.plan(true, 4);
+    let plan = f.plan(true);
     let manifest = coverage::generate(&f.app, &plan, now()).unwrap();
     fs::write(
         manifest.parent().unwrap().join("candidates/2026-10-11.md"),
@@ -217,7 +214,7 @@ fn partial_recovery_reuses_success_and_retains_original_job_consumption() {
     });
     outputs.push(compose);
     let f = Fixture::new(outputs);
-    let plan = f.plan(true, 2);
+    let plan = f.plan(true);
     assert_eq!(
         coverage::generate(&f.app, &plan, now()).unwrap_err().code,
         "MODEL_HTTP_ERROR"
@@ -227,8 +224,7 @@ fn partial_recovery_reuses_success_and_retains_original_job_consumption() {
         &f.app,
         &plan,
         "恢复成稿步骤",
-        "测试授权总上限增加至三次",
-        Some(3),
+        "使用已核对材料恢复",
         false,
         now(),
     )
@@ -239,8 +235,7 @@ fn partial_recovery_reuses_success_and_retains_original_job_consumption() {
             &f.app,
             &plan,
             "恢复成稿步骤",
-            "测试授权总上限增加至三次",
-            Some(3),
+            "使用已核对材料恢复",
             false,
             now()
         )
@@ -260,7 +255,7 @@ fn partial_recovery_reuses_success_and_retains_original_job_consumption() {
     assert_eq!(calls[1]["status"], "failed");
 }
 #[test]
-fn explicit_failed_only_amendment_keeps_old_calls_and_cannot_exceed_budget() {
+fn explicit_failed_only_amendment_keeps_old_call_records() {
     let mut outputs = vec![HttpResponse {
         status: 400,
         retry_after: None,
@@ -268,7 +263,7 @@ fn explicit_failed_only_amendment_keeps_old_calls_and_cannot_exceed_budget() {
     }];
     outputs.extend(replies());
     let mut f = Fixture::new(outputs);
-    let plan = f.plan(true, 3);
+    let plan = f.plan(true);
     assert!(coverage::generate(&f.app, &plan, now()).is_err());
     f.app.config.llm.thinking_mode = Some("disabled".into());
     f.app.config.llm.thinking_parameter_location = Some("extra_body".into());
@@ -289,14 +284,14 @@ fn explicit_failed_only_amendment_keeps_old_calls_and_cannot_exceed_budget() {
 #[test]
 fn plan_without_refresh_never_sends_and_external_edits_preserve_formal_body() {
     let f = Fixture::new(replies());
-    let plan = f.plan(false, 4);
+    let plan = f.plan(false);
     assert_eq!(
         coverage::generate(&f.app, &plan, now()).unwrap_err().code,
         "COVERAGE_PREFLIGHT_REQUIRED"
     );
     assert_eq!(f.sent(), 0);
     let f = Fixture::new(replies());
-    let plan = f.plan(true, 4);
+    let plan = f.plan(true);
     let manifest = coverage::generate(&f.app, &plan, now()).unwrap();
     fs::write(&f.body_path, "人工修改正式日报\n").unwrap();
     assert_eq!(
@@ -313,7 +308,7 @@ fn plan_without_refresh_never_sends_and_external_edits_preserve_formal_body() {
 #[test]
 fn changing_hashed_plan_is_detected_before_generation() {
     let f = Fixture::new(replies());
-    let plan = f.plan(true, 4);
+    let plan = f.plan(true);
     let mut value: Value = serde_json::from_slice(&fs::read(&plan).unwrap()).unwrap();
     value["plan"]["calls_limit"] = json!(100);
     fs::write(&plan, value.to_string()).unwrap();
@@ -326,7 +321,7 @@ fn changing_hashed_plan_is_detected_before_generation() {
 }
 
 #[test]
-fn second_explicit_recovery_keeps_prior_successes_and_every_failed_charge() {
+fn repeated_recovery_keeps_successes_and_failure_records_without_quota_changes() {
     let mut outputs = replies();
     let compose = outputs.pop().unwrap();
     outputs.extend([
@@ -343,23 +338,14 @@ fn second_explicit_recovery_keeps_prior_successes_and_every_failed_charge() {
         compose,
     ]);
     let f = Fixture::new(outputs);
-    let plan = f.plan(true, 2);
+    let plan = f.plan(true);
     assert!(coverage::generate(&f.app, &plan, now()).is_err());
-    let first =
-        coverage::recover(&f.app, &plan, "恢复", "明确增加一次", Some(3), false, now()).unwrap();
+    let first = coverage::recover(&f.app, &plan, "恢复", "保留已成功请求", false, now()).unwrap();
     let saved = fs::read(&first).unwrap();
     assert!(coverage::generate(&f.app, &plan, now()).is_err());
     assert_eq!(f.sent(), 3);
-    let second = coverage::recover(
-        &f.app,
-        &plan,
-        "再次恢复",
-        "明确再增加一次",
-        Some(4),
-        false,
-        now(),
-    )
-    .unwrap();
+    let second =
+        coverage::recover(&f.app, &plan, "再次恢复", "继续保留已有请求", false, now()).unwrap();
     assert_ne!(first, second);
     assert_eq!(fs::read(first).unwrap(), saved);
     coverage::generate(&f.app, &plan, now()).unwrap();
@@ -367,5 +353,14 @@ fn second_explicit_recovery_keeps_prior_successes_and_every_failed_charge() {
     let value: Value = serde_json::from_slice(&fs::read(plan).unwrap()).unwrap();
     let job = value["plan"]["job_id"].as_str().unwrap();
     assert_eq!(f.app.store.job_calls(job).unwrap().len(), 4);
-    assert_eq!(f.app.store.job_budget_revisions(job).unwrap().len(), 2);
+    assert!(calls_have_no_quota(&f.app.store.job_calls(job).unwrap()));
+}
+
+fn calls_have_no_quota(calls: &[Value]) -> bool {
+    calls.iter().all(|call| {
+        serde_json::from_str::<Value>(call["usage_json"].as_str().unwrap())
+            .unwrap()
+            .get("reserved_budget")
+            .is_none()
+    })
 }

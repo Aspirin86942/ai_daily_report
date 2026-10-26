@@ -129,6 +129,16 @@ pub fn cleanup(
             protected.extend(referenced);
         }
     }
+    // Unfinished backfills protect their call evidence independently of the
+    // retired quota metadata. Completed jobs return to ordinary retention.
+    let job_runs = conn
+        .prepare("SELECT DISTINCT c.run_id FROM report_model_calls c
+                  JOIN report_metadata m ON m.key='backfill_state:'||json_extract(c.usage_json,'$.job_id')
+                  WHERE NOT EXISTS(SELECT 1 FROM report_metadata done
+                    WHERE done.key='backfill_complete:'||json_extract(c.usage_json,'$.job_id'))")?
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    protected.extend(job_runs);
     // Cross-generation references remain readable while their owner still has an input snapshot.
     for run in &runs {
         if app.store.is_personal_run(&run.run_id)? {

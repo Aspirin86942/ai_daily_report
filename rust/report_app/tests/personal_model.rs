@@ -1,28 +1,15 @@
 use ai_daily_report::{
-    config::AppConfig,
-    model::budget::Reservation,
     snapshots::SnapshotRef,
     store::{CallCompletion, CallReservation, Store},
     types::{new_run_id, RunContext},
 };
 use chrono::Utc;
 use serde_json::json;
-use std::{
-    collections::BTreeMap,
-    fs,
-    sync::{Arc, Barrier},
-};
+use std::sync::{Arc, Barrier};
 
 #[test]
-fn concurrent_reservations_unknown_results_and_compaction_never_refund_date_budget() {
+fn concurrent_calls_and_unknown_results_remain_counted_without_blocking_after_compaction() {
     let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("config")).unwrap();
-    fs::write(
-        dir.path().join("config/settings.yaml"),
-        "paths:\n  work_dir: work\nrecovery:\n  enforce_model_budgets: false\n",
-    )
-    .unwrap();
-    let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
     let now = Utc::now();
     let store = Store::open(&dir.path().join("reports.sqlite3"), now).unwrap();
     let reference = SnapshotRef {
@@ -47,18 +34,16 @@ fn concurrent_reservations_unknown_results_and_compaction_never_refund_date_budg
             .map(|id| {
                 let barrier = Arc::clone(&barrier);
                 let store = &store;
-                let config = &config;
                 let reference = &reference;
                 scope.spawn(move || {
-                    let budget = Reservation::new(&config.llm, &config.recovery, 10, 10, json!({}));
                     barrier.wait();
                     store.reserve_call(CallReservation {
                         run_id: id,
                         fingerprint: &reference.sha256,
                         logical_step: "personal_summary",
                         request: reference,
-                        budget: &budget,
-                        recovery: &config.recovery,
+                        job_id: None,
+                        audit: &json!({"fixture":"personal"}),
                         max_attempts: 3,
                         now,
                     })
@@ -70,13 +55,12 @@ fn concurrent_reservations_unknown_results_and_compaction_never_refund_date_budg
             .map(|h| h.join().unwrap())
             .collect::<Vec<_>>()
     });
-    assert_eq!(results.iter().filter(|r| r.is_ok()).count(), 3);
-    assert!(results
-        .iter()
-        .filter_map(|r| r.as_ref().err())
-        .all(|e| e.code == "PERSONAL_CALL_LIMIT"));
+    assert!(results.iter().all(Result::is_ok));
     let calls: Vec<_> = results.into_iter().filter_map(Result::ok).collect();
-    for (call, status) in calls.iter().zip(["failed", "unknown", "succeeded"]) {
+    for (call, status) in calls
+        .iter()
+        .zip(["failed", "unknown", "succeeded"].into_iter().cycle())
+    {
         if status == "unknown" {
             continue;
         } // Simulate process exit after durable reservation.
@@ -111,7 +95,7 @@ fn concurrent_reservations_unknown_results_and_compaction_never_refund_date_budg
                     |r| r.get::<_, i64>(0)
                 )
                 .unwrap(),
-            1
+            3
         );
     }
     for id in &ids {
@@ -144,14 +128,14 @@ fn concurrent_reservations_unknown_results_and_compaction_never_refund_date_budg
     let summary: serde_json::Value = serde_json::from_str(&summary).unwrap();
     assert_eq!(summary["runs"], 8);
     assert_eq!(summary["failures"], 8);
-    assert_eq!(summary["calls"], 3);
+    assert_eq!(summary["calls"], 8);
     assert_eq!(summary["elapsed_ms_total"], 16_000);
     assert_eq!(summary["last_run"]["elapsed_ms"], 2_000);
     assert_eq!(
         store
             .personal_calls("personal_work", &now.date_naive().to_string())
             .unwrap(),
-        3
+        8
     );
     assert_eq!(
         store
@@ -169,19 +153,24 @@ fn concurrent_reservations_unknown_results_and_compaction_never_refund_date_budg
     store
         .prepare(&id, &reference, &reference.sha256, &[], now)
         .unwrap();
-    let budget = Reservation::new(&config.llm, &config.recovery, 10, 10, json!({}));
     let reserve = || {
         store.reserve_call(CallReservation {
             run_id: &id,
             fingerprint: &reference.sha256,
             logical_step: "personal_summary",
             request: &reference,
-            budget: &budget,
-            recovery: &config.recovery,
+            job_id: None,
+            audit: &json!({"fixture":"personal"}),
             max_attempts: 3,
             now,
         })
     };
-    assert_eq!(reserve().unwrap_err().code, "PERSONAL_CALL_LIMIT");
-    assert!(store.calls(&id).unwrap().is_empty());
+    reserve().unwrap();
+    assert_eq!(
+        store
+            .personal_calls("personal_work", &now.date_naive().to_string())
+            .unwrap(),
+        9
+    );
+    assert_eq!(store.calls(&id).unwrap().len(), 1);
 }

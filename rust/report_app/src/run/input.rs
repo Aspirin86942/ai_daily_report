@@ -473,7 +473,7 @@ fn prepare_sources(
         missed_dates: app.store.missed_dates(request.context.target_date)?,
         input_fingerprint,
         recovery_fingerprint: app.fingerprint(true)?,
-        model_pricing: app.config.recovery.model_pricing.clone(),
+        model_pricing: None,
         recovery_inputs: None,
     })
 }
@@ -498,8 +498,7 @@ pub(super) fn apply_coverage(
     }
     for call in calls {
         let usage: Value = serde_json::from_str(call["usage_json"].as_str().unwrap_or("{}"))?;
-        if let Some(ranges) = usage["reserved_budget"]["request_audit"]["source_ranges"].as_object()
-        {
+        if let Some(ranges) = crate::model::request_audit(&usage)["source_ranges"].as_object() {
             for (id, ranges) in ranges {
                 let ranges: Vec<TextRange> = serde_json::from_value(ranges.clone())?;
                 attempted.entry(id.clone()).or_default().extend(ranges);
