@@ -47,15 +47,6 @@ fn default_invalid_response_retries() -> u32 {
     1
 }
 
-impl Llm {
-    pub fn facts_output_tokens(&self) -> u64 {
-        self.facts_max_tokens.min(
-            self.verified_max_output_tokens
-                .unwrap_or(self.facts_max_tokens),
-        )
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReportSettings {
@@ -599,7 +590,6 @@ impl AppConfig {
         if !(1..=3).contains(&llm.max_retries)
             || !(0.0..=2.0).contains(&llm.temperature)
             || llm.max_tokens == 0
-            || llm.facts_max_tokens == 0
         {
             return Err(invalid("llm.max_retries/temperature/max_tokens"));
         }
@@ -609,11 +599,7 @@ impl AppConfig {
         {
             return Err(invalid("llm.request_timeout_seconds"));
         }
-        if llm.max_request_utf8_bytes < 2048
-            || llm.max_sources_per_batch == 0
-            || llm.max_batches == 0
-            || llm.response_format != "json_object"
-        {
+        if llm.max_request_utf8_bytes < 2048 || llm.response_format != "json_object" {
             return Err(invalid("llm 请求限制"));
         }
         if llm

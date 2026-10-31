@@ -56,7 +56,16 @@ fn scheduled_results_keep_execution_material_and_publication_separate() {
         .unwrap();
     }
     let mut events = vec![];
-    for entry in fs::read_dir(&config.paths.log_dir).unwrap() {
+    for entry in fs::read_dir(config.paths.log_dir.join("personal")).unwrap() {
+        if entry
+            .as_ref()
+            .unwrap()
+            .path()
+            .extension()
+            .is_none_or(|e| e != "jsonl")
+        {
+            continue;
+        }
         for line in fs::read_to_string(entry.unwrap().path()).unwrap().lines() {
             events.push(serde_json::from_str::<Value>(line).unwrap());
         }

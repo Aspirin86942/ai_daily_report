@@ -1,7 +1,7 @@
 //! Bounded personal summaries keep their evidence in the published report.
 use super::data::{CoverageGap, ReportSource};
 use crate::{
-    archive::model_input::EvidenceRef,
+    evidence::EvidenceRef,
     snapshots::{digest, valid_hash},
     types::{parse_date, utc_window, RunContext},
     ReportError,

@@ -165,6 +165,7 @@ fn startup_recovery_preserves_prepared_runs_and_marks_early_interruptions() {
     store
         .create(&context, "report", "generation", None, now())
         .unwrap();
+    store.register_personal_run(&context.run_id).unwrap();
     store.recover_interrupted(now(), &lock).unwrap();
     let record = store.get(&context.run_id).unwrap();
     assert_eq!(record.error_code.as_deref(), Some("RUN_INTERRUPTED"));

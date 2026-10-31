@@ -68,6 +68,8 @@ PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；
 
 ## 备份与回退
 
+2026-11-01 **00:55:52** 已切换至 `.releases/rust-20261101-personal-only-01`，对应已验收包 `personal-ablation-20261101-final`。本次回退包为完整保留的 `.releases/rust-20261029-summary-1500-01`；配置、两项任务 XML、报告库与扫描库一致备份、当前与历史冻结文件位于 `.artifacts/personal-ablation-20261031/deployment-01/before`，逐文件哈希见同级 `backup-manifest.json`。两项任务仅修改执行动作和工作目录，配置仅修改 Office/PDF 路径；触发器、权限、启用状态与时限保持。回退时按 `before/settings.yaml` 和两份任务 XML 恢复对应程序路径与任务动作，核对同包解析程序并重新执行 `doctor --strict` 与任务回读。保留当前数据库及切换后新增数据，数据库备份用于核查与隔离恢复。部署与任务实跑证据见同级 [final-verification.json](../.artifacts/personal-ablation-20261031/deployment-01/final-verification.json)。
+
 2026-10-29 11:35:36 已切换至 `.releases/rust-20261029-summary-1500-01`（个人日报正文硬上限 1,500 字）。本次回退包为完整保留的 `.releases/rust-20261028-summary-compact-01`；配置、两项任务 XML、报告库及扫描库一致备份位于 `.artifacts/personal-summary-extension-20261029/deployment-01/before`，逐文件哈希见同级 `backup-manifest.json`。本次仅更新既有任务的执行动作与工作目录，并改写配置中的两个解析程序路径，触发器、权限和启用状态保持。回退时按备份恢复对应程序路径、任务动作和配置，核对同包解析程序并重新执行 `doctor --strict` 与任务回读；当前业务数据库、报告和调用账本继续保留，禁止用旧数据库备份覆盖新增数据。部署、恢复 10 月 28 日日报及任务实跑结果见同级 [final-verification.json](../.artifacts/personal-summary-extension-20261029/deployment-01/final-verification.json)。
 
 2026-10-28 14:31:33 已切换至 `.releases/rust-20261028-summary-compact-01`。本次回退包为完整保留的 `.releases/rust-20261027-collection-clean-01`；配置、两项任务 XML、报告库及扫描库一致备份位于 `.artifacts/personal-summary-compaction-20261028/deployment-01/before`，逐文件哈希见同级 `backup-manifest.json`。本次仅更新既有任务的执行动作和配置中的两个解析程序路径，触发器及权限保持。回退时按备份恢复对应程序路径、任务动作和配置，核对同包解析程序并重新执行 `doctor --strict` 与任务回读；当前业务数据库、报告和调用账本继续保留，禁止用旧数据库备份覆盖新增数据。部署及正式任务实跑结果见同级 [final-verification.json](../.artifacts/personal-summary-compaction-20261028/deployment-01/final-verification.json)。

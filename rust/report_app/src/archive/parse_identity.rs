@@ -70,7 +70,8 @@ impl Verification {
             return Err(super::error("ARCHIVE_WORKER_IDENTITY_INVALID"));
         }
         let proof = serde_json::to_value(self)?;
-        let value = serde_json::json!({"sha256":crate::run::hash(&proof)?, "proof":proof});
+        let value =
+            serde_json::json!({"sha256":crate::snapshots::fingerprint(&proof)?, "proof":proof});
         let value = value.to_string();
         let saved: Option<String> = store
             .conn
@@ -113,7 +114,7 @@ fn verification_key(config: &AppConfig) -> Result<String, ReportError> {
             files.push(serde_json::json!([path, guard]));
         }
     }
-    crate::run::hash(&serde_json::json!({
+    crate::snapshots::fingerprint(&serde_json::json!({
         "version":1, "build":env!("AI_DAILY_REPORT_BUILD"),
         "parser":ai_daily_scanner_core::PARSER_CONTENT_IDENTITY,
         "parameters":parameters(config), "files":files
@@ -133,7 +134,7 @@ fn saved_verification(config: &AppConfig, key: &str) -> Option<Verification> {
         .ok()?;
     let envelope: serde_json::Value = serde_json::from_str(&text).ok()?;
     let proof = envelope.get("proof")?;
-    if envelope.get("sha256")?.as_str()? != crate::run::hash(proof).ok()? {
+    if envelope.get("sha256")?.as_str()? != crate::snapshots::fingerprint(proof).ok()? {
         return None;
     }
     let verified: Verification = serde_json::from_value(proof.clone()).ok()?;
@@ -208,7 +209,7 @@ fn profile_from_identities(
             return Ok(profile);
         }
     }
-    crate::run::hash(&serde_json::json!({
+    crate::snapshots::fingerprint(&serde_json::json!({
         "archive_parser":2, "parser":ai_daily_scanner_core::PARSER_CONTENT_IDENTITY,
         "office":office,"pdf":pdf,"parameters":parameters
     }))
@@ -244,7 +245,7 @@ fn compatible_profile(
     let mut old = parameters.clone();
     old["archive_parser"] = serde_json::json!(1);
     old["engine"] = serde_json::json!(entry.legacy_engine_build);
-    if crate::run::hash(&old)? != entry.legacy_profile {
+    if crate::snapshots::fingerprint(&old)? != entry.legacy_profile {
         return Err(super::error("PARSER_COMPATIBILITY_INVALID"));
     }
     Ok(Some(entry.legacy_profile.clone()))
@@ -291,7 +292,7 @@ fn worker_identity(path: &Path) -> Result<WorkerProof, ReportError> {
 }
 
 fn legacy_worker_identity(executable: &str, pdfium: &str) -> Result<String, ReportError> {
-    crate::run::hash(&serde_json::json!({"executable":executable,"pdfium":pdfium}))
+    crate::snapshots::fingerprint(&serde_json::json!({"executable":executable,"pdfium":pdfium}))
 }
 
 #[cfg(test)]
@@ -397,7 +398,7 @@ mod tests {
         let mut entry = Entry {
             parser_content_identity: ai_daily_scanner_core::PARSER_CONTENT_IDENTITY.into(),
             parameters: parameters.clone(),
-            legacy_profile: crate::run::hash(&old).unwrap(),
+            legacy_profile: crate::snapshots::fingerprint(&old).unwrap(),
             legacy_engine_build: "old-build".into(),
             office_sha256: "a".repeat(64),
             pdf_sha256: "b".repeat(64),

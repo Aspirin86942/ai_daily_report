@@ -2,7 +2,7 @@
 //! Scan identities describe a frozen observation, never an archive version.
 use super::{input, App};
 use crate::{
-    archive::model_input::{permitted, EvidenceRef},
+    evidence::{permitted, EvidenceRef},
     reports::{
         data::ReportSource,
         personal::{Material, Selection, MAX_INPUT_CHARS},

@@ -1,9 +1,5 @@
 //! NTFS compression preserves ordinary reads, seek offsets and evidence hashes.
-use super::{parse, store::ArchiveStore};
-use crate::{config::AppConfig, store::locking::ReportLock, ReportError};
-use ai_daily_worker_contract::archive::ArchiveArtifact;
-use serde_json::{json, Value};
-use std::{fs, io, path::Path, time::Duration};
+use std::{fs, io, path::Path};
 
 pub fn allocated_bytes(path: &Path) -> io::Result<u64> {
     #[cfg(windows)]
@@ -77,59 +73,4 @@ pub fn compress(path: &Path) -> io::Result<()> {
             "NTFS compression requires Windows",
         ))
     }
-}
-
-/// Idempotent maintenance: evidence bytes and database schema stay unchanged.
-pub fn optimize(config: &AppConfig) -> Result<Value, ReportError> {
-    let _lock = ReportLock::acquire(
-        &config.paths.data_dir.join("archive/collector"),
-        "archive",
-        Duration::ZERO,
-    )?;
-    let store = ArchiveStore::open(config, true)?;
-    let mut statement = store.conn.prepare(
-        "SELECT id,manifest_json,sha256 FROM extractions WHERE status IN ('complete','partial') ORDER BY id",
-    )?;
-    let mut files = 0u64;
-    let mut logical_bytes = 0u64;
-    let mut before = 0u64;
-    let mut after = 0u64;
-    for row in statement.query_map([], |row| {
-        Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-        ))
-    })? {
-        let (id, manifest, hash) = row?;
-        let directory = store.extraction_dir(&id)?;
-        crate::snapshots::reject_redirects(&directory, "ARCHIVE_PATH_REDIRECT")?;
-        let artifact: ArchiveArtifact = serde_json::from_str(&manifest)?;
-        parse::verify_artifact(&directory, &artifact, &hash)?;
-        if config.archive.compress_extractions {
-            compress(&directory)?;
-        }
-        for name in ["body.md", "units.jsonl", "units.idx"] {
-            let path = directory.join(name);
-            crate::snapshots::reject_redirects(&path, "ARCHIVE_PATH_REDIRECT")?;
-            logical_bytes += fs::metadata(&path)?.len();
-            before += allocated_bytes(&path)?;
-            if config.archive.compress_extractions {
-                compress(&path)?;
-            }
-            after += allocated_bytes(&path)?;
-            files += 1;
-        }
-        parse::verify_artifact(&directory, &artifact, &hash)?;
-    }
-    Ok(json!({
-        "status": "verified",
-        "files": files,
-        "logical_bytes": logical_bytes,
-        "allocated_bytes_before": before,
-        "allocated_bytes_after": after,
-        "reclaimed_bytes": before.saturating_sub(after),
-        "compression": if config.archive.compress_extractions { "ntfs_lznt1" } else { "unchanged" },
-        "content_hashes_verified": true,
-    }))
 }

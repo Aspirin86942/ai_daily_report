@@ -59,7 +59,7 @@ impl ModelTransport for Network {
             .as_str()
             .unwrap()
             .contains("虚构"));
-        let content = json!({"schema_version":3,"facts":[{"topic":"接口检查","background":null,"detail":"采购审批方案待评审。","conditions":[],"status":"草稿","source_ids":["S001"],"uncertainty":null}],"pending":[]});
+        let content = json!({"schema_version":5,"items":[{"title":"接口检查","text":"采购审批方案待评审。","kind":"attention","statement_kind":"user_statement","source_ids":["user_input"]}]});
         Ok(HttpResponse{status:200,retry_after:None,body:json!({"choices":[{"finish_reason":"stop","message":{"content":content.to_string()}}],"usage":{"total_tokens":123}}).to_string().into_bytes()})
     }
 }
@@ -89,7 +89,12 @@ fn strict_doctor_uses_real_same_build_workers_and_checks_packaged_templates() {
     let value = operations::doctor(&app, false, now()).unwrap();
     assert_eq!(value["status"], "ok");
     assert_eq!(app.store.list_runs(None, 100).unwrap().len(), 0);
-    fs::write(dir.path().join("templates/weekly_template.md"), "changed").unwrap();
+    fs::write(
+        dir.path()
+            .join("templates/personal_daily_scan_template_v5.md"),
+        "changed",
+    )
+    .unwrap();
     assert_eq!(
         operations::doctor(&app, false, now()).unwrap_err().code,
         "TEMPLATE_BUILD_MISMATCH"

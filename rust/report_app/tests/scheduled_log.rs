@@ -54,7 +54,7 @@ fn scheduled_log_records_kind_run_date_phase_and_duration() {
     .unwrap();
     // 调度日志按运行时刻的上海日期命名；跨午夜时读取目录内全部日志再按 run_id 筛选。
     let mut events = Vec::new();
-    for entry in fs::read_dir(dir.path().join("logs")).unwrap() {
+    for entry in fs::read_dir(dir.path().join("logs/personal")).unwrap() {
         let path = entry.unwrap().path();
         if !path
             .file_name()

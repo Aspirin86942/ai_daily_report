@@ -193,7 +193,11 @@ fn evidence_profile_preserves_old_serialization_and_fingerprints() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("config")).unwrap();
     let path = dir.path().join("config/settings.yaml");
-    fs::write(&path, "paths:\n  work_dir: work\n").unwrap();
+    fs::write(
+        &path,
+        "paths:\n  work_dir: work\nreport:\n  profile: evidence\n",
+    )
+    .unwrap();
     let old = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
     assert_eq!(old.report.profile, ReportProfile::Evidence);
     assert!(serde_json::to_value(&old.report)

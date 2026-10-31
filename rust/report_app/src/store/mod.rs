@@ -245,13 +245,48 @@ impl Store {
         reason: Option<&str>,
         now: DateTime<Utc>,
     ) -> Result<RunRecord, ReportError> {
+        self.create_run(context, kind, generation_id, reason, now, false)
+    }
+
+    pub fn create_personal(
+        &self,
+        context: &RunContext,
+        kind: &str,
+        generation_id: &str,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+    ) -> Result<RunRecord, ReportError> {
+        if !["report", "preview", "model_check"].contains(&kind) {
+            return Err(ReportError::new("RUN_KIND_INVALID", "个人运行类型无效"));
+        }
+        self.create_run(context, kind, generation_id, reason, now, true)
+    }
+
+    fn create_run(
+        &self,
+        context: &RunContext,
+        kind: &str,
+        generation_id: &str,
+        reason: Option<&str>,
+        now: DateTime<Utc>,
+        personal: bool,
+    ) -> Result<RunRecord, ReportError> {
         context.validate()?;
         if !["report", "preview", "model_check", "weekly", "monthly"].contains(&kind) {
             return Err(ReportError::new("RUN_KIND_INVALID", "不支持的运行类型"));
         }
-        self.connection()?.execute("INSERT INTO report_runs(run_id,scope_id,target_date,timezone,run_kind,context_json,config_fingerprint,generation_id,regeneration_reason,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        let mut conn = self.connection()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        transaction.execute("INSERT INTO report_runs(run_id,scope_id,target_date,timezone,run_kind,context_json,config_fingerprint,generation_id,regeneration_reason,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             params![context.run_id,context.scope_id,context.target_date.to_string(),context.timezone,kind,
                 String::from_utf8(canonical_json(&serde_json::to_value(context)?)?).unwrap(),context.config_fingerprint,generation_id,reason,timestamp(now),timestamp(now)])?;
+        if personal {
+            transaction.execute(
+                "INSERT INTO report_metadata(key,value) VALUES(?,'5')",
+                [format!("personal_run:{}", context.run_id)],
+            )?;
+        }
+        transaction.commit()?;
         self.get(&context.run_id)
     }
 
@@ -336,8 +371,8 @@ impl Store {
     ) -> Result<(), ReportError> {
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("UPDATE report_model_calls SET status='unknown',error_code='CALL_RESULT_UNKNOWN',finished_at=? WHERE status='reserved'", [timestamp(now)])?;
-        tx.execute("UPDATE report_runs SET status='failed',error_code='RUN_INTERRUPTED',updated_at=?,finished_at=? WHERE status='running' AND (phase IN ('created','scanning') OR run_kind!='report')", params![timestamp(now),timestamp(now)])?;
+        tx.execute("UPDATE report_model_calls SET status='unknown',error_code='CALL_RESULT_UNKNOWN',finished_at=? WHERE status='reserved' AND EXISTS(SELECT 1 FROM report_metadata m WHERE m.key='personal_run:'||report_model_calls.run_id AND m.value='5')", [timestamp(now)])?;
+        tx.execute("UPDATE report_runs SET status='failed',error_code='RUN_INTERRUPTED',updated_at=?,finished_at=? WHERE status='running' AND EXISTS(SELECT 1 FROM report_metadata m WHERE m.key='personal_run:'||report_runs.run_id AND m.value='5') AND (phase IN ('created','scanning') OR run_kind!='report')", params![timestamp(now),timestamp(now)])?;
         tx.commit()?;
         Ok(())
     }

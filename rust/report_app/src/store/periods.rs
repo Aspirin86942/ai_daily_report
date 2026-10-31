@@ -1,5 +1,5 @@
-use super::{query, reports::read_run, timestamp, RunRecord, RunStatus, StagedReport, Store};
-use crate::{reports::period, snapshots::digest, types::RunPhase, ReportError};
+use super::{query, reports::read_run, timestamp, RunRecord, Store};
+use crate::{reports::period, types::RunPhase, ReportError};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
@@ -68,33 +68,7 @@ impl Store {
         table(kind)?;
         query(&self.connection()?,"SELECT * FROM report_runs WHERE run_kind=? AND target_date=? AND phase IN ('prepared','generating','db_committed') AND status!='succeeded' AND COALESCE(error_code,'')!='RUN_SUPERSEDED' ORDER BY CASE WHEN phase='db_committed' THEN 0 ELSE 1 END,created_at,run_id",params![kind,target])?.into_iter().map(|v|serde_json::from_value(v).map_err(Into::into)).collect()
     }
-    pub fn stage_period(
-        &self,
-        id: &str,
-        staged: &StagedReport<'_>,
-        quality: &str,
-        save: bool,
-        now: DateTime<Utc>,
-    ) -> Result<(), ReportError> {
-        let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let run = read_run(&tx, id)?;
-        let label = period::validate_identity(&run.run_kind, staged.report)?;
-        if !matches!(run.phase, RunPhase::Prepared | RunPhase::Generating)
-            || !matches!(run.status, RunStatus::Running)
-            || staged.markdown.is_empty()
-            || !matches!(quality, "complete" | "partial")
-        {
-            return Err(ReportError::new(
-                "RUN_PHASE_INVALID",
-                "周月报尚未准备好提交",
-            ));
-        }
-        let previous = current(&tx, &run.run_kind, &label)?;
-        tx.execute("UPDATE report_runs SET phase=?,status=?,quality=?,report_json=?,markdown=?,expected_sha256=?,previous_sha256=?,previous_run_id=?,output_path=?,publication_fingerprint=?,updated_at=?,finished_at=? WHERE run_id=?",params![if save{"db_committed"}else{"preview"},if save{"running"}else{"succeeded"},quality,staged.report.to_string(),staged.markdown,digest(staged.markdown.as_bytes()),previous.as_ref().and_then(|r|r.expected_sha256.as_ref()),previous.as_ref().map(|r|&r.run_id),if save{Some(staged.output_path)}else{None},staged.publication_fingerprint,timestamp(now),if save{None}else{Some(timestamp(now))},id])?;
-        tx.commit()?;
-        Ok(())
-    }
+
     pub(super) fn mark_period_published(
         &self,
         id: &str,

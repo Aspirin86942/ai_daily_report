@@ -1,6 +1,6 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 use ai_daily_report::{
-    cli::{Cli, Command, CoverageCommand},
+    cli::{Cli, Command},
     config::AppConfig,
     run::{repair_output, run_report, App},
     types::new_run_id,
@@ -60,6 +60,9 @@ fn execute(
         );
         return Ok(());
     }
+    if matches!(command, Command::Retired(_)) {
+        return Err(ReportError::new("FEATURE_RETIRED", "周报、月报、批量补跑、覆盖修复和 OCR 工作流已退役；请使用 daily，历史报告仍可查询和恢复"));
+    }
     let executable = std::env::current_exe()?;
     let config = AppConfig::load(executable.parent().unwrap(), config_dir)?;
     let now = chrono::Utc::now();
@@ -87,7 +90,7 @@ fn execute(
             ai_daily_report::archive::cli::print(&value, args.format)
         }
         Command::ArchiveScanner { .. } => unreachable!(),
-        command @ (Command::Daily(_) | Command::Weekly(_) | Command::Monthly(_)) => {
+        command @ Command::Daily(_) => {
             let scheduled = matches!(&command,Command::Daily(args)if args.scheduled);
             let kind = if matches!(&command, Command::Daily(_)) {
                 "daily"
@@ -100,16 +103,7 @@ fn execute(
                 let request =
                     command.report_request(&config, now, run_id.clone(), String::new())?;
                 target_date = Some(request.context.target_date.to_string());
-                let mut app = App::open_started(config.clone(), now, started)?;
-                if let Command::Daily(args) = &command {
-                    if let Some(path) = &args.ocr_manifest {
-                        app.ocr_manifest = ai_daily_report::maintenance::ocr::load_manifest(
-                            &app.config,
-                            path,
-                            &Default::default(),
-                        )?;
-                    }
-                }
+                let app = App::open_started(config.clone(), now, started)?;
                 let value = serde_json::to_value(run_report(request, &app)?)?;
                 Ok(value)
             })();
@@ -132,7 +126,7 @@ fn execute(
             Ok(())
         }
         Command::List => {
-            let app = App::open(config, now)?;
+            let app = App::open_history(config, now)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&app.store.list_reports()?)?
@@ -140,7 +134,7 @@ fn execute(
             Ok(())
         }
         Command::Runs { target_date, limit } => {
-            let app = App::open(config, now)?;
+            let app = App::open_history(config, now)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&app.store.list_runs(
@@ -150,12 +144,22 @@ fn execute(
             );
             Ok(())
         }
-        Command::RepairOutput { target_date } => {
-            let app = App::open(config, now)?;
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&repair_output(&app, &target_date.to_string(), now)?)?
-            );
+        Command::RepairOutput {
+            target_date,
+            run_id,
+        } => {
+            let app = App::open_history(config, now)?;
+            let result = match (target_date, run_id) {
+                (Some(date), None) => repair_output(&app, &date.to_string(), now)?,
+                (None, Some(id)) => ai_daily_report::run::repair_by_id(&app, &id, now)?,
+                _ => {
+                    return Err(ReportError::new(
+                        "COMMAND_INVALID",
+                        "选择目标日期或运行编号",
+                    ))
+                }
+            };
+            println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
         Command::Doctor {
@@ -165,109 +169,9 @@ fn execute(
             println!("{}", serde_json::to_string_pretty(&config.config_check())?);
             Ok(())
         }
-        Command::Coverage { command } => {
-            use ai_daily_report::maintenance::coverage;
-            let mut app = App::open(config, now)?;
-            let result = match command {
-                CoverageCommand::Plan {
-                    dates,
-                    gap_codes,
-                    scope_root,
-                    refresh_preflight,
-                } => {
-                    serde_json::json!({"plan":coverage::make_plan(&app,coverage::PlanRequest{dates:&dates,gap_codes:&gap_codes,scope_root:&scope_root,refresh:refresh_preflight},now)?})
-                }
-                CoverageCommand::Generate { plan, workers } => {
-                    app.model_workers = workers;
-                    serde_json::json!({"candidates":coverage::generate(&app,&plan,now)?})
-                }
-                CoverageCommand::Publish { candidates } => {
-                    coverage::publish(&app, &candidates, now)?
-                }
-                CoverageCommand::Recover {
-                    plan,
-                    reason,
-                    authorization_note,
-                    revise_runtime,
-                } => {
-                    serde_json::json!({"recovery":coverage::recover(&app,&plan,&reason,&authorization_note,revise_runtime,now)?})
-                }
-                CoverageCommand::Amend { plan, reason } => {
-                    serde_json::json!({"amendment":coverage::amend(&app,&plan,&reason,now)?})
-                }
-            };
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            Ok(())
-        }
-        Command::Ocr { command } => {
-            use ai_daily_report::{cli::OcrCommand, maintenance::ocr};
-            let result = match command {
-                OcrCommand::Validate { manifest } => {
-                    let documents = ocr::load_manifest(&config, &manifest, &Default::default())?;
-                    serde_json::json!({"status":"validated","documents":documents.len(),"text_unverified":true})
-                }
-                OcrCommand::Run {
-                    engine,
-                    engine_arg,
-                    file,
-                    pages,
-                    output_dir,
-                } => {
-                    let limits = ocr::OcrLimits {
-                        enabled: true,
-                        ..Default::default()
-                    };
-                    let mut worker = ocr::OcrEngine::new(
-                        engine,
-                        engine_arg.into_iter().map(Into::into).collect(),
-                        limits,
-                        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    )?;
-                    let document = worker.recognize(&config, &file, &pages)?;
-                    serde_json::json!({"manifest":ocr::export_document(&output_dir,&document)?,"text_unverified":true})
-                }
-            };
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            Ok(())
-        }
-        Command::Backfill(args) => {
-            let mut config = config;
-            if let Some(tokens) = args.output_tokens {
-                if tokens == 0
-                    || config
-                        .llm
-                        .verified_max_output_tokens
-                        .is_none_or(|limit| tokens > limit)
-                {
-                    return Err(ReportError::new(
-                        "MODEL_CAPABILITY_INVALID",
-                        "输出容量超过已验证模型上限",
-                    ));
-                }
-                config.llm.max_tokens = tokens;
-                config.llm.facts_max_tokens = tokens;
-            }
-            let mut app = App::open(config, now)?;
-            app.model_workers = args.workers;
-            if let Some(path) = &args.ocr_manifest {
-                app.ocr_manifest = ai_daily_report::maintenance::ocr::load_manifest(
-                    &app.config,
-                    path,
-                    &Default::default(),
-                )?;
-            }
-            let result = ai_daily_report::maintenance::backfill::run(&app, &args, now)?;
-            println!("{}", serde_json::to_string_pretty(&result)?);
-            if result["complete"] == false && !args.only_no_model {
-                return Err(ReportError::new(
-                    "BACKFILL_INCOMPLETE",
-                    "补跑尚有未完成日期，请查看保存的状态与错误码",
-                ));
-            }
-            Ok(())
-        }
+        Command::Retired(_) => unreachable!(),
         Command::Cleanup { execute } => {
-            let app = App::open(config, now)?;
+            let app = App::open_history(config, now)?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(&ai_daily_report::maintenance::retention::cleanup(
@@ -277,7 +181,7 @@ fn execute(
             Ok(())
         }
         Command::Backup { output } => {
-            let app = App::open(config, now)?;
+            let app = App::open_history(config, now)?;
             let _lock = ai_daily_report::store::locking::ReportLock::acquire(
                 &app.store.path,
                 &app.config.report.scope_id,

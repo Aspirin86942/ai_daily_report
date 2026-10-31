@@ -1,6 +1,6 @@
 use super::App;
 use crate::{
-    archive::model_input::permitted,
+    evidence::permitted,
     model::{
         plan::PlannedStep,
         transport::{HttpResponse, ModelTransport, TransportFailure},
@@ -114,7 +114,7 @@ pub fn run(
         app.store.activate(request.context.target_date)?;
     }
     let id = &request.context.run_id;
-    app.store.create(
+    app.store.create_personal(
         &request.context,
         if request.save && !request.dry_run {
             "report"
@@ -125,7 +125,6 @@ pub fn run(
         request.regeneration_reason.as_deref(),
         request.context.started_at,
     )?;
-    app.store.register_personal_run(id)?;
     let result = (|| {
         app.store.set_scanning(id, Utc::now())?;
         let mut selection = super::personal_scan::prepare(app, &request)?;
@@ -258,7 +257,6 @@ pub fn finish(
             snapshots: &snapshots,
             transport: &transport,
             llm: &app.config.llm,
-            recovery_inputs: None,
             allow_new_calls: run.config_fingerprint == app.fingerprint(false)?,
             run_id: id,
             started_at: Utc::now()

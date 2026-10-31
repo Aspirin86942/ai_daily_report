@@ -8,7 +8,7 @@ use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(version, about = "AI Daily Report — 文件证据日报、周报与月报")]
+#[command(version, about = "AI Daily Report — 个人日报与历史证据")]
 pub struct Cli {
     #[arg(long, global = true, help = "配置目录；默认使用程序旁的 config")]
     pub config_dir: Option<PathBuf>,
@@ -29,10 +29,9 @@ pub enum Command {
     Stats(crate::archive::cli::StatsArgs),
     /// 生成已结束自然日的文件证据日报
     Daily(DailyArgs),
-    /// 汇总一周报告，须明确选择 db 或 scan 来源
-    Weekly(PeriodArgs),
-    /// 汇总一个月报告，须明确选择 db 或 scan 来源
-    Monthly(PeriodArgs),
+    /// Retired generation workflows remain recognizable for old scripts.
+    #[command(name="weekly", aliases=["monthly","backfill","coverage","ocr"], hide=true)]
+    Retired(RetiredArgs),
     /// 查看历史报告
     List,
     #[command(about = "只读检索日报、周报和月报正文")]
@@ -46,8 +45,14 @@ pub enum Command {
     },
     /// 从数据库恢复原正文，不调用模型
     RepairOutput {
-        #[arg(long, value_parser = types::parse_date)]
-        target_date: NaiveDate,
+        #[arg(long, value_parser = types::parse_date, required_unless_present="run_id", conflicts_with="run_id")]
+        target_date: Option<NaiveDate>,
+        #[arg(
+            long,
+            required_unless_present = "target_date",
+            conflicts_with = "target_date"
+        )]
+        run_id: Option<String>,
     },
     /// 检查配置、模板、数据库及解析进程
     #[command(alias = "check-config")]
@@ -59,18 +64,6 @@ pub enum Command {
     },
     /// 只读检查任务、采集、日报发布、磁盘与数据库状态
     Health(HealthArgs),
-    /// 批量补跑或仅执行输入预检
-    Backfill(BackfillArgs),
-    /// 固定输入、生成候选、发布或恢复覆盖修复作业
-    Coverage {
-        #[command(subcommand)]
-        command: CoverageCommand,
-    },
-    /// 校验显式提供的 OCR 文字与原文件身份
-    Ocr {
-        #[command(subcommand)]
-        command: OcrCommand,
-    },
     /// 生成 Windows 计划任务定义
     Task {
         #[command(subcommand)]
@@ -99,8 +92,6 @@ pub enum Command {
 pub struct DailyArgs {
     #[arg(long, value_enum)]
     pub source: Option<ReportSource>,
-    #[arg(long)]
-    pub ocr_manifest: Option<PathBuf>,
     #[arg(short = 'i', long)]
     pub input: Option<String>,
     #[arg(long, conflicts_with_all = ["dry_run", "scheduled"])]
@@ -122,14 +113,9 @@ pub struct DailyArgs {
 }
 
 #[derive(Debug, Args)]
-pub struct PeriodArgs {
-    pub period: Option<String>,
-    #[arg(long, value_enum)]
-    pub source: ReportSource,
-    #[arg(short = 'i', long)]
-    pub input: Option<String>,
-    #[arg(long)]
-    pub no_save: bool,
+pub struct RetiredArgs {
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    pub arguments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -187,105 +173,6 @@ pub struct HealthArgs {
     pub output: Option<PathBuf>,
 }
 
-#[derive(Debug, Args)]
-pub struct BackfillArgs {
-    #[arg(long, value_parser = types::parse_date)]
-    pub start_date: Option<NaiveDate>,
-    #[arg(long, value_parser = types::parse_date)]
-    pub end_date: Option<NaiveDate>,
-    #[arg(long)]
-    pub preflight: Option<PathBuf>,
-    #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
-    pub workers: u8,
-    #[arg(long)]
-    pub ocr_manifest: Option<PathBuf>,
-    #[arg(long)]
-    pub only_no_model: bool,
-    #[arg(long)]
-    pub only_failed: bool,
-    #[arg(long)]
-    pub output_tokens: Option<u64>,
-    #[arg(long)]
-    pub repair_coverage: bool,
-    #[arg(long, value_delimiter = ',', value_parser = types::parse_date)]
-    pub dates: Vec<NaiveDate>,
-    #[arg(long, value_delimiter = ',')]
-    pub gap_codes: Vec<String>,
-    #[arg(long)]
-    pub scope_root: Option<PathBuf>,
-    #[arg(long)]
-    pub dry_run: bool,
-    #[arg(long)]
-    pub refresh_preflight: bool,
-    #[arg(long)]
-    pub plan: Option<PathBuf>,
-    #[arg(long)]
-    pub generate_candidates: bool,
-    #[arg(long)]
-    pub publish_candidates: Option<PathBuf>,
-}
-
-#[derive(Debug, Subcommand)]
-pub enum CoverageCommand {
-    Plan {
-        #[arg(long, required = true, value_delimiter = ',', value_parser = types::parse_date)]
-        dates: Vec<NaiveDate>,
-        #[arg(long, required = true, value_delimiter = ',')]
-        gap_codes: Vec<String>,
-        #[arg(long)]
-        scope_root: PathBuf,
-        #[arg(long)]
-        refresh_preflight: bool,
-    },
-    Generate {
-        #[arg(long)]
-        plan: PathBuf,
-        #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u8).range(1..=4))]
-        workers: u8,
-    },
-    Publish {
-        #[arg(long)]
-        candidates: PathBuf,
-    },
-    Recover {
-        #[arg(long)]
-        plan: PathBuf,
-        #[arg(long)]
-        reason: String,
-        #[arg(long)]
-        authorization_note: String,
-        #[arg(long)]
-        revise_runtime: bool,
-    },
-    Amend {
-        #[arg(long)]
-        plan: PathBuf,
-        #[arg(long)]
-        reason: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-pub enum OcrCommand {
-    Validate {
-        #[arg(long)]
-        manifest: PathBuf,
-    },
-    /// 显式运行已批准的本地 OCR 引擎，输出待核实清单
-    Run {
-        #[arg(long)]
-        engine: PathBuf,
-        #[arg(long, allow_hyphen_values = true)]
-        engine_arg: Vec<String>,
-        #[arg(long)]
-        file: PathBuf,
-        #[arg(long, required = true, value_delimiter = ',')]
-        pages: Vec<u64>,
-        #[arg(long)]
-        output_dir: PathBuf,
-    },
-}
-
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
     Plan {
@@ -304,9 +191,11 @@ impl Command {
         run_id: String,
         fingerprint: String,
     ) -> Result<ReportRequest, ReportError> {
-        let today = now.with_timezone(&types::shanghai()).date_naive();
         let (period, input, save, dry_run, scheduled, regeneration_reason) = match self {
             Self::Daily(args) => {
+                if config.report.profile != crate::config::ReportProfile::Personal {
+                    return Err(ReportError::new("FEATURE_RETIRED", "旧通用日报生成已退役，请显式使用 report.profile: personal；历史报告仍可查询和恢复"));
+                }
                 let target = types::target_date(
                     now,
                     args.target_date.or(args.date),
@@ -335,22 +224,6 @@ impl Command {
                     reason,
                 )
             }
-            Self::Weekly(args) => (
-                Period::weekly(today, args.period.as_deref(), args.source)?,
-                args.input.clone().unwrap_or_default(),
-                !args.no_save,
-                false,
-                false,
-                None,
-            ),
-            Self::Monthly(args) => (
-                Period::monthly(today, args.period.as_deref(), args.source)?,
-                args.input.clone().unwrap_or_default(),
-                !args.no_save,
-                false,
-                false,
-                None,
-            ),
             _ => return Err(ReportError::new("COMMAND_INVALID", "该命令不生成报告")),
         };
         let context = RunContext::new(run_id, now, period.start, fingerprint)?;

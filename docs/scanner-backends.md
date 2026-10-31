@@ -7,8 +7,7 @@ Rust CLI 的 report_app 负责报告、模型调用和恢复。个人日报在�
 ~~~text
 ai-daily-report.exe
   ├─ archive → 历史原件、版本、差异与证据查询
-  ├─ weekly/monthly --source db → 已发布日报汇总
-  └─ daily/weekly/monthly --source scan → scanner_core
+  └─ daily --source scan → scanner_core
        ├─ Rust 内部轻文本解析
        ├─ ai-daily-office-parser.exe
        └─ ai-daily-pdf-parser.exe + pdfium.dll

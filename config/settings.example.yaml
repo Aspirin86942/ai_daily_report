@@ -17,10 +17,8 @@ llm:
   # API base URL；缺省时 DeepSeek 使用 https://api.deepseek.com。
   base_url: "https://api.deepseek.com"
   temperature: 0.2
-  # 成稿、周报和月报的输出上限。
+  # 个人摘要及精简请求的输出上限。
   max_tokens: 8192
-  # 事实提取单独设置输出容量，实际值不超过已验证的模型输出上限。
-  facts_max_tokens: 16384
   max_retries: 3
   # 单次请求超时；应用统一控制尝试次数。
   request_timeout_seconds: 120
@@ -31,9 +29,6 @@ llm:
   # 有效值须与已设置的 thinking_mode 配合；未指定时保持原顶层发送格式。
   thinking_parameter_location: null
   max_request_utf8_bytes: 160000
-  max_sources_per_batch: 8
-  # 完整摘录的初始分批上限；容量不足时明确停止，不丢弃剩余内容。
-  max_batches: 32
   # 模型响应结构或引用无效时的额外重试次数；与 max_retries 共享单步骤总尝试上限。
   invalid_response_retries: 1
   # 公司网关的模型能力经联调确认后填写；空值禁止发送业务正文。
@@ -41,7 +36,7 @@ llm:
   verified_max_output_tokens: null
 
 report:
-  # 新安装使用个人日报；缺省 profile 的旧配置继续使用 evidence。
+  # 当前默认个人日报；显式 evidence 配置仅用于历史查询与原文恢复。
   profile: personal
   scope_id: "personal_work"
   root_alias: "work"
@@ -50,8 +45,6 @@ report:
   notes_dir: "data/report_notes"
 
 recovery:
-  # 同时执行的模型请求数，范围 1-4；调整并发不会改变冻结请求的身份。
-  model_workers: 1
   missed_days_policy: "latest_due_day_with_gap_notice"
   # personal 日报固定总预算 300 秒，270 秒后停止启动新工作。
   run_budget_seconds: 300

@@ -25,8 +25,8 @@ function Assert-Test([bool]$Condition, [string]$Message) { if (-not $Condition) 
 Assert-Test ($plan.work_dir.Replace('\','/') -ceq $work) 'Task plan corrupted a Unicode work path under CP936'
 Assert-Test $encodingRestored 'Task plan did not restore the caller console encoding'
 $dailyFields = Get-ReportTaskXmlFields -Xml $plan.xml
-Assert-Test ($dailyFields['calendar_count'] -eq 3) 'Daily plan must have three calendar triggers'
-Assert-Test ($dailyFields['calendar_times'] -eq '09:00;09:30;10:30') ('Daily trigger times: ' + $dailyFields['calendar_times'])
+Assert-Test ($dailyFields['calendar_count'] -eq 1) 'Personal daily plan must have one calendar trigger'
+Assert-Test ($dailyFields['calendar_times'] -eq '09:00') ('Daily trigger times: ' + $dailyFields['calendar_times'])
 # Windows omits default-valued elements on export; the comparison must accept that for every trigger.
 $normalizedDailyXml = $plan.xml -replace '(<StartBoundary>[^<]+</StartBoundary>)<Enabled>true</Enabled>', '$1'
 Assert-Test (@(Get-ReportTaskDifferences -Plan $plan -Xml $normalizedDailyXml).Count -eq 0) 'Windows omission of calendar trigger defaults was rejected'

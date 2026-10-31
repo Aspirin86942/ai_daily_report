@@ -1,5 +1,4 @@
 //! Historical parser identity for retained archive queries.
-pub use super::parse_identity::profile;
 use super::{error, file_hash};
 use crate::ReportError;
 use ai_daily_worker_contract::archive::ArchiveArtifact;

@@ -35,7 +35,7 @@ pub struct SelectedFact {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matter_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub evidence: Vec<crate::archive::model_input::EvidenceRef>,
+    pub evidence: Vec<crate::evidence::EvidenceRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

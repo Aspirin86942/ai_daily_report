@@ -206,6 +206,12 @@ fn task_plan_inner(
 }
 
 pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Value, ReportError> {
+    if !config.personal_scan() {
+        return Err(ReportError::new(
+            "FEATURE_RETIRED",
+            "旧通用日报任务已退役，请使用 personal 配置；历史报告仍可查询和恢复",
+        ));
+    }
     if u64::from(config.schedule.execution_limit_minutes) * 60
         < config.recovery.run_budget_seconds.saturating_add(60)
     {
@@ -344,50 +350,6 @@ pub const TEMPLATES: &[(&str, &str)] = &[
         "personal_daily_template_v5.md",
         crate::reports::personal::TEMPLATE,
     ),
-    (
-        "evidence_facts_prompt_v4.md",
-        include_str!("../../../templates/evidence_facts_prompt_v4.md"),
-    ),
-    (
-        "evidence_compose_prompt_v4.md",
-        include_str!("../../../templates/evidence_compose_prompt_v4.md"),
-    ),
-    (
-        "evidence_report_template_v4.md",
-        include_str!("../../../templates/evidence_report_template_v4.md"),
-    ),
-    (
-        "evidence_facts_prompt_v3.md",
-        include_str!("../../../templates/evidence_facts_prompt_v3.md"),
-    ),
-    (
-        "evidence_compose_prompt_v3.md",
-        include_str!("../../../templates/evidence_compose_prompt_v3.md"),
-    ),
-    (
-        "evidence_report_template_v3.md",
-        include_str!("../../../templates/evidence_report_template_v3.md"),
-    ),
-    (
-        "evidence_report_template.md",
-        include_str!("../../../templates/evidence_report_template.md"),
-    ),
-    (
-        "weekly_prompt.md",
-        include_str!("../../../templates/weekly_prompt.md"),
-    ),
-    (
-        "weekly_template.md",
-        include_str!("../../../templates/weekly_template.md"),
-    ),
-    (
-        "monthly_prompt.md",
-        include_str!("../../../templates/monthly_prompt.md"),
-    ),
-    (
-        "monthly_template.md",
-        include_str!("../../../templates/monthly_template.md"),
-    ),
 ];
 
 pub fn doctor(app: &App, check_model: bool, now: DateTime<Utc>) -> Result<Value, ReportError> {
@@ -398,7 +360,6 @@ pub fn doctor(app: &App, check_model: bool, now: DateTime<Utc>) -> Result<Value,
         ));
     }
     crate::model::plan::request_limit(&app.config.llm, app.config.llm.max_tokens)?;
-    crate::model::plan::request_limit(&app.config.llm, app.config.llm.facts_output_tokens())?;
     if app.config.api_key().is_empty() {
         return Err(ReportError::new(
             "MODEL_CREDENTIAL_MISSING",
@@ -469,7 +430,13 @@ pub fn doctor(app: &App, check_model: bool, now: DateTime<Utc>) -> Result<Value,
 }
 
 pub fn model_check(app: &App, now: DateTime<Utc>) -> Result<Value, ReportError> {
-    use crate::model::{plan, slicing::SourceInput, ModelRunner, StepOutput};
+    use crate::{
+        model::{personal, ModelRunner},
+        reports::{
+            data::ReportSource,
+            personal::{Material, Selection},
+        },
+    };
     let _lock = crate::store::locking::ReportLock::acquire(
         &app.store.path,
         &app.config.report.scope_id,
@@ -481,31 +448,26 @@ pub fn model_check(app: &App, now: DateTime<Utc>) -> Result<Value, ReportError> 
         now.with_timezone(&types::shanghai()).date_naive(),
         app.fingerprint(false)?,
     )?;
-    let sources = [SourceInput {
-        source_id: "S001".into(),
-        source_kind: "md".into(),
-        path: "synthetic-model-check.md".into(),
-        text: "这是虚构的接口检查材料：一份采购审批方案处于待评审草稿状态，尚未生效。".into(),
-        units: vec![],
-        history_priority: false,
-        text_unverified: false,
-    }];
-    let plan = plan::prepare(
-        &app.config.llm,
-        json!({"date":context.target_date}),
-        &sources,
-        json!({"synthetic":true}),
-    )?;
-    if plan.batches.len() != 1 {
-        return Err(ReportError::new(
-            "MODEL_CHECK_INPUT_INVALID",
-            "检查请求未能形成完整批次",
-        ));
-    }
+    let text = "这是虚构的接口检查材料：一份采购审批方案处于待评审草稿状态，尚未生效。";
+    let mut selection = Selection::default();
+    selection.summary.selected_chars = text.chars().count();
+    selection.materials.push(Material {
+        source: ReportSource::user(text, now),
+        text: text.into(),
+        evidence: vec![],
+        priority: 0,
+    });
+    let plan = personal::prepare_scan(&app.config.llm, &context, &mut selection)?;
+    let personal_snapshots = app
+        .processing
+        .as_ref()
+        .map(|_| crate::run::personal::snapshots(app))
+        .transpose()?;
+    let snapshots = personal_snapshots.as_ref().unwrap_or(&app.snapshots);
     app.store
-        .create(&context, "model_check", &context.run_id, None, now)?;
+        .create_personal(&context, "model_check", &context.run_id, None, now)?;
     let result = (|| {
-        let snapshot = app.snapshots.put(
+        let snapshot = snapshots.put(
             &context.run_id,
             "input",
             &json!({"version":3,"context":context,"plan":plan,"purpose":"model_check"}),
@@ -515,28 +477,24 @@ pub fn model_check(app: &App, now: DateTime<Utc>) -> Result<Value, ReportError> 
         let started = Instant::now();
         let runner = ModelRunner {
             store: &app.store,
-            snapshots: &app.snapshots,
+            snapshots,
             transport: app.transport.as_ref(),
             llm: &app.config.llm,
-            recovery_inputs: None,
             allow_new_calls: true,
             run_id: &context.run_id,
             started_at: now,
             started,
             deadline: started + Duration::from_secs(app.config.recovery.run_budget_seconds),
         };
-        let output = runner.execute(&plan.batches[0])?;
-        let StepOutput::Facts(facts) = output.output else {
-            unreachable!()
-        };
-        if facts.is_empty() {
+        let output = runner.execute(&plan)?.output;
+        if output.items.is_empty() {
             return Err(ReportError::new(
                 "MODEL_CHECK_EMPTY",
-                "模型检查没有返回有效事实",
+                "模型检查没有返回有效事项",
             ));
         }
         app.store
-            .finish_model_check(&context.run_id, &serde_json::to_value(facts)?, now)?;
+            .finish_model_check(&context.run_id, &serde_json::to_value(output.items)?, now)?;
         Ok(
             json!({"checked":true,"run_id":context.run_id,"calls":app.store.calls(&context.run_id)?.len()}),
         )

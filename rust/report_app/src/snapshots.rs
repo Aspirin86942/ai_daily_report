@@ -127,6 +127,18 @@ pub struct SnapshotStore {
 pub(crate) const RESPONSE_RESERVATION_BYTES: u64 = 2 * 1024 * 1024;
 
 impl SnapshotStore {
+    /// Open saved snapshots without creating directories or pruning content.
+    pub(crate) fn retained(root: PathBuf, max_bytes: u64) -> Result<Self, ReportError> {
+        let root = std::path::absolute(root)?;
+        reject_redirects(&root, "SNAPSHOT_PATH_REDIRECTED")?;
+        Ok(Self {
+            root,
+            max_bytes,
+            max_file_bytes: max_bytes.min(512 * 1024 * 1024),
+            write_lock: Mutex::new(()),
+            quota: None,
+        })
+    }
     pub fn new(root: PathBuf, max_bytes: u64) -> Result<Self, ReportError> {
         let root = std::path::absolute(root)?;
         reject_redirects(&root, "SNAPSHOT_PATH_REDIRECTED")?;

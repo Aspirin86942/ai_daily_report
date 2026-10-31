@@ -216,9 +216,7 @@ pub fn generate(
     runner: &super::ModelRunner<'_>,
     plan: &PlannedStep,
 ) -> Result<PersonalOutput, ReportError> {
-    let super::StepOutput::Personal(mut output) = runner.execute(plan)?.output else {
-        return Err(super::contracts::invalid());
-    };
+    let mut output = runner.execute(plan)?.output;
     let Some(cap) = summary_cap(plan.target["summary_prompt_version"].as_u64()) else {
         return Ok(output);
     };
@@ -240,9 +238,7 @@ pub fn generate(
         compact.target["summary_draft"] = serde_json::to_value(&output.items)?;
         rebuild(&mut compact, runner.llm)?;
         compact.validate(runner.llm)?;
-        let super::StepOutput::Personal(result) = runner.execute(&compact)?.output else {
-            return Err(super::contracts::invalid());
-        };
+        let result = runner.execute(&compact)?.output;
         Ok(result)
     })();
     match compacted {

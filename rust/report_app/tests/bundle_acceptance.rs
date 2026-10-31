@@ -41,11 +41,13 @@ fn standalone_personal_scan_publishes_once_without_collection() {
             "max_request_utf8_bytes":160000,"context_window_tokens":128000,"verified_max_output_tokens":8192,
             "max_tokens":4096,"request_timeout_seconds":3}
     }).to_string()).unwrap();
-    let target = chrono::Utc::now()
-        .with_timezone(&ai_daily_report::types::shanghai())
-        .date_naive()
-        .pred_opt()
-        .unwrap();
+    let target = ai_daily_report::types::target_date(
+        chrono::Utc::now(),
+        None,
+        true,
+        chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+    )
+    .unwrap();
     let stamp = ai_daily_report::types::utc_window(target)
         .unwrap()
         .0
@@ -198,7 +200,6 @@ fn request(stream: &mut TcpStream) -> Value {
 struct Server {
     port: u16,
     count: Arc<AtomicUsize>,
-    fail_compose: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<()>>,
 }
@@ -208,9 +209,8 @@ impl Server {
         let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let count = Arc::new(AtomicUsize::new(0));
-        let fail_compose = Arc::new(AtomicBool::new(false));
         let stop = Arc::new(AtomicBool::new(false));
-        let (c, f, s) = (count.clone(), fail_compose.clone(), stop.clone());
+        let (c, s) = (count.clone(), stop.clone());
         let handle = thread::spawn(move || {
             while !s.load(Ordering::SeqCst) {
                 let Ok((mut stream, _)) = listener.accept() else {
@@ -219,15 +219,7 @@ impl Server {
                 };
                 let input = request(&mut stream);
                 c.fetch_add(1, Ordering::SeqCst);
-                let user: Value =
-                    serde_json::from_str(input["messages"][1]["content"].as_str().unwrap())
-                        .unwrap_or(Value::Null);
-                let fail = user["facts"].is_array() && f.swap(false, Ordering::SeqCst);
-                let (status, body) = if fail {
-                    (400, b"{}".to_vec())
-                } else {
-                    (200,json!({"choices":[{"finish_reason":"stop","message":{"content":model_mock::reply(&input).to_string()}}],"usage":{"prompt_tokens":100,"completion_tokens":80,"total_tokens":180}}).to_string().into_bytes())
-                };
+                let (status,body)=(200,json!({"choices":[{"finish_reason":"stop","message":{"content":model_mock::reply(&input).to_string()}}],"usage":{"prompt_tokens":100,"completion_tokens":80,"total_tokens":180}}).to_string().into_bytes());
                 thread::sleep(Duration::from_millis(60));
                 write!(stream,"HTTP/1.1 {status} test\r\nContent-Length: {}\r\nConnection: close\r\nContent-Type: application/json\r\n\r\n",body.len()).unwrap();
                 stream.write_all(&body).unwrap();
@@ -236,7 +228,6 @@ impl Server {
         Self {
             port,
             count,
-            fail_compose,
             stop,
             thread: Some(handle),
         }
@@ -323,121 +314,90 @@ fn standalone_bundle_runs_reports_recovery_and_scheduling_without_python() {
     );
     assert!(!output.exists());
     fs::create_dir_all(output.join("config")).unwrap();
-    let root = fs::canonicalize(&output).unwrap();
-    let work = root.join("work");
-    fs::create_dir(&work).unwrap();
-    let source = work.join("approval.md");
-    fs::write(&source, "采购审批方案为待评审草稿。\n").unwrap();
+    let root = fs::canonicalize(output).unwrap();
+    fs::create_dir(root.join("work")).unwrap();
+    let source = root.join("work/approval.md");
+    fs::write(
+        &source,
+        "金额由100元调整为120元；预算内且复核通过后生效，仍待审批。责任人与截止时间待确认。\n",
+    )
+    .unwrap();
+    let target = ai_daily_report::types::target_date(
+        chrono::Utc::now(),
+        None,
+        true,
+        chrono::NaiveTime::from_hms_opt(9, 0, 0).unwrap(),
+    )
+    .unwrap();
+    let stamp = ai_daily_report::types::utc_window(target)
+        .unwrap()
+        .0
+        .timestamp() as u64
+        + 3600;
     File::options()
         .write(true)
         .open(&source)
         .unwrap()
-        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1791680400)))
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(stamp)))
         .unwrap();
     let server = Server::new();
     let config = root.join("config");
-    let db = root.join("db");
-    let reports = root.join("reports");
-    fs::write(config.join("settings.yaml"),json!({"paths":{"work_dir":work,"data_dir":root.join("data"),"db_dir":db,"reports_dir":reports,"log_dir":root.join("logs")},"llm":{"base_url":format!("http://127.0.0.1:{}",server.port),"model_id":"synthetic-local","max_request_utf8_bytes":64000,"context_window_tokens":100000,"verified_max_output_tokens":8192,"max_tokens":4096,"request_timeout_seconds":3},"recovery":{"enforce_model_budgets":false,"run_budget_seconds":20}}).to_string()).unwrap();
+    fs::write(config.join("settings.yaml"),json!({"paths":{"work_dir":root.join("work"),"data_dir":root.join("data"),"db_dir":root.join("db"),"reports_dir":root.join("reports"),"log_dir":root.join("logs")},"llm":{"base_url":format!("http://127.0.0.1:{}",server.port),"model_id":"synthetic-local","max_request_utf8_bytes":160000,"context_window_tokens":128000,"verified_max_output_tokens":8192,"max_tokens":4096,"request_timeout_seconds":3}}).to_string()).unwrap();
     let mut loaded = BTreeSet::new();
-    let mut checks = Vec::new();
-    macro_rules! ok{($args:expr)=>{{let args=$args;let(success,value,error)=run(&bundle,&config,args,&mut loaded);assert!(success,"{args:?}: {error}");checks.push(json!({"args":args,"result":value.get("action").or(value.get("status"))}));value}}}
+    let mut checks = vec![];
+    macro_rules! ok {($args:expr)=>{{let args=$args;let(success,value,error)=run(&bundle,&config,args,&mut loaded);assert!(success,"{args:?}: {error}");checks.push(json!({"args":args,"passed":true}));value}}}
     ok!(&["doctor", "--strict"]);
     assert_eq!(server.calls(), 0);
-    ok!(&["daily", "--target-date", "2026-10-11", "--dry-run"]);
-    assert_eq!(server.calls(), 0);
-    let first = ok!(&["daily", "--target-date", "2026-10-11"]);
-    assert_eq!(server.calls(), 2);
-    assert_eq!(first["model_calls"], 2);
-    let again = ok!(&["daily", "--target-date", "2026-10-11"]);
-    assert_eq!(again["model_calls"], 0);
-    assert_eq!(server.calls(), 2);
-    let body = PathBuf::from(first["output_path"].as_str().unwrap());
-    let original = fs::read(&body).unwrap();
-    fs::remove_file(&body).unwrap();
-    ok!(&["repair-output", "--target-date", "2026-10-11"]);
-    assert_eq!(fs::read(&body).unwrap(), original);
-    assert_eq!(server.calls(), 2);
-    server.fail_compose.store(true, Ordering::SeqCst);
-    let (failed, _, error) = run(
-        &bundle,
-        &config,
-        &[
-            "daily",
-            "--target-date",
-            "2026-10-11",
-            "--regenerate",
-            "--reason",
-            "isolated recovery test",
-        ],
-        &mut loaded,
-    );
-    assert!(!failed && error.contains("MODEL_HTTP_ERROR"), "{error}");
-    assert_eq!(server.calls(), 4);
-    fs::write(&source, "Changed after input was frozen.\n").unwrap();
-    ok!(&["daily", "--target-date", "2026-10-11"]);
-    assert_eq!(server.calls(), 5);
-    ok!(&["weekly", "2026-W41", "--source", "db"]);
-    ok!(&["monthly", "2026-10", "--source", "db"]);
-    assert_eq!(server.calls(), 7);
-    File::options()
-        .write(true)
-        .open(&source)
-        .unwrap()
-        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(1791680400)))
-        .unwrap();
-    ok!(&["weekly", "2026-W41", "--source", "scan", "--no-save"]);
-    ok!(&["monthly", "2026-10", "--source", "scan", "--no-save"]);
-    assert_eq!(server.calls(), 9);
+    assert_eq!(ok!(&["daily", "--dry-run"])["model_calls"], 0);
+    let first = ok!(&["daily", "--scheduled"]);
+    assert_eq!(first["model_calls"], 1);
+    assert_eq!(ok!(&["daily", "--scheduled"])["action"], "existing");
+    let path = PathBuf::from(first["output_path"].as_str().unwrap());
+    let original = fs::read(&path).unwrap();
+    fs::remove_file(&path).unwrap();
+    ok!(&[
+        "repair-output",
+        "--run-id",
+        first["run_id"].as_str().unwrap()
+    ]);
+    assert_eq!(fs::read(&path).unwrap(), original);
+    assert_eq!(server.calls(), 1);
+    ok!(&["daily", "--target-date", &target.to_string(), "--no-save"]);
+    ok!(&[
+        "daily",
+        "--target-date",
+        &target.to_string(),
+        "--regenerate",
+        "--reason",
+        "isolated acceptance"
+    ]);
+    assert_eq!(server.calls(), 3);
     ok!(&["doctor", "--check-model"]);
-    assert_eq!(server.calls(), 10);
-    ok!(&["daily", "--target-date", "2026-10-10"]);
-    assert_eq!(server.calls(), 10);
-    ok!(&["daily", "--scheduled"]);
-    assert_eq!(server.calls(), 10);
-    assert!(fs::read_dir(root.join("logs")).unwrap().next().is_some());
+    assert_eq!(server.calls(), 4);
+    for command in ["weekly", "monthly", "backfill", "coverage", "ocr"] {
+        let (success, _, error) = run(&bundle, &config, &[command], &mut loaded);
+        assert!(
+            !success && error.contains("FEATURE_RETIRED"),
+            "{command}: {error}"
+        );
+        checks.push(json!({"retired":command,"passed":true}));
+    }
     ok!(&["list"]);
     ok!(&["runs", "--limit", "50"]);
-    let preflight = ok!(&[
-        "backfill",
-        "--start-date",
-        "2026-10-09",
-        "--end-date",
-        "2026-10-09",
-        "--dry-run",
-    ]);
-    let backfill_args = [
-        "backfill",
-        "--start-date",
-        "2026-10-09",
-        "--end-date",
-        "2026-10-09",
-        "--preflight",
-        preflight["preflight"].as_str().unwrap(),
-    ];
-    assert_eq!(ok!(&backfill_args)["complete"], true);
-    assert_eq!(ok!(&backfill_args)["complete"], true);
-    let backup_path = root.join("reports-backup.sqlite3");
-    ok!(&["backup", "--output", backup_path.to_str().unwrap()]);
-    let backup = rusqlite::Connection::open(backup_path).unwrap();
+    ok!(&["search", "--query", "审批", "--format", "json"]);
+    let backup = root.join("reports-backup.sqlite3");
+    ok!(&["backup", "--output", backup.to_str().unwrap()]);
+    let conn = rusqlite::Connection::open(backup).unwrap();
     assert_eq!(
-        backup
-            .query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+        conn.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
             .unwrap(),
         "ok"
     );
-    let task = ok!(&["task", "plan", "--sid", "S-1-5-21-100"]);
-    assert!(task.to_string().contains("ai-daily-report.exe"));
+    assert!(ok!(&["task", "plan", "--sid", "S-1-5-21-100"])
+        .to_string()
+        .contains("ai-daily-report.exe"));
     ok!(&["cleanup"]);
-    assert_eq!(server.calls(), 10);
-    let connection = rusqlite::Connection::open(db.join("reports.sqlite3")).unwrap();
-    let count: i64 = connection
-        .query_row("SELECT count(*) FROM report_model_calls", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 10);
-    assert!(loaded
-        .iter()
-        .any(|p| p.to_ascii_lowercase().ends_with("ai-daily-report.exe")));
+    assert_eq!(server.calls(), 4);
     assert!(!loaded.iter().any(|p| {
         let name = Path::new(p)
             .file_name()

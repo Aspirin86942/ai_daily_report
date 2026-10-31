@@ -170,20 +170,6 @@ pub fn write_csv(
     Ok(())
 }
 
-/// Append attempts separately so recovery does not rewrite earlier timings.
-pub fn record_stage(
-    config: &AppConfig,
-    run: &str,
-    date: &str,
-    stage: &str,
-    wall_ms: u64,
-) -> Result<(), ReportError> {
-    let store = ArchiveStore::open(config, true)?;
-    let key = format!("stage:{run}:{stage}:{}", crate::types::new_run_id());
-    store.conn.execute("INSERT INTO metadata(key,value) VALUES(?,?)", params![key, json!({"run_id":run,"date":date,"target_date":date,"stage":stage,"wall_ms":wall_ms,"recorded_at":chrono::Utc::now().to_rfc3339()}).to_string()])?;
-    Ok(())
-}
-
 const FILE_QUERY: &str = "SELECT f.collection_id AS run_id,f.path,f.version_id,v.extension,v.size_bytes,f.capture_ms,f.bytes_read,f.parse_ms,f.diff_ms,f.queue_ms,f.backend,f.lane,f.status FROM file_metrics f JOIN collections c ON c.id=f.collection_id LEFT JOIN versions v ON v.id=f.version_id WHERE (?1 IS NULL OR substr(datetime(c.started_at,'+8 hours'),1,10)>=?1) AND (?2 IS NULL OR substr(datetime(c.started_at,'+8 hours'),1,10)<=?2) AND (?3 IS NULL OR c.id=?3)";
 fn file_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(

@@ -77,6 +77,7 @@ pub fn target_date(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
 pub enum ReportSource {
+    #[value(skip)]
     Db,
     Scan,
     // Historical frozen inputs still deserialize this source.

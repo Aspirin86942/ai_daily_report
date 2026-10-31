@@ -5,7 +5,6 @@ use minijinja::{context, Environment, Error, ErrorKind, Value};
 use serde_json::{json, Value as JsonValue};
 use std::collections::{BTreeMap, BTreeSet};
 pub mod data;
-pub mod legacy;
 pub mod period;
 pub mod personal;
 

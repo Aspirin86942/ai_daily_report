@@ -55,6 +55,8 @@ fn historical_pending_extractions_are_read_without_workers_or_processing_cache()
 fn retained_extractions_support_diff_quotes_and_corruption_detection() {
     let (_dir, config) = config();
     let store = ArchiveStore::open(&config, true).unwrap();
+    store.conn.execute("INSERT INTO collections(id,started_at,status,baseline) VALUES('retained','2026-10-01','complete',0)", []).unwrap();
+    store.conn.execute("INSERT INTO documents(id,root,path,extension,baseline) VALUES('document','work','retained.txt','.txt',0)", []).unwrap();
     let mut ids = Vec::new();
     for text in ["unchanged\nold amount", "unchanged\nnew amount"] {
         let id = digest(text.as_bytes());
@@ -74,8 +76,30 @@ fn retained_extractions_support_diff_quotes_and_corruption_detection() {
             "INSERT INTO extractions(id,sha256,profile,extension,status,manifest_json) VALUES(?,?,'retired-parser','.txt','complete',?)",
             params![id, id, serde_json::to_string(&artifact).unwrap()],
         ).unwrap();
+        store.conn.execute("INSERT INTO versions(id,document_id,sha256,path,extension,size_bytes,modified_at,observed_at,collection_id,baseline) VALUES(?,'document',?,'retained.txt','.txt',0,'2026-10-01','2026-10-01','retained',0)",params![id,id]).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO version_extractions VALUES(?,?)",
+                params![id, id],
+            )
+            .unwrap();
         ids.push(id);
     }
+    let database = config.paths.data_dir.join("archive/index.sqlite3");
+    let before = fs::read(&database).unwrap();
+    assert!(!config.office_worker_path.exists());
+    assert!(!config.pdf_worker_path.exists());
+    let result = ai_daily_report::archive::cli::execute(
+        &config,
+        ai_daily_report::archive::cli::ArchiveCommand::Diff {
+            from: ids[0].clone(),
+            to: ids[1].clone(),
+        },
+    )
+    .unwrap();
+    assert_eq!(result["changes"]["hunks"].as_array().unwrap().len(), 1);
+    assert_eq!(fs::read(&database).unwrap(), before);
     let changes = diff::compare(&store, Some(&ids[0]), &ids[1], &BTreeMap::new()).unwrap();
     assert_eq!(changes.hunks.len(), 1);
     assert_eq!(changes.hunks[0].before.start, 2);

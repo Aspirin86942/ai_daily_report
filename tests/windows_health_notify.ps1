@@ -386,7 +386,7 @@ else {
     Assert-Test ($nativeLogFile.json.status -eq $nativeJson.json.status) 'Native and --output health files disagree on status'
     Assert-Test (-not ($nativeLogFile.json.PSObject.Properties.Name -contains 'tasks')) 'Native persist must not contain the notification task readback'
     Assert-Test ($nativeLogFile.json.task_names.health -eq 'Reliability Closure Health Probe Native Health') 'Native persist must carry the health task name'
-    $scheduledLog = Join-Path ([string]$nativeJson.json.log_dir) ('scheduled-' + (Get-HealthFileName ([string]$nativeJson.json.generated_at)).Substring(7, 10) + '.jsonl')
+    $scheduledLog = Join-Path (Join-Path ([string]$nativeJson.json.log_dir) 'personal') ('scheduled-' + (Get-HealthFileName ([string]$nativeJson.json.generated_at)).Substring(7, 10) + '.jsonl')
     Assert-Test (Test-Path -LiteralPath $scheduledLog) 'Scheduled run must still write its scheduled log entry'
     Assert-Test (@(Get-ChildItem -LiteralPath ([string]$nativeJson.json.log_dir) -Filter '*.tmp' -ErrorAction SilentlyContinue).Count -eq 0) 'Program left temporary files in log_dir'
 

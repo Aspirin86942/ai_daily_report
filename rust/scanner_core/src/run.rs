@@ -1400,42 +1400,40 @@ fn assemble_scheduler_execution_metrics(
     discovery_ms: u64,
     snapshot_lookup_ms: u64,
 ) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
-    ai_daily_scanner_contract::ExecutionMetricsV2 {
-        discovery_observed_file_count: metrics.discovery_observed_file_count,
-        refill_audit: metrics.refill_audit.clone(),
-        source_guard_content_hash_file_count: metrics.source_guard_content_hash_file_count,
-        source_guard_unavailable_count: metrics.source_guard_unavailable_count,
-        source_guard_bytes_read: metrics.source_guard_bytes_read,
-        candidate_file_count: metrics.candidate_file_count,
-        admitted_file_count: metrics.admitted_file_count,
-        classification_slot_count: metrics.classification_slot_count,
-        confirmed_run_inspected_pages_total: metrics.confirmed_run_inspected_pages_total,
-        unobserved_classification_attempt_count: metrics.unobserved_classification_attempt_count,
-        nominal_charged_pages_total: metrics.nominal_charged_pages_total,
-        extraction_slot_count: metrics.extraction_slot_count,
-        pdfplumber_invocations: metrics.pdfplumber_invocations,
-        snapshot_hit: false,
-        parse_cache_lookup_count: metrics.parse_cache_lookup_count,
-        classification_cache_lookup_count: metrics.classification_cache_lookup_count,
-        parse_cache_all_hit: Nullable(metrics.parse_cache_all_hit),
-        classification_cache_all_hit: Nullable(metrics.classification_cache_all_hit),
-        stage_deadline_exhausted_count: metrics.stage_deadline_exhausted_count,
-        session_restart_count: session.map_or(0, |stats| stats.session_restart_count),
-        session_fallback_count: 0,
-        classify_attempt_count: metrics.classify_attempt_count,
-        parse_attempt_count: metrics.parse_attempt_count,
-        reserved_chars: metrics.reserved_chars,
-        rendered_chars: metrics.rendered_chars,
+    let mut output = base_execution_metrics(
         worker_handshake_ms,
         discovery_ms,
-        snapshot_lookup_ms,
-        current_run_audit_write_ms: 0,
-        terminal_precommit_ms: 0,
-        deadline_precommit_elapsed_ms: metrics.deadline_precommit_elapsed_ms,
-        envelope_rebuild_ms: 0,
-        terminal_rows_written: 0,
-        peak_worker_rss_bytes: Nullable(peak_worker_rss_bytes),
-    }
+        metrics.discovery_observed_file_count,
+        SourceGuardObservationMetrics {
+            content_hash_file_count: metrics.source_guard_content_hash_file_count,
+            unavailable_file_count: metrics.source_guard_unavailable_count,
+            bytes_read: metrics.source_guard_bytes_read,
+        },
+        peak_worker_rss_bytes,
+    );
+    output.refill_audit = metrics.refill_audit.clone();
+    output.candidate_file_count = metrics.candidate_file_count;
+    output.admitted_file_count = metrics.admitted_file_count;
+    output.classification_slot_count = metrics.classification_slot_count;
+    output.confirmed_run_inspected_pages_total = metrics.confirmed_run_inspected_pages_total;
+    output.unobserved_classification_attempt_count =
+        metrics.unobserved_classification_attempt_count;
+    output.nominal_charged_pages_total = metrics.nominal_charged_pages_total;
+    output.extraction_slot_count = metrics.extraction_slot_count;
+    output.pdfplumber_invocations = metrics.pdfplumber_invocations;
+    output.parse_cache_lookup_count = metrics.parse_cache_lookup_count;
+    output.classification_cache_lookup_count = metrics.classification_cache_lookup_count;
+    output.parse_cache_all_hit = Nullable(metrics.parse_cache_all_hit);
+    output.classification_cache_all_hit = Nullable(metrics.classification_cache_all_hit);
+    output.stage_deadline_exhausted_count = metrics.stage_deadline_exhausted_count;
+    output.session_restart_count = session.map_or(0, |stats| stats.session_restart_count);
+    output.classify_attempt_count = metrics.classify_attempt_count;
+    output.parse_attempt_count = metrics.parse_attempt_count;
+    output.reserved_chars = metrics.reserved_chars;
+    output.rendered_chars = metrics.rendered_chars;
+    output.snapshot_lookup_ms = snapshot_lookup_ms;
+    output.deadline_precommit_elapsed_ms = metrics.deadline_precommit_elapsed_ms;
+    output
 }
 
 /// Assembles the strict `execution_metrics` for a snapshot-hit current run
@@ -1454,49 +1452,24 @@ fn assemble_snapshot_execution_metrics(
     deadline_precommit_elapsed_ms: u64,
     peak_worker_rss_bytes: Option<u64>,
 ) -> ai_daily_scanner_contract::ExecutionMetricsV2 {
-    ai_daily_scanner_contract::ExecutionMetricsV2 {
-        discovery_observed_file_count,
-        refill_audit: None,
-        source_guard_content_hash_file_count: guards.content_hash_file_count,
-        source_guard_unavailable_count: guards.unavailable_file_count,
-        source_guard_bytes_read: guards.bytes_read,
-        candidate_file_count: 0,
-        admitted_file_count: 0,
-        classification_slot_count: 0,
-        confirmed_run_inspected_pages_total: 0,
-        unobserved_classification_attempt_count: 0,
-        nominal_charged_pages_total: 0,
-        extraction_slot_count: 0,
-        pdfplumber_invocations: 0,
-        snapshot_hit: true,
-        parse_cache_lookup_count: 0,
-        classification_cache_lookup_count: 0,
-        parse_cache_all_hit: Nullable(None),
-        classification_cache_all_hit: Nullable(None),
-        stage_deadline_exhausted_count: 0,
-        session_restart_count: 0,
-        session_fallback_count: 0,
-        classify_attempt_count: 0,
-        parse_attempt_count: 0,
-        reserved_chars,
-        rendered_chars,
+    let mut output = base_execution_metrics(
         worker_handshake_ms,
         discovery_ms,
-        snapshot_lookup_ms,
-        current_run_audit_write_ms: 0,
-        terminal_precommit_ms: 0,
-        deadline_precommit_elapsed_ms,
-        envelope_rebuild_ms: 0,
-        terminal_rows_written: 0,
-        peak_worker_rss_bytes: Nullable(peak_worker_rss_bytes),
-    }
+        discovery_observed_file_count,
+        guards,
+        peak_worker_rss_bytes,
+    );
+    output.snapshot_hit = true;
+    output.reserved_chars = reserved_chars;
+    output.rendered_chars = rendered_chars;
+    output.snapshot_lookup_ms = snapshot_lookup_ms;
+    output.deadline_precommit_elapsed_ms = deadline_precommit_elapsed_ms;
+    output
 }
 
-/// Assembles the strict `execution_metrics` for the engine-error path (spec
-/// Part 5.3): the scheduler did not complete, so every plan/execution count is
-/// 0; the worker handshake and discovery wall spans that genuinely ran are the
-/// measured values (never fabricated zeros).
-fn assemble_engine_error_execution_metrics(
+/// Shared initial state uses current discovery measurements and no execution counts.
+/// Normal and snapshot paths add only the work they actually performed.
+fn base_execution_metrics(
     worker_handshake_ms: u64,
     discovery_ms: u64,
     discovery_observed_file_count: u64,
@@ -2459,7 +2432,7 @@ fn persist_active_error_without_heartbeat(
         // spec Part 5.3: engine-error runs persist an authoritative metrics row
         // with the wall spans that genuinely ran (handshake + discovery), never
         // a fabricated-zero derive.
-        execution_metrics: Some(assemble_engine_error_execution_metrics(
+        execution_metrics: Some(base_execution_metrics(
             worker_handshake_ms,
             discovery_ms,
             discovery_observed_file_count,
@@ -2995,7 +2968,7 @@ mod tests {
         assert_eq!(observations.unavailable_file_count, 1);
         assert_eq!(observations.bytes_read, 0);
 
-        let metrics = assemble_engine_error_execution_metrics(1, 2, 1, observations, Some(0));
+        let metrics = base_execution_metrics(1, 2, 1, observations, Some(0));
         assert_eq!(metrics.source_guard_content_hash_file_count, 1);
         assert_eq!(metrics.source_guard_unavailable_count, 1);
         assert_eq!(metrics.source_guard_bytes_read, 0);

@@ -33,13 +33,7 @@ pub fn fields(kind: StepKind) -> &'static [&'static str] {
         MONTH_FIELDS
     }
 }
-pub fn schema(kind: StepKind) -> Value {
-    let properties: serde_json::Map<String, Value> = fields(kind)
-        .iter()
-        .map(|key| ((*key).into(), json!({"type":"string"})))
-        .collect();
-    json!({"type":"object","additionalProperties":false,"properties":properties,"required":fields(kind)})
-}
+
 pub fn kind(period: &Period) -> StepKind {
     if period.mode == ReportMode::Weekly {
         StepKind::Weekly
@@ -88,29 +82,4 @@ pub fn validate_identity(kind: &str, value: &Value) -> Result<String, ReportErro
     let target = json!({"week_label":period.label,"year_month":period.label,"date_range":format!("{} ~ {}",period.start,period.end)});
     validate(self::kind(&period), value, &target)?;
     Ok(period.label)
-}
-pub fn prompt(kind: StepKind, target: &Value) -> Result<String, ReportError> {
-    let template = if kind == StepKind::Weekly {
-        include_str!("../../../../templates/weekly_prompt.md")
-    } else {
-        include_str!("../../../../templates/monthly_prompt.md")
-    };
-    let mut template = template.to_owned();
-    let mut context = target.clone();
-    context["schema"] =
-        json!(String::from_utf8(crate::snapshots::canonical_json(&schema(kind))?).unwrap());
-    for field in [
-        "schema",
-        "week_label",
-        "year_month",
-        "data_source",
-        "reports_summary",
-        "missing_days",
-        "file_context",
-    ] {
-        template = template.replace(&format!("{{{field}}}"), &format!("{{{{ {field} }}}}"));
-    }
-    super::environment()
-        .render_str(&template, super::template_value(&context))
-        .map_err(|error| ReportError::new("TEMPLATE_INVALID", error.to_string()))
 }

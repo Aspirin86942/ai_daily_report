@@ -41,9 +41,8 @@ fn command_tree_and_existing_daily_constraints() {
         vec!["app", "daily", "--no-save", "--dry-run"],
         vec!["app", "daily", "--regenerate"],
         vec!["app", "daily", "--reason", "why"],
-        vec!["app", "weekly"],
         vec!["app", "daily", "--timezone", "UTC"],
-        vec!["app", "backfill", "--workers", "5"],
+        vec!["app", "daily", "--source", "db"],
         vec!["app", "daily", "--date", "2026-1-1"],
     ] {
         assert!(Cli::try_parse_from(args.clone()).is_err(), "{args:?}");
@@ -160,7 +159,7 @@ fn merge_precedence_and_scanner_replacement_are_explicit() {
     assert_eq!(config.api_key(), "synthetic-env-token");
     assert!(config.config_check().get("enforce_model_budgets").is_none());
     assert_eq!(config.scanner.allowed_extensions.unwrap(), [".txt"]);
-    assert_eq!(config.scanner.max_workers, None);
+    assert_eq!(config.scanner.max_workers, Some(1));
 }
 
 #[test]
@@ -318,5 +317,10 @@ fn retired_quota_settings_are_ignored_and_quota_flags_are_removed() {
         "1"
     ])
     .is_err());
-    assert!(Cli::try_parse_from(["app", "backfill", "--call-budget", "1"]).is_err());
+    assert!(matches!(
+        Cli::try_parse_from(["app", "backfill", "--call-budget", "1"])
+            .unwrap()
+            .command,
+        Some(Command::Retired(_))
+    ));
 }

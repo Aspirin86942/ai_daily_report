@@ -107,7 +107,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         snapshots: &snapshots,
         transport: &transport,
         llm: &config.llm,
-        recovery_inputs: None,
         allow_new_calls: true,
         run_id: id,
         started_at: now,

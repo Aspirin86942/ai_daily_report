@@ -29,17 +29,14 @@ pub enum ArchiveCommand {
         to: String,
     },
     Verify,
-    /// Compress extraction storage without changing evidence bytes.
-    Optimize,
+    #[command(name = "optimize", alias = "prune", hide = true)]
+    Retired {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<String>,
+    },
     Backup {
         #[arg(long)]
         output: PathBuf,
-    },
-    Prune {
-        #[arg(long,value_parser=types::parse_date,conflicts_with="execute_plan")]
-        before: Option<NaiveDate>,
-        #[arg(long, required_unless_present = "before")]
-        execute_plan: Option<PathBuf>,
     },
 }
 #[derive(Debug, Args)]
@@ -57,16 +54,8 @@ pub struct StatsArgs {
 }
 pub fn execute(config: &AppConfig, command: ArchiveCommand) -> Result<Value, ReportError> {
     match command {
-        ArchiveCommand::Optimize => super::storage::optimize(config),
+        ArchiveCommand::Retired { .. } => Err(error("FEATURE_RETIRED")),
         ArchiveCommand::Backup { output } => super::maintenance::backup(config, &output),
-        ArchiveCommand::Prune {
-            before,
-            execute_plan,
-        } => match (before, execute_plan) {
-            (Some(date), None) => super::maintenance::prune_plan(config, date),
-            (None, Some(path)) => super::maintenance::prune_execute(config, &path),
-            _ => Err(error("ARCHIVE_PRUNE_OPTIONS_INVALID")),
-        },
         command => {
             let store = ArchiveStore::open(config, false)?;
             match command {
@@ -101,12 +90,12 @@ pub fn execute(config: &AppConfig, command: ArchiveCommand) -> Result<Value, Rep
                     if before.document_id != after.document_id {
                         return Err(error("ARCHIVE_DIFF_DOCUMENT_MISMATCH"));
                     }
-                    let profile = super::parse::profile(config)?;
-                    let extraction = |version: &str| -> Result<String, ReportError> {
-                        Ok(store.conn.query_row("SELECT e.id FROM extractions e JOIN version_extractions v ON v.extraction_id=e.id WHERE v.version_id=? AND e.profile=? AND e.status IN('complete','partial')",rusqlite::params![version,profile],|r|r.get(0))?)
-                    };
+                    // Select a shared saved profile; historical reads need no live parser.
+                    let (before_extraction, after_extraction):(String,String)=store.conn.query_row(
+                        "SELECT a.id,b.id FROM version_extractions va JOIN extractions a ON a.id=va.extraction_id JOIN version_extractions vb ON vb.version_id=?2 JOIN extractions b ON b.id=vb.extraction_id WHERE va.version_id=?1 AND a.profile=b.profile AND a.status IN('complete','partial') AND b.status IN('complete','partial') ORDER BY a.rowid DESC,b.rowid DESC LIMIT 1",
+                        rusqlite::params![from,to],|r|Ok((r.get(0)?,r.get(1)?)))?;
                     Ok(
-                        json!({"before":before,"after":after,"changes":super::diff::compare(&store,Some(&extraction(&from)?),&extraction(&to)?,&config.archive.table_keys)?}),
+                        json!({"before":before,"after":after,"changes":super::diff::compare(&store,Some(&before_extraction),&after_extraction,&config.archive.table_keys)?}),
                     )
                 }
                 ArchiveCommand::Verify => super::maintenance::verify(&store),

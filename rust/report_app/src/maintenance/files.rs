@@ -1,12 +1,9 @@
-use crate::{
-    snapshots::{canonical_json, fingerprint, reject_redirects},
-    ReportError,
-};
-use serde_json::{json, Value};
+use crate::{snapshots::reject_redirects, ReportError};
+use serde_json::Value;
 use std::{
     fs::{self, File},
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 pub fn read_bytes(path: &Path, limit: u64) -> Result<Vec<u8>, ReportError> {
@@ -53,39 +50,4 @@ pub fn write_immutable(path: &Path, bytes: &[u8]) -> Result<(), ReportError> {
         ReportError::new("MAINTENANCE_ARTIFACT_CONFLICT", "维护材料已被其他操作创建")
     })?;
     Ok(())
-}
-pub fn write_envelope(path: &Path, key: &str, value: &Value) -> Result<String, ReportError> {
-    let hash = fingerprint(value)?;
-    write_immutable(path, &canonical_json(&json!({key:value,"sha256":hash}))?)?;
-    Ok(hash)
-}
-pub fn read_envelope(path: &Path, key: &str) -> Result<(Value, String), ReportError> {
-    let envelope = read_json(path)?;
-    let hash = fingerprint(&envelope[key])?;
-    if envelope["sha256"] != hash {
-        return Err(ReportError::new(
-            "MAINTENANCE_ARTIFACT_CHANGED",
-            "维护材料校验值不一致",
-        ));
-    }
-    Ok((envelope[key].clone(), hash))
-}
-pub fn relative_path(root: &Path, relative: &str) -> Result<PathBuf, ReportError> {
-    let path = Path::new(relative);
-    if path.as_os_str().is_empty()
-        || relative.contains(':')
-        || relative.contains('\\')
-        || path.is_absolute()
-        || path
-            .components()
-            .any(|part| !matches!(part, std::path::Component::Normal(_)))
-    {
-        return Err(ReportError::new(
-            "MAINTENANCE_PATH_INVALID",
-            "来源路径必须位于工作目录内",
-        ));
-    }
-    let path = root.join(path);
-    reject_redirects(&path, "MAINTENANCE_PATH_REDIRECTED")?;
-    Ok(path)
 }

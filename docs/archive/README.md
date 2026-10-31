@@ -88,3 +88,8 @@
 - [Scanner 预算感知解析 + 缓存策略 + PDF 分类 设计规格（修订版 v4）](specs/2026-08-08-scanner-budget-aware-cache-and-pdf-performance-design.md)
 - [轻量清理设计(2026-08-10)](specs/2026-08-10-light-cleanup-design.md)
 - [设计：最大化保留文件原文的上下文压缩改进](specs/2026-08-10-max-preserve-context-design.md)
+
+## 个人日报收敛前的操作记录
+
+- [日报、批量修复与 OCR 原操作说明](history/daily-report-operations-through-20261031.md)
+- [归档优化与清理原操作说明](history/change-archive-through-20261031.md)

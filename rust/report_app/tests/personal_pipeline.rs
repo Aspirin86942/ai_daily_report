@@ -629,7 +629,6 @@ fn thousand_five_hundred_boundary_compacts_all_items_and_reuses_both_audited_cal
             snapshots: &snapshots,
             transport: app.transport.as_ref(),
             llm: &app.config.llm,
-            recovery_inputs: None,
             allow_new_calls: false,
             run_id: &outcome.run_id,
             started_at: Utc::now(),
