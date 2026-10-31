@@ -1,16 +1,13 @@
 use super::{error, identity, store::ArchiveStore};
-use crate::{config::AppConfig, ReportError};
+use crate::ReportError;
 use ai_daily_worker_contract::archive::{ArchiveArtifact, ArchiveUnit};
 use ai_daily_worker_contract::ContentUnitKind;
-use chrono::Utc;
-use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::Path,
-    time::Instant,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,25 +66,12 @@ pub fn text(dir: &Path, unit: &ArchiveUnit) -> Result<String, ReportError> {
     String::from_utf8(bytes).map_err(|_| error("ARCHIVE_TEXT_INVALID"))
 }
 fn indexes(dir: &Path, keys: &BTreeMap<String, Vec<String>>) -> Result<Vec<Unit>, ReportError> {
-    indexes_bounded(dir, keys, None)
-}
-fn indexes_bounded(
-    dir: &Path,
-    keys: &BTreeMap<String, Vec<String>>,
-    bounds: Option<(Instant, usize)>,
-) -> Result<Vec<Unit>, ReportError> {
     let mut output = Vec::new();
     let reader = BufReader::new(File::open(dir.join("units.jsonl"))?);
     let mut body = BufReader::new(File::open(dir.join("body.md"))?);
     let mut body_pos = 0;
     let mut headers: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for line in reader
-        .lines()
-        .take(bounds.map(|(_, limit)| limit).unwrap_or(usize::MAX))
-    {
-        if let Some((deadline, _)) = bounds {
-            crate::processing_cache::check_deadline(deadline)?;
-        }
+    for line in reader.lines() {
         let unit: ArchiveUnit = serde_json::from_str(&line?)?;
         let mut key = unit.sha256.clone();
         if matches!(
@@ -176,28 +160,6 @@ pub fn compare(
     after: &str,
     keys: &BTreeMap<String, Vec<String>>,
 ) -> Result<Changes, ReportError> {
-    compare_impl(store, before, after, keys, None)
-}
-
-pub fn compare_bounded(
-    store: &ArchiveStore,
-    before: Option<&str>,
-    after: &str,
-    keys: &BTreeMap<String, Vec<String>>,
-    deadline: Instant,
-    max_units: usize,
-) -> Result<Changes, ReportError> {
-    crate::processing_cache::check_deadline(deadline)?;
-    compare_impl(store, before, after, keys, Some((deadline, max_units)))
-}
-
-fn compare_impl(
-    store: &ArchiveStore,
-    before: Option<&str>,
-    after: &str,
-    keys: &BTreeMap<String, Vec<String>>,
-    bounds: Option<(Instant, usize)>,
-) -> Result<Changes, ReportError> {
     let new: ArchiveArtifact = serde_json::from_value(store.read_manifest(after)?)?;
     let Some(before) = before else {
         return Ok(Changes {
@@ -208,17 +170,13 @@ fn compare_impl(
                 before: Span { start: 1, end: 1 },
                 after: Span {
                     start: 1,
-                    end: new
-                        .units
-                        .min(bounds.map(|(_, n)| n as u64).unwrap_or(u64::MAX))
-                        + 1,
+                    end: new.units + 1,
                 },
             }],
         });
     };
     let old: ArchiveArtifact = serde_json::from_value(store.read_manifest(before)?)?;
-    let limited = bounds.is_some_and(|(_, n)| old.units > n as u64 || new.units > n as u64);
-    if old.body_sha256 == new.body_sha256 && !limited {
+    if old.body_sha256 == new.body_sha256 {
         return Ok(Changes {
             version: 1,
             kind: "continued".into(),
@@ -226,7 +184,7 @@ fn compare_impl(
             hunks: vec![],
         });
     }
-    if bounds.is_none() && (old.units > 100000 || new.units > 100000) {
+    if old.units > 100000 || new.units > 100000 {
         return Ok(Changes {
             version: 1,
             kind: "modified".into(),
@@ -243,20 +201,11 @@ fn compare_impl(
             }],
         });
     }
-    let a = match bounds {
-        Some(_) => indexes_bounded(&store.extraction_dir(before)?, keys, bounds)?,
-        None => indexes(&store.extraction_dir(before)?, keys)?,
-    };
-    let b = match bounds {
-        Some(_) => indexes_bounded(&store.extraction_dir(after)?, keys, bounds)?,
-        None => indexes(&store.extraction_dir(after)?, keys)?,
-    };
+    let a = indexes(&store.extraction_dir(before)?, keys)?;
+    let b = indexes(&store.extraction_dir(after)?, keys)?;
     let mut left: HashMap<&str, Vec<usize>> = HashMap::new();
     let mut right: HashMap<&str, Vec<usize>> = HashMap::new();
     for (i, u) in a.iter().enumerate() {
-        if let Some((deadline, _)) = bounds {
-            crate::processing_cache::check_deadline(deadline)?;
-        }
         left.entry(&u.key).or_default().push(i);
     }
     for (i, u) in b.iter().enumerate() {
@@ -278,9 +227,6 @@ fn compare_impl(
     let mut tails: Vec<usize> = vec![];
     let mut previous = vec![None; pairs.len()];
     for (i, &(_, j)) in pairs.iter().enumerate() {
-        if let Some((deadline, _)) = bounds {
-            crate::processing_cache::check_deadline(deadline)?;
-        }
         let pos = tails.partition_point(|p| pairs[*p].1 < j);
         if pos > 0 {
             previous[i] = Some(tails[pos - 1]);
@@ -301,9 +247,6 @@ fn compare_impl(
     let mut hunks = vec![];
     let (mut x, mut y) = (0, 0);
     for (i, j) in anchors.into_iter().chain(Some((a.len(), b.len()))) {
-        if let Some((deadline, _)) = bounds {
-            crate::processing_cache::check_deadline(deadline)?;
-        }
         let (mut begin_a, mut begin_b, mut end_a, mut end_b) = (x, y, i, j);
         while begin_a < end_a && begin_b < end_b && a[begin_a].hash == b[begin_b].hash {
             begin_a += 1;
@@ -343,86 +286,7 @@ fn compare_impl(
     Ok(Changes {
         version: 1,
         kind: "modified".into(),
-        granularity: if limited { "bounded_unit" } else { "unit" }.into(),
+        granularity: "unit".into(),
         hunks,
     })
-}
-pub fn prepare_changes(
-    store: &ArchiveStore,
-    config: &AppConfig,
-    profile: &str,
-    deadline: Instant,
-    before: Option<&str>,
-) -> Result<(), ReportError> {
-    let mut statement=store.conn.prepare("SELECT v.id,v.parent_id,v.observed_at,e.id FROM versions v JOIN version_extractions ve ON ve.version_id=v.id JOIN extractions e ON e.id=ve.extraction_id WHERE v.baseline=0 AND v.pruned_at IS NULL AND e.profile=?1 AND e.status IN('complete','partial') AND (?2 IS NULL OR julianday(v.observed_at)<julianday(?2)) ORDER BY v.rowid")?;
-    let rows = statement
-        .query_map(params![profile, before], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-            ))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    for (version, parent, observed, extraction) in rows {
-        if Instant::now() >= deadline {
-            break;
-        }
-        let previous: Option<String> = if let Some(parent) = &parent {
-            store.conn.query_row("SELECT e.id FROM version_extractions v JOIN extractions e ON e.id=v.extraction_id WHERE v.version_id=? AND e.profile=? AND e.status IN('complete','partial')",params![parent,profile],|r|r.get(0)).optional()?
-        } else {
-            None
-        };
-        if let Some(parent) = parent.as_ref().filter(|_| previous.is_none()) {
-            let failed: bool = store.conn.query_row("SELECT EXISTS(SELECT 1 FROM version_extractions ve JOIN extractions e ON e.id=ve.extraction_id WHERE ve.version_id=? AND e.profile=? AND e.status='failed')", params![parent,profile], |r|r.get(0))?;
-            if !failed {
-                continue;
-            }
-        }
-        let id = identity(&[
-            "diff-v1",
-            &version,
-            previous.as_deref().unwrap_or(""),
-            &extraction,
-            &serde_json::to_string(&config.archive.table_keys)?,
-        ]);
-        if store.conn.query_row(
-            "SELECT EXISTS(SELECT 1 FROM changes WHERE id=?)",
-            [&id],
-            |r| r.get::<_, bool>(0),
-        )? {
-            continue;
-        }
-        let start = Instant::now();
-        let mut changes = compare(
-            store,
-            previous.as_deref(),
-            &extraction,
-            &config.archive.table_keys,
-        )?;
-        if parent.is_some() && previous.is_none() {
-            changes.kind = "modified".into();
-            changes.granularity = "before_unavailable".into();
-        }
-        store.conn.execute(
-            "INSERT INTO changes VALUES(?,?,?,?,?,?,?,?,?)",
-            params![
-                id,
-                version,
-                parent,
-                extraction,
-                previous,
-                changes.kind,
-                observed,
-                Utc::now().to_rfc3339(),
-                serde_json::to_string(&changes)?
-            ],
-        )?;
-        store.conn.execute(
-            "UPDATE file_metrics SET diff_ms=? WHERE version_id=?",
-            params![start.elapsed().as_millis() as i64, version],
-        )?;
-    }
-    Ok(())
 }

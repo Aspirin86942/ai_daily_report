@@ -79,6 +79,8 @@ pub fn target_date(
 pub enum ReportSource {
     Db,
     Scan,
+    // Historical frozen inputs still deserialize this source.
+    #[value(skip)]
     Archive,
 }
 

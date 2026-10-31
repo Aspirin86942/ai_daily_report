@@ -79,11 +79,6 @@ Assert-Test ((Get-FileHash -LiteralPath $database).Hash -eq $hash) 'Rollback cha
 $unsafe = $false
 try { & $pointerScript -Mode Switch -PointerPath $pointer -ReleaseVersion x -ScannerDatabasePath shared/data/db/../../outside.sqlite3 -Apply | Out-Null } catch { $unsafe = $true }
 Assert-Test $unsafe 'Pointer path escape was accepted'
-$collectPlan = Get-ReportTaskPlan -ProjectRoot (Split-Path -Parent $Program) -ConfigDirectory (Join-Path $root 'config') -Kind collect
-$normalizedCollectXml = $collectPlan.xml.Replace('<StopAtDurationEnd>false</StopAtDurationEnd>', '')
-Assert-Test (@(Get-ReportTaskDifferences -Plan $collectPlan -Xml $normalizedCollectXml).Count -eq 0) 'Windows omitted repetition default was rejected'
-$wrongIntervalXml = $normalizedCollectXml.Replace('<Interval>PT30M</Interval>', '<Interval>PT60M</Interval>')
-Assert-Test (@(Get-ReportTaskDifferences -Plan $collectPlan -Xml $wrongIntervalXml).Count -gt 0) 'Wrong collection interval was accepted'
 $healthPlan = Get-ReportTaskPlan -ProjectRoot (Split-Path -Parent $Program) -ConfigDirectory (Join-Path $root 'config') -Kind health
 Assert-Test ($healthPlan.kind -eq 'health') 'Health plan kind missing'
 Assert-Test ($healthPlan.task_name -like '* Health') 'Health task name missing'
@@ -104,11 +99,11 @@ $healthFile = Join-Path $healthData ('logs/health-' + (Get-Date -Format 'yyyy-MM
 Assert-Test (Test-Path -LiteralPath $healthFile) 'Health file was not written'
 $healthJson = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
 Assert-Test ($healthJson.status -ne 'healthy') 'Empty data directory should not be healthy'
-Assert-Test (@($healthJson.tasks).Count -eq 4) 'Health report must include all four task readbacks'
+Assert-Test (@($healthJson.tasks).Count -eq 2) 'Health report must include two task readbacks'
 $healthState = Join-Path $healthData 'logs/health-notify-state.json'
 Assert-Test (Test-Path -LiteralPath $healthState) 'Health notify state was not written'
 Assert-Test (@($healthJson.checks | Where-Object { $_.level -ne 'ok' }).Count -gt 0) 'Health report should list failing checks'
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts/health_notify.ps1') -Program $Program -ConfigDirectory $healthConfig -NoNotify | Out-Null
 $healthJson2 = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
-Assert-Test (@($healthJson2.tasks).Count -eq 4) 'Repeated health run must stay readable'
+Assert-Test (@($healthJson2.tasks).Count -eq 2) 'Repeated health run must stay readable'
 [ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 26; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')

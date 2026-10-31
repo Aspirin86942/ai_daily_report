@@ -18,8 +18,12 @@ pub const MAX_ITEMS: usize = 10;
 // Historical v5 reports retain their original validation limits.
 pub const MAX_SUMMARY_CHARS: usize = 600;
 pub const MAX_SUMMARY_ITEMS: usize = 5;
+/// New personal plans keep at most five items while allowing the documented body bound.
+pub const MAX_SUMMARY_CHARS_EXTENDED: usize = MAX_BODY_CHARS;
 pub const MAX_REPORT_BYTES: usize = 100_000;
 pub const TEMPLATE: &str = include_str!("../../../../templates/personal_daily_template_v5.md");
+pub const SCAN_TEMPLATE: &str =
+    include_str!("../../../../templates/personal_daily_scan_template_v5.md");
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -316,8 +320,10 @@ impl PersonalReport {
     pub fn validate(&self) -> Result<(), ReportError> {
         if let Some(attachment) = &self.evidence_attachment {
             attachment.validate()?;
-            if self.items.len() > MAX_SUMMARY_ITEMS || body_chars(&self.items) > MAX_SUMMARY_CHARS {
-                return Err(invalid("个人日报正文最多 600 字、5 个重点"));
+            if self.items.len() > MAX_SUMMARY_ITEMS
+                || body_chars(&self.items) > MAX_SUMMARY_CHARS_EXTENDED
+            {
+                return Err(invalid("个人日报正文最多 1,500 字、5 个重点"));
             }
         }
         let window = utc_window(parse_date(&self.date)?)?;

@@ -1,7 +1,7 @@
 //! Outstanding personal reports stay visible until their current publication is usable.
-use crate::{config::AppConfig, processing_cache::RETENTION_DAYS, types, ReportError};
+use crate::{processing_cache::RETENTION_DAYS, types, ReportError};
 use chrono::{DateTime, NaiveDate, Utc};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -155,95 +155,4 @@ pub fn issues(
     }
     result.sort_by_key(|issue| issue.target_date);
     Ok(result)
-}
-
-pub fn material_dates(
-    config: &AppConfig,
-    now: DateTime<Utc>,
-) -> Result<Vec<NaiveDate>, ReportError> {
-    let path = config.paths.db_dir.join("reports.sqlite3");
-    if !path.is_file() {
-        return Ok(vec![]);
-    }
-    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    Ok(issues(&conn, &config.report.scope_id, now)?
-        .into_iter()
-        .filter(|issue| issue.material_window_open)
-        .map(|issue| issue.target_date)
-        .collect())
-}
-
-/// Recover an older date only after the currently due day has a publication.
-pub fn scheduled_request(
-    app: &crate::run::App,
-    request: &mut types::ReportRequest,
-) -> Result<(), ReportError> {
-    if !request.scheduled
-        || app
-            .store
-            .current(&request.context.target_date.to_string())?
-            .is_none()
-    {
-        return Ok(());
-    }
-    for issue in issues(
-        &app.store.connection()?,
-        &app.config.report.scope_id,
-        request.context.started_at,
-    )? {
-        if !issue.material_window_open {
-            continue;
-        }
-        let run = app.store.get(&issue.run_id)?;
-        request.input = if let Some(report) = run.report_json.as_deref() {
-            serde_json::from_str::<Value>(report)?["user_notes"]
-                .as_str()
-                .unwrap_or("")
-                .to_owned()
-        } else if let (Some(path), Some(sha256)) = (&run.snapshot_path, &run.snapshot_sha256) {
-            let snapshots = crate::run::personal::snapshots(app)?;
-            let value = match snapshots.read(&crate::snapshots::SnapshotRef {
-                path: path.clone(),
-                sha256: sha256.clone(),
-            }) {
-                Ok(value) => value,
-                Err(error)
-                    if matches!(error.code, "SNAPSHOT_MISSING" | "PERSONAL_INPUT_EXPIRED") =>
-                {
-                    continue
-                }
-                Err(error) => return Err(error),
-            };
-            let input: crate::run::personal::PersonalInput = serde_json::from_value(value)?;
-            input.context.validate()?;
-            input.selection.validate()?;
-            if input.context.run_id != run.run_id || input.context.scope_id != run.scope_id {
-                return Err(ReportError::new(
-                    "SNAPSHOT_CONTEXT_MISMATCH",
-                    "历史恢复输入身份不一致",
-                ));
-            }
-            input
-                .selection
-                .materials
-                .iter()
-                .find(|m| m.source.source_id == "user_input")
-                .map(|m| m.text.clone())
-                .unwrap_or_default()
-        } else {
-            continue;
-        };
-        request.context = types::RunContext::new(
-            request.context.run_id.clone(),
-            request.context.started_at,
-            issue.target_date,
-            request.context.config_fingerprint.clone(),
-        )?;
-        request.period.start = issue.target_date;
-        request.period.end = issue.target_date;
-        request.period.label = issue.target_date.to_string();
-        request.regeneration_reason = Some(format!("automatic_personal_recovery:{}", issue.run_id));
-        return Ok(());
-    }
-    Ok(())
 }

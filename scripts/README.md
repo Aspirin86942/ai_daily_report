@@ -1,6 +1,6 @@
 # 脚本归属与保留说明
 
-核对日期：2026-10-18。本目录顶层实际有 **23 个脚本**；其中生产/发布 6 个、计划任务 6 个、验收证据 9 个、旧 Python 保留 1 个、离线维护 1 个。原有脚本的文件头和关键参数已按历史记录逐项核对，本次补充维护脚本入口。另列出 `pdf_benchmark/` 的 6 个脚本和 3 份结果，覆盖目录内全部 32 个文件（本 README 除外）。
+核对日期：2026-10-27。当前任务脚本只管理 Daily、Health。旧采集基准、归档出报验收和采集窗口测试已退役；源码恢复资料见当前状态。历史测量结果继续保留。
 
 正式运行状态见[当前状态](../docs/current-state.md)。脚本归类仅说明用途；生产切换、任务安装/移除、模型调用、原始数据或证据覆盖仍需相应授权。新增离线维护入口及其隔离验证见下节；运行真实目录仍须相应授权。
 
@@ -8,7 +8,7 @@
 
 | 文件 | 用途 | 入口或前置条件 | 分类 |
 | --- | --- | --- | --- |
-| [compress_historical_artifacts.py](compress_historical_artifacts.py) | 对冻结清单内的两处历史解析产物执行 NTFS LZNT1 透明压缩、核验与回退 | Windows/NTFS、已有 Python 3.13 标准库、三项正式任务可只读查询；`plan` / `apply` / `verify` / `rollback` | 离线维护 |
+| [compress_historical_artifacts.py](compress_historical_artifacts.py) | 对冻结清单内的两处历史解析产物执行 NTFS LZNT1 透明压缩、核验与回退 | Windows/NTFS、已有 Python 3.13 标准库、两项正式任务可只读查询；`plan` / `apply` / `verify` / `rollback` | 离线维护 |
 
 此脚本不加入 Rust 生产发布包，不给产品增加 Python 依赖，也不修改保留的 Python 回退环境。它不调用采集、解析或模型，不启动、注册或改写计划任务。代码目录 `CodeRoot` 与待维护数据目录 `SourceRoot` 必须显式区分；脚本不会从当前目录猜测数据位置。
 
@@ -34,7 +34,7 @@ $Manifest = Join-Path $Evidence 'manifest.json'
 
 `plan` 只读目标文件，发布不可修改的 `manifest.json` 及其原始 UTF-8 字节摘要 `manifest.sha256`。其余命令每次另建 `runs/<run_id>/`，保存事件、任务窗口回读与最终汇总；旧证据全部保留。运行输出一条标准 JSON；`completed` / `paused` / `failed` 的退出码依次为 0 / 1 / 2，具体原因在 `pause_reason` / `error_code` / `message` 中。`verify` 报告当前压缩和未压缩数量。`failed` 的空间汇总不作最终节省实测，收益以成功运行及独立前后测量为准。
 
-三项正式任务运行中、查询失败、任务缺失，或进入下一次触发前 300 秒时暂停；每 100 文件或累计 256 MiB 重新查询，单个大文件完整处理。空间不足时回退也暂停。排除原因后重复同一条 apply 或 rollback 命令即可续跑；程序重新核对冻结清单、身份、完整哈希和真实压缩状态，不依赖旧日志判断进度。重复 apply/rollback 的匹配项计入 `files_already`，不重复写入；重复 verify 创建新的只读核验证据。
+两项正式任务运行中、查询失败、任务缺失，或进入下一次触发前 300 秒时暂停；每 100 文件或累计 256 MiB 重新查询，单个大文件完整处理。空间不足时回退也暂停。排除原因后重复同一条 apply 或 rollback 命令即可续跑；程序重新核对冻结清单、身份、完整哈希和真实压缩状态，不依赖旧日志判断进度。重复 apply/rollback 的匹配项计入 `files_already`，不重复写入；重复 verify 创建新的只读核验证据。
 
 **需要恢复时才执行**以下独立回退命令块，沿用上面的维护解释器、代码目录与已审阅清单变量；回退后再次核验：
 
@@ -62,7 +62,7 @@ $Manifest = Join-Path $Evidence 'manifest.json'
 
 | 文件 | 用途 | 入口或前置条件 | 分类 |
 | --- | --- | --- | --- |
-| [install_daily_task.ps1](install_daily_task.ps1) | 预览或安装日报、采集、健康任务 | `-ProjectRoot` 指向程序包，`-ConfigDirectory` 选择配置，`-Kind daily\|collect\|health`；`-Apply` 才安装，日报/采集先做相应自检 | 计划任务 |
+| [install_daily_task.ps1](install_daily_task.ps1) | 预览或安装日报、健康任务 | `-ProjectRoot` 指向程序包，`-ConfigDirectory` 选择配置，`-Kind daily\|health`；`-Apply` 才安装，日报先做相应自检 | 计划任务 |
 | [remove_daily_task.ps1](remove_daily_task.ps1) | 预览或移除归属当前配置和用户的任务 | `-ProjectRoot`、`-ConfigDirectory`、`-Kind`；`-Apply` 才移除，保留业务数据 | 计划任务 |
 | [check_daily_task.ps1](check_daily_task.ps1) | 只读核对任务归属、配置差异和上海时间触发信息 | `-ProjectRoot`、`-ConfigDirectory`、`-Kind`；需要 Windows 调度器可读权限 | 计划任务 |
 | [daily_task_common.ps1](daily_task_common.ps1) | 共用 Rust `task plan`、任务 XML 校验和安装/移除逻辑 | 由任务脚本点加载；程序包内需有 `ai-daily-report.exe` | 计划任务 |
@@ -76,13 +76,11 @@ $Manifest = Join-Path $Evidence 'manifest.json'
 | 文件 | 用途 | 入口或前置条件 | 分类 |
 | --- | --- | --- | --- |
 | [accept_windows_bundle.ps1](accept_windows_bundle.ps1) | 独立验收无 Python 的发布包、报告恢复和调度契约 | `-BundleDirectory`、全新 `-OutputDirectory`、`-Harness`；需构建 `bundle_acceptance` 测试程序，默认查找 `bundle-acceptance.exe` | 验收证据 |
-| [accept_archive_bundle.py](accept_archive_bundle.py) | 用本地 HTTP 模型替身和合成数据验收归档 CLI | `--release`、`--output`；Windows/Python，依赖 `benchmark_archive`；历史证据脚本，保留不删 | 验收证据 |
 | [archive_scanner_database.ps1](archive_scanner_database.ps1) | 调用 Rust `archive-scanner` 保存扫描数据库归档 | `-SourceDatabase`、`-ArchiveDirectory`，可指定 `-Program`；涉及数据库归档写入，需相应授权 | 验收证据 |
 | [export_rust_migration_baseline.py](export_rust_migration_baseline.py) | 从合成输入冻结旧 Python 契约供 Rust 回归核对 | `python scripts/export_rust_migration_baseline.py`；需旧 Python、原生扩展及 `.artifacts/rust-migration/rust-baseline.log`，会写 Rust 测试夹具 | 验收证据 |
 | [coverage_optimization_evidence.py](coverage_optimization_evidence.py) | 采集配置与混合语料覆盖优化证据 | `--runtime-root`、`--worker-root`、`--output`，可选 `--config-only` / `--mixed-corpus-only`；旧 Python/native 环境；历史证据脚本，保留不删 | 验收证据 |
 | [coverage_release_evidence.py](coverage_release_evidence.py) | 将旧安装包、Git 状态与离线闸门日志绑定为证据 | `--bundle`、`--output`，可重复 `--gate-log`；依赖 `windows_release.py`；历史证据脚本，保留不删 | 验收证据 |
 | [verify_coverage_corpus.py](verify_coverage_corpus.py) | 通过已安装原生扫描器验证固定合成语料 | `--corpus`、`--output`；需旧 Python、原生扩展及匹配工作进程；历史证据脚本，保留不删 | 验收证据 |
-| [benchmark_archive.py](benchmark_archive.py) | 测量归档全文件、增量和无变化采集的耗时、资源与内容签名 | `--release`、`--corpus`、`--output`、`--reference`，可选 `--phase sample\|full\|incremental\|all`；Windows，零模型调用 | 验收证据 |
 | [deduplicate_historical_artifacts.py](deduplicate_historical_artifacts.py) | 对固定白名单内的冻结历史输入建立同卷硬链接，并保留逐文件核验与恢复日志 | Windows；`plan --project-root ... --output ...` 生成清单，`apply`、`verify`、`rollback` 必须同时指定 `--manifest` 和 `--sha256`；不处理正式归档及已有硬链接 | 历史材料维护 |
 | [benchmark_scanner.py](benchmark_scanner.py) | 通过旧 Python/native 链路输出冷/热扫描性能证据 | `--work-dir`、独立 `--state-dir`，可选 `--office-worker-path`、`--iterations`；需旧 Python 原生环境，输出 JSON/Markdown | 验收证据 |
 | [pdf_benchmark/generate_classifier_corpus.py](pdf_benchmark/generate_classifier_corpus.py) | 生成固定 PDF 分类器数值验证语料与清单 | `python scripts/pdf_benchmark/generate_classifier_corpus.py`；需 `reportlab`、`pypdf`；已有夹具跳过生成，保留基线 | 验收证据 |

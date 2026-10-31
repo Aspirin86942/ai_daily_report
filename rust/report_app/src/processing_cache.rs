@@ -58,7 +58,7 @@ impl ProcessingSession {
             deadline,
             MAX_BYTES,
             CONTROL_BYTES,
-            // A collector can hold this shared lock for its full 120-second run.
+            // Concurrent report commands share this lock; waiting uses the run budget.
             // Waiting still consumes the caller's original application budget.
             Duration::from_secs(120),
         )
@@ -86,15 +86,16 @@ impl ProcessingSession {
         })
     }
 
-    pub fn open_archive(
-        &self,
-        config: &AppConfig,
-    ) -> Result<crate::archive::store::ArchiveStore, ReportError> {
-        let mut store = crate::archive::store::ArchiveStore::open_collection(config, true)?;
-        store.quota = Some(Arc::clone(&self.quota));
-        crate::archive::collect::recover_captures(&mut store)?;
-        crate::archive::retention::prune(&mut store, self.quota.now, self.quota.deadline)?;
-        Ok(store)
+    pub fn prune_snapshots(&self) -> Result<(), ReportError> {
+        let snapshots = self.quota.root.join("snapshots");
+        for path in self.quota.expired()? {
+            check_deadline(self.quota.deadline)?;
+            // Legacy archive objects are retired explicitly, never by this scanner.
+            if path.starts_with(&snapshots) {
+                self.quota.remove(&path)?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -267,14 +268,6 @@ impl CacheQuota {
 
     pub fn used_bytes(&self) -> Result<u64, ReportError> {
         Ok(self.state.lock().map_err(|_| full())?.used + self.control_bytes)
-    }
-
-    pub(crate) fn deadline(&self) -> Instant {
-        self.deadline
-    }
-
-    pub(crate) fn now(&self) -> DateTime<Utc> {
-        self.now
     }
 
     pub fn write(self: &Arc<Self>, path: &Path, bytes: &[u8]) -> Result<(), ReportError> {

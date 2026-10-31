@@ -1,20 +1,11 @@
 //! Durable observed versions. This store never participates in model-cache retention.
 pub mod cli;
-pub mod collect;
 pub mod config;
-pub(crate) mod demand;
 pub mod diff;
 pub mod maintenance;
 pub mod model_input;
-pub(crate) mod observation;
 pub mod parse;
 mod parse_identity;
-mod parse_request;
-pub mod queue;
-pub mod recovery;
-pub mod retention;
-pub mod schedule;
-pub mod selection;
 pub mod stats;
 pub mod storage;
 pub mod store;
@@ -24,19 +15,10 @@ use sha2::{Digest, Sha256};
 use std::{fs::File, io::Read, path::Path};
 
 pub fn file_hash(path: &Path) -> Result<String, ReportError> {
-    hash_before(path, None)
-}
-pub fn file_hash_bounded(path: &Path, deadline: std::time::Instant) -> Result<String, ReportError> {
-    hash_before(path, Some(deadline))
-}
-fn hash_before(path: &Path, deadline: Option<std::time::Instant>) -> Result<String, ReportError> {
     let mut file = File::open(path)?;
     let mut hash = Sha256::new();
     let mut buffer = [0; 65536];
     loop {
-        if let Some(deadline) = deadline {
-            crate::processing_cache::check_deadline(deadline)?;
-        }
         let count = file.read(&mut buffer)?;
         if count == 0 {
             break;
@@ -53,11 +35,3 @@ pub fn identity(parts: &[&str]) -> String {
 pub fn error(code: &'static str) -> ReportError {
     ReportError::new(code, code)
 }
-
-pub fn local_day(now: chrono::DateTime<chrono::Utc>) -> String {
-    (now + chrono::Duration::hours(8))
-        .format("%Y-%m-%d")
-        .to_string()
-}
-
-pub mod resources;

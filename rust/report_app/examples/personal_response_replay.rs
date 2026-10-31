@@ -4,9 +4,9 @@ use ai_daily_report::{
     config::AppConfig,
     model::{
         transport::{HttpResponse, ModelTransport, TransportFailure},
-        ModelRunner, StepOutput,
+        ModelRunner,
     },
-    reports::personal::{PersonalReport, StatementKind, MAX_REPORT_BYTES},
+    reports::personal::{body_chars, PersonalReport, StatementKind, MAX_REPORT_BYTES},
     run::personal::PersonalInput,
     snapshots::{digest, SnapshotStore},
     store::Store,
@@ -16,6 +16,7 @@ use clap::Parser;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
 use std::{
+    collections::BTreeMap,
     fs,
     path::PathBuf,
     time::{Duration, Instant},
@@ -30,19 +31,18 @@ struct Args {
 }
 
 struct SavedResponse {
-    request: Vec<u8>,
-    response: Vec<u8>,
+    responses: BTreeMap<Vec<u8>, Vec<u8>>,
 }
 impl ModelTransport for SavedResponse {
     fn send(&self, body: &[u8], _: Duration) -> Result<HttpResponse, TransportFailure> {
-        assert_eq!(
-            body, self.request,
-            "replay request differs from frozen input"
-        );
+        let response = self
+            .responses
+            .get(body)
+            .expect("replay request has no matching saved response");
         Ok(HttpResponse {
             status: 200,
             retry_after: None,
-            body: self.response.clone(),
+            body: response.clone(),
         })
     }
 }
@@ -75,10 +75,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     store.register_personal_run(id)?;
     let saved = snapshots.put_bytes(id, "personal-input", &input_bytes)?;
     store.prepare(id, &saved, &input.input_fingerprint, &[], now)?;
-    let transport = SavedResponse {
-        request: plan.bytes()?,
-        response: response_bytes,
-    };
+    let mut responses = BTreeMap::new();
+    let compaction_plan = matches!(plan.target["summary_prompt_version"].as_u64(), Some(4 | 6));
+    if compaction_plan {
+        let mut statement = database.prepare(
+            "SELECT request_path,request_sha256,response_path,response_sha256 FROM report_model_calls WHERE run_id=? AND status='succeeded' ORDER BY call_id",
+        )?;
+        for row in statement.query_map([id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })? {
+            let (request_path, request_hash, response_path, response_hash) = row?;
+            let request = fs::read(snapshots_root.join(request_path))?;
+            let response = fs::read(snapshots_root.join(response_path))?;
+            if digest(&request) != request_hash || digest(&response) != response_hash {
+                return Err("saved compaction request or response hash mismatch".into());
+            }
+            responses.insert(request, response);
+        }
+    } else {
+        responses.insert(plan.bytes()?, response_bytes);
+    }
+    let transport = SavedResponse { responses };
     let started = Instant::now();
     let runner = ModelRunner {
         store: &store,
@@ -92,9 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         started,
         deadline: started + Duration::from_secs(30),
     };
-    let StepOutput::Personal(output) = runner.execute(plan)?.output else {
-        return Err("unexpected replay response type".into());
-    };
+    let output = ai_daily_report::model::personal::generate(&runner, plan)?;
     let mut report = PersonalReport::from_selection(&input.context, "work", &input.selection);
     report.items = output.items;
     report.retain_cited();
@@ -108,10 +128,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 break body;
             }
         }
-        report
-            .items
-            .pop()
-            .ok_or("required evidence exceeds report budget")?;
+        let remove = if compaction_plan {
+            report
+                .items
+                .iter()
+                .rposition(|item| {
+                    item.kind != ai_daily_report::reports::personal::ItemKind::NextStep
+                })
+                .ok_or("required next-step evidence exceeds report budget")?
+        } else {
+            report
+                .items
+                .len()
+                .checked_sub(1)
+                .ok_or("required evidence exceeds report budget")?
+        };
+        report.items.remove(remove);
         report.retain_cited();
     };
     if report.items.is_empty() {
@@ -124,6 +156,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "remote_model_calls":0, "isolated_fixture_calls":store.calls(id)?.len(),
             "input_sha256":input_hash, "response_sha256":response_hash,
             "initial_items":initial_items, "publishable_items":report.items.len(),
+            "omitted_items":output.omitted, "body_chars":body_chars(&report.items),
             "uncertain_items":report.items.iter().filter(|i| i.statement_kind == StatementKind::Uncertain).count(),
             "output_bytes":body.len(), "sources":report.sources.len(),
             "references":report.evidence.values().map(Vec::len).sum::<usize>(),

@@ -4,7 +4,6 @@
     "build_identity/src",
     "parser-inputs.json",
     "build-inputs.json",
-    "report_app/src/archive/parse_request.rs",
     "text_parser/src",
     "office_parser/src",
     "pdf_parser/src",

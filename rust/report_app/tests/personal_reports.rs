@@ -109,22 +109,23 @@ fn repeated_gap_messages_merge_without_losing_their_source_locations() {
 }
 
 #[test]
-fn compact_limits_preserve_legacy_reports_and_preview_has_local_evidence() {
-    use ai_daily_report::reports::personal::body_chars;
+fn extended_limits_preserve_legacy_reports_and_preview_has_local_evidence() {
+    use ai_daily_report::reports::personal::{body_chars, MAX_BODY_CHARS};
     let mut report = sample();
     report.items[0].text = "中🦀".repeat(290);
     report.evidence_attachment = report.render_attachment(TEMPLATE).unwrap();
-    assert!(body_chars(&report.items) <= 600);
+    assert!(body_chars(&report.items) <= MAX_BODY_CHARS);
     report.validate().unwrap();
     let preview = report.render_preview(TEMPLATE).unwrap();
     assert!(preview.contains("[查看依据](#item-1)"));
     assert!(preview.contains("id=\"item-1\""));
     assert!(preview.contains("## 用户补充原文"));
     assert!(!preview.contains("attachments/"));
-    report.items[0].text.push_str(&"字".repeat(25));
-    assert!(body_chars(&report.items) > 600);
+    report.items[0].text.push_str(&"字".repeat(MAX_BODY_CHARS));
+    assert!(body_chars(&report.items) > MAX_BODY_CHARS);
     assert!(report.validate().is_err());
     report.evidence_attachment = None;
+    report.items[0].text = "中🦀".repeat(290);
     report.validate().unwrap();
     let legacy = serde_json::to_value(&report).unwrap();
     assert!(legacy.get("evidence_attachment").is_none());

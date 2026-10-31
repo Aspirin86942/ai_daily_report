@@ -1,0 +1,377 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "showcase",
+  "startedAt": "2026-10-26T15:45:53.669Z",
+  "specification": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+    "sha256": "dfe9825202545dce16174c8baa1181c8aed3208647d9566e6ef9489c5775000e",
+    "bytes": 13423
+  },
+  "artifact": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+    "sha256": "d5d5f13a7fd4aed95a5f6c480b09b0d82bf0a23534f877adc272c8949ff66244",
+    "bytes": 846533
+  },
+  "stages": {
+    "validate": {
+      "status": "fail",
+      "exitCode": 1,
+      "durationMs": null,
+      "command": [
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Users\\lcf\\.dsh\\skills\\archify\\bin\\archify.mjs",
+        "deliver",
+        "architecture",
+        "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+        "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+        "--quality",
+        "showcase",
+        "--repo-root",
+        "D:\\python_program\\ai_daily_report",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "deliver",
+        "receiptId": "7543f84c-acd1-40c9-b089-8fcd5f1c3473",
+        "stage": "render",
+        "type": "architecture",
+        "input": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+        "output": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+        "error": "Architecture layout validation failed:\n- [composition/proper-crossing] showcase architecture connections[11] \"model\" -> \"render\" crosses connections[20] \"period\" -> \"publish\" at [780, 450] (segments 2 and 1) — if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors.\n- [composition/proper-crossing] showcase architecture connections[15] \"publish\" -> \"reportsdb\" crosses connections[19] \"period\" -> \"model\" at [635, 540] (segments 1 and 0) — if the authored via/fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors.\n- [composition/micro-segment] showcase architecture connections[11] \"model\" -> \"render\" has a 2px interior segment 1 [765, 452] -> [765, 450] that is below the 8px micro-segment floor — if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and move route/via points into a wider corridor or move the component so every turn has room to read.\n- [composition/label-route-clearance] showcase architecture label \"结构化结果\" on connections[11] \"model\" -> \"render\" label \"结构化结果\" is 0px from connections[20] \"period\" -> \"publish\" label \"复用发布器\" segment 1 [780, 593] -> [780, 400] (label rect [736, 431, 58, 14]; minimum 4px) — if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust labelAt, labelDx, labelDy, or labelSegment; otherwise adjust the other relationship route/via/channel.",
+        "diagnostics": [
+          {
+            "code": "composition/proper-crossing",
+            "severity": "error",
+            "message": "[composition/proper-crossing] showcase architecture connections[11] \"model\" -> \"render\" crosses connections[20] \"period\" -> \"publish\" at [780, 450] (segments 2 and 1) — if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 11,
+              "from": "model",
+              "to": "render"
+            },
+            "evidence": {
+              "otherRelationship": {
+                "diagramType": "architecture",
+                "collection": "connections",
+                "index": 20,
+                "from": "period",
+                "to": "publish"
+              },
+              "point": [
+                780,
+                450
+              ],
+              "segmentIndex": 2,
+              "otherSegmentIndex": 1
+            },
+            "supportedFixes": [
+              "if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors"
+            ]
+          },
+          {
+            "code": "composition/proper-crossing",
+            "severity": "error",
+            "message": "[composition/proper-crossing] showcase architecture connections[15] \"publish\" -> \"reportsdb\" crosses connections[19] \"period\" -> \"model\" at [635, 540] (segments 1 and 0) — if the authored via/fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 15,
+              "from": "publish",
+              "to": "reportsdb"
+            },
+            "evidence": {
+              "otherRelationship": {
+                "diagramType": "architecture",
+                "collection": "connections",
+                "index": 19,
+                "from": "period",
+                "to": "model"
+              },
+              "point": [
+                635,
+                540
+              ],
+              "segmentIndex": 1,
+              "otherSegmentIndex": 0
+            },
+            "supportedFixes": [
+              "if the authored via/fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors"
+            ]
+          },
+          {
+            "code": "composition/micro-segment",
+            "severity": "error",
+            "message": "[composition/micro-segment] showcase architecture connections[11] \"model\" -> \"render\" has a 2px interior segment 1 [765, 452] -> [765, 450] that is below the 8px micro-segment floor — if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and move route/via points into a wider corridor or move the component so every turn has room to read.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 11,
+              "from": "model",
+              "to": "render"
+            },
+            "evidence": {
+              "segmentIndex": 1,
+              "position": "interior",
+              "lengthPx": 2,
+              "minimumPx": 8,
+              "from": [
+                765,
+                452
+              ],
+              "to": [
+                765,
+                450
+              ]
+            },
+            "supportedFixes": [
+              "if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and move route/via points into a wider corridor or move the component so every turn has room to read"
+            ]
+          },
+          {
+            "code": "composition/label-route-clearance",
+            "severity": "error",
+            "message": "[composition/label-route-clearance] showcase architecture label \"结构化结果\" on connections[11] \"model\" -> \"render\" label \"结构化结果\" is 0px from connections[20] \"period\" -> \"publish\" label \"复用发布器\" segment 1 [780, 593] -> [780, 400] (label rect [736, 431, 58, 14]; minimum 4px) — if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust labelAt, labelDx, labelDy, or labelSegment; otherwise adjust the other relationship route/via/channel.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 11,
+              "from": "model",
+              "to": "render"
+            },
+            "evidence": {
+              "label": "结构化结果",
+              "otherRelationship": {
+                "diagramType": "architecture",
+                "collection": "connections",
+                "index": 20,
+                "from": "period",
+                "to": "publish"
+              },
+              "segmentIndex": 1,
+              "clearancePx": 0,
+              "minimumPx": 4,
+              "labelRect": {
+                "relation": {
+                  "from": "model",
+                  "to": "render",
+                  "label": "结构化结果",
+                  "fromSide": "right",
+                  "toSide": "left"
+                },
+                "relationIndex": 11,
+                "label": "结构化结果",
+                "x": 736,
+                "y": 431,
+                "width": 58,
+                "height": 14,
+                "lx": 765,
+                "ly": 441
+              },
+              "from": [
+                780,
+                593
+              ],
+              "to": [
+                780,
+                400
+              ]
+            },
+            "supportedFixes": [
+              "if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust labelAt, labelDx, labelDy, or labelSegment; otherwise adjust the other relationship route/via/channel"
+            ]
+          }
+        ],
+        "provenance": "failed",
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      },
+      "execution": "embedded-in-deliver"
+    },
+    "deliver": {
+      "status": "not-run",
+      "execution": "blocked-by-validate"
+    }
+  },
+  "browserCheck": {
+    "requested": true,
+    "ran": false
+  },
+  "diagnostics": [
+    {
+      "code": "composition/proper-crossing",
+      "severity": "error",
+      "message": "[composition/proper-crossing] showcase architecture connections[11] \"model\" -> \"render\" crosses connections[20] \"period\" -> \"publish\" at [780, 450] (segments 2 and 1) — if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 11,
+        "from": "model",
+        "to": "render"
+      },
+      "evidence": {
+        "otherRelationship": {
+          "diagramType": "architecture",
+          "collection": "connections",
+          "index": 20,
+          "from": "period",
+          "to": "publish"
+        },
+        "point": [
+          780,
+          450
+        ],
+        "segmentIndex": 2,
+        "otherSegmentIndex": 1
+      },
+      "supportedFixes": [
+        "if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors"
+      ]
+    },
+    {
+      "code": "composition/proper-crossing",
+      "severity": "error",
+      "message": "[composition/proper-crossing] showcase architecture connections[15] \"publish\" -> \"reportsdb\" crosses connections[19] \"period\" -> \"model\" at [635, 540] (segments 1 and 0) — if the authored via/fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 15,
+        "from": "publish",
+        "to": "reportsdb"
+      },
+      "evidence": {
+        "otherRelationship": {
+          "diagramType": "architecture",
+          "collection": "connections",
+          "index": 19,
+          "from": "period",
+          "to": "model"
+        },
+        "point": [
+          635,
+          540
+        ],
+        "segmentIndex": 1,
+        "otherSegmentIndex": 0
+      },
+      "supportedFixes": [
+        "if the authored via/fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust route/via or fromSide/toSide so the connections use separate corridors"
+      ]
+    },
+    {
+      "code": "composition/micro-segment",
+      "severity": "error",
+      "message": "[composition/micro-segment] showcase architecture connections[11] \"model\" -> \"render\" has a 2px interior segment 1 [765, 452] -> [765, 450] that is below the 8px micro-segment floor — if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and move route/via points into a wider corridor or move the component so every turn has room to read.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 11,
+        "from": "model",
+        "to": "render"
+      },
+      "evidence": {
+        "segmentIndex": 1,
+        "position": "interior",
+        "lengthPx": 2,
+        "minimumPx": 8,
+        "from": [
+          765,
+          452
+        ],
+        "to": [
+          765,
+          450
+        ]
+      },
+      "supportedFixes": [
+        "if the authored fromSide/toSide are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and move route/via points into a wider corridor or move the component so every turn has room to read"
+      ]
+    },
+    {
+      "code": "composition/label-route-clearance",
+      "severity": "error",
+      "message": "[composition/label-route-clearance] showcase architecture label \"结构化结果\" on connections[11] \"model\" -> \"render\" label \"结构化结果\" is 0px from connections[20] \"period\" -> \"publish\" label \"复用发布器\" segment 1 [780, 593] -> [780, 400] (label rect [736, 431, 58, 14]; minimum 4px) — if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust labelAt, labelDx, labelDy, or labelSegment; otherwise adjust the other relationship route/via/channel.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 11,
+        "from": "model",
+        "to": "render"
+      },
+      "evidence": {
+        "label": "结构化结果",
+        "otherRelationship": {
+          "diagramType": "architecture",
+          "collection": "connections",
+          "index": 20,
+          "from": "period",
+          "to": "publish"
+        },
+        "segmentIndex": 1,
+        "clearancePx": 0,
+        "minimumPx": 4,
+        "labelRect": {
+          "relation": {
+            "from": "model",
+            "to": "render",
+            "label": "结构化结果",
+            "fromSide": "right",
+            "toSide": "left"
+          },
+          "relationIndex": 11,
+          "label": "结构化结果",
+          "x": 736,
+          "y": 431,
+          "width": 58,
+          "height": 14,
+          "lx": 765,
+          "ly": 441
+        },
+        "from": [
+          780,
+          593
+        ],
+        "to": [
+          780,
+          400
+        ]
+      },
+      "supportedFixes": [
+        "if the authored fromSide/toSide/via are not required by the user, remove them so the renderer can re-plan; otherwise preserve that intent and adjust labelAt, labelDx, labelDy, or labelSegment; otherwise adjust the other relationship route/via/channel"
+      ]
+    }
+  ],
+  "evidence": {
+    "receipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\review-5\\index.finalize.json",
+    "summaryReceipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\review-5\\index.finalize-summary.json"
+  },
+  "visualReview": "not-requested",
+  "failedStage": "validate",
+  "finishedAt": "2026-10-26T15:45:54.627Z",
+  "durationMs": 958,
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-26T15:35:04.017Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  }
+}

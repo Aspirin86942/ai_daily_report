@@ -15,8 +15,6 @@ fn report(generated_at: &str) -> HealthReport {
         }],
         task_names: health::TaskNames {
             daily: "AI Daily Report".into(),
-            collect: "AI Daily Report Collect".into(),
-            parse: "AI Daily Report Parse".into(),
             health: "AI Daily Report Health".into(),
         },
         log_dir: "unused".into(),
@@ -72,7 +70,8 @@ fn write_report_writes_utf8_json_without_leaving_temp_files() {
     let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(parsed, serde_json::to_value(&value).unwrap());
     assert_eq!(parsed["checks"][0]["evidence"]["nested"]["中文"], "值");
-    assert_eq!(parsed["task_names"]["parse"], "AI Daily Report Parse");
+    assert_eq!(parsed["task_names"]["health"], "AI Daily Report Health");
+    assert_eq!(parsed["task_names"].as_object().unwrap().len(), 2);
     assert_eq!(names(&dir.path().join("nested")), vec!["health.json"]);
 }
 

@@ -129,7 +129,6 @@ pub fn optimize(config: &AppConfig) -> Result<Value, ReportError> {
         "allocated_bytes_before": before,
         "allocated_bytes_after": after,
         "reclaimed_bytes": before.saturating_sub(after),
-        "collection_interval_minutes": config.archive.collection_interval_minutes,
         "compression": if config.archive.compress_extractions { "ntfs_lznt1" } else { "unchanged" },
         "content_hashes_verified": true,
     }))

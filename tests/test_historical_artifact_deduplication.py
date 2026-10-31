@@ -212,27 +212,21 @@ class DeduplicationTests(unittest.TestCase):
         self.run_action("apply", plan)
         self.run_action("verify", plan)
 
-    def test_frozen_benchmark_refuses_old_output_and_copy_is_independent(self):
-        plan = self.plan()
-        self.run_action("apply", plan)
-        path = SCRIPT.with_name("benchmark_archive.py")
-        spec = importlib.util.spec_from_file_location("archive_benchmark_dedup_test", path)
-        benchmark = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(benchmark)
-        with self.assertRaises(RuntimeError):
-            benchmark.reject_frozen_output(self.paths[0].parent)
-        with self.assertRaises(RuntimeError):
-            benchmark.save(self.paths[0].parent / "new-result.json", {})
-        with self.assertRaises(RuntimeError):
-            benchmark.configure(self.paths[0].parent, self.root, self.root / "unused.exe", {}, 1, 1)
-        with self.assertRaises(RuntimeError):
-            benchmark.run(self.root / "unused.exe", self.root, [], self.paths[0].parent / "run")
-        new = self.root / "new-experiment"
-        benchmark.copy_subset([self.paths[0]], self.paths[0].parent, new)
-        copy = new / self.paths[0].name
-        tool.attrs(copy, copy.stat().st_file_attributes & ~1)
-        copy.write_bytes(b"new experiment")
-        self.assertNotEqual(copy.read_bytes(), self.paths[0].read_bytes())
+
+
+class TaskWindowTests(unittest.TestCase):
+    def test_current_tasks_are_required_and_busy_or_imminent_tasks_block_writes(self):
+        rows = [
+            {"name": "AI Daily Report", "state": 3, "seconds": 3600},
+            {"name": "AI Daily Report Health", "state": 3, "seconds": 3600},
+        ]
+        with mock.patch.object(tool.subprocess, "run") as run:
+            run.return_value.stdout = json.dumps(rows).encode()
+            tool.quiet_window()
+            for invalid in [rows[:1], [dict(rows[0], state=4), rows[1]], [rows[0], dict(rows[1], seconds=299)]]:
+                run.return_value.stdout = json.dumps(invalid).encode()
+                with self.assertRaises(RuntimeError):
+                    tool.quiet_window()
 
 
 if __name__ == "__main__":

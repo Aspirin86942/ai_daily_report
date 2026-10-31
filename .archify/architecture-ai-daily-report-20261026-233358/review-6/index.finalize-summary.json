@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+    "sha256": "bc4da3853b719d7ba91e496b8cf70d225e46cae9ed50e8834c4ca829f4d9c75a",
+    "bytes": 13310
+  },
+  "artifact": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+    "sha256": "d5d5f13a7fd4aed95a5f6c480b09b0d82bf0a23534f877adc272c8949ff66244",
+    "bytes": 846533
+  },
+  "gates": {
+    "validate": "fail",
+    "deliver": "not-run",
+    "check": "not-run",
+    "browser-check": "not-run"
+  },
+  "failedStage": "validate",
+  "diagnostics": [
+    {
+      "code": "clean-flow/endpoint-side-direction",
+      "severity": "error",
+      "message": "[clean-flow/endpoint-side-direction] architecture connections[15] \"publish\" -> \"output\" first segment 0 [1200, 450] -> [1240, 452] does not honor fromSide \"right\" — it must run horizontal rightward; keep automatic routing so the renderer can use a side-aware bridge, or set truthful fromSide/toSide with perpendicular via segments.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 15,
+        "from": "publish",
+        "to": "output"
+      },
+      "evidence": {
+        "endpoint": "source",
+        "authoredField": "fromSide",
+        "sideOrigin": "authored",
+        "side": "right",
+        "segmentIndex": 0,
+        "from": [
+          1200,
+          450
+        ],
+        "to": [
+          1240,
+          452
+        ],
+        "expectedAxis": "horizontal",
+        "expectedDirection": "rightward"
+      },
+      "supportedFixes": [
+        "keep automatic routing so the renderer can use a side-aware bridge, or set truthful fromSide/toSide with perpendicular via segments"
+      ]
+    }
+  ],
+  "diagnosticSummary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\review-6\\index.finalize.json",
+    "summaryReceipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\review-6\\index.finalize-summary.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-26T15:35:04.017Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 1019,
+  "browserCheck": {
+    "requested": true,
+    "ran": false
+  },
+  "nextAction": {
+    "action": "edit-in-place",
+    "candidate": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+    "constraint": "Preserve all semantics and user-fixed geometry. Use references/architecture-layout-repair.md to choose a local repair or connected-scene reflow; edit the existing candidate.",
+    "then": "finalize-once"
+  }
+}

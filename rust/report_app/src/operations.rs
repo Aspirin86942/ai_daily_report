@@ -112,6 +112,13 @@ fn daily_triggers(
     now: DateTime<Utc>,
 ) -> Result<String, ReportError> {
     let date = now.with_timezone(&types::shanghai()).date_naive();
+    if config.personal_scan() {
+        return Ok(calendar_trigger(
+            "DailyShanghai",
+            date,
+            &config.schedule.local_time,
+        ));
+    }
     let times = trigger_times(&config.schedule.local_time)?;
     Ok(format!(
         "{}{}{}{}",
@@ -120,38 +127,6 @@ fn daily_triggers(
         calendar_trigger("DailyCatchup90", date, &times[2]),
         logon_trigger(config, sid)
     ))
-}
-
-fn collect_triggers(
-    config: &AppConfig,
-    sid: &str,
-    now: DateTime<Utc>,
-) -> Result<String, ReportError> {
-    let date = now.with_timezone(&types::shanghai()).date_naive();
-    let Some(window) = config.archive.collection_workday_window.as_ref() else {
-        let interval = config.archive.collection_interval_minutes;
-        let repetition = match (interval / 60, interval % 60) {
-            (24, 0) => "P1D".to_owned(),
-            (0, minutes) => format!("PT{minutes}M"),
-            (hours, 0) => format!("PT{hours}H"),
-            (hours, minutes) => format!("PT{hours}H{minutes}M"),
-        };
-        return Ok(format!(
-            "<CalendarTrigger id=\"CollectInterval\"><StartBoundary>{date}T00:00:00+08:00</StartBoundary><Enabled>true</Enabled><Repetition><Interval>{repetition}</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay></CalendarTrigger>{}",
-            logon_trigger(config, sid)
-        ));
-    };
-    let interval = config.archive.collection_interval_minutes;
-    let mut triggers = String::new();
-    for (index, tick) in window.ticks(interval)?.iter().enumerate() {
-        triggers.push_str(&format!(
-            "<CalendarTrigger id=\"CollectWorkday{:02}\"><StartBoundary>{date}T{}:00+08:00</StartBoundary><Enabled>true</Enabled><ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek><Monday/><Tuesday/><Wednesday/><Thursday/><Friday/></DaysOfWeek></ScheduleByWeek></CalendarTrigger>",
-            index + 1,
-            tick.format("%H:%M")
-        ));
-    }
-    triggers.push_str(&logon_trigger(config, sid));
-    Ok(triggers)
 }
 
 fn validate_sid(sid: &str) -> Result<(), ReportError> {
@@ -194,7 +169,9 @@ fn task_plan_inner(
         display_path(config.config_dir.parent().unwrap())
     );
     let schedule = &config.schedule;
-    let restart = if schedule.restart_count > 0 {
+    let restart = if schedule.restart_count > 0
+        && !(config.personal_scan() && task_name == config.schedule.task_name)
+    {
         format!(
             "<RestartOnFailure><Interval>PT{}M</Interval><Count>{}</Count></RestartOnFailure>",
             schedule.restart_interval_minutes, schedule.restart_count
@@ -229,22 +206,12 @@ fn task_plan_inner(
 }
 
 pub fn task_plan(config: &AppConfig, sid: &str, now: DateTime<Utc>) -> Result<Value, ReportError> {
-    let preparation_seconds = if config.archive.daily_source == "archive"
-        && config.report.profile != crate::config::ReportProfile::Personal
-    {
-        120
-    } else {
-        0
-    };
     if u64::from(config.schedule.execution_limit_minutes) * 60
-        < config
-            .recovery
-            .run_budget_seconds
-            .saturating_add(60 + preparation_seconds)
+        < config.recovery.run_budget_seconds.saturating_add(60)
     {
         return Err(ReportError::new(
             "TASK_RUNTIME_LIMIT_TOO_SHORT",
-            "日报任务时限须覆盖程序运行预算、归档材料准备时间及至少一分钟的状态保存时间。",
+            "日报任务时限须覆盖程序运行预算及至少一分钟的状态保存时间。",
         ));
     }
     let config_dir = display_path(&config.config_dir);
@@ -317,8 +284,6 @@ pub fn task_plan_kind(
 ) -> Result<Value, ReportError> {
     let mut plan = match kind {
         "daily" => task_plan(config, sid, now),
-        "collect" => task_plan_collect(config, sid, now),
-        "parse" => task_plan_parse(config, sid, now),
         "health" => task_plan_health(config, sid, now),
         _ => Err(ReportError::new("TASK_KIND_INVALID", "任务类型无效")),
     }?;
@@ -331,7 +296,7 @@ pub fn task_plan_kind(
         }
     )));
     plan["base_task_name"] = json!(config.schedule.task_name);
-    plan["collection_scope"] = json!(crate::snapshots::fingerprint(&json!({
+    plan["execution_scope"] = json!(crate::snapshots::fingerprint(&json!({
         "profile":config.report.profile,"work_dir":config.paths.work_dir,"data_dir":config.paths.data_dir,
         "roots":config.archive.roots,"model_roots":config.archive.model_roots,
         "allow_work_dir_for_model":config.archive.allow_work_dir_for_model,
@@ -342,94 +307,37 @@ pub fn task_plan_kind(
     Ok(plan)
 }
 
-fn task_plan_collect(
-    config: &AppConfig,
-    sid: &str,
-    now: DateTime<Utc>,
-) -> Result<Value, ReportError> {
-    let mut collection = config.clone();
-    collection.schedule.task_name = format!("{} Collect", config.schedule.task_name);
-    collection.schedule.local_time = "00:00".into();
-    collection.schedule.wake_to_run = false;
-    collection.schedule.execution_limit_minutes =
-        if config.report.profile == crate::config::ReportProfile::Personal {
-            3
-        } else {
-            20
-        };
-    let config_dir = display_path(&collection.config_dir);
-    let arguments = format!("--config-dir \"{config_dir}\" collect --scheduled");
-    let triggers = collect_triggers(&collection, sid, now)?;
-    let mut value = task_plan_inner(
-        &collection,
-        sid,
-        &collection.schedule.task_name,
-        &arguments,
-        &triggers,
-    )?;
-    value["kind"] = json!("collect");
-    value["interval_minutes"] = json!(config.archive.collection_interval_minutes);
-    value["collection_workday_window"] =
-        serde_json::to_value(&config.archive.collection_workday_window)?;
-    Ok(value)
-}
-
-fn task_plan_parse(
-    config: &AppConfig,
-    sid: &str,
-    now: DateTime<Utc>,
-) -> Result<Value, ReportError> {
-    let mut parsing = config.clone();
-    parsing.schedule.task_name = format!("{} Parse", config.schedule.task_name);
-    parsing.schedule.execution_limit_minutes =
-        if config.report.profile == crate::config::ReportProfile::Personal {
-            3
-        } else {
-            5
-        };
-    let arguments = format!(
-        "--config-dir \"{}\" archive drain --scheduled --max-seconds 120",
-        display_path(&config.config_dir)
-    );
-    let triggers = if let Some(window) = &config.archive.collection_workday_window {
-        let date = now.with_timezone(&types::shanghai()).date_naive();
-        let ticks = window.ticks(30)?;
-        let end = *ticks.last().expect("validated workday ticks");
-        let mut triggers = String::new();
-        for (index, tick) in ticks.iter().enumerate() {
-            let shifted = if *tick == end {
-                end
-            } else {
-                *tick + chrono::Duration::minutes(5)
-            };
-            if shifted > end {
-                continue;
-            }
-            triggers.push_str(&format!(
-                "<CalendarTrigger id=\"ParseWorkday{:02}\"><StartBoundary>{date}T{}:00+08:00</StartBoundary><Enabled>true</Enabled><ScheduleByWeek><WeeksInterval>1</WeeksInterval><DaysOfWeek><Monday/><Tuesday/><Wednesday/><Thursday/><Friday/></DaysOfWeek></ScheduleByWeek></CalendarTrigger>",
-                index + 1, shifted.format("%H:%M")
-            ));
-        }
-        triggers.push_str(&logon_trigger(config, sid));
-        triggers
-    } else {
-        parsing.archive.collection_interval_minutes = 30;
-        collect_triggers(&parsing, sid, now)?
-    };
-    let mut plan = task_plan_inner(
-        &parsing,
-        sid,
-        &parsing.schedule.task_name,
-        &arguments,
-        &triggers,
-    )?;
-    plan["kind"] = json!("parse");
-    Ok(plan)
-}
-
 pub const TEMPLATES: &[(&str, &str)] = &[
     (
+        "personal_daily_scan_prompt_v7.md",
+        crate::model::personal::SCAN_PROMPT_EXTENDED,
+    ),
+    (
+        "personal_daily_compact_prompt_v7.md",
+        crate::model::personal::COMPACT_PROMPT_EXTENDED,
+    ),
+    (
+        "personal_daily_scan_prompt_v6.md",
+        crate::model::personal::SCAN_COMPACT_PROMPT,
+    ),
+    (
+        "personal_daily_compact_prompt_v6.md",
+        crate::model::personal::COMPACT_PROMPT,
+    ),
+    (
+        "personal_daily_scan_prompt_v5.md",
+        crate::model::personal::SCAN_PROMPT,
+    ),
+    (
+        "personal_daily_scan_template_v5.md",
+        crate::reports::personal::SCAN_TEMPLATE,
+    ),
+    (
         "personal_daily_prompt_v5.md",
+        crate::model::personal::LEGACY_PROMPT,
+    ),
+    (
+        "personal_daily_prompt_v5_compact.md",
         crate::model::personal::PROMPT,
     ),
     (
@@ -674,12 +582,10 @@ pub fn append_scheduled_log(
             let action = value["action"].as_str().unwrap_or("");
             let status = match action {
                 "skipped" => "skipped",
-                "deferred" => "deferred",
                 _ => value["status"].as_str().unwrap_or("succeeded"),
             };
             let execution = match action {
                 "skipped" => "skipped",
-                "deferred" => "deferred",
                 _ => value["execution_status"].as_str().unwrap_or("succeeded"),
             };
             let material = value["material_status"]
@@ -714,8 +620,8 @@ pub fn append_scheduled_log(
                 "date": if value["target_date"].is_null() { json!(target_date) } else { value["target_date"].clone() },
                 "target_date": if value["target_date"].is_null() { json!(target_date) } else { value["target_date"].clone() },
                 "action":value["action"], "quality":value["quality"], "duration_ms":duration_ms,
-                "queued":value["queued"], "pending_changes":value["pending_changes"], "errors":value["errors"], "reason_codes":reasons,
-                "phase": if action == "deferred" { "waiting_materials" } else { "completed" },
+                "errors":value["errors"], "reason_codes":reasons,
+                "phase": "completed",
             });
             if action == "skipped" {
                 event["reason"] = value["reason"].clone();
@@ -732,7 +638,7 @@ pub fn append_scheduled_log(
             "status": "failed",
             "execution_status":"failed", "material_status":"unknown",
             "publication_status":if kind == "daily" { "unknown" } else { "not_applicable" },
-            "queued":null, "pending_changes":null, "errors":1, "reason_codes":[e.code],
+            "errors":1, "reason_codes":[e.code],
             "run_id": run_id,
             "target_date": target_date,
             "phase": run_id.map(|id| run_phase(config, id)).unwrap_or_else(|| "unknown".into()),

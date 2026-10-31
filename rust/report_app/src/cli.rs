@@ -18,8 +18,6 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// 保存观察到的文件版本并处理归档解析队列
-    Collect(crate::archive::cli::CollectArgs),
     /// 查询与维护长期档案
     Archive {
         #[arg(long, value_enum, default_value = "json", global = true)]
@@ -291,7 +289,7 @@ pub enum OcrCommand {
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
     Plan {
-        #[arg(long,default_value="daily",value_parser=["daily","collect","parse","health"])]
+        #[arg(long,default_value="daily",value_parser=["daily","health"])]
         kind: String,
         #[arg(long)]
         sid: String,
@@ -325,13 +323,7 @@ impl Command {
                 (
                     Period {
                         mode: ReportMode::Daily,
-                        source: args.source.unwrap_or(
-                            if config.archive.daily_source == "archive" {
-                                ReportSource::Archive
-                            } else {
-                                ReportSource::Scan
-                            },
-                        ),
+                        source: args.source.unwrap_or(ReportSource::Scan),
                         start: target,
                         end: target,
                         label: target.to_string(),

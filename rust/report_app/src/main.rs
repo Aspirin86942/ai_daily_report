@@ -64,26 +64,6 @@ fn execute(
     let config = AppConfig::load(executable.parent().unwrap(), config_dir)?;
     let now = chrono::Utc::now();
     match command {
-        Command::Collect(args) => {
-            let started = std::time::Instant::now();
-            let result = ai_daily_report::archive::collect::execute(
-                &config,
-                args.baseline,
-                args.scheduled,
-                now,
-            );
-            if args.scheduled {
-                ai_daily_report::operations::append_scheduled_log(
-                    &config,
-                    "collect",
-                    started.elapsed().as_millis() as u64,
-                    None,
-                    None,
-                    &result,
-                )?;
-            }
-            ai_daily_report::archive::cli::print(&result?, args.format)
-        }
         Command::Archive { format, command } => ai_daily_report::archive::cli::print(
             &ai_daily_report::archive::cli::execute(&config, command)?,
             format,
@@ -117,7 +97,7 @@ fn execute(
             let run_id = new_run_id();
             let mut target_date: Option<String> = None;
             let result = (|| {
-                let mut request =
+                let request =
                     command.report_request(&config, now, run_id.clone(), String::new())?;
                 target_date = Some(request.context.target_date.to_string());
                 let mut app = App::open_started(config.clone(), now, started)?;
@@ -130,18 +110,7 @@ fn execute(
                         )?;
                     }
                 }
-                let preparation =
-                    ai_daily_report::run::prepare_scheduled_archive(&app, &mut request)?;
-                target_date = Some(request.context.target_date.to_string());
-                if let Some(ready) = &preparation {
-                    if ready["action"] == "deferred" {
-                        return Ok(ready.clone());
-                    }
-                }
-                let mut value = serde_json::to_value(run_report(request, &app)?)?;
-                if let Some(preparation) = preparation {
-                    value["preparation"] = preparation;
-                }
+                let value = serde_json::to_value(run_report(request, &app)?)?;
                 Ok(value)
             })();
             if scheduled {

@@ -212,7 +212,7 @@ def quiet_window():
         capture_output=True, check=True, creationflags=0x08000000,
     )
     tasks = json.loads(result.stdout)
-    expected = {"AI Daily Report", "AI Daily Report Collect", "AI Daily Report Health", "AI Daily Report Parse"}
+    expected = {"AI Daily Report", "AI Daily Report Health"}
     if {t["name"] for t in tasks} != expected or any(t["state"] != 3 or t["seconds"] < 300 for t in tasks):
         raise RuntimeError("Formal task active, unavailable or due within five minutes")
 

@@ -29,7 +29,7 @@ HASH_CHUNK_BYTES = 1_048_576
 BATCH_BYTES = 268_435_456
 BATCH_FILES = 100
 PAUSE_SECONDS = 300
-TASK_NAMES = ("AI Daily Report", "AI Daily Report Collect", "AI Daily Report Health")
+TASK_NAMES = ("AI Daily Report", "AI Daily Report Health")
 REPARSE = 0x400
 COMPRESSED = 0x800
 ENCRYPTED = 0x4000
@@ -259,7 +259,7 @@ def _read_candidate(root, relative):
 _TASK_QUERY = r"""
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$names = @('AI Daily Report', 'AI Daily Report Collect', 'AI Daily Report Health')
+$names = @('AI Daily Report', 'AI Daily Report Health')
 $rows = @(foreach ($name in $names) {
     $task = Get-ScheduledTask -TaskName $name -TaskPath '\' -ErrorAction Stop
     $info = Get-ScheduledTaskInfo -InputObject $task -ErrorAction Stop
@@ -301,8 +301,8 @@ def read_task_window(now_utc: datetime) -> tuple[bool, datetime]:
             if stderr.read().strip():
                 raise ValueError("Scheduled-task query produced errors")
             rows = json.loads(stdout.read().decode("utf-8-sig"))
-        if not isinstance(rows, list) or len(rows) != 3:
-            raise ValueError("All three task records are required")
+        if not isinstance(rows, list) or len(rows) != len(TASK_NAMES):
+            raise ValueError("All current task records are required")
         names = []
         triggers = []
         running = False

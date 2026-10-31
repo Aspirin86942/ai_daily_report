@@ -4,6 +4,9 @@
 
 ## 归档日报、迁移与覆盖记录
 
+- [截至 2026-10-27 的历史运行记录](history/runtime-through-20261027.md)
+- [旧日内采集与补解析操作](history/collection-operations-through-20261027.md)
+
 - [Use performance-first hybrid fallback for Rust Office parsing](adr/0001-performance-first-hybrid-office-fallback.md)
 - [AI Daily Report 错误与覆盖优化方案](history/AI_Daily_Report_错误与覆盖优化方案_v1.0.md)
 - [变化归档与可追溯日报：性能验收](history/archive-performance-20261017.md)

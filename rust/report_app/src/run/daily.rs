@@ -39,38 +39,6 @@ pub(super) fn resume_pending(
     Ok(None)
 }
 
-pub(super) fn existing_archive(
-    app: &App,
-    request: &ReportRequest,
-) -> Result<Option<ReportOutcome>, ReportError> {
-    if request.period.source == crate::types::ReportSource::Archive
-        && request.save
-        && !request.dry_run
-        && request.regeneration_reason.is_none()
-    {
-        if let Some(current) = app
-            .store
-            .current(&request.context.target_date.to_string())?
-        {
-            crate::archive::model_input::published(
-                &app.config,
-                &current.run_id,
-                current.markdown.as_deref().unwrap_or(""),
-            )?;
-            return Ok(Some(ReportOutcome {
-                run_id: current.run_id,
-                target_date: current.target_date,
-                quality: current.quality.unwrap_or_else(|| "complete".into()),
-                markdown: current.markdown.unwrap_or_default(),
-                output_path: current.output_path.map(Into::into),
-                action: "existing".into(),
-                model_calls: 0,
-            }));
-        }
-    }
-    Ok(None)
-}
-
 enum PreparedDaily {
     Input(Box<FrozenInput>),
     Preview(ReportOutcome),
@@ -83,37 +51,7 @@ fn prepare(
     deadline: Instant,
 ) -> Result<PreparedDaily, ReportError> {
     let run_id = &request.context.run_id;
-    let payload = if request.period.source == crate::types::ReportSource::Archive {
-        let payload = input::prepare_archive(app, request)?;
-        if request.dry_run {
-            let reference =
-                app.snapshots
-                    .put(run_id, "archive-preview", &serde_json::to_value(&payload)?)?;
-            app.store.prepare(
-                run_id,
-                &reference,
-                &payload.input_fingerprint,
-                &payload
-                    .sources
-                    .iter()
-                    .map(serde_json::to_value)
-                    .collect::<Result<Vec<_>, _>>()?,
-                now,
-            )?;
-            app.store
-                .finish_scan_preview(run_id, &payload.quality, now)?;
-            return Ok(PreparedDaily::Preview(ReportOutcome {
-                run_id: run_id.clone(),
-                target_date: request.context.target_date.to_string(),
-                quality: "scan_only".into(),
-                markdown: serde_json::to_string_pretty(&payload.sources)?,
-                output_path: None,
-                action: "dry_run".into(),
-                model_calls: 0,
-            }));
-        }
-        payload
-    } else {
+    let payload = {
         let scan = scan_stable(app, request, deadline)?;
         if request.dry_run {
             let metadata = serde_json::to_value(&scan)?;

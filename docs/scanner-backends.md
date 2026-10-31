@@ -2,12 +2,12 @@
 
 ## 当前调用关系
 
-Rust CLI 的 report_app 负责报告、模型调用和恢复。扫描来源直接调用 scanner_core；归档来源读取已保存的正文、差异和证据，日报准备不启动原目录扫描或解析。collect 命令负责持续采集和归档解析。
+Rust CLI 的 report_app 负责报告、模型调用和恢复。个人日报在一次运行中依次扫描、解析、总结并发布。scanner_core 复用未变文件的解析缓存；archive 只处理历史证据查询、核验和存储维护。
 
 ~~~text
 ai-daily-report.exe
-  ├─ collect → 归档原件、正文、位置与版本
-  ├─ daily --source archive → 归档变化与证据 → 事实提取 → 成稿
+  ├─ archive → 历史原件、版本、差异与证据查询
+  ├─ weekly/monthly --source db → 已发布日报汇总
   └─ daily/weekly/monthly --source scan → scanner_core
        ├─ Rust 内部轻文本解析
        ├─ ai-daily-office-parser.exe
@@ -43,9 +43,9 @@ Office/PDF 工作进程使用协议 v4，以逐行 JSON 完成启动握手、能
 
 ## 验证与阅读
 
-使用隔离目录、固定样本和本地模拟模型验证。归档性能工具为 scripts/benchmark_archive.py；无变化采集门槛为 20 次、P95 不超过 5 秒，正文读取、解析启动和模型调用均为零。计时期间不并行运行构建或测试。
+使用隔离目录、固定样本和本地模拟模型验证每日扫描、冻结恢复与重复发布。测试入口为 `rust/report_app/tests/personal_scan.rs` 和 `bundle_acceptance.rs`。旧归档性能测量保留原始数据和口径，不能作为当前日扫性能结论；旧采集基准脚本已退役。计时期间不并行运行构建或测试。
 
-- [归档操作](change-archive.md)：采集、全文、差异、引用和资源限制。
+- [历史归档查询](change-archive.md)：全文、差异、引用核验和存储维护。
 - [历史性能测量](archive/history/archive-performance-20261017.md)：全量样本、覆盖缺口和原始测量口径。
 - [当前状态](current-state.md)：正式任务及验收状态。
 - [术语表](../CONTEXT.md)：程序中各层职责。

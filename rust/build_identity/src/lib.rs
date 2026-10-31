@@ -52,7 +52,6 @@ fn local_source_fingerprint() -> String {
         "pdf_parser/Cargo.toml",
         "build-inputs.json",
         "parser-inputs.json",
-        "report_app/src/archive/parse_request.rs",
     ] {
         files.push(workspace.join(relative));
     }

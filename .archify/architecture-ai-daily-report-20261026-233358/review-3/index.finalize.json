@@ -1,0 +1,157 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "showcase",
+  "startedAt": "2026-10-26T15:38:59.618Z",
+  "specification": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+    "sha256": "d58f688a1bad6a14e1562c0d70f4a64fbebbba089f1f9d2c3aad961b3e85ed36",
+    "bytes": 10715
+  },
+  "artifact": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+    "sha256": "dcbfddbbd438ab76302d60f0352cb9cc8e5993eb22462d4c1731efcd56efb9aa",
+    "bytes": 846891
+  },
+  "stages": {
+    "validate": {
+      "status": "fail",
+      "exitCode": 1,
+      "durationMs": null,
+      "command": [
+        "C:\\Program Files\\nodejs\\node.exe",
+        "C:\\Users\\lcf\\.dsh\\skills\\archify\\bin\\archify.mjs",
+        "deliver",
+        "architecture",
+        "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+        "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+        "--quality",
+        "showcase",
+        "--repo-root",
+        "D:\\python_program\\ai_daily_report",
+        "--json"
+      ],
+      "receipt": {
+        "schemaVersion": 1,
+        "ok": false,
+        "command": "deliver",
+        "receiptId": "fd430339-1704-41dc-82b4-b05d3f9b7bd9",
+        "stage": "render",
+        "type": "architecture",
+        "input": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+        "output": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+        "error": "Architecture layout validation failed:\n- [clean-flow/endpoint-side-direction] architecture connections[4] \"cli\" -> \"run\" first segment 0 [280, 64] -> [280, 150] does not honor fromSide \"left\" — it must run horizontal leftward; keep automatic routing so the renderer can use a side-aware bridge, or set truthful fromSide/toSide with perpendicular via segments.",
+        "diagnostics": [
+          {
+            "code": "clean-flow/endpoint-side-direction",
+            "severity": "error",
+            "message": "[clean-flow/endpoint-side-direction] architecture connections[4] \"cli\" -> \"run\" first segment 0 [280, 64] -> [280, 150] does not honor fromSide \"left\" — it must run horizontal leftward; keep automatic routing so the renderer can use a side-aware bridge, or set truthful fromSide/toSide with perpendicular via segments.",
+            "subject": {
+              "diagramType": "architecture",
+              "collection": "connections",
+              "index": 4,
+              "from": "cli",
+              "to": "run"
+            },
+            "evidence": {
+              "endpoint": "source",
+              "authoredField": "fromSide",
+              "sideOrigin": "authored",
+              "side": "left",
+              "segmentIndex": 0,
+              "from": [
+                280,
+                64
+              ],
+              "to": [
+                280,
+                150
+              ],
+              "expectedAxis": "horizontal",
+              "expectedDirection": "leftward"
+            },
+            "supportedFixes": [
+              "keep automatic routing so the renderer can use a side-aware bridge, or set truthful fromSide/toSide with perpendicular via segments"
+            ]
+          }
+        ],
+        "provenance": "failed",
+        "update": {
+          "status": "unavailable",
+          "installedVersion": null,
+          "availableVersion": null,
+          "releaseNotes": null,
+          "checkedAt": null,
+          "source": null,
+          "noticeRequired": false,
+          "noticeText": null,
+          "reason": "disabled"
+        }
+      },
+      "execution": "embedded-in-deliver"
+    },
+    "deliver": {
+      "status": "not-run",
+      "execution": "blocked-by-validate"
+    }
+  },
+  "browserCheck": {
+    "requested": true,
+    "ran": false
+  },
+  "diagnostics": [
+    {
+      "code": "clean-flow/endpoint-side-direction",
+      "severity": "error",
+      "message": "[clean-flow/endpoint-side-direction] architecture connections[4] \"cli\" -> \"run\" first segment 0 [280, 64] -> [280, 150] does not honor fromSide \"left\" — it must run horizontal leftward; keep automatic routing so the renderer can use a side-aware bridge, or set truthful fromSide/toSide with perpendicular via segments.",
+      "subject": {
+        "diagramType": "architecture",
+        "collection": "connections",
+        "index": 4,
+        "from": "cli",
+        "to": "run"
+      },
+      "evidence": {
+        "endpoint": "source",
+        "authoredField": "fromSide",
+        "sideOrigin": "authored",
+        "side": "left",
+        "segmentIndex": 0,
+        "from": [
+          280,
+          64
+        ],
+        "to": [
+          280,
+          150
+        ],
+        "expectedAxis": "horizontal",
+        "expectedDirection": "leftward"
+      },
+      "supportedFixes": [
+        "keep automatic routing so the renderer can use a side-aware bridge, or set truthful fromSide/toSide with perpendicular via segments"
+      ]
+    }
+  ],
+  "evidence": {
+    "receipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\review-3\\index.finalize.json",
+    "summaryReceipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\review-3\\index.finalize-summary.json"
+  },
+  "visualReview": "not-requested",
+  "failedStage": "validate",
+  "finishedAt": "2026-10-26T15:39:00.584Z",
+  "durationMs": 965,
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-26T15:35:04.017Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  }
+}

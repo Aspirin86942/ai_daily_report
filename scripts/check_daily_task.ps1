@@ -1,5 +1,5 @@
 [CmdletBinding()]
-param([string]$ProjectRoot = (Join-Path $PSScriptRoot '..'), [string]$ConfigDirectory, [ValidateSet("daily", "collect", "parse", "health")][string]$Kind = "daily")
+param([string]$ProjectRoot = (Join-Path $PSScriptRoot '..'), [string]$ConfigDirectory, [ValidateSet("daily", "health")][string]$Kind = "daily")
 . (Join-Path $PSScriptRoot 'daily_task_common.ps1')
 $plan = Get-ReportTaskPlan -ProjectRoot $ProjectRoot -ConfigDirectory $ConfigDirectory -Kind $Kind
 Assert-ReportTaskContext -Plan $plan

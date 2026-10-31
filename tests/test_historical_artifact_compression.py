@@ -32,7 +32,7 @@ class BatchClock(datetime):
 
 
 NOW = datetime(2026, 10, 18, 7, 0, tzinfo=timezone.utc)
-TASK_NAMES = ("AI Daily Report", "AI Daily Report Collect", "AI Daily Report Health")
+TASK_NAMES = ("AI Daily Report", "AI Daily Report Health")
 
 
 def load_tool():
@@ -534,9 +534,9 @@ class WindowTests(SyntheticTests):
         running = json.loads(json.dumps(rows))
         running[1]["state"] = 4
         queued = json.loads(json.dumps(rows))
-        queued[2]["state"] = 2
+        queued[1]["state"] = 2
         for data, exitcode, code in ((imminent, 0, "TASK_IMMINENT"), (running, 0, "TASK_RUNNING"),
-                                     (queued, 0, "TASK_RUNNING"), (rows[:2], 0, "TASK_QUERY_FAILED"),
+                                     (queued, 0, "TASK_RUNNING"), (rows[:1], 0, "TASK_QUERY_FAILED"),
                                      (rows, 1, "TASK_QUERY_FAILED")):
             with self.subTest(code=code), mock.patch.object(tool, "datetime", BatchClock), \
                  mock.patch.object(tool.subprocess, "run", side_effect=self.scheduler_process(data, exitcode)):
@@ -643,7 +643,6 @@ class WindowTests(SyntheticTests):
         return [
             {"task_name": TASK_NAMES[0], "state": 3, "next_run_time_utc": "2026-10-18T16:00:00+08:00"},
             {"task_name": TASK_NAMES[1], "state": 3, "next_run_time_utc": "2026-10-18T07:30:00Z"},
-            {"task_name": TASK_NAMES[2], "state": 3, "next_run_time_utc": "2026-10-18T15:00:00Z"},
         ]
 
     def scheduler_process(self, rows, returncode=0):
@@ -658,14 +657,14 @@ class WindowTests(SyntheticTests):
         return run
 
     # Break caught: selecting a later trigger or interpreting Shanghai local time as UTC.
-    def test_task_query_uses_all_three_tasks_and_utc_earliest_trigger(self):
+    def test_task_query_uses_both_tasks_and_utc_earliest_trigger(self):
         self.f.window_patch.stop()
         rows = self.task_rows()
         with mock.patch.object(tool.subprocess, "run", side_effect=self.scheduler_process(rows)):
             running, upcoming = tool.read_task_window(NOW)
         self.assertFalse(running)
         self.assertEqual(upcoming, datetime(2026, 10, 18, 7, 30, tzinfo=timezone.utc))
-        rows[2]["state"] = 4
+        rows[1]["state"] = 4
         with mock.patch.object(tool.subprocess, "run", side_effect=self.scheduler_process(rows)):
             self.assertTrue(tool.read_task_window(NOW)[0])
 
@@ -677,7 +676,7 @@ class WindowTests(SyntheticTests):
         invalid_time[0]["next_run_time_utc"] = "2026-10-18T08:00:00"
         invalid_state = self.task_rows()
         invalid_state[0]["state"] = 0
-        for data, exitcode in ((rows[:2], 0), (rows + rows[:1], 0), (invalid_time, 0),
+        for data, exitcode in ((rows[:1], 0), (rows + rows[:1], 0), (invalid_time, 0),
                                (invalid_state, 0), (rows, 1), (None, 0)):
             with self.subTest(data=data, exitcode=exitcode), \
                  mock.patch.object(tool.subprocess, "run", side_effect=self.scheduler_process(data, exitcode)):

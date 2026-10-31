@@ -4,13 +4,13 @@ use crate::{
     model::{
         plan::PlannedStep,
         transport::{HttpResponse, ModelTransport, TransportFailure},
-        ModelRunner, StepOutput,
+        ModelRunner,
     },
     processing_cache::check_deadline,
     publish::Publisher,
     reports::{
         data::CoverageGap,
-        personal::{PersonalReport, Selection, MAX_REPORT_BYTES, TEMPLATE},
+        personal::{PersonalReport, Selection, MAX_REPORT_BYTES},
     },
     snapshots::{fingerprint, SnapshotRef, SnapshotStore},
     store::{locking::ReportLock, StagedReport},
@@ -49,25 +49,12 @@ pub(crate) fn snapshots(app: &App) -> Result<SnapshotStore, ReportError> {
     )
 }
 
-fn ensure_snapshot_space(
-    app: &App,
-    end: &str,
-    bytes: u64,
-    deadline: Instant,
-) -> Result<(), ReportError> {
+fn ensure_snapshot_space(app: &App, bytes: u64) -> Result<(), ReportError> {
     let session = app
         .processing
         .as_ref()
         .ok_or_else(|| ReportError::new("PROCESSING_LOCK_REQUIRED", "缺少处理会话"))?;
-    if session.quota.available_bytes()? < bytes {
-        let mut store = session.open_archive(&app.config)?;
-        let now = session.quota.now();
-        let protected =
-            crate::archive::demand::protected(&app.config, &store, Some(end), now, deadline)?;
-        crate::archive::retention::reclaim(&mut store, bytes, &protected, now, deadline)?;
-    }
-    // Exercise the same admission check as the writer; the processing lock
-    // prevents another collector from consuming this space before its write.
+    // Admission is shared with the writer under the processing lock.
     drop(session.quota.reserve(bytes)?);
     Ok(())
 }
@@ -77,10 +64,10 @@ pub fn run(
     app: &App,
     started: Instant,
 ) -> Result<ReportOutcome, ReportError> {
-    if request.period.source != ReportSource::Archive {
+    if request.period.source != ReportSource::Scan {
         return Err(ReportError::new(
             "PERSONAL_SOURCE_INVALID",
-            "个人日报需要 archive 采集来源",
+            "个人日报需要 scan 来源",
         ));
     }
     let deadline = started + Duration::from_secs(270);
@@ -141,47 +128,17 @@ pub fn run(
     app.store.register_personal_run(id)?;
     let result = (|| {
         app.store.set_scanning(id, Utc::now())?;
-        let preparation = crate::archive::queue::prepare_personal(
-            &app.config,
-            app.processing
-                .as_ref()
-                .ok_or_else(|| ReportError::new("PROCESSING_LOCK_REQUIRED", "缺少处理会话"))?,
-            request.context.target_date,
-            Utc::now(),
-            deadline,
-        );
-        if request
-            .regeneration_reason
-            .as_deref()
-            .is_some_and(|reason| reason.starts_with("automatic_personal_recovery:"))
-        {
-            let ready = preparation
-                .as_ref()
-                .map_err(|e| ReportError::new(e.code, e.message.clone()))?;
-            if ready["queued"].as_u64().unwrap_or(0) > 0
-                || ready["unavailable"].as_u64().unwrap_or(0) > 0
-            {
-                return Err(ReportError::new(
-                    "PERSONAL_RECOVERY_WAITING",
-                    "历史日报材料仍在准备，保留原报告并等待后续重试",
-                ));
-            }
-        }
-        let mut selection =
-            crate::archive::selection::prepare_at(&app.config, &request, deadline, Utc::now())?;
-        if let Err(e) = preparation {
-            selection.gaps.push(CoverageGap::new(
-                e.code,
-                "parse",
-                None,
-                "补解析未完成，仅使用当前可用材料。",
-            ));
-        }
+        let mut selection = super::personal_scan::prepare(app, &request)?;
+        check_deadline(deadline)?;
+        let template = crate::reports::personal::SCAN_TEMPLATE;
         let plan = if selection.materials.is_empty() || request.dry_run {
             None
         } else {
-            match crate::model::personal::prepare(&app.config.llm, &request.context, &mut selection)
-            {
+            match crate::model::personal::prepare_scan(
+                &app.config.llm,
+                &request.context,
+                &mut selection,
+            ) {
                 Ok(plan) => Some(plan),
                 Err(e) => {
                     selection.gaps.push(CoverageGap::new(
@@ -195,25 +152,20 @@ pub fn run(
             }
         };
         let input_fingerprint = fingerprint(
-            &json!({"context":request.context,"selection":selection,"plan":plan,"template":TEMPLATE}),
+            &json!({"context":request.context,"selection":selection,"plan":plan,"template":template}),
         )?;
         let input = PersonalInput {
             version: 5,
             context: request.context.clone(),
             selection,
             plan,
-            template: TEMPLATE.into(),
+            template: template.into(),
             input_fingerprint,
             recovery_fingerprint: app.fingerprint(true)?,
         };
         let snapshots = snapshots(app)?;
         let bytes = crate::snapshots::canonical_json(&serde_json::to_value(&input)?)?;
-        ensure_snapshot_space(
-            app,
-            &input.context.window_end_utc.to_rfc3339(),
-            2 * bytes.len() as u64,
-            deadline,
-        )?;
+        ensure_snapshot_space(app, 2 * bytes.len() as u64)?;
         let reference = snapshots.put_bytes(id, "personal-input", &bytes)?;
         app.store.prepare(
             id,
@@ -297,7 +249,6 @@ pub fn finish(
         let transport = PersonalTransport {
             app,
             selection: &input.selection,
-            end: input.context.window_end_utc.to_rfc3339(),
             snapshot_bytes: 2 * plan.bytes()?.len() as u64
                 + crate::snapshots::RESPONSE_RESERVATION_BYTES,
             deadline,
@@ -315,15 +266,17 @@ pub fn finish(
             started,
             deadline,
         };
-        match runner.execute(plan) {
-            Ok(result) => {
-                let StepOutput::Personal(output) = result.output else {
-                    return Err(ReportError::new(
-                        "MODEL_RESPONSE_INVALID",
-                        "个人日报响应类型不符",
-                    ));
-                };
+        match crate::model::personal::generate(&runner, plan) {
+            Ok(output) => {
                 report.items = output.items;
+                if let Some(code) = output.compaction_error {
+                    report.gaps.push(CoverageGap::new(
+                        code,
+                        "model",
+                        None,
+                        "摘要精简未完成，已按完整事项保底减量并保留下一步计划。",
+                    ));
+                }
                 if output.omitted > 0 {
                     report.gaps.push(CoverageGap::new(
                         "PERSONAL_OUTPUT_REDUCED",
@@ -392,7 +345,18 @@ pub fn finish(
                 "完整事项及其依据超过报告上限，未发布不完整摘要",
             ));
         }
-        report.items.pop();
+        if input.plan.as_ref().is_some_and(|plan| {
+            matches!(plan.target["summary_prompt_version"].as_u64(), Some(4 | 6))
+        }) {
+            if !crate::model::personal::omit_lowest_priority(&mut report.items, &input.selection) {
+                return Err(ReportError::new(
+                    "PERSONAL_REPORT_TOO_LARGE",
+                    "下一步计划及其完整依据超过报告上限，未删除计划或截断依据",
+                ));
+            }
+        } else {
+            report.items.pop();
+        }
         report.quality = "partial".into();
         if !report
             .gaps
@@ -448,12 +412,12 @@ pub fn finish(
 struct PersonalTransport<'a> {
     app: &'a App,
     selection: &'a Selection,
-    end: String,
     snapshot_bytes: u64,
     deadline: Instant,
 }
 impl PersonalTransport<'_> {
     fn check(&self) -> Result<(), ReportError> {
+        check_deadline(self.deadline)?;
         let current = crate::config::AppConfig::load(
             &self.app.config.program_dir,
             Some(&self.app.config.config_dir),
@@ -481,7 +445,7 @@ impl PersonalTransport<'_> {
 impl ModelTransport for PersonalTransport<'_> {
     fn prepare(&self) -> Result<(), ReportError> {
         self.check()?;
-        ensure_snapshot_space(self.app, &self.end, self.snapshot_bytes, self.deadline)?;
+        ensure_snapshot_space(self.app, self.snapshot_bytes)?;
         self.app.transport.prepare()
     }
     fn send(&self, request: &[u8], timeout: Duration) -> Result<HttpResponse, TransportFailure> {

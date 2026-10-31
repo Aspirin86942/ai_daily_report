@@ -44,8 +44,8 @@ pub fn query(
                 collections.push(row);
             }
         }
-        let counts:(i64,i64,i64,i64)=store.conn.query_row("SELECT (SELECT count(*) FROM versions WHERE pruned_at IS NULL),(SELECT COALESCE(sum(size_bytes),0) FROM versions WHERE pruned_at IS NULL),(SELECT COALESCE(sum(size_bytes),0) FROM objects o WHERE EXISTS(SELECT 1 FROM versions v WHERE v.sha256=o.sha256 AND v.pruned_at IS NULL)),(SELECT count(*) FROM extractions WHERE profile=? AND (status IN('queued','running') OR id IN(SELECT value FROM metadata WHERE key LIKE 'retry:%')))",[super::parse::profile(config)?],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
-        storage = json!({"versions":counts.0,"logical_bytes":counts.1,"object_bytes":counts.2,"deduplicated_bytes":counts.1.saturating_sub(counts.2),"parse_queue":counts.3});
+        let counts:(i64,i64,i64,i64)=store.conn.query_row("SELECT (SELECT count(*) FROM versions WHERE pruned_at IS NULL),(SELECT COALESCE(sum(size_bytes),0) FROM versions WHERE pruned_at IS NULL),(SELECT COALESCE(sum(size_bytes),0) FROM objects o WHERE EXISTS(SELECT 1 FROM versions v WHERE v.sha256=o.sha256 AND v.pruned_at IS NULL)),(SELECT count(*) FROM extractions WHERE (status IN('queued','running') OR id IN(SELECT value FROM metadata WHERE key LIKE 'retry:%')))",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        storage = json!({"versions":counts.0,"logical_bytes":counts.1,"object_bytes":counts.2,"deduplicated_bytes":counts.1.saturating_sub(counts.2),"historical_pending_extractions":counts.3});
         let mut statuses = std::collections::BTreeMap::<String, u64>::new();
         let mut parser_gaps = std::collections::BTreeMap::<String, u64>::new();
         let mut truncated = 0u64;

@@ -11,7 +11,7 @@ use std::{
     fs,
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -46,7 +46,8 @@ fn setup() -> (tempfile::TempDir, AppConfig) {
     fs::create_dir(dir.path().join("work")).unwrap();
     fs::write(dir.path().join("config/settings.yaml"), json!({
         "paths":{"work_dir":"work"}, "report":{"profile":"personal"},
-        "archive":{"daily_source":"archive"},
+        "scanner":{"office_worker_path": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug/ai-daily-office-parser.exe"),
+            "pdf_worker_path": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug/ai-daily-pdf-parser.exe")},
         "llm":{"max_request_utf8_bytes":128000,"context_window_tokens":128000,"verified_max_output_tokens":8192,"max_tokens":4096},
         "recovery":{"enforce_model_budgets":false}
     }).to_string()).unwrap();
@@ -59,7 +60,7 @@ fn request(day: NaiveDate, save: bool) -> ReportRequest {
         context: RunContext::new(new_run_id(), Utc::now(), day, String::new()).unwrap(),
         period: Period {
             mode: ReportMode::Daily,
-            source: ReportSource::Archive,
+            source: ReportSource::Scan,
             start: day,
             end: day,
             label: day.to_string(),
@@ -81,139 +82,6 @@ impl ModelTransport for OfflineModel {
 }
 
 #[test]
-fn historical_timeout_stays_visible_and_scheduled_recovery_preserves_notes() {
-    use ai_daily_report::{health, personal_recovery, run::prepare_scheduled_archive};
-    let (_dir, config) = setup();
-    let now = Utc::now();
-    let today = now
-        .with_timezone(&ai_daily_report::types::shanghai())
-        .date_naive();
-    let day = today - chrono::Duration::days(3);
-    let sent = Arc::new(AtomicUsize::new(0));
-    let mut app = App::open(config.clone(), now).unwrap();
-    app.transport = Box::new(OfflineModel(sent.clone()));
-    let first = run_daily(request(day, true), &app).unwrap();
-    assert_eq!(
-        sent.load(Ordering::SeqCst),
-        1,
-        "one outage must not consume all date reservations"
-    );
-    let calls = app.store.calls(&first.run_id).unwrap();
-    assert_eq!(calls[0]["status"], "unknown");
-    assert_eq!(calls[0]["error_code"], "MODEL_TIMEOUT");
-    let original = fs::read(first.output_path.as_ref().unwrap()).unwrap();
-    let future = now + chrono::Duration::hours(30);
-    let check = health::check(&config, today.pred_opt().unwrap(), future).unwrap();
-    let historical = check
-        .checks
-        .iter()
-        .find(|c| c.code == "HISTORICAL_REPORT_ATTENTION")
-        .unwrap();
-    assert_eq!(historical.level, "error");
-    assert_eq!(
-        historical.evidence["reports"][0]["target_date"],
-        day.to_string()
-    );
-
-    let mut due = request(today.pred_opt().unwrap(), true);
-    due.input.clear();
-    run_daily(due, &app).unwrap();
-    let mut scheduled = request(today.pred_opt().unwrap(), true);
-    scheduled.scheduled = true;
-    scheduled.input.clear();
-    prepare_scheduled_archive(&app, &mut scheduled).unwrap();
-    assert_eq!(scheduled.context.target_date, day);
-    assert!(scheduled.input.contains("100"));
-    app.transport = Box::new(Model {
-        sent: sent.clone(),
-        invalid: false,
-    });
-    let recovered = run_daily(scheduled, &app).unwrap();
-    assert_ne!(recovered.run_id, first.run_id);
-    assert!(recovered.markdown.contains("仍待审批"));
-    assert_eq!(sent.load(Ordering::SeqCst), 2);
-    assert!(
-        personal_recovery::issues(&app.store.connection().unwrap(), "personal_work", now)
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(
-        app.store
-            .get(&first.run_id)
-            .unwrap()
-            .markdown
-            .unwrap()
-            .as_bytes(),
-        original
-    );
-    assert_eq!(
-        app.store.calls(&first.run_id).unwrap()[0]["status"],
-        "unknown"
-    );
-}
-
-#[test]
-fn recovery_after_repeated_timeouts_needs_no_quota_grant_and_keeps_useful_report() {
-    let (_dir, config) = setup();
-    let day = Utc::now()
-        .with_timezone(&ai_daily_report::types::shanghai())
-        .date_naive()
-        .pred_opt()
-        .unwrap();
-    let sent = Arc::new(AtomicUsize::new(0));
-    let mut app = App::open(config.clone(), Utc::now()).unwrap();
-    app.transport = Box::new(OfflineModel(sent.clone()));
-    for _ in 0..4 {
-        let mut retry = request(day, true);
-        retry.regeneration_reason = Some("retry after transport failure".into());
-        run_daily(retry, &app).unwrap();
-    }
-    assert_eq!(sent.load(Ordering::SeqCst), 4);
-    assert_eq!(
-        app.store
-            .personal_calls("personal_work", &day.to_string())
-            .unwrap(),
-        4
-    );
-    drop(app);
-    let mut app = App::open(config, Utc::now()).unwrap();
-    app.transport = Box::new(Model {
-        sent: sent.clone(),
-        invalid: false,
-    });
-    let mut retry = request(day, true);
-    retry.scheduled = true;
-    ai_daily_report::run::prepare_scheduled_archive(&app, &mut retry).unwrap();
-    let result = run_daily(retry, &app).unwrap();
-    assert!(result.markdown.contains("仍待审批"));
-    assert_eq!(
-        app.store
-            .personal_calls("personal_work", &day.to_string())
-            .unwrap(),
-        5
-    );
-    assert!(ai_daily_report::personal_recovery::issues(
-        &app.store.connection().unwrap(),
-        "personal_work",
-        Utc::now()
-    )
-    .unwrap()
-    .is_empty());
-    app.transport = Box::new(OfflineModel(sent.clone()));
-    let mut failed = request(day, true);
-    failed.regeneration_reason = Some("verify failed regeneration protection".into());
-    assert_eq!(
-        run_daily(failed, &app).unwrap_err().code,
-        "PERSONAL_RECOVERY_INCOMPLETE"
-    );
-    assert_eq!(
-        app.store.current(&day.to_string()).unwrap().unwrap().run_id,
-        result.run_id
-    );
-    assert_eq!(sent.load(Ordering::SeqCst), 6);
-}
-
-#[test]
 fn recovery_alert_survives_material_expiry_without_extending_retention() {
     use ai_daily_report::personal_recovery;
     let (_dir, config) = setup();
@@ -232,9 +100,6 @@ fn recovery_alert_survives_material_expiry_without_extending_retention() {
             .unwrap();
     assert_eq!(issues.len(), 1);
     assert!(!issues[0].material_window_open);
-    assert!(personal_recovery::material_dates(&config, later)
-        .unwrap()
-        .is_empty());
 }
 
 struct ResponseVersionModel {
@@ -373,7 +238,7 @@ fn personal_response_version_omission_preserves_content_validation_and_call_audi
 }
 
 #[test]
-fn report_waits_for_collection_beyond_five_seconds_without_resetting_its_budget() {
+fn report_waits_for_processing_lock_beyond_five_seconds_without_resetting_its_budget() {
     use ai_daily_report::processing_cache::{ProcessingSession, CONTROL_BYTES, MAX_BYTES};
 
     let (_dir, config) = setup();
@@ -408,7 +273,7 @@ fn report_waits_for_collection_beyond_five_seconds_without_resetting_its_budget(
 }
 
 #[test]
-fn collection_lock_wait_respects_the_remaining_deadline() {
+fn processing_lock_wait_respects_the_remaining_deadline() {
     use ai_daily_report::processing_cache::ProcessingSession;
     use ai_daily_report::store::locking::ReportLock;
 
@@ -467,11 +332,7 @@ fn publishes_one_request_and_repairs_after_processing_content_expires() {
     drop(app);
     let future = Utc::now() + chrono::Duration::days(8);
     let mut app = App::open(config, future).unwrap();
-    app.processing
-        .as_ref()
-        .unwrap()
-        .open_archive(&app.config)
-        .unwrap();
+    app.processing.as_ref().unwrap().prune_snapshots().unwrap();
     fs::remove_file(&evidence_path).unwrap(); // isolated publication-repair fixture
     let health = ai_daily_report::health::check(&app.config, day, future).unwrap();
     assert!(health
@@ -548,7 +409,9 @@ fn attachment_failure_prevents_publication_and_repair_uses_stored_bytes() {
 
 struct OversizedSummaryModel {
     sent: Arc<AtomicUsize>,
-    too_many_items: bool,
+    item_count: usize,
+    padding: usize,
+    invalid_last_source: bool,
 }
 
 impl ModelTransport for OversizedSummaryModel {
@@ -562,45 +425,400 @@ impl ModelTransport for OversizedSummaryModel {
             let mut envelope: Value = serde_json::from_slice(&response.body).unwrap();
             let content = &mut envelope["choices"][0]["message"]["content"];
             let mut report: Value = serde_json::from_str(content.as_str().unwrap()).unwrap();
-            if self.too_many_items {
-                report["items"] = json!(vec![report["items"][0].clone(); 6]);
-            } else {
-                report["items"][0]["text"] =
-                    json!(format!("{}仍待审批，条件通过后生效。", "字".repeat(600)));
+            let mut item = report["items"][0].clone();
+            item["text"] = json!(format!(
+                "{}{}",
+                "字".repeat(self.padding),
+                item["text"].as_str().unwrap()
+            ));
+            report["items"] = json!(vec![item; self.item_count]);
+            if self.invalid_last_source {
+                report["items"][self.item_count - 1]["source_ids"] = json!(["missing"]);
             }
             *content = json!(report.to_string());
             response.body = serde_json::to_vec(&envelope).unwrap();
+        } else {
+            let payload: Value = serde_json::from_slice(request).unwrap();
+            let input: Value =
+                serde_json::from_str(payload["messages"][1]["content"].as_str().unwrap()).unwrap();
+            if let Some(draft) = input["draft_items"].as_array() {
+                let mut envelope: Value = serde_json::from_slice(&response.body).unwrap();
+                let mut items = draft.clone();
+                for item in &mut items {
+                    item["text"] =
+                        json!("金额由 100 调整到 120，条件满足后生效；责任人与截止日期待确认。");
+                }
+                envelope["choices"][0]["message"]["content"] =
+                    json!(json!({"schema_version":5,"items":items}).to_string());
+                response.body = serde_json::to_vec(&envelope).unwrap();
+            }
         }
         Ok(response)
     }
 }
 
 #[test]
-fn oversized_summaries_retry_without_cutting_off_conditions_or_whole_items() {
-    for too_many_items in [false, true] {
+fn oversized_summaries_compact_complete_items_and_validate_all_sources() {
+    for (item_count, padding, invalid_last_source, calls, kept) in [
+        (1, 1600, false, 2, 1), // Compact the only item instead of discarding it.
+        (6, 0, false, 2, 1),    // Regenerate an invalid item count.
+        (5, 300, false, 2, 5),  // Keep every item through compaction.
+        (6, 0, true, 2, 1),     // Omission cannot hide an invalid source.
+    ] {
         let (_dir, config) = setup();
         let sent = Arc::new(AtomicUsize::new(0));
         let mut app = App::open(config, Utc::now()).unwrap();
         app.transport = Box::new(OversizedSummaryModel {
             sent: sent.clone(),
-            too_many_items,
+            item_count,
+            padding,
+            invalid_last_source,
         });
         let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
         let output = run_daily(request(day, true), &app).unwrap();
-        assert_eq!(sent.load(Ordering::SeqCst), 2);
+        assert_eq!(sent.load(Ordering::SeqCst), calls);
         assert!(output.markdown.contains("条件满足后生效"));
         assert!(output.markdown.contains("待确认"));
         let run = app.store.get(&output.run_id).unwrap();
         let report: ai_daily_report::reports::personal::PersonalReport =
             serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
-        assert!(ai_daily_report::reports::personal::body_chars(&report.items) <= 600);
-        assert!(report.items.len() <= 5);
-        assert!(!report.items.is_empty());
-        assert_eq!(
-            app.store.calls(&output.run_id).unwrap()[0]["error_code"],
-            "MODEL_RESPONSE_INVALID"
+        assert!(
+            ai_daily_report::reports::personal::body_chars(&report.items)
+                <= ai_daily_report::reports::personal::MAX_BODY_CHARS
         );
+        assert!(report.items.len() <= 5);
+        assert_eq!(report.items.len(), kept);
+        assert!(report.items.iter().all(|item| item
+            .text
+            .ends_with("金额由 100 调整到 120，条件满足后生效；责任人与截止日期待确认。")));
+        assert!(!report
+            .gaps
+            .iter()
+            .any(|gap| gap.code == "PERSONAL_OUTPUT_REDUCED"));
+        let call = &app.store.calls(&output.run_id).unwrap()[0];
+        if item_count > 5 {
+            assert_eq!(call["error_code"], "MODEL_RESPONSE_INVALID");
+        } else {
+            assert_eq!(call["status"], "succeeded");
+        }
     }
+}
+
+fn summary_draft(chars: usize) -> Value {
+    let mut items = json!([
+        {"title":"核查结果","text":"已核查记录，金额由 100 调整到 120，条件满足后生效。","kind":"progress","statement_kind":"user_statement","source_ids":["user_input"]},
+        {"title":"审批状态","text":"仍待审批，不能按已批准执行；责任人与截止日期待确认。","kind":"attention","statement_kind":"user_statement","source_ids":["user_input"]},
+        {"title":"明细核对","text":"部分明细尚待核实，现有结果仅限已核查范围。","kind":"progress","statement_kind":"user_statement","source_ids":["user_input"]},
+        {"title":"下一步：核实差异","text":"先核对未匹配记录，条件满足后再确认金额；负责人和期限待确认。","kind":"next_step","statement_kind":"suggestion","source_ids":["user_input"]}
+    ]);
+    let original: Vec<ai_daily_report::reports::personal::PersonalItem> =
+        serde_json::from_value(items.clone()).unwrap();
+    let padding = chars - ai_daily_report::reports::personal::body_chars(&original);
+    items[0]["text"] = json!(format!(
+        "{}{}",
+        "字".repeat(padding),
+        items[0]["text"].as_str().unwrap()
+    ));
+    json!({"schema_version":5,"items":items})
+}
+
+struct CompactionModel {
+    requests: Arc<Mutex<Vec<Value>>>,
+    draft: Value,
+    behavior: &'static str,
+}
+
+impl ModelTransport for CompactionModel {
+    fn send(&self, request: &[u8], _: Duration) -> Result<HttpResponse, TransportFailure> {
+        let payload: Value = serde_json::from_slice(request).unwrap();
+        let input: Value =
+            serde_json::from_str(payload["messages"][1]["content"].as_str().unwrap()).unwrap();
+        self.requests.lock().unwrap().push(payload);
+        let mut report = self.draft.clone();
+        if input["draft_items"].is_array() {
+            assert_eq!(input["max_chars"], 1500);
+            let mut draft = input["draft_items"].clone();
+            for (index, item) in draft.as_array_mut().unwrap().iter_mut().enumerate() {
+                assert_eq!(
+                    item.as_object_mut().unwrap().remove("item_id"),
+                    Some(json!(index + 1))
+                );
+            }
+            assert_eq!(draft, self.draft["items"]);
+            report["items"] = input["draft_items"].clone();
+            if self.behavior == "timeout" {
+                return Err(TransportFailure::Timeout);
+            }
+            if self.behavior != "too_long" {
+                report["items"][0]["text"] = json!("金额由 100 调整到 120，条件满足后生效。");
+            }
+            match self.behavior {
+                "drop_plan" => {
+                    report["items"].as_array_mut().unwrap().pop();
+                }
+                "change_kind" => report["items"][3]["kind"] = json!("progress"),
+                "change_certainty" => {
+                    report["items"][3]["statement_kind"] = json!("user_statement")
+                }
+                "drop_source" => report["items"][3]["source_ids"] = json!([]),
+                "reorder" => report["items"].as_array_mut().unwrap().swap(0, 2),
+                _ => {}
+            }
+        }
+        Ok(HttpResponse {
+            status: 200,
+            retry_after: None,
+            body: serde_json::to_vec(&json!({"choices":[{"finish_reason":"stop","message":{"content":report.to_string()}}],"usage":{"prompt_tokens":100,"completion_tokens":100}})).unwrap(),
+        })
+    }
+}
+
+#[test]
+fn thousand_five_hundred_boundary_compacts_all_items_and_reuses_both_audited_calls() {
+    for chars in [1500, 1501, 1504] {
+        let (_dir, config) = setup();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut app = App::open(config, Utc::now()).unwrap();
+        app.transport = Box::new(CompactionModel {
+            requests: requests.clone(),
+            draft: summary_draft(chars),
+            behavior: "valid",
+        });
+        let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let outcome = run_daily(request(day, true), &app).unwrap();
+        let run = app.store.get(&outcome.run_id).unwrap();
+        let report: ai_daily_report::reports::personal::PersonalReport =
+            serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
+        assert_eq!(report.items.len(), 4);
+        assert_eq!(
+            report.items[3].kind,
+            ai_daily_report::reports::personal::ItemKind::NextStep
+        );
+        assert!(report.items[3].text.contains("条件满足后"));
+        assert!(report.items[3].text.contains("待确认"));
+        assert!(
+            ai_daily_report::reports::personal::body_chars(&report.items)
+                <= ai_daily_report::reports::personal::MAX_BODY_CHARS
+        );
+        assert!(report.gaps.is_empty());
+        assert_eq!(report.quality, "complete");
+        let calls = app.store.calls(&outcome.run_id).unwrap();
+        assert_eq!(calls.len(), if chars == 1500 { 1 } else { 2 });
+        assert!(calls.iter().all(|call| call["status"] == "succeeded"));
+        if chars > 1500 {
+            assert_eq!(calls[1]["logical_step"], "personal_summary.compact");
+            assert_ne!(
+                calls[0]["request_fingerprint"],
+                calls[1]["request_fingerprint"]
+            );
+        }
+        let snapshots = ai_daily_report::snapshots::SnapshotStore::new(
+            app.config.paths.data_dir.join("daily_cache/snapshots"),
+            1024 * 1024 * 1024,
+        )
+        .unwrap();
+        let saved = ai_daily_report::snapshots::SnapshotRef {
+            path: run.snapshot_path.unwrap(),
+            sha256: run.snapshot_sha256.unwrap(),
+        };
+        let input: ai_daily_report::run::personal::PersonalInput =
+            serde_json::from_value(snapshots.read(&saved).unwrap()).unwrap();
+        let started = Instant::now();
+        let runner = ai_daily_report::model::ModelRunner {
+            store: &app.store,
+            snapshots: &snapshots,
+            transport: app.transport.as_ref(),
+            llm: &app.config.llm,
+            recovery_inputs: None,
+            allow_new_calls: false,
+            run_id: &outcome.run_id,
+            started_at: Utc::now(),
+            started,
+            deadline: started,
+        };
+        let reused =
+            ai_daily_report::model::personal::generate(&runner, input.plan.as_ref().unwrap())
+                .unwrap();
+        assert_eq!(reused.items.len(), 4);
+        assert_eq!(reused.omitted, 0);
+        assert_eq!(requests.lock().unwrap().len(), calls.len());
+        assert_eq!(app.store.calls(&outcome.run_id).unwrap().len(), calls.len());
+    }
+}
+
+#[test]
+fn failed_compaction_preserves_next_steps_and_audits_bounded_fallback() {
+    for behavior in [
+        "too_long",
+        "drop_plan",
+        "change_kind",
+        "change_certainty",
+        "drop_source",
+        "reorder",
+        "timeout",
+    ] {
+        let (_dir, config) = setup();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut app = App::open(config, Utc::now()).unwrap();
+        app.transport = Box::new(CompactionModel {
+            requests: requests.clone(),
+            draft: summary_draft(1504),
+            behavior,
+        });
+        let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let outcome = run_daily(request(day, true), &app).unwrap();
+        let run = app.store.get(&outcome.run_id).unwrap();
+        let report: ai_daily_report::reports::personal::PersonalReport =
+            serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
+        assert!(
+            ai_daily_report::reports::personal::body_chars(&report.items)
+                <= ai_daily_report::reports::personal::MAX_BODY_CHARS,
+            "{behavior}"
+        );
+        assert_eq!(
+            report.items.last().unwrap().kind,
+            ai_daily_report::reports::personal::ItemKind::NextStep,
+            "{behavior}"
+        );
+        assert_eq!(
+            report.items.last().unwrap().text,
+            summary_draft(1504)["items"][3]["text"].as_str().unwrap()
+        );
+        assert_eq!(report.quality, "partial");
+        assert!(report
+            .gaps
+            .iter()
+            .any(|g| g.code == "PERSONAL_OUTPUT_REDUCED"));
+        let calls = app.store.calls(&outcome.run_id).unwrap();
+        assert_eq!(
+            calls.len(),
+            if behavior == "timeout" { 2 } else { 3 },
+            "{behavior}"
+        );
+        assert_eq!(calls[0]["status"], "succeeded");
+        let error = if behavior == "timeout" {
+            "MODEL_TIMEOUT"
+        } else {
+            "MODEL_RESPONSE_INVALID"
+        };
+        assert!(
+            report.gaps.iter().any(|g| g.code == error),
+            "{behavior}: {:?}",
+            report.gaps
+        );
+        assert_eq!(requests.lock().unwrap().len(), calls.len());
+    }
+}
+
+struct StaticDraftModel {
+    sent: Arc<AtomicUsize>,
+    draft: Value,
+}
+
+impl ModelTransport for StaticDraftModel {
+    fn send(&self, _: &[u8], _: Duration) -> Result<HttpResponse, TransportFailure> {
+        self.sent.fetch_add(1, Ordering::SeqCst);
+        Ok(HttpResponse {
+            status: 200,
+            retry_after: None,
+            body: serde_json::to_vec(&json!({
+                "choices":[{"finish_reason":"stop","message":{"content":self.draft.to_string()}}],
+                "usage":{"prompt_tokens":100,"completion_tokens":100}
+            }))
+            .unwrap(),
+        })
+    }
+}
+
+fn extended_draft(chars: usize) -> Value {
+    let mut items = json!([
+        {"title":"劳务用工差异","text":"劳务用工规模与参保人数严重不匹配，需核实。","kind":"attention","statement_kind":"user_statement","source_ids":["user_input"]},
+        {"title":"供应商线索","text":"供应商董监高与单一来源采购线索需关注。","kind":"attention","statement_kind":"uncertain","source_ids":["user_input"]},
+        {"title":"镜片报废筛查","text":"报废原因字眼筛查无命中，原表已保留。","kind":"progress","statement_kind":"user_statement","source_ids":["user_input"]},
+        {"title":"信用报告取数","text":"信用报告批量取数完成，共 13 份。","kind":"progress","statement_kind":"user_statement","source_ids":["user_input"]},
+        {"title":"下一步：索要明细","text":"索取决算明细与花名册，条件满足后再核对。","kind":"next_step","statement_kind":"suggestion","source_ids":["user_input"]}
+    ]);
+    let original: Vec<ai_daily_report::reports::personal::PersonalItem> =
+        serde_json::from_value(items.clone()).unwrap();
+    let padding = chars - ai_daily_report::reports::personal::body_chars(&original);
+    items[0]["text"] = json!(format!(
+        "{}{}",
+        "字".repeat(padding),
+        items[0]["text"].as_str().unwrap()
+    ));
+    json!({"schema_version":5,"items":items})
+}
+
+#[test]
+fn complete_draft_within_extended_limit_publishes_every_item_without_compaction() {
+    let (_dir, config) = setup();
+    let sent = Arc::new(AtomicUsize::new(0));
+    let mut app = App::open(config, Utc::now()).unwrap();
+    app.transport = Box::new(StaticDraftModel {
+        sent: sent.clone(),
+        draft: extended_draft(913),
+    });
+    let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+    let outcome = run_daily(request(day, true), &app).unwrap();
+    let run = app.store.get(&outcome.run_id).unwrap();
+    let report: ai_daily_report::reports::personal::PersonalReport =
+        serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
+    assert_eq!(report.items.len(), 5);
+    assert_eq!(
+        ai_daily_report::reports::personal::body_chars(&report.items),
+        913
+    );
+    assert_eq!(
+        report.items.last().unwrap().kind,
+        ai_daily_report::reports::personal::ItemKind::NextStep
+    );
+    assert!(report.gaps.is_empty());
+    assert_eq!(report.quality, "complete");
+    let calls = app.store.calls(&outcome.run_id).unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["status"], "succeeded");
+    assert_eq!(calls[0]["logical_step"], "personal_summary");
+    assert_eq!(
+        app.store
+            .personal_calls("personal_work", &day.to_string())
+            .unwrap(),
+        1
+    );
+    assert_eq!(sent.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn oversized_next_steps_never_replace_an_existing_valid_report_with_an_empty_fallback() {
+    let (_dir, config) = setup();
+    let mut app = App::open(config, Utc::now()).unwrap();
+    app.transport = Box::new(Model {
+        sent: Arc::new(AtomicUsize::new(0)),
+        invalid: false,
+    });
+    let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+    let original = run_daily(request(day, true), &app).unwrap();
+    let path = original.output_path.unwrap();
+    let original_bytes = fs::read(&path).unwrap();
+    let mut draft = summary_draft(1504);
+    for item in draft["items"].as_array_mut().unwrap() {
+        item["kind"] = json!("next_step");
+    }
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    app.transport = Box::new(CompactionModel {
+        requests: requests.clone(),
+        draft,
+        behavior: "timeout",
+    });
+    let mut regenerate = request(day, true);
+    regenerate.regeneration_reason = Some("verify protected plans".into());
+    let error = run_daily(regenerate, &app).unwrap_err();
+    assert_eq!(error.code, "PERSONAL_RECOVERY_INCOMPLETE");
+    assert_eq!(
+        app.store.current(&day.to_string()).unwrap().unwrap().run_id,
+        original.run_id
+    );
+    assert_eq!(fs::read(&path).unwrap(), original_bytes);
+    assert_eq!(requests.lock().unwrap().len(), 2);
 }
 
 #[test]
@@ -618,74 +836,6 @@ fn no_save_preview_carries_evidence_without_publishing_files() {
     assert!(preview.markdown.contains("id=\"item-1\""));
     assert!(preview.markdown.contains("## 用户补充原文"));
     assert!(!app.config.paths.reports_dir.join("2026-10").exists());
-}
-
-#[test]
-fn report_reclaims_standby_bytes_for_input_and_model_snapshots() {
-    use ai_daily_report::{
-        archive::{identity, store::ArchiveStore},
-        processing_cache::ProcessingSession,
-    };
-    use std::time::Instant;
-    let (_dir, config) = setup();
-    let old = Utc::now() - chrono::Duration::days(2);
-    let root = config.paths.data_dir.join("daily_cache");
-    let session = ProcessingSession::at(
-        &root,
-        old,
-        Instant::now() + Duration::from_secs(30),
-        8 * 1024 * 1024,
-        1024 * 1024,
-        Duration::ZERO,
-    )
-    .unwrap();
-    let store = session.open_archive(&config).unwrap();
-    // Two 3 MiB standby objects leave less space than the existing 2 MiB
-    // response reservation. A report must reclaim one before its model call.
-    let objects: Vec<_> = (0..2)
-        .map(|i| {
-            let hash = identity(&[&i.to_string()]);
-            let path = store.object(&hash).unwrap();
-            let mut reservation = session.quota.reserve(3 * 1024 * 1024).unwrap();
-            reservation.track(&path).unwrap();
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(&path, vec![b'a'; 3 * 1024 * 1024]).unwrap();
-            reservation.commit(std::slice::from_ref(&path)).unwrap();
-            path
-        })
-        .collect();
-    drop(store);
-    drop(session);
-    let now = Utc::now();
-    let mut app = App::open(config, now).unwrap();
-    app.processing = None;
-    app.processing = Some(
-        ProcessingSession::at(
-            &root,
-            now,
-            Instant::now() + Duration::from_secs(30),
-            8 * 1024 * 1024,
-            1024 * 1024,
-            Duration::ZERO,
-        )
-        .unwrap(),
-    );
-    let sent = Arc::new(AtomicUsize::new(0));
-    app.transport = Box::new(Model {
-        sent: sent.clone(),
-        invalid: false,
-    });
-    let day = now
-        .with_timezone(&ai_daily_report::types::shanghai())
-        .date_naive()
-        .pred_opt()
-        .unwrap();
-    let output = run_daily(request(day, true), &app).unwrap();
-    assert_eq!(output.action, "published");
-    assert_eq!(sent.load(Ordering::SeqCst), 1);
-    assert!(objects.iter().any(|path| !path.exists()));
-    assert!(app.processing.as_ref().unwrap().quota.used_bytes().unwrap() <= 8 * 1024 * 1024);
-    assert!(ArchiveStore::open_collection(&app.config, false).is_ok());
 }
 
 #[test]
@@ -758,7 +908,7 @@ fn invalid_sources_never_publish_as_facts_and_requests_remain_bounded() {
 }
 
 #[test]
-fn oversized_notes_and_scan_source_fail_before_model_send() {
+fn oversized_notes_and_database_source_fail_before_model_send() {
     let (_dir, config) = setup();
     let sent = Arc::new(AtomicUsize::new(0));
     let mut app = App::open(config, Utc::now()).unwrap();
@@ -773,55 +923,11 @@ fn oversized_notes_and_scan_source_fail_before_model_send() {
         "USER_INPUT_TOO_LARGE"
     );
     let mut input = request(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap(), false);
-    input.period.source = ReportSource::Scan;
+    input.period.source = ReportSource::Db;
     assert_eq!(
         run_daily(input, &app).unwrap_err().code,
         "PERSONAL_SOURCE_INVALID"
     );
-    assert_eq!(sent.load(Ordering::SeqCst), 0);
-}
-
-#[test]
-fn no_change_requires_complete_observation_and_never_calls_the_model() {
-    let (_dir, config) = setup();
-    let now = Utc::now();
-    let day = (now - chrono::Duration::days(1)).date_naive();
-    let (start, end) = ai_daily_report::types::utc_window(day).unwrap();
-    ai_daily_report::archive::collect::run(&config, true, start - chrono::Duration::days(1))
-        .unwrap();
-    let store =
-        ai_daily_report::archive::store::ArchiveStore::open_collection(&config, true).unwrap();
-    for tick in 0..48 {
-        let at = (start + chrono::Duration::minutes(tick * 30)).to_rfc3339();
-        store.conn.execute("INSERT INTO collections(id,started_at,finished_at,status,baseline) VALUES(?,?,?,'complete',0)",
-            rusqlite::params![format!("test-{tick}"),at,at]).unwrap();
-    }
-    drop(store);
-    let sent = Arc::new(AtomicUsize::new(0));
-    let mut app = App::open(config, now).unwrap();
-    app.transport = Box::new(Model {
-        sent: sent.clone(),
-        invalid: false,
-    });
-    let mut input = request(day, false);
-    input.input.clear();
-    let output = run_daily(input.clone(), &app).unwrap();
-    assert_eq!(output.quality, "no_changes");
-    let store =
-        ai_daily_report::archive::store::ArchiveStore::open_collection(&app.config, true).unwrap();
-    store
-        .conn
-        .execute("DELETE FROM collections WHERE id='test-20'", [])
-        .unwrap();
-    drop(store);
-    input.context = RunContext::new(
-        new_run_id(),
-        end + chrono::Duration::seconds(1),
-        day,
-        String::new(),
-    )
-    .unwrap();
-    assert_eq!(run_daily(input, &app).unwrap().quality, "partial");
     assert_eq!(sent.load(Ordering::SeqCst), 0);
 }
 

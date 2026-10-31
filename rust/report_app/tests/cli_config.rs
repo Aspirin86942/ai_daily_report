@@ -51,6 +51,41 @@ fn command_tree_and_existing_daily_constraints() {
 }
 
 #[test]
+fn retired_collection_settings_are_rejected_in_effective_configuration() {
+    for (key, value) in [
+        ("collection_interval_minutes", "30"),
+        (
+            "collection_workday_window",
+            "{start: '09:00', end: '18:00'}",
+        ),
+        ("daily_source", "scan"),
+        ("read_workers", "2"),
+        ("parse_workers", "5"),
+        ("memory_mib", "3072"),
+        ("system_reserve_mib", "2048"),
+        ("parent_memory_mib", "512"),
+        ("run_seconds", "1200"),
+        ("copy_seconds", "120"),
+        ("warn_free_mib", "20480"),
+        ("reserve_free_mib", "5120"),
+        ("model_group_max_units", "16"),
+        ("model_group_max_utf8_bytes", "8192"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("config")).unwrap();
+        fs::write(
+            directory.path().join("config/settings.yaml"),
+            format!("paths:\n  work_dir: work\narchive:\n  {key}: {value}\n"),
+        )
+        .unwrap();
+        assert!(
+            AppConfig::load_with_env(directory.path(), None, &BTreeMap::new()).is_err(),
+            "accepted retired setting {key}"
+        );
+    }
+}
+
+#[test]
 fn shanghai_date_and_scheduled_boundary_match_python() {
     let due = NaiveTime::from_hms_opt(9, 0, 0).unwrap();
     let day = |text| types::parse_date(text).unwrap();

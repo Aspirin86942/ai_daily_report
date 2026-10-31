@@ -37,40 +37,6 @@ fn setup() -> (tempfile::TempDir, AppConfig) {
 }
 
 #[test]
-fn parse_queue_reports_wait_age_and_latest_deferral_reason() {
-    use ai_daily_report::archive::store::ArchiveStore;
-    let (_dir, config) = setup();
-    let store = ArchiveStore::open(&config, true).unwrap();
-    store.conn.execute_batch(r#"
-        INSERT INTO collections(id,started_at,status,baseline) VALUES('capture','2026-10-17T10:00:00Z','partial',0);
-        INSERT INTO collections(id,started_at,status,baseline,metrics_json) VALUES('parse-run','2026-10-18T02:00:00Z','parse_partial',0,'{"operation":"parse","queued":1,"reason_codes":["MEMORY_RESERVE"]}');
-        INSERT INTO documents(id,root,path,extension,baseline) VALUES('doc','root','queued.pdf','.pdf',0);
-        INSERT INTO objects VALUES('raw',1,'2026-10-17T10:00:00Z');
-        INSERT INTO versions(id,document_id,sha256,path,extension,size_bytes,modified_at,observed_at,collection_id,baseline) VALUES('version','doc','raw','queued.pdf','.pdf',1,'2026-10-17T10:00:00Z','2026-10-17T10:00:00Z','capture',0);
-        INSERT INTO extractions(id,sha256,profile,extension,status) VALUES('job','raw','profile','.pdf','queued');
-        INSERT INTO version_extractions VALUES('version','job');
-    "#).unwrap();
-    let report = health::check(
-        &config,
-        chrono::NaiveDate::from_ymd_opt(2026, 10, 17).unwrap(),
-        now(),
-    )
-    .unwrap();
-    let check = report
-        .checks
-        .iter()
-        .find(|check| check.code == "PARSE_QUEUE")
-        .unwrap();
-    assert_eq!(check.evidence["queued"], 1);
-    assert_eq!(check.evidence["oldest_observed_at"], "2026-10-17T10:00:00Z");
-    assert_eq!(check.evidence["oldest_age_seconds"], 61200);
-    assert_eq!(
-        check.evidence["last_parse_run"]["reason_codes"],
-        serde_json::json!(["MEMORY_RESERVE"])
-    );
-}
-
-#[test]
 fn health_reports_error_when_daily_report_is_missing() {
     let (_dir, config) = setup();
     let report = health::check(
@@ -110,56 +76,6 @@ fn health_reports_database_failures_as_unhealthy() {
 }
 
 #[test]
-fn health_baseline_window_is_not_a_collection_gap() {
-    use ai_daily_report::archive::store::ArchiveStore;
-    let (_dir, config) = setup();
-    let store = ArchiveStore::open(&config, true).unwrap();
-    store
-        .conn
-        .execute(
-            "INSERT INTO metadata(key,value) VALUES('baseline','2026-10-17T05:06:34+00:00')",
-            [],
-        )
-        .unwrap();
-    let start = DateTime::parse_from_rfc3339("2026-10-16T16:00:00+00:00")
-        .unwrap()
-        .with_timezone(&Utc);
-    let end = DateTime::parse_from_rfc3339("2026-10-17T16:00:00+00:00")
-        .unwrap()
-        .with_timezone(&Utc);
-    let baseline = DateTime::parse_from_rfc3339("2026-10-17T05:06:34+00:00")
-        .unwrap()
-        .with_timezone(&Utc);
-    let mut at = start;
-    while at <= end {
-        if at >= baseline - chrono::Duration::minutes(10) {
-            store
-                .conn
-                .execute(
-                    "INSERT INTO collections(id,started_at,finished_at,status,baseline) VALUES(?,?,?,'complete',0)",
-                    rusqlite::params![format!("c{}", at.timestamp()), at.to_rfc3339(), at.to_rfc3339()],
-                )
-                .unwrap();
-        }
-        at += chrono::Duration::minutes(30);
-    }
-    let report = health::check(
-        &config,
-        chrono::NaiveDate::from_ymd_opt(2026, 10, 17).unwrap(),
-        now(),
-    )
-    .unwrap();
-    assert!(
-        !report
-            .checks
-            .iter()
-            .any(|check| check.code == "COLLECTION_GAP" && check.level == "error"),
-        "{:?}",
-        report.checks
-    );
-}
-
-#[test]
 fn health_reports_empty_database_as_unhealthy() {
     let (_dir, config) = setup();
     fs::write(config.paths.db_dir.join("reports.sqlite3"), b"").unwrap();
@@ -175,59 +91,6 @@ fn health_reports_empty_database_as_unhealthy() {
         .iter()
         .any(|check| check.code == "DATABASE_INTEGRITY" && check.level == "error"));
     assert_eq!(health::exit_code(&report), 2);
-}
-
-#[test]
-fn health_previous_day_tail_gap_is_not_today_gap() {
-    use ai_daily_report::archive::store::ArchiveStore;
-    let (_dir, config) = setup();
-    let store = ArchiveStore::open(&config, true).unwrap();
-    store
-        .conn
-        .execute(
-            "INSERT INTO metadata(key,value) VALUES('baseline','2026-10-16T00:00:00+00:00')",
-            [],
-        )
-        .unwrap();
-    // 前一日最后一轮在目标窗口开始前 1 小时；目标日采集完整，不应把这段算作当日缺口。
-    store
-        .conn
-        .execute(
-            "INSERT INTO collections(id,started_at,finished_at,status,baseline) VALUES('prev','2026-10-16T15:00:00+00:00','2026-10-16T15:00:00+00:00','complete',0)",
-            [],
-        )
-        .unwrap();
-    let start = DateTime::parse_from_rfc3339("2026-10-16T16:00:00+00:00")
-        .unwrap()
-        .with_timezone(&Utc);
-    let end = DateTime::parse_from_rfc3339("2026-10-17T16:00:00+00:00")
-        .unwrap()
-        .with_timezone(&Utc);
-    let mut at = start;
-    while at < end {
-        store
-            .conn
-            .execute(
-                "INSERT INTO collections(id,started_at,finished_at,status,baseline) VALUES(?,?,?,'complete',0)",
-                rusqlite::params![format!("t{}", at.timestamp()), at.to_rfc3339(), at.to_rfc3339()],
-            )
-            .unwrap();
-        at += chrono::Duration::minutes(30);
-    }
-    let report = health::check(
-        &config,
-        chrono::NaiveDate::from_ymd_opt(2026, 10, 17).unwrap(),
-        now(),
-    )
-    .unwrap();
-    assert!(
-        !report
-            .checks
-            .iter()
-            .any(|check| check.code == "COLLECTION_GAP" && check.level == "error"),
-        "{:?}",
-        report.checks
-    );
 }
 
 fn insert_run(
@@ -263,7 +126,7 @@ fn attention(config: &AppConfig, target: &str) -> health::HealthCheck {
 }
 
 #[test]
-fn task_names_include_parse_task() {
+fn task_names_only_include_supported_tasks() {
     let (_dir, config) = setup();
     let report = health::check(
         &config,
@@ -272,9 +135,7 @@ fn task_names_include_parse_task() {
     )
     .unwrap();
     let name = &config.schedule.task_name;
-    assert_eq!(report.task_names.parse, format!("{name} Parse"));
     assert_eq!(report.task_names.daily, *name);
-    assert_eq!(report.task_names.collect, format!("{name} Collect"));
     assert_eq!(report.task_names.health, format!("{name} Health"));
 }
 

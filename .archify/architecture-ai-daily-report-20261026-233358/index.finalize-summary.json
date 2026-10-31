@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "command": "finalize",
+  "status": "fail",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+    "sha256": "e80b2a6ded84d1cc15bb1bebb96dfbe8a51e58f9b8b92ac2290aa7aa4c40a632",
+    "bytes": 10634
+  },
+  "artifact": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+    "sha256": "dcbfddbbd438ab76302d60f0352cb9cc8e5993eb22462d4c1731efcd56efb9aa",
+    "bytes": 846891
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "fail"
+  },
+  "failedStage": "browser-check",
+  "diagnostics": [
+    {
+      "code": "viewer/evidence-path-conflict",
+      "severity": "error",
+      "message": "browser-check will not replace the existing unowned evidence path \"D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.browser-check.json\".",
+      "subject": {
+        "artifact": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+        "evidencePath": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.browser-check.json"
+      },
+      "evidence": {
+        "reason": {
+          "code": "ownership-artifact-mismatch"
+        }
+      },
+      "supportedFixes": [
+        "move the conflicting file aside, or choose a separate --out-dir, then rerun browser-check"
+      ]
+    }
+  ],
+  "diagnosticSummary": {
+    "total": 1,
+    "shown": 1,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.finalize.json",
+    "summaryReceipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.finalize-summary.json",
+    "browserCheckReceipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-26T15:35:04.017Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 1971,
+  "browserCheck": {
+    "requested": true,
+    "ran": false
+  }
+}

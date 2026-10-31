@@ -13,7 +13,6 @@ use std::{
 pub struct ArchiveStore {
     pub root: PathBuf,
     pub conn: Connection,
-    pub quota: Option<std::sync::Arc<crate::processing_cache::CacheQuota>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,21 +33,7 @@ impl ArchiveStore {
     pub fn open(config: &AppConfig, writable: bool) -> Result<Self, ReportError> {
         Self::at(&config.paths.data_dir.join("archive"), writable)
     }
-    pub fn open_collection(config: &AppConfig, writable: bool) -> Result<Self, ReportError> {
-        if config.report.profile == crate::config::ReportProfile::Personal {
-            Self::at_mode(
-                &config.paths.data_dir.join("daily_cache/archive"),
-                writable,
-                true,
-            )
-        } else {
-            Self::open(config, writable)
-        }
-    }
     pub fn at(root: &Path, writable: bool) -> Result<Self, ReportError> {
-        Self::at_mode(root, writable, false)
-    }
-    fn at_mode(root: &Path, writable: bool, personal: bool) -> Result<Self, ReportError> {
         crate::snapshots::reject_redirects(root, "ARCHIVE_PATH_REDIRECT")?;
         if writable {
             for name in [
@@ -75,23 +60,6 @@ impl ArchiveStore {
         conn.busy_timeout(Duration::from_secs(5))?;
         conn.pragma_update(None, "foreign_keys", true)?;
         let version: u32 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if personal {
-            if version == 0 && writable {
-                conn.pragma_update(None, "page_size", 4096)?;
-                conn.pragma_update(None, "auto_vacuum", 2)?;
-            }
-            let page_size: i64 = conn.pragma_query_value(None, "page_size", |r| r.get(0))?;
-            let pages: i64 = conn.pragma_query_value(None, "page_count", |r| r.get(0))?;
-            let vacuum: u32 = conn.pragma_query_value(None, "auto_vacuum", |r| r.get(0))?;
-            let journal: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
-            if page_size != 4096 || pages > 8192 || vacuum != 2 || journal != "delete" {
-                return Err(error("PROCESSING_DATABASE_LIMIT_INVALID"));
-            }
-            conn.pragma_update(None, "temp_store", "MEMORY")?;
-            if writable {
-                conn.pragma_update(None, "max_page_count", 8192)?;
-            }
-        }
         if version == 0 && writable {
             let count: i64 = conn.query_row(
                 "SELECT count(*) FROM sqlite_master WHERE type='table'",
@@ -108,17 +76,12 @@ impl ArchiveStore {
             return Err(error("ARCHIVE_SCHEMA_INVALID"));
         }
         if writable {
-            conn.pragma_update(
-                None,
-                "journal_mode",
-                if personal { "DELETE" } else { "WAL" },
-            )?;
+            conn.pragma_update(None, "journal_mode", "WAL")?;
             conn.pragma_update(None, "synchronous", "FULL")?;
         }
         Ok(Self {
             root: root.to_owned(),
             conn,
-            quota: None,
         })
     }
     pub fn object(&self, hash: &str) -> Result<PathBuf, ReportError> {
@@ -148,33 +111,6 @@ impl ArchiveStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
-    pub fn gap(
-        &self,
-        run: &str,
-        path: Option<&str>,
-        code: &str,
-        detail: &str,
-    ) -> Result<(), ReportError> {
-        self.conn.execute(
-            "INSERT INTO gaps(collection_id,path,code,detail) VALUES(?,?,?,?)",
-            rusqlite::params![
-                run,
-                path,
-                code,
-                if self.quota.is_some() {
-                    &detail[..detail
-                        .char_indices()
-                        .map(|(i, c)| i + c.len_utf8())
-                        .take_while(|i| *i <= 4096)
-                        .last()
-                        .unwrap_or(0)]
-                } else {
-                    detail
-                }
-            ],
-        )?;
-        Ok(())
-    }
     pub fn put_json(&self, path: &Path, value: &impl Serialize) -> Result<String, ReportError> {
         let bytes = crate::snapshots::canonical_json(&serde_json::to_value(value)?)?;
         if path.exists() {
@@ -182,11 +118,7 @@ impl ArchiveStore {
                 return Err(error("ARCHIVE_IMMUTABLE_CONFLICT"));
             }
         } else {
-            if let Some(quota) = &self.quota {
-                quota.write(path, &bytes)?;
-            } else {
-                atomic_write(path, &bytes)?;
-            }
+            atomic_write(path, &bytes)?;
         }
         Ok(crate::snapshots::digest(&bytes))
     }
@@ -199,11 +131,7 @@ impl ArchiveStore {
         Ok(serde_json::from_str(&text)?)
     }
     pub fn verify_object(&self, hash: &str) -> Result<(), ReportError> {
-        let actual = if let Some(quota) = &self.quota {
-            super::file_hash_bounded(&self.object(hash)?, quota.deadline())?
-        } else {
-            file_hash(&self.object(hash)?)?
-        };
+        let actual = file_hash(&self.object(hash)?)?;
         if actual != hash {
             return Err(error("ARCHIVE_OBJECT_CORRUPT"));
         }

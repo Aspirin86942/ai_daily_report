@@ -1,0 +1,104 @@
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "command": "finalize",
+  "status": "pass",
+  "type": "architecture",
+  "quality": "showcase",
+  "specification": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+    "sha256": "95b6b87fa3d77cc7703add6e9851e8a8998c63de8545698a9b00c0b082a5aef9",
+    "bytes": 13310
+  },
+  "artifact": {
+    "path": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+    "sha256": "60624720dde7c5e884abf9e80ea7d1f406523f3d3f1c1b6312347301cd845e54",
+    "bytes": 855251
+  },
+  "gates": {
+    "validate": "pass",
+    "deliver": "pass",
+    "check": "pass",
+    "browser-check": "pass"
+  },
+  "diagnostics": [],
+  "diagnosticSummary": {
+    "total": 0,
+    "shown": 0,
+    "truncated": false
+  },
+  "evidence": {
+    "receipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\review-7\\index.finalize.json",
+    "summaryReceipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\review-7\\index.finalize-summary.json",
+    "browserCheckReceipt": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\review-7\\index.browser-check.json"
+  },
+  "update": {
+    "status": "current",
+    "installedVersion": "3.2.0",
+    "availableVersion": "3.2.0",
+    "releaseNotes": null,
+    "checkedAt": "2026-10-26T15:35:04.017Z",
+    "source": "cache",
+    "noticeRequired": false,
+    "noticeText": null
+  },
+  "visualReview": "not-requested",
+  "durationMs": 6036,
+  "browserCheck": {
+    "requested": true,
+    "ran": true
+  },
+  "visualReviewRecommendation": {
+    "action": "inspect-route-readability",
+    "signals": {
+      "routesOverSuggestedBends": 2,
+      "routesOverSuggestedStretch": 1
+    },
+    "reason": "Automated gates passed, but crossings or detours still need perceptual review before claiming visual quality.",
+    "affectedRoutes": {
+      "crossings": [],
+      "detours": [
+        {
+          "relationship": {
+            "from": "cli",
+            "to": "run",
+            "label": "daily",
+            "collectionIndex": 4,
+            "artifactIndex": 5
+          },
+          "bends": 4,
+          "stretch": 1.064
+        },
+        {
+          "relationship": {
+            "from": "publish",
+            "to": "output",
+            "label": "日期.md",
+            "collectionIndex": 15,
+            "artifactIndex": 16
+          },
+          "bends": 2,
+          "stretch": 1.408
+        },
+        {
+          "relationship": {
+            "from": "period",
+            "to": "publish",
+            "label": "汇总正文",
+            "collectionIndex": 19,
+            "artifactIndex": 20
+          },
+          "bends": 3,
+          "stretch": 1
+        }
+      ],
+      "truncated": false
+    },
+    "hints": [
+      "cli → run needs 4 bends: move node cli or run so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "publish → output needs 2 bends: move node publish or output so they share a row or column with matching centers, or sit diagonally with a clear corner.",
+      "period → publish needs 3 bends: move node period or publish so they share a row or column with matching centers, or sit diagonally with a clear corner."
+    ],
+    "repair": "Trace these relationships at the desktop viewport. For Architecture, use references/architecture-layout-repair.md: reflow a blocked main path or tangled connected scene, and repair an isolated defect locally only when the surrounding composition is accepted. Preserve all semantic content and user-fixed geometry. Rerun finalize once after the edit."
+  }
+}

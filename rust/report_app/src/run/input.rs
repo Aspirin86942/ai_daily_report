@@ -56,7 +56,7 @@ fn source_gap(source: &ReportSource, code: &str, stage: &str, message: &str) -> 
     CoverageGap::new(code, stage, Some(&source.source_id), message)
 }
 
-fn scan_sources(
+pub(super) fn scan_sources(
     scan: &ContextResult,
 ) -> Result<(Vec<ReportSource>, Vec<CoverageGap>), ReportError> {
     let mut sources = Vec::new();
@@ -331,19 +331,6 @@ pub(super) fn prepare(
         .map(|s| (s.source_id.clone(), s.excerpt.clone()))
         .collect();
     prepare_sources(app, request, sources, gaps, texts, None)
-}
-
-pub fn prepare_archive(app: &App, request: &ReportRequest) -> Result<FrozenInput, ReportError> {
-    let prepared = crate::archive::model_input::prepare(&app.config, request)?;
-    let target = json!({"archive_format":4,"archive_changes":prepared.changes,"archive_excluded_changes":prepared.excluded_changes,"continued":prepared.continued});
-    prepare_sources(
-        app,
-        request,
-        prepared.sources,
-        prepared.gaps,
-        prepared.texts,
-        Some(target),
-    )
 }
 
 fn prepare_sources(

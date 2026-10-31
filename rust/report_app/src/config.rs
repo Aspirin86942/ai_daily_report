@@ -525,12 +525,24 @@ impl AppConfig {
             *path = absolute(&program_dir, path);
         }
         if config.report.profile == ReportProfile::Personal {
-            config.archive.run_seconds = config.archive.run_seconds.min(120);
             config.archive.max_input_mib = config.archive.max_input_mib.min(50);
             config.archive.max_output_mib = config.archive.max_output_mib.min(16);
             config.recovery.run_budget_seconds = 300;
             config.recovery.lock_wait_seconds = config.recovery.lock_wait_seconds.min(5.0);
             config.recovery.model_workers = 1;
+            if config.personal_scan() {
+                // Leave room for user notes and model execution within the daily budget.
+                config.scanner.max_workers = Some(1);
+                config.scanner.total_max_chars =
+                    Some(config.scanner.total_max_chars.unwrap_or(18_000).min(18_000));
+                config.scanner.total_deadline_ms = Some(
+                    config
+                        .scanner
+                        .total_deadline_ms
+                        .unwrap_or(120_000)
+                        .min(120_000),
+                );
+            }
         }
         config.validate()?;
         config.archive.validate()?;
@@ -539,6 +551,10 @@ impl AppConfig {
 
     pub fn api_key(&self) -> &str {
         &self.api_key
+    }
+
+    pub fn personal_scan(&self) -> bool {
+        self.report.profile == ReportProfile::Personal
     }
 
     pub fn fingerprint(&self, recovery: bool) -> Result<String, ReportError> {

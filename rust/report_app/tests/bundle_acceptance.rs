@@ -17,6 +17,117 @@ use std::{
     thread,
     time::{Duration, Instant, UNIX_EPOCH},
 };
+#[test]
+#[ignore = "requires AI_DAILY_TEST_BUNDLE; standalone personal scan acceptance"]
+fn standalone_personal_scan_publishes_once_without_collection() {
+    let bundle = fs::canonicalize(std::env::var_os("AI_DAILY_TEST_BUNDLE").unwrap()).unwrap();
+    let output = PathBuf::from(std::env::var_os("AI_DAILY_ACCEPTANCE_OUTPUT").unwrap());
+    let root = output.with_file_name(format!(
+        "{}-scan",
+        output.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(!root.exists());
+    fs::create_dir_all(root.join("config")).unwrap();
+    fs::create_dir(root.join("work")).unwrap();
+    let root = fs::canonicalize(root).unwrap();
+    let config = root.join("config");
+    let server = Server::new();
+    fs::write(config.join("settings.yaml"),json!({
+        "paths":{"work_dir":root.join("work"),"data_dir":root.join("data"),"db_dir":root.join("db"),"reports_dir":root.join("reports"),"log_dir":root.join("logs")},
+        "report":{"profile":"personal"},
+        "archive":{"allow_work_dir_for_model":true},
+        "schedule":{"execution_limit_minutes":6},
+        "llm":{"base_url":format!("http://127.0.0.1:{}",server.port),"model_id":"synthetic-local",
+            "max_request_utf8_bytes":160000,"context_window_tokens":128000,"verified_max_output_tokens":8192,
+            "max_tokens":4096,"request_timeout_seconds":3}
+    }).to_string()).unwrap();
+    let target = chrono::Utc::now()
+        .with_timezone(&ai_daily_report::types::shanghai())
+        .date_naive()
+        .pred_opt()
+        .unwrap();
+    let stamp = ai_daily_report::types::utc_window(target)
+        .unwrap()
+        .0
+        .timestamp() as u64
+        + 3600;
+    let file = root.join("work/quotation.md");
+    fs::write(
+        &file,
+        "金额由 100 元调整为 120 元；预算内且复核通过后生效，仍待审批。责任人与截止时间待确认。\n",
+    )
+    .unwrap();
+    File::options()
+        .write(true)
+        .open(&file)
+        .unwrap()
+        .set_times(FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(stamp)))
+        .unwrap();
+    let mut loaded = BTreeSet::new();
+    let mut checks = vec![];
+    macro_rules! ok {
+        ($args:expr) => {{let (success,value,error)=run(&bundle,&config,$args,&mut loaded);assert!(success,"{error}");checks.push(json!({"args":$args,"passed":true}));value}};
+    }
+    ok!(&["doctor", "--strict"]);
+    assert_eq!(ok!(&["daily", "--dry-run"])["model_calls"], 0);
+    assert_eq!(server.calls(), 0);
+    let started = Instant::now();
+    let result = ok!(&["daily", "--scheduled"]);
+    let elapsed = started.elapsed().as_millis();
+    assert_eq!(result["target_date"], target.to_string());
+    assert_eq!(result["model_calls"], 1);
+    assert_eq!(server.calls(), 1);
+    assert!(!root.join("data/daily_cache/archive").exists());
+    let reports = rusqlite::Connection::open(root.join("db/reports.sqlite3")).unwrap();
+    let raw: String = reports
+        .query_row(
+            "SELECT raw_json FROM daily_reports WHERE date=?",
+            [target.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let report: ai_daily_report::reports::personal::PersonalReport =
+        serde_json::from_str(&raw).unwrap();
+    report.validate().unwrap();
+    assert!(!report.items.is_empty());
+    assert!(report.evidence_attachment.is_some());
+    assert_eq!(
+        report.sources[0].coverage_limits["personal"]["input_mode"],
+        "scan"
+    );
+    fs::rename(root.join("work"), root.join("work-offline")).unwrap();
+    assert_eq!(ok!(&["daily", "--scheduled"])["action"], "existing");
+    assert_eq!(server.calls(), 1);
+    let (_, health, error) = run(
+        &bundle,
+        &config,
+        &["health", "--format", "json"],
+        &mut loaded,
+    );
+    assert_eq!(
+        health["task_names"].as_object().unwrap().len(),
+        2,
+        "{error}"
+    );
+    assert!(!health["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["code"] == "COLLECTION_GAP" || c["code"] == "PARSE_QUEUE"));
+    let plan = ok!(&["task", "plan", "--kind", "daily", "--sid", "S-1-5-21-123"]);
+    assert_eq!(
+        plan["xml"]
+            .as_str()
+            .unwrap()
+            .matches("<CalendarTrigger")
+            .count(),
+        1
+    );
+    fs::write(root.join("acceptance.json"),serde_json::to_vec_pretty(&json!({"status":"passed","bundle":bundle,
+        "remote_model_calls":0,"local_http_requests":server.calls(),"checks":checks,"elapsed_ms":elapsed,
+        "production_tasks_changed":0,"report_items":report.items.len(),"health":health})).unwrap()).unwrap();
+}
+
 fn modules(pid: u32) -> Vec<String> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,
@@ -336,205 +447,4 @@ fn standalone_bundle_runs_reports_recovery_and_scheduling_without_python() {
         name.contains("python") || name.ends_with(".pyd") || name == "vcruntime140.dll"
     }));
     fs::write(root.join("acceptance.json"),serde_json::to_vec_pretty(&json!({"status":"passed","bundle":bundle,"path_scope":"Windows System32 only","python_environment_inherited":false,"remote_model_calls":0,"local_http_requests":server.calls(),"checks":checks,"loaded_modules":loaded,"production_tasks_changed":0,"real_daily_windows":0})).unwrap()).unwrap();
-}
-
-#[test]
-#[ignore = "requires AI_DAILY_TEST_BUNDLE; standalone personal package acceptance"]
-fn standalone_personal_bundle_exceeds_old_quotas_and_keeps_independent_evidence() {
-    let bundle =
-        fs::canonicalize(std::env::var_os("AI_DAILY_TEST_BUNDLE").expect("bundle required"))
-            .unwrap();
-    let output = PathBuf::from(std::env::var_os("AI_DAILY_ACCEPTANCE_OUTPUT").unwrap());
-    let root = output.with_file_name(format!(
-        "{}-personal",
-        output.file_name().unwrap().to_string_lossy()
-    ));
-    assert!(!root.exists());
-    fs::create_dir_all(root.join("config")).unwrap();
-    fs::create_dir(root.join("work")).unwrap();
-    let root = fs::canonicalize(root).unwrap();
-    let server = Server::new();
-    let config = root.join("config");
-    let work = root.join("work");
-    let data = root.join("data");
-    fs::write(config.join("settings.yaml"),json!({
-        "paths":{"work_dir":work,"data_dir":data,"db_dir":root.join("db"),"reports_dir":root.join("reports"),"log_dir":root.join("logs")},
-        "report":{"profile":"personal"},
-        "recovery":{"enforce_model_budgets":true,"max_calls_per_run":0,"max_calls_per_calendar_day":0,"max_tokens_per_run":0,"max_tokens_per_calendar_day":0,"max_cost_per_run_microunits":0,"max_cost_per_calendar_day_microunits":0},
-        "archive":{"daily_source":"archive","run_seconds":120,"read_workers":1,"parse_workers":1},
-        "schedule":{"local_time":"00:00","execution_limit_minutes":6},
-        "llm":{"base_url":format!("http://127.0.0.1:{}",server.port),"model_id":"synthetic-local",
-            "max_request_utf8_bytes":160000,"context_window_tokens":128000,"verified_max_output_tokens":8192,
-            "max_tokens":4096,"request_timeout_seconds":3}
-    }).to_string()).unwrap();
-    let table = |amount| {
-        let mut text = String::from("编号,金额（元）,条件,状态\n");
-        for i in 1..=200 {
-            text.push_str(&format!("{i},{amount},预算内且复核通过后生效,仍待审批\n"));
-        }
-        text
-    };
-    fs::write(work.join("amounts.csv"), table(100)).unwrap();
-    fs::write(
-        work.join("approval.txt"),
-        "报价金额 100 元，预算内且复核通过后生效，仍待审批。\n",
-    )
-    .unwrap();
-    let mut loaded = BTreeSet::new();
-    let mut checks = Vec::new();
-    macro_rules! ok {($args:expr)=>{{let args=$args;let(success,value,error)=run(&bundle,&config,args,&mut loaded);
-        assert!(success,"{args:?}: {error} {value}");checks.push(json!({"args":args,"action":value["action"]}));value}}}
-    ok!(&["doctor", "--strict"]);
-    ok!(&["collect", "--baseline"]);
-    fs::write(work.join("amounts.csv"), table(120)).unwrap();
-    fs::write(
-        work.join("approval.txt"),
-        "报价金额 120 元，预算内且复核通过后生效，仍待审批。\n",
-    )
-    .unwrap();
-    fs::write(work.join("new.txt"), "首次观察，截止日期待确认。\n").unwrap();
-    let too_big = File::create(work.join("oversized.txt")).unwrap();
-    too_big.set_len(51 * 1024 * 1024).unwrap();
-    drop(too_big);
-    let changed = ok!(&["collect"]);
-    assert!(changed["errors"].as_u64().unwrap() > 0);
-    let target = chrono::Utc::now()
-        .with_timezone(&ai_daily_report::types::shanghai())
-        .date_naive()
-        .pred_opt()
-        .unwrap();
-    let (start, _) = ai_daily_report::types::utc_window(target).unwrap();
-    // Controlled observation clock in the isolated fixture; no production input is read.
-    let conn = rusqlite::Connection::open(data.join("daily_cache/archive/index.sqlite3")).unwrap();
-    conn.execute(
-        "UPDATE versions SET observed_at=CASE WHEN baseline=1 THEN ?1 ELSE ?2 END",
-        rusqlite::params![
-            (start - chrono::Duration::days(1)).to_rfc3339(),
-            (start + chrono::Duration::hours(9)).to_rfc3339()
-        ],
-    )
-    .unwrap();
-    conn.execute(
-        "UPDATE metadata SET value=? WHERE key='baseline'",
-        [(start - chrono::Duration::days(1)).to_rfc3339()],
-    )
-    .unwrap();
-    drop(conn);
-    let date = target.to_string();
-    let dry = ok!(&["daily", "--target-date", &date, "--dry-run"]);
-    assert_eq!(dry["model_calls"], 0);
-    // Separate CLI processes prove that neither old configuration limits nor the
-    // persistent personal date count blocks later requests or publication.
-    for count in 1..=4 {
-        let preview = ok!(&["daily", "--target-date", &date, "--no-save"]);
-        assert_eq!(preview["model_calls"], 1);
-        assert_eq!(server.calls(), count);
-    }
-    let started = Instant::now();
-    let report = ok!(&["daily", "--scheduled"]);
-    let elapsed = started.elapsed().as_millis();
-    assert_eq!(report["target_date"], date);
-    assert_eq!(report["model_calls"], 1);
-    assert_eq!(server.calls(), 5);
-    let path = PathBuf::from(report["output_path"].as_str().unwrap());
-    let body = fs::read_to_string(&path).unwrap();
-    assert!(body.len() <= 100_000 && body.contains("100") && body.contains("120"));
-    assert!(body.contains("仍待审批") && body.contains("建议"));
-    let reports = rusqlite::Connection::open(root.join("db/reports.sqlite3")).unwrap();
-    let call_count: i64 = reports
-        .query_row("SELECT count(*) FROM report_model_calls", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(call_count, 5);
-    let raw: String = reports
-        .query_row(
-            "SELECT raw_json FROM daily_reports WHERE date=?",
-            [&date],
-            |r| r.get(0),
-        )
-        .unwrap();
-    let saved: ai_daily_report::reports::personal::PersonalReport =
-        serde_json::from_str(&raw).unwrap();
-    saved.validate().unwrap();
-    assert!(!saved.evidence.is_empty());
-    assert!(saved.selection.selected_chars <= 20_000);
-    assert_eq!(saved.schema_version, 5);
-    assert_eq!(ok!(&["daily", "--scheduled"])["model_calls"], 0);
-    assert_eq!(server.calls(), 5);
-    let search = ok!(&["search", "--query", "报价", "--format", "json"]);
-    assert!(search["total"].as_u64().unwrap() > 0);
-    let (_, health, error) = run(
-        &bundle,
-        &config,
-        &["health", "--target-date", &date, "--format", "json"],
-        &mut loaded,
-    );
-    let health_checks = health["checks"].as_array().expect(&error);
-    assert!(health_checks
-        .iter()
-        .any(|c| c["code"] == "REPORT_NOT_PUBLISHED" && c["level"] == "ok"));
-    assert!(health_checks
-        .iter()
-        .any(|c| c["code"] == "REPORT_CONTENT_PARTIAL" && c["level"] == "warning"));
-    assert!(health_checks
-        .iter()
-        .any(|c| c["code"] == "PROCESSING_CACHE" && c["evidence"]["complete"] == true));
-    fs::write(
-        root.join("health.json"),
-        serde_json::to_vec_pretty(&health).unwrap(),
-    )
-    .unwrap();
-    // Expiry is exercised by advancing the cache ledger clock in this fixture.
-    let ledger = data.join("daily_cache/.cache-ledger.json");
-    let mut entries: Value = serde_json::from_slice(&fs::read(&ledger).unwrap()).unwrap();
-    for entry in entries.as_object_mut().unwrap().values_mut() {
-        entry["created"] = json!((chrono::Utc::now() - chrono::Duration::days(8)).to_rfc3339());
-    }
-    fs::write(ledger, serde_json::to_vec(&entries).unwrap()).unwrap();
-    fs::remove_file(&path).unwrap();
-    ok!(&["archive", "drain"]);
-    ok!(&["repair-output", "--target-date", &date]);
-    assert_eq!(fs::read_to_string(path).unwrap(), body);
-    assert_eq!(server.calls(), 5);
-    for kind in ["daily", "collect", "parse", "health"] {
-        let plan = ok!(&[
-            "task",
-            "plan",
-            "--sid",
-            "S-1-5-21-1-2-3-1001",
-            "--kind",
-            kind
-        ]);
-        assert_eq!(plan["report_profile"], "personal");
-        assert!(plan["processing_dir"]
-            .as_str()
-            .unwrap()
-            .ends_with("daily_cache"));
-        if kind == "daily" {
-            assert!(plan["xml"].as_str().unwrap().contains("PT6M"));
-        }
-        if matches!(kind, "collect" | "parse") {
-            assert!(plan["xml"].as_str().unwrap().contains("PT3M"));
-        }
-    }
-    let cache_bytes: u64 = walkdir::WalkDir::new(data.join("daily_cache"))
-        .into_iter()
-        .map(|e| e.unwrap())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.metadata().unwrap().len())
-        .sum();
-    assert!(cache_bytes <= 1024 * 1024 * 1024);
-    assert!(elapsed < 180_000);
-    assert!(!data.join("archive").exists());
-    fs::write(
-        root.join("acceptance.json"),
-        serde_json::to_vec_pretty(&json!({
-            "status":"passed","bundle":bundle,"daily_duration_ms":elapsed,"output_bytes":body.len(),
-            "cache_logical_bytes":cache_bytes,"selected_chars":saved.selection.selected_chars,
-            "local_http_requests":server.calls(),"remote_model_calls":0,"real_tasks_changed":0,
-            "same_date_previews":4,"published_on_call":5,"legacy_zero_quotas_ignored":true,
-            "observation_clock":"isolated fixture","checks":checks,"loaded_modules":loaded
-        }))
-        .unwrap(),
-    )
-    .unwrap();
 }

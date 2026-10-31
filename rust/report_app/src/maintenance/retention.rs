@@ -264,7 +264,7 @@ pub fn cleanup(
         return Ok(result);
     }
     if let Some(session) = &app.processing {
-        session.open_archive(&app.config)?;
+        session.prune_snapshots()?;
         app.store
             .compact_personal(now, &session.quota.root.join("snapshots"))?;
     }

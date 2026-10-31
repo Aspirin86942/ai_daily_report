@@ -2,15 +2,11 @@
 
 根据本地文件生成可核对的中文日报、周报和月报。Rust 程序负责扫描、提取事实、成稿、存储及恢复，Windows 程序包无需 Python、uv 或虚拟环境。
 
-新安装示例启用 `report.profile: personal`：日报按进展、留意、下一步整理，通常 3～5 个重点、正文含事项标题合计 300～600 字；材料不足时允许更短。关键数字、条件和待确认状态保留在正文，完整原文、来源位置与指纹保存为独立 Markdown 附件，通过正文链接查看。重复的材料缺口合并说明。旧配置缺省为 `evidence`，历史日报保留原正文与完整证据附录。
+新安装示例启用 `report.profile: personal`：日报按进展、留意、下一步整理，通常 3～5 个重点、正文含事项标题合计以 420～560 字为目标，硬上限 1,500 字；材料不足时允许更短，初稿不超上限时直接发布，只有超过上限才进入独立精简步骤。关键数字、条件和待确认状态保留在正文，完整原文、来源位置与指纹保存为独立 Markdown 附件，通过正文链接查看。重复的材料缺口合并说明。旧配置缺省为 `evidence`，历史日报保留原正文与完整证据附录。
 
-个人日报关注指定工作目录的变化，尽可能比较前后内容，材料不足时明确说明。输入最多 20,000 字，人工补充最多 2,000 字。通常一次模型请求，不设按日期、运行或补报作业累计的调用次数、token 用量和金额额度；预览、失败和未知结果继续记录，单次运行仍有超时与有限重试。`data_dir/daily_cache` 中的处理文件与进行中的空间预留合计最多 1 GiB，正文最长保留 7 天；容量不足时可提前回收，不保证七天的完整历史。历史报告、旧归档、程序包和测试产物另行保留，整个项目占用不受此缓存限额约束。最终日报及依据文件最多 100,000 字节。程序总预算 300 秒，目录遍历、解析和模型调用均检查剩余时间。
+个人日报每天 09:00 扫描一次工作目录，按昨天 00:00–24:00 的修改时间选取文件，解析后生成一份日报；已发布内容重复触发时直接复用。扫描取得的是当时可见内容，中间版本、已删除文件及扫描前再次改写的文件可能缺失。文件输入最多 18,000 字，为人工补充预留 2,000 字。Collect、Parse 日内任务及执行代码已移除，Health 保留轻量检查。输入最多 20,000 字，人工补充最多 2,000 字。通常一次模型请求，不设按日期、运行或补报作业累计的调用次数、token 用量和金额额度；预览、失败和未知结果继续记录，单次运行仍有超时与有限重试。`data_dir/daily_cache` 中的处理文件与进行中的空间预留合计最多 1 GiB，正文最长保留 7 天；到期快照按七天规则清理，容量不足时明确报错。历史报告、旧归档、程序包和测试产物另行保留，整个项目占用不受此缓存限额约束。最终日报及依据文件最多 100,000 字节。程序总预算 300 秒，目录遍历、解析和模型调用均检查剩余时间。
 
-个人模式优先保存已发现的新增和修改，初始基线只利用剩余空间补采，不要求全部补齐，也不为补采基线淘汰同级材料。后台默认准备今天、昨天及仍在材料保留期内的历史异常日期；显式补报可指定 `--target-date`，按现存材料处理。比较使用目标日开始前和目标日内各自最后一次捕获的版本，未保存过的修改前正文无法事后还原。
-
-每次先恢复未完成的复制，再清理超过 7 天的处理材料。容量不足时，保护今天、昨天及显式目标日所需的比较版本和共享内容，依次回收无必要引用的中间材料、待用材料；仍放不下就保留缺口。发现变化但未取得正文、缺少修改前版本、初始基线待补采分别记录，解析队列为零不代表材料完整。复制按顺序进行，正文只在需要比较时解析。后台每批取 128 项，在 120 秒预算内继续处理并预留收尾时间；每项任务同一轮最多尝试一次。个人模式同时运行一个解析进程，保留系统预留和 512 MiB 子进程上限，并为主进程后续增长预留 128 MiB。
-
-缓存的 72 MiB 控制空间覆盖 SQLite 主库（上限 32 MiB）、回滚日志、空间预留账本及原子更新临时文件。复制同时考虑原件、两份回执的临时占用和 16 MiB 解析空间；解析按输出上限预留，日报快照按实际字节数预留，模型请求前保留响应写入空间。元信息未变化且本日已核验的文件走零正文读取快路径；每日内容核验会读取正文。性能指标以本机固定样本的测量为准。
+旧日内采集与补解析执行链路已退役，当前程序只生成 Daily 和 Health 任务。已发布报告、独立附件、模型调用审计及长期归档证据继续保留；旧采集缓存、专用配置与停用任务按退役清单删除。恢复资料与验证入口见当前状态。
 
 ## 当前状态
 
@@ -22,15 +18,13 @@
 
 ```powershell
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config doctor --strict | Out-Host
-./ai-daily-report.exe --config-dir D:/DailyReport/shared/config collect --baseline | Out-Host
-./ai-daily-report.exe --config-dir D:/DailyReport/shared/config collect | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config daily --dry-run | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config daily --target-date 2026-10-11 | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config weekly 2026-W41 --source db | Out-Host
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config monthly 2026-10 --source db | Out-Host
 ```
 
-`daily` 默认报告上一个已结束的自然日，时区固定为 `Asia/Shanghai`。personal 要求 `archive.daily_source: archive`，拒绝 `daily --source scan`。首次基线用于建立文件状态；后续采集才提供可比较变化，基线不计为新进展。`--dry-run` 准备有限输入、零模型请求；`--no-save` 生成有调用记录的预览。补充可通过 `daily -i "..."` 或 `report.notes_dir/YYYY-MM-DD.md` 提供。`doctor --strict` 不联网；`doctor --check-model` 明确发送一批合成材料并记录用量。
+`daily` 默认报告上一个已结束的自然日，时区固定为 `Asia/Shanghai`。personal 日报统一使用每日扫描输入。历史正文与附件使用 `repair-output` 从报告库恢复。`--dry-run` 准备有限输入、零模型请求；`--no-save` 生成有调用记录的预览。补充可通过 `daily -i "..."` 或 `report.notes_dir/YYYY-MM-DD.md` 提供。`doctor --strict` 不联网；`doctor --check-model` 明确发送一批合成材料并记录用量。
 
 ```powershell
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config runs --target-date 2026-10-11 | Out-Host
@@ -39,7 +33,7 @@
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config search --query 审批 --kind daily --limit 20 | Out-Host
 ```
 
-修复输出直接读取数据库中的正文，零扫描、零模型调用。检测到人工编辑时停止覆盖。`health` 只读检查采集连续性、日报发布与哈希、运行状态、磁盘与数据库完整性，不调用模型；退出码 0/1/2 分别表示健康/警告/不健康。`search` 只读检索历史日报、周报和月报正文，命中到具体事项，支持日期、类型和来源过滤；索引保存在独立的 `report_search.sqlite3`，可删除重建，报告库不被修改。
+修复输出直接读取数据库中的正文，零扫描、零模型调用。检测到人工编辑时停止覆盖。`health` 在每日扫描模式下只读检查日报发布与哈希、运行状态、扫描索引、磁盘与数据库完整性；归档模式额外检查采集连续性和解析队列，不调用模型；退出码 0/1/2 分别表示健康/警告/不健康。`search` 只读检索历史日报、周报和月报正文，命中到具体事项，支持日期、类型和来源过滤；索引保存在独立的 `report_search.sqlite3`，可删除重建，报告库不被修改。
 
 ## 文件与实现
 
@@ -48,7 +42,7 @@
 ```text
 ai-daily-report.exe
   ├─ report_app：配置、命令、模型调用、报告、恢复及维护
-  ├─ archive：持续采集、全文、差异和报告依据
+  ├─ archive：历史原件、全文、差异和报告依据查询
   └─ scanner_core：发现、选择、解析调度、缓存及覆盖审计
        ├─ ai-daily-office-parser.exe：Office 文件
        └─ ai-daily-pdf-parser.exe + pdfium.dll：PDF 文件
@@ -80,4 +74,4 @@ cargo test --manifest-path rust/Cargo.toml --workspace --locked
 - [历史归档索引](docs/archive/README.md)：历次设计、迁移与验收材料。
 - [旧 Python 操作说明归档](docs/archive/python-runtime-readme-2026-10-15.md)：切换前的运行参考。
 
-变化归档、版本差异、引用证据、采集任务与统计命令见 [变化归档操作说明](docs/change-archive.md)。2,648 文件测量、并发配置和覆盖限制见 [归档性能验收](docs/archive/history/archive-performance-20261017.md)。
+历史版本差异、引用证据与统计命令见 [变化归档操作说明](docs/change-archive.md)。2,648 文件测量、并发配置和覆盖限制见 [归档性能验收](docs/archive/history/archive-performance-20261017.md)。

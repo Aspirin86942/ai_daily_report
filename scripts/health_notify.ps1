@@ -78,10 +78,10 @@ try {
         $anomalies.Add('HEALTH_PROGRAM_FAILED')
     }
 
-    # Read back daily/collect/parse/health. This is read-only: the script never
+    # Read back the supported daily and health tasks. This is read-only: the script never
     # registers, modifies or removes a scheduled task.
     $names = New-Object System.Collections.Generic.List[string]
-    foreach ($property in @('daily', 'collect', 'parse', 'health')) {
+    foreach ($property in @('daily', 'health')) {
         if (-not ($report.task_names.PSObject.Properties.Name -contains $property)) {
             $anomalies.Add('TASK_NAME_MISSING:' + $property)
             continue
@@ -97,13 +97,15 @@ try {
     $healthName = ''
     if ($report.task_names.PSObject.Properties.Name -contains 'health') { $healthName = [string]$report.task_names.health }
     foreach ($name in $names) {
+        $expectedEnabled = $true
         $task = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
         if ($null -eq $task) {
-            $tasks += [pscustomobject]@{ name = $name; exists = $false; state = ''; last_result = $null; next_run_shanghai = '' }
+            $tasks += [pscustomobject]@{ name = $name; exists = $false; expected_enabled = $expectedEnabled; state = ''; last_result = $null; next_run_shanghai = '' }
             continue
         }
         $taskState = ''
         if ($task.PSObject.Properties.Name -contains 'State') { $taskState = [string]$task.State }
+        if ($expectedEnabled -and $taskState -eq 'Disabled') { $anomalies.Add('TASK_DISABLED:' + $name) }
         $info = Get-ScheduledTaskInfo -TaskName $name -ErrorAction SilentlyContinue
         $last = $null
         $next = ''
@@ -113,7 +115,7 @@ try {
                 $next = [TimeZoneInfo]::ConvertTime($info.NextRunTime, $zone).ToString('yyyy-MM-dd HH:mm:ss')
             }
         }
-        $tasks += [pscustomobject]@{ name = $name; exists = $true; state = $taskState; last_result = $last; next_run_shanghai = $next }
+        $tasks += [pscustomobject]@{ name = $name; exists = $true; expected_enabled = $expectedEnabled; state = $taskState; last_result = $last; next_run_shanghai = $next }
     }
     if ($report.PSObject.Properties.Name -contains 'tasks') {
         $report.PSObject.Properties.Remove('tasks')
@@ -169,9 +171,9 @@ try {
     # The health task itself is excluded from failure judgement: it is running (0x41301)
     # and this script may exit non-zero by design.
     $checkable = @($tasks | Where-Object { $_.name -ne $healthName })
-    $missing = @($checkable | Where-Object { -not $_.exists })
+    $missing = @($checkable | Where-Object { $_.expected_enabled -and -not $_.exists })
     $badResult = @($checkable | Where-Object {
-        $_.exists -and $null -ne $_.last_result -and $_.last_result -ne 0 -and $_.last_result -ne 267009
+        $_.expected_enabled -and $_.exists -and $null -ne $_.last_result -and $_.last_result -ne 0 -and $_.last_result -ne 267009
     })
     $stateFile = Join-Path $logDir 'health-notify-state.json'
     $state = $null
@@ -239,6 +241,6 @@ finally {
 # 4 = the program's own execution did not match its reported verdict; the report
 #     itself is preserved, so this code is reserved for an execution contract break.
 if ($null -eq $report -or $executionStatus -eq 'failed') { exit 4 }
-# warning/unhealthy report both non-zero to the scheduler.
-if ($report.status -ne 'healthy') { exit 1 }
+# Native warnings and scheduler anomalies both require scheduler attention.
+if ($notify) { exit 1 }
 exit 0

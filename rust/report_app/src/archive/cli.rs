@@ -10,33 +10,8 @@ pub enum Format {
     Text,
     Json,
 }
-#[derive(Debug, Args)]
-pub struct CollectArgs {
-    #[arg(long)]
-    pub baseline: bool,
-    #[arg(long)]
-    pub scheduled: bool,
-    #[arg(long, value_enum, default_value = "json")]
-    pub format: Format,
-}
 #[derive(Debug, Subcommand)]
 pub enum ArchiveCommand {
-    /// Process saved originals without scanning source directories or calling a model.
-    Drain {
-        #[arg(long)]
-        scheduled: bool,
-        #[arg(long, value_parser=types::parse_date)]
-        target_date: Option<NaiveDate>,
-        #[arg(long, default_value_t=120, value_parser=clap::value_parser!(u64).range(1..=1200))]
-        max_seconds: u64,
-    },
-    /// Prepare a new recovery generation using frozen input and validated fact receipts; no model calls.
-    Recover {
-        #[arg(long)]
-        run_id: String,
-        #[arg(long)]
-        reason: String,
-    },
     History {
         #[arg(long)]
         path: String,
@@ -53,15 +28,7 @@ pub enum ArchiveCommand {
         #[arg(long)]
         to: String,
     },
-    Retry {
-        #[arg(long)]
-        version: String,
-    },
     Verify,
-    /// Check the active profile's collection store, without modifying it.
-    VerifyCollection,
-    /// Activate the configured collection policy without collecting or parsing.
-    ActivateSchedule,
     /// Compress extraction storage without changing evidence bytes.
     Optimize,
     Backup {
@@ -90,56 +57,6 @@ pub struct StatsArgs {
 }
 pub fn execute(config: &AppConfig, command: ArchiveCommand) -> Result<Value, ReportError> {
     match command {
-        ArchiveCommand::Drain {
-            scheduled,
-            target_date,
-            max_seconds,
-        } => {
-            let started = std::time::Instant::now();
-            let result = super::queue::execute(
-                config,
-                scheduled,
-                target_date,
-                max_seconds,
-                chrono::Utc::now(),
-            );
-            if scheduled {
-                crate::operations::append_scheduled_log(
-                    config,
-                    "parse",
-                    started.elapsed().as_millis() as u64,
-                    None,
-                    target_date.as_ref().map(ToString::to_string).as_deref(),
-                    &result,
-                )?;
-            }
-            result
-        }
-        ArchiveCommand::Recover { run_id, reason } => {
-            super::recovery::prepare(config, &run_id, &reason)
-        }
-        ArchiveCommand::VerifyCollection => {
-            let store = ArchiveStore::open_collection(config, false)?;
-            super::maintenance::verify(&store)
-        }
-        ArchiveCommand::ActivateSchedule => {
-            let session = processing_session(config)?;
-            let _lock = if session.is_none() {
-                Some(crate::store::locking::ReportLock::acquire(
-                    &config.paths.data_dir.join("archive/collector"),
-                    "archive",
-                    std::time::Duration::ZERO,
-                )?)
-            } else {
-                None
-            };
-            let store = if let Some(session) = &session {
-                session.open_archive(config)?
-            } else {
-                ArchiveStore::open(config, true)?
-            };
-            super::schedule::activate_config(&store, &config.archive, chrono::Utc::now())
-        }
         ArchiveCommand::Optimize => super::storage::optimize(config),
         ArchiveCommand::Backup { output } => super::maintenance::backup(config, &output),
         ArchiveCommand::Prune {
@@ -150,56 +67,6 @@ pub fn execute(config: &AppConfig, command: ArchiveCommand) -> Result<Value, Rep
             (None, Some(path)) => super::maintenance::prune_execute(config, &path),
             _ => Err(error("ARCHIVE_PRUNE_OPTIONS_INVALID")),
         },
-        ArchiveCommand::Retry { version } => {
-            let session = processing_session(config)?;
-            let _lock = if session.is_none() {
-                Some(crate::store::locking::ReportLock::acquire(
-                    &config.paths.data_dir.join("archive/collector"),
-                    "archive",
-                    std::time::Duration::ZERO,
-                )?)
-            } else {
-                None
-            };
-            let mut store = if let Some(session) = &session {
-                session.open_archive(config)?
-            } else {
-                ArchiveStore::open(config, true)?
-            };
-            let version = store.version(&version)?;
-            if session.is_some() && !store.object(&version.sha256)?.is_file() {
-                return Err(error("PROCESSING_CONTENT_EXPIRED"));
-            }
-            let profile = super::parse::profile(config)?;
-            let id =
-                super::identity(&["extraction", &version.sha256, &version.extension, &profile]);
-            let tx = store.conn.transaction()?;
-            tx.execute("INSERT OR IGNORE INTO extractions(id,sha256,profile,extension,status) VALUES(?,?,?,?,'queued')",rusqlite::params![id,version.sha256,profile,version.extension])?;
-            tx.execute(
-                "INSERT OR IGNORE INTO version_extractions VALUES(?,?)",
-                rusqlite::params![version.id, id],
-            )?;
-            // Readable evidence stays available during an explicit retry.
-            if session.is_some() {
-                let exhausted: bool = tx.query_row(
-                    "SELECT attempts>=3 OR status='expired' FROM extractions WHERE id=?",
-                    [&id],
-                    |r| r.get(0),
-                )?;
-                if exhausted {
-                    return Err(error("PARSE_RETRY_EXHAUSTED"));
-                }
-                tx.execute("UPDATE extractions SET status=CASE WHEN manifest_json IS NULL THEN 'queued' ELSE status END,error_code=NULL WHERE id=?", [&id])?;
-            } else {
-                tx.execute("UPDATE extractions SET status=CASE WHEN manifest_json IS NULL THEN 'queued' ELSE status END,attempts=0,error_code=NULL WHERE id=?",[&id])?;
-            }
-            tx.execute(
-                "INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)",
-                rusqlite::params![format!("retry:{id}"), id],
-            )?;
-            tx.commit()?;
-            Ok(json!({"queued":1,"extraction_id":id}))
-        }
         command => {
             let store = ArchiveStore::open(config, false)?;
             match command {
@@ -247,21 +114,6 @@ pub fn execute(config: &AppConfig, command: ArchiveCommand) -> Result<Value, Rep
             }
         }
     }
-}
-fn processing_session(
-    config: &AppConfig,
-) -> Result<Option<crate::processing_cache::ProcessingSession>, ReportError> {
-    if config.report.profile != crate::config::ReportProfile::Personal {
-        return Ok(None);
-    }
-    Ok(Some(crate::processing_cache::ProcessingSession::at(
-        &config.paths.data_dir.join("daily_cache"),
-        chrono::Utc::now(),
-        std::time::Instant::now() + std::time::Duration::from_secs(120),
-        crate::processing_cache::MAX_BYTES,
-        crate::processing_cache::CONTROL_BYTES,
-        std::time::Duration::ZERO,
-    )?))
 }
 pub fn print(value: &Value, format: Format) -> Result<(), ReportError> {
     match format {

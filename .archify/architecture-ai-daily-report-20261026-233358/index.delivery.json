@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "3945eebc-905c-43b2-bf5b-9516953136cf",
+  "status": "current",
+  "command": "deliver",
+  "type": "architecture",
+  "input": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\candidate.json",
+  "output": "D:\\python_program\\ai_daily_report\\.archify\\architecture-ai-daily-report-20261026-233358\\index.html",
+  "specification": {
+    "sha256": "95b6b87fa3d77cc7703add6e9851e8a8998c63de8545698a9b00c0b082a5aef9",
+    "bytes": 13310
+  },
+  "artifact": {
+    "sha256": "60624720dde7c5e884abf9e80ea7d1f406523f3d3f1c1b6312347301cd845e54",
+    "bytes": 855251
+  }
+}

@@ -1,0 +1,312 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "AI 文件证据日报 — 项目架构",
+    "subtitle": "Rust 主程序 report_app + office/pdf worker + Windows 计划任务脚本",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "output": ".archify/architecture-ai-daily-report-20261026-233358/index.html",
+    "repository": {
+      "url": "https://github.com/Aspirin86942/ai_daily_report.git",
+      "provider": "github",
+      "revision": "f7e3179ec586b26ade98fda66213dc250dca52a0"
+    }
+  },
+  "components": [
+    {
+      "id": "sched",
+      "type": "external",
+      "label": "Windows 任务计划程序",
+      "sublabel": "daily/collect/parse/health",
+      "pos": [40, 36],
+      "size": [170, 56],
+      "sources": [
+        { "path": "scripts/daily_task_common.ps1", "line": 5, "end_line": 27, "label": "按 Kind 注册任务" },
+        { "path": "scripts/install_daily_task.ps1", "line": 1, "end_line": 16, "label": "安装入口" }
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "backend",
+      "label": "CLI 入口",
+      "sublabel": "ai-daily-report.exe · clap",
+      "pos": [280, 32],
+      "size": [180, 64],
+      "sources": [
+        { "path": "rust/report_app/src/cli.rs", "line": 10, "end_line": 98, "label": "子命令定义" },
+        { "path": "rust/report_app/src/main.rs", "line": 1, "end_line": 42, "label": "启动与分发" }
+      ]
+    },
+    {
+      "id": "src",
+      "type": "external",
+      "label": "源资料目录",
+      "sublabel": "共享盘 / 工作目录",
+      "pos": [40, 170],
+      "size": [160, 56],
+      "sources": [
+        { "path": "rust/report_app/src/archive/collect.rs", "line": 405, "end_line": 430, "label": "发现根与排除目录" }
+      ]
+    },
+    {
+      "id": "collect",
+      "type": "backend",
+      "label": "归档采集 collect",
+      "sublabel": "发现→复制→入队",
+      "pos": [270, 170],
+      "size": [160, 64],
+      "sources": [
+        { "path": "rust/report_app/src/archive/collect.rs", "line": 284, "end_line": 330, "label": "采集主流程" }
+      ]
+    },
+    {
+      "id": "parse",
+      "type": "backend",
+      "label": "解析调度 parse",
+      "sublabel": "队列身份 / 预算",
+      "pos": [500, 170],
+      "size": [150, 64],
+      "sources": [
+        { "path": "rust/report_app/src/archive/parse.rs", "line": 46, "end_line": 80, "label": "drain 与预算" },
+        { "path": "rust/report_app/src/archive/parse.rs", "line": 350, "end_line": 420, "label": "worker 会话" }
+      ]
+    },
+    {
+      "id": "worker",
+      "type": "backend",
+      "label": "解析 worker 进程",
+      "sublabel": "office / pdf · 协议 v4",
+      "pos": [720, 170],
+      "size": [170, 64],
+      "sources": [
+        { "path": "rust/report_app/src/archive/parse.rs", "line": 350, "end_line": 420, "label": "按格式选 worker" }
+      ]
+    },
+    {
+      "id": "archive",
+      "type": "database",
+      "label": "归档库 data/archive",
+      "sublabel": "原始对象 + schema v1",
+      "pos": [960, 150],
+      "size": [190, 90],
+      "sources": [
+        { "path": "rust/report_app/src/archive/schema.sql", "line": 1, "end_line": 42, "label": "归档 schema v1" }
+      ]
+    },
+    {
+      "id": "run",
+      "type": "backend",
+      "label": "运行编排 run",
+      "sublabel": "报告锁 · 270s 预算",
+      "pos": [40, 420],
+      "size": [170, 64],
+      "sources": [
+        { "path": "rust/report_app/src/run.rs", "line": 59, "end_line": 116, "label": "开锁与预算" },
+        { "path": "rust/report_app/src/run.rs", "line": 353, "end_line": 393, "label": "run_daily 分发" },
+        { "path": "rust/report_app/src/run/personal.rs", "line": 75, "end_line": 152, "label": "personal 主流程" }
+      ]
+    },
+    {
+      "id": "select",
+      "type": "backend",
+      "label": "材料选择 selection",
+      "sublabel": "前次观察 vs 当日",
+      "pos": [290, 420],
+      "size": [170, 64],
+      "sources": [
+        { "path": "rust/report_app/src/archive/selection.rs", "line": 71, "end_line": 115, "label": "prepare_at" }
+      ]
+    },
+    {
+      "id": "model",
+      "type": "backend",
+      "label": "模型执行 model",
+      "sublabel": "计划 v6 · 重试 · 审计",
+      "pos": [550, 420],
+      "size": [170, 64],
+      "sources": [
+        { "path": "rust/report_app/src/model/personal.rs", "line": 23, "end_line": 54, "label": "计划 v6" },
+        { "path": "rust/report_app/src/run/personal.rs", "line": 296, "end_line": 318, "label": "执行计划" },
+        { "path": "rust/report_app/src/model/mod.rs", "line": 606, "end_line": 629, "label": "生成入口" }
+      ]
+    },
+    {
+      "id": "render",
+      "type": "backend",
+      "label": "报告组装 reports",
+      "sublabel": "MiniJinja 模板",
+      "pos": [810, 420],
+      "size": [150, 64],
+      "sources": [
+        { "path": "rust/report_app/src/reports.rs", "line": 12, "end_line": 18, "label": "模板环境" },
+        { "path": "rust/report_app/src/reports/personal.rs", "line": 395, "end_line": 405, "label": "render / 依据附件" }
+      ]
+    },
+    {
+      "id": "publish",
+      "type": "backend",
+      "label": "发布 Publisher",
+      "sublabel": "正文 + 依据附件",
+      "pos": [1050, 420],
+      "size": [150, 64],
+      "sources": [
+        { "path": "rust/report_app/src/publish.rs", "line": 86, "end_line": 99, "label": "路径与安全检查" },
+        { "path": "rust/report_app/src/run/personal.rs", "line": 414, "end_line": 425, "label": "stage 后发布" }
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "模型服务 LLM",
+      "sublabel": "DeepSeek / OpenAI",
+      "pos": [550, 300],
+      "size": [170, 56],
+      "sources": [
+        { "path": "rust/report_app/src/model/transport.rs", "line": 86, "end_line": 120, "label": "准备与凭据" },
+        { "path": "rust/report_app/src/model/transport.rs", "line": 121, "end_line": 164, "label": "HTTPS POST 与错误映射" }
+      ]
+    },
+    {
+      "id": "health",
+      "type": "backend",
+      "label": "健康检查 health",
+      "sublabel": "任务 / 发布 / 队列",
+      "pos": [40, 560],
+      "size": [170, 60],
+      "sources": [
+        { "path": "rust/report_app/src/health.rs", "line": 510, "end_line": 545, "label": "只读 check" }
+      ]
+    },
+    {
+      "id": "reportsdb",
+      "type": "database",
+      "label": "报告库 + 快照",
+      "sublabel": "reports.sqlite3 · run_snapshots",
+      "pos": [290, 560],
+      "size": [180, 66],
+      "sources": [
+        { "path": "rust/report_app/src/store/mod.rs", "line": 26, "end_line": 26, "label": "报告 schema" },
+        { "path": "rust/report_app/src/run.rs", "line": 76, "end_line": 88, "label": "库与快照路径" }
+      ]
+    },
+    {
+      "id": "period",
+      "type": "backend",
+      "label": "周期汇总 weekly / monthly",
+      "sublabel": "读已完成日报 · 计划 v3",
+      "pos": [535, 560],
+      "size": [200, 66],
+      "sources": [
+        { "path": "rust/report_app/src/run/period.rs", "line": 78, "end_line": 136, "label": "run_period" },
+        { "path": "rust/report_app/src/reports/period.rs", "line": 26, "end_line": 27, "label": "周/月模板" },
+        { "path": "rust/report_app/src/publish.rs", "line": 101, "end_line": 108, "label": "period_path" }
+      ]
+    },
+    {
+      "id": "output",
+      "type": "database",
+      "label": "报告输出 data/reports",
+      "sublabel": "YYYY-MM/日期.md",
+      "pos": [1040, 560],
+      "size": [170, 58],
+      "sources": [
+        { "path": "rust/report_app/src/publish.rs", "line": 96, "end_line": 108, "label": "输出路径规则" }
+      ]
+    },
+    {
+      "id": "ops",
+      "type": "backend",
+      "label": "运维 / 巡检命令 ops",
+      "sublabel": "doctor · coverage · cleanup",
+      "pos": [1040, 700],
+      "size": [220, 76],
+      "sources": [
+        { "path": "rust/report_app/src/main.rs", "line": 160, "end_line": 320, "label": "运维命令分发" },
+        { "path": "rust/report_app/src/operations.rs", "line": 485, "label": "doctor --strict" },
+        { "path": "rust/report_app/src/maintenance/retention.rs", "line": 48, "label": "cleanup / backup" }
+      ]
+    }
+  ],
+  "connections": [
+    { "from": "sched", "to": "cli", "label": "定时", "fromSide": "right", "toSide": "left" },
+    { "from": "src", "to": "collect", "label": "变更", "fromSide": "right", "toSide": "left" },
+    { "from": "cli", "to": "collect", "label": "collect", "fromSide": "bottom", "toSide": "top" },
+    { "from": "cli", "to": "parse", "label": "parse", "fromSide": "right", "toSide": "top", "via": [[575, 64]] },
+    { "from": "cli", "to": "run", "label": "daily", "fromSide": "left", "toSide": "left", "via": [[240, 64], [240, 150], [20, 150], [20, 452]] },
+    { "from": "collect", "to": "parse", "label": "入队", "fromSide": "right", "toSide": "left" },
+    { "from": "parse", "to": "worker", "label": "请求", "fromSide": "right", "toSide": "left" },
+    { "from": "worker", "to": "archive", "label": "抽取", "fromSide": "right", "toSide": "left" },
+    { "from": "archive", "to": "select", "label": "changes / versions", "fromSide": "bottom", "toSide": "top", "via": [[1055, 275], [375, 275]] },
+    { "from": "run", "to": "select", "label": "筛选材料", "fromSide": "right", "toSide": "left" },
+    { "from": "select", "to": "model", "label": "计划 v6", "fromSide": "right", "toSide": "left" },
+    { "from": "model", "to": "render", "label": "结构化结果", "fromSide": "right", "toSide": "left" },
+    { "from": "render", "to": "publish", "label": "正文+附件", "fromSide": "right", "toSide": "left" },
+    { "from": "model", "to": "llm", "label": "HTTPS", "fromSide": "top", "toSide": "bottom" },
+    { "from": "run", "to": "reportsdb", "label": "运行 / 发布记录", "fromSide": "bottom", "toSide": "top", "via": [[125, 520], [380, 520]] },
+    { "from": "publish", "to": "output", "label": "日期.md", "fromSide": "right", "toSide": "right", "via": [[1240, 452], [1240, 589]] },
+    { "from": "health", "to": "reportsdb", "label": "读状态", "fromSide": "right", "toSide": "left" },
+    { "from": "reportsdb", "to": "period", "label": "已完成日报", "fromSide": "right", "toSide": "left" },
+    { "from": "period", "to": "model", "label": "计划 v3", "fromSide": "top", "toSide": "bottom" },
+    { "from": "period", "to": "publish", "label": "汇总正文", "fromSide": "right", "toSide": "bottom", "via": [[780, 593], [780, 520], [1125, 520]] },
+    { "from": "ops", "to": "reportsdb", "label": "巡检 / 清理", "fromSide": "left", "toSide": "bottom", "via": [[380, 738]] },
+    { "from": "ops", "to": "output", "label": "修复 / 备份", "fromSide": "top", "toSide": "bottom", "via": [[1150, 680], [1125, 680]] },
+    { "from": "ops", "to": "archive", "label": "统计 / 覆盖 / OCR", "fromSide": "right", "toSide": "right", "via": [[1310, 738], [1310, 195]] }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "触发与调度",
+      "items": [
+        "计划任务按 -Kind daily / collect / parse / health 注册，任务名带后缀",
+        "health 任务在 11:00、23:00 运行 health_notify.ps1，写 log_dir/health-YYYY-MM-DD.json",
+        "异常时用 NotifyIcon 弹桌面通知，执行失败与通知失败分开记录"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "归档与解析",
+      "items": [
+        "data/archive 的 schema v1 保存对象、版本、抽取、变更与证据引用",
+        "collect 只复制变更并入队；parse 以 worker 协议 v4 调 office_parser / pdf_parser",
+        "scan 来源由 scanner_core 在进程内调度同一解析 worker 池"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "报告生成",
+      "items": [
+        "personal profile 必须用 archive 来源：先冻结输入 v5，再按计划 v6 生成",
+        "选择比较目标日前最后一次观察与当日最后一次观察，每侧上限 5,000 件",
+        "先发布依据附件再发布正文；reports.sqlite3 记录运行、发布指纹与模型调用审计"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "预算与约束",
+      "items": [
+        "personal 在 270 秒停止发起新操作，300 秒内收尾",
+        "采集与排空各限 120 秒；材料保留 7 天 / 1 GiB",
+        "不设累计模型调用、token 或费用额度；失败一次即止并留审计"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "周期汇总 weekly / monthly",
+      "items": [
+        "只接受 --source db：读区间内已发布的归档日报，archive 来源直接拒绝",
+        "缺失日期写入 gaps，质量降为 partial；计划 v3 用 weekly / monthly 模板",
+        "正文经 Publisher.period_path 写 data/reports/weekly|monthly/<label>.md"
+      ]
+    },
+    {
+      "dot": "slate",
+      "title": "运维与巡检命令",
+      "items": [
+        "doctor --strict 校验配置、模板、库、worker 与 PDFium，不联网",
+        "list / search / runs / repair-output 只读核对报告库与输出文件",
+        "archive stats / coverage / ocr / backfill 读归档证据；cleanup / backup 按授权执行且不触发模型调用"
+      ]
+    }
+  ]
+}

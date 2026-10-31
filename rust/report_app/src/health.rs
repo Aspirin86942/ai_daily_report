@@ -1,11 +1,8 @@
 //! 只读健康巡检：任务、采集、日报发布、磁盘与数据库状态。
 //!
 //! 该模块不调用模型、不扫描原目录、不修改数据库；`health` 命令与健康任务共用这里的检查结果。
-use crate::{
-    archive::store::ArchiveStore, config::AppConfig, operations::display_path, snapshots::digest,
-    types, ReportError,
-};
-use chrono::{DateTime, Duration, NaiveDate, TimeZone, Utc};
+use crate::{config::AppConfig, operations::display_path, snapshots::digest, types, ReportError};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -29,8 +26,6 @@ pub struct HealthCheck {
 #[derive(Debug, Serialize)]
 pub struct TaskNames {
     pub daily: String,
-    pub collect: String,
-    pub parse: String,
     pub health: String,
 }
 
@@ -86,81 +81,6 @@ fn quick_check(connection: &Connection) -> bool {
         connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)),
         Ok(value) if value == "ok"
     )
-}
-
-fn shanghai_day_start(target: NaiveDate) -> Option<DateTime<Utc>> {
-    let day = target.and_hms_opt(0, 0, 0)?;
-    let local = types::shanghai().from_local_datetime(&day).single()?;
-    Some(local.with_timezone(&Utc))
-}
-
-fn baseline(store: &ArchiveStore) -> Result<Option<DateTime<Utc>>, ReportError> {
-    let value: Option<String> = store
-        .conn
-        .query_row(
-            "SELECT value FROM metadata WHERE key='baseline'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(value
-        .and_then(|text| DateTime::parse_from_rfc3339(&text).ok())
-        .map(|value| value.with_timezone(&Utc)))
-}
-
-fn collection_continuity(
-    store: &ArchiveStore,
-    target: NaiveDate,
-    now: DateTime<Utc>,
-) -> Result<HealthCheck, ReportError> {
-    let Some(window_start) = shanghai_day_start(target) else {
-        return Ok(HealthCheck::warning(
-            "COLLECTION_GAP",
-            "目标日期无法换算为上海时间",
-            json!({"target_date": target}),
-        ));
-    };
-    let window_end = window_start + Duration::days(1);
-    let start = baseline(store)?.map_or(window_start, |value| window_start.max(value));
-    let end = window_end.min(now);
-    if start >= end {
-        return Ok(HealthCheck::ok(
-            "COLLECTION_GAP",
-            "目标时段尚未结束或归档尚未建立基线，无需核对采集连续性",
-        ));
-    }
-    let coverage = crate::archive::schedule::coverage(store, start, end, now)?;
-    if coverage.planned_idle {
-        return Ok(HealthCheck::ok(
-            "COLLECTION_GAP",
-            "按当时生效的工作日采集规则，目标范围没有计划采集点",
-        ));
-    }
-    let completed = coverage.completed;
-    let gaps = coverage.gaps;
-    let ranges = coverage.ranges;
-    if !completed {
-        return Ok(HealthCheck::error(
-            "COLLECTION_GAP",
-            "目标范围尚无可核对的已完成采集记录，无法判断是否有变化",
-            json!({"target_date": target}),
-        ));
-    }
-    if gaps == 0 {
-        return Ok(HealthCheck::ok(
-            "COLLECTION_GAP",
-            "目标范围采集连续，未发现缺少已完成采集记录的时间",
-        ));
-    }
-    Ok(HealthCheck::error(
-        "COLLECTION_GAP",
-        format!(
-            "按当时生效的采集间隔检查（允许 1 分钟调度偏差），发现 {gaps} 段缺少已完成采集记录，前 {} 段（Asia/Shanghai）：{}",
-            ranges.len(),
-            ranges.join("；")
-        ),
-        json!({"target_date": target, "gaps": gaps, "ranges": ranges}),
-    ))
 }
 
 fn published_report(
@@ -350,104 +270,6 @@ fn run_attention(connection: &Connection, now: DateTime<Utc>) -> Result<HealthCh
     ))
 }
 
-fn parse_queue(
-    store: &ArchiveStore,
-    config: &AppConfig,
-    now: DateTime<Utc>,
-) -> Result<HealthCheck, ReportError> {
-    let personal = config.report.profile == crate::config::ReportProfile::Personal;
-    let pending = if personal {
-        Some(crate::archive::queue::pending_in(store, config, None)?)
-    } else {
-        None
-    };
-    let queued: i64 = if let Some(pending) = &pending {
-        pending["queued"].as_i64().unwrap_or(0)
-    } else {
-        store.conn.query_row(
-        "SELECT count(*) FROM extractions WHERE status IN ('queued','running') OR id IN (SELECT value FROM metadata WHERE key LIKE 'retry:%')",
-        [], |row| row.get(0),
-    )?
-    };
-    let oldest: Option<String> = if let Some(pending) = &pending {
-        pending["oldest_observed_at"].as_str().map(str::to_owned)
-    } else {
-        store.conn.query_row(
-        "SELECT min(v.observed_at) FROM versions v JOIN version_extractions ve ON ve.version_id=v.id JOIN extractions e ON e.id=ve.extraction_id WHERE v.pruned_at IS NULL AND (e.status IN ('queued','running') OR e.id IN (SELECT value FROM metadata WHERE key LIKE 'retry:%'))",
-        [], |row| row.get(0),
-    )?
-    };
-    let age = oldest
-        .as_deref()
-        .and_then(|at| DateTime::parse_from_rfc3339(at).ok())
-        .map(|at| (now - at.with_timezone(&Utc)).num_seconds().max(0));
-    let last: Option<String> = store.conn.query_row(
-        "SELECT metrics_json FROM collections WHERE status LIKE 'parse_%' ORDER BY julianday(started_at) DESC LIMIT 1", [], |row| row.get(0)
-    ).optional()?;
-    let changes = if config.report.profile == crate::config::ReportProfile::Personal {
-        0
-    } else {
-        crate::archive::queue::pending_changes(
-            store,
-            &crate::archive::parse::profile(config)?,
-            None,
-        )?
-    };
-    let expired: i64 = store.conn.query_row(
-        "SELECT count(*) FROM extractions WHERE status='expired'",
-        [],
-        |r| r.get(0),
-    )?;
-    let gaps: i64 = store.conn.query_row(
-        "SELECT count(*) FROM gaps WHERE resolved_at IS NULL",
-        [],
-        |r| r.get(0),
-    )?;
-    let standby = pending
-        .as_ref()
-        .and_then(|p| p["standby_baselines"].as_u64())
-        .unwrap_or(0);
-    let unavailable = pending
-        .as_ref()
-        .and_then(|p| p["unavailable"].as_u64())
-        .unwrap_or(0);
-    let capture_pending = pending
-        .as_ref()
-        .and_then(|p| p["capture_pending"].as_u64())
-        .unwrap_or(0);
-    let baseline_deferred = pending
-        .as_ref()
-        .and_then(|p| p["baseline_deferred"].as_u64())
-        .unwrap_or(0);
-    let evidence = json!({"queued":queued,"expired":expired,"read_gaps":gaps,"pending_changes":changes,"oldest_observed_at":oldest,"oldest_age_seconds":age,
-        "standby_baselines":standby,"unavailable":unavailable,
-        "capture_pending":capture_pending,"baseline_deferred":baseline_deferred,
-        "last_parse_run":last.map(|value|serde_json::from_str::<Value>(&value)).transpose()?});
-    Ok(HealthCheck {
-        code: "PARSE_QUEUE",
-        level: if queued == 0
-            && changes == 0
-            && unavailable == 0
-            && capture_pending == 0
-            && baseline_deferred == 0
-        {
-            "ok"
-        } else {
-            "warning"
-        },
-        message: if personal {
-            format!(
-                "日报材料待解析 {queued} 项、比较材料无法准备 {unavailable} 项；发现变化但未取得正文 {capture_pending} 项；初始基线待补采 {baseline_deferred} 项、已采待用 {standby} 项"
-            )
-        } else if queued == 0 && changes == 0 {
-            "归档解析队列为空".into()
-        } else {
-            format!("归档仍有 {queued} 个解析任务、{changes} 个变化依据未准备完成")
-        },
-        evidence,
-    })
-}
-
 fn disk_space(config: &AppConfig) -> HealthCheck {
     match free_bytes(&config.paths.data_dir) {
         Some(bytes) if bytes < DISK_ERROR_BYTES => HealthCheck::error(
@@ -590,46 +412,16 @@ pub fn check(
         )),
     }
 
-    match ArchiveStore::open_collection(config, false) {
-        Ok(store) => {
-            if quick_check(&store.conn) {
-                match collection_continuity(&store, target, now) {
-                    Ok(check) => checks.push(check),
-                    Err(_) => checks.push(HealthCheck::error(
-                        "DATABASE_INTEGRITY",
-                        "归档索引结构不可用，无法核对采集连续性",
-                        json!({"target_date": target}),
-                    )),
-                }
-                match parse_queue(&store, config, now) {
-                    Ok(check) => checks.push(check),
-                    Err(_) => checks.push(HealthCheck::error(
-                        "DATABASE_INTEGRITY",
-                        "归档索引结构不可用，无法核对解析队列",
-                        json!({}),
-                    )),
-                }
-            } else {
-                checks.push(HealthCheck::error(
-                    "DATABASE_INTEGRITY",
-                    "归档索引完整性检查未通过",
-                    json!({"path": display_path(&store.root.join("index.sqlite3"))}),
-                ));
-                checks.push(HealthCheck::error(
-                    "COLLECTION_GAP",
-                    "归档索引不可用，无法核对目标日采集连续性",
-                    json!({"target_date": target}),
-                ));
-            }
+    checks.push(match open_read(&config.index_db_path) {
+        Ok(connection) if quick_check(&connection) => {
+            HealthCheck::ok("SCAN_INDEX_INTEGRITY", "每日扫描索引完整性正常")
         }
-        Err(_) => {
-            checks.push(HealthCheck::error(
-                "COLLECTION_GAP",
-                "归档索引不存在或无法只读打开，无法核对采集连续性",
-                json!({"target_date": target, "data_dir": display_path(&config.paths.data_dir)}),
-            ));
-        }
-    }
+        _ => HealthCheck::error(
+            "SCAN_INDEX_INTEGRITY",
+            "每日扫描索引不存在或完整性检查未通过",
+            json!({"path":display_path(&config.index_db_path)}),
+        ),
+    });
     checks.push(disk_space(config));
     if config.report.profile == crate::config::ReportProfile::Personal {
         let root = config.paths.data_dir.join("daily_cache");
@@ -671,8 +463,6 @@ pub fn check(
         checks,
         task_names: TaskNames {
             daily: config.schedule.task_name.clone(),
-            collect: format!("{} Collect", config.schedule.task_name),
-            parse: format!("{} Parse", config.schedule.task_name),
             health: format!("{} Health", config.schedule.task_name),
         },
         log_dir: display_path(&config.paths.log_dir),

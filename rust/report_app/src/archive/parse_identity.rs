@@ -3,6 +3,7 @@ use ai_daily_scanner_core::parsers::identity::{file_hash, worker_content_identit
 use ai_daily_scanner_core::source_guard::{
     compute_source_guard, source_guard_kind_text, SourceGuardKind,
 };
+#[cfg(test)]
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,10 +32,7 @@ impl Verification {
         profile_from_identities(config, &self.office.identity, &self.pdf.identity)
     }
 
-    pub fn executable_hash(&self, pdf: bool) -> Option<&str> {
-        self.worker(pdf).sha256.as_deref()
-    }
-
+    #[cfg(test)]
     fn worker(&self, pdf: bool) -> &WorkerProof {
         if pdf {
             &self.pdf
@@ -43,6 +41,7 @@ impl Verification {
         }
     }
 
+    #[cfg(test)]
     pub fn check_worker(
         &self,
         config: &AppConfig,
@@ -61,6 +60,7 @@ impl Verification {
         Ok(())
     }
 
+    #[cfg(test)]
     pub fn persist(
         &self,
         config: &AppConfig,
@@ -122,7 +122,7 @@ fn verification_key(config: &AppConfig) -> Result<String, ReportError> {
 
 fn saved_verification(config: &AppConfig, key: &str) -> Option<Verification> {
     // A profile query must not create an archive or write verification state.
-    let store = super::store::ArchiveStore::open_collection(config, false).ok()?;
+    let store = super::store::ArchiveStore::open(config, false).ok()?;
     let text: String = store
         .conn
         .query_row(

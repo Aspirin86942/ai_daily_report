@@ -3,6 +3,7 @@ pub(crate) mod input;
 mod legacy;
 mod period;
 pub mod personal;
+mod personal_scan;
 pub use input::FrozenInput;
 pub fn prepare_daily_input(
     app: &App,
@@ -11,14 +12,6 @@ pub fn prepare_daily_input(
 ) -> Result<FrozenInput, ReportError> {
     input::prepare(app, request, scan)
 }
-pub use period::run_period;
-pub fn prepare_archive_input(
-    app: &App,
-    request: &ReportRequest,
-) -> Result<FrozenInput, ReportError> {
-    input::prepare_archive(app, request)
-}
-
 use crate::{
     config::AppConfig,
     model::{
@@ -35,6 +28,7 @@ use crate::{
 use ai_daily_scanner_contract::{AdapterPaths, ReportMode as ScanMode};
 use ai_daily_scanner_core::{ContextResult, ScanRequest, Scanner, ScannerConfig};
 use chrono::{DateTime, Utc};
+pub use period::run_period;
 use serde_json::Value;
 use std::{
     fs,
@@ -87,6 +81,7 @@ impl App {
         )?;
         let store = Store::open_locked(&path, now, &lock)?;
         if let Some(session) = &processing {
+            session.prune_snapshots()?;
             store.compact_personal_until(
                 now,
                 &session.quota.root.join("snapshots"),
@@ -323,34 +318,13 @@ fn deadline_check(deadline: Instant) -> Result<(), ReportError> {
 }
 
 /// Prepare only new scheduled archive input; published and frozen runs stay immutable.
-pub fn prepare_scheduled_archive(
-    app: &App,
-    request: &mut ReportRequest,
-) -> Result<Option<Value>, ReportError> {
-    if app.config.report.profile == crate::config::ReportProfile::Personal {
-        crate::personal_recovery::scheduled_request(app, request)?;
-        return Ok(None);
-    }
-    if !request.scheduled || request.period.source != crate::types::ReportSource::Archive {
-        return Ok(None);
-    }
-    let target = request.context.target_date.to_string();
-    if app.store.current(&target)?.is_some() || !app.store.pending(Some(&target))?.is_empty() {
-        return Ok(None);
-    }
-    let ready = crate::archive::queue::prepare_daily(
-        &app.config,
-        request.context.target_date,
-        request.context.started_at,
-    )?;
-    if ready["action"] != "deferred" {
-        // Newly completed parses carry their real ready_at, after the original CLI start.
-        request.context.started_at = Utc::now();
-    }
-    Ok(Some(ready))
-}
-
 pub fn run_daily(mut request: ReportRequest, app: &App) -> Result<ReportOutcome, ReportError> {
+    if request.period.source == crate::types::ReportSource::Archive {
+        return Err(ReportError::new(
+            "ARCHIVE_COLLECTION_RETIRED",
+            "日内采集已退役，请使用 daily --source scan；历史正文使用 repair-output 恢复",
+        ));
+    }
     if app.config.report.profile == crate::config::ReportProfile::Personal {
         return personal::run(request, app, app.started);
     }
@@ -369,9 +343,6 @@ pub fn run_daily(mut request: ReportRequest, app: &App) -> Result<ReportOutcome,
     }
     if let Some(recovered) = daily::resume_pending(app, &request, now, started, deadline)? {
         return Ok(recovered);
-    }
-    if let Some(existing) = daily::existing_archive(app, &request)? {
-        return Ok(existing);
     }
     let run_id = &request.context.run_id;
     app.store.create(

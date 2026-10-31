@@ -84,7 +84,7 @@ $report = [ordered]@{
     checks = @(
         [ordered]@{ code = 'STUB_CHECK'; level = $level; message = $message; evidence = [ordered]@{ target_date = '2026-10-18' } }
     )
-    task_names = [ordered]@{ daily = $task; collect = ($task + ' Collect'); parse = ($task + ' Parse'); health = ($task + ' Health') }
+    task_names = [ordered]@{ daily = $task; health = ($task + ' Health') }
     log_dir = $logDir
     generated_at = '2026-10-18T16:30:00+00:00'
 }
@@ -144,7 +144,7 @@ $report = [ordered]@{
     checks = @(
         [ordered]@{ code = 'REPORT_NOT_PUBLISHED'; level = 'error'; message = $message; evidence = [ordered]@{ target_date = '2026-10-18' } }
     )
-    task_names = [ordered]@{ daily = $task; collect = ($task + ' Collect'); parse = ($task + ' Parse'); health = ($task + ' Health') }
+    task_names = [ordered]@{ daily = $task; health = ($task + ' Health') }
     log_dir = $logDir
     generated_at = '2026-10-18T16:30:00+00:00'
 }
@@ -156,7 +156,7 @@ exit 2
 '@
 [IO.File]::WriteAllText($stub, $stubBody, $utf8)
 
-# Phase A.1: UTF-8 file contract, four task readbacks, temp cleanup.
+# Phase A.1: UTF-8 file contract, two task readbacks, temp cleanup.
 $logic = New-IsolatedConfig (Join-Path $root 'logic') 'Reliability Closure Health Probe'
 $tempsBefore = Get-HealthTempFiles
 $stdout = & $script -Program $stub -ConfigDirectory $logic.config -NoNotify | Out-String
@@ -171,13 +171,11 @@ $health = Read-HealthFile $healthPath
 Assert-Test (-not ($health.bytes[0] -eq 0xEF -and $health.bytes[1] -eq 0xBB -and $health.bytes[2] -eq 0xBF)) 'Health file must be UTF-8 without BOM'
 Assert-Test (-not $health.text.Contains([char]0xFFFD)) 'Health file contains invalid UTF-8 replacement characters'
 Assert-Test ([string]$health.json.checks[0].message -eq $chinese) 'Chinese health text must survive the UTF-8 file round trip'
-Assert-Test (@($health.json.tasks).Count -eq 4) ('Health report must include four task readbacks, got ' + @($health.json.tasks).Count)
+Assert-Test (@($health.json.tasks).Count -eq 2) ('Health report must include two task readbacks, got ' + @($health.json.tasks).Count)
 $taskNames = @($health.json.tasks | ForEach-Object { [string]$_.name })
 Assert-Test ($taskNames[0] -eq 'Reliability Closure Health Probe') 'Daily task name must come from configuration'
-Assert-Test ($taskNames[1] -eq 'Reliability Closure Health Probe Collect') 'Collect task name missing'
-Assert-Test ($taskNames[2] -eq 'Reliability Closure Health Probe Parse') 'Parse task name missing'
-Assert-Test ($taskNames[3] -eq 'Reliability Closure Health Probe Health') 'Health task name missing'
-Assert-Test ($health.json.task_names.parse -eq 'Reliability Closure Health Probe Parse') 'task_names.parse must be reported by the program'
+Assert-Test ($taskNames[1] -eq 'Reliability Closure Health Probe Health') 'Health task name missing'
+Assert-Test ($health.json.task_names.health -eq 'Reliability Closure Health Probe Health') 'task_names.health must be reported by the program'
 Assert-Test (@($health.json.tasks | Where-Object { $_.exists }).Count -eq 0) 'Isolated task names must not exist in the scheduler'
 $logDir = [string]$health.json.log_dir
 $tempsAfter = Get-HealthTempFiles
@@ -189,7 +187,7 @@ Assert-Test (@(Get-ChildItem -LiteralPath $logDir -Filter '*.tmp' -ErrorAction S
 $stdout2 = & $script -Program $stub -ConfigDirectory $logic.config -NoNotify | Out-String
 Assert-Test ($LASTEXITCODE -eq 1) 'Repeated unhealthy run must keep exit code 1'
 $health2 = Read-HealthFile ([string]($stdout2 | ConvertFrom-Json).health_file)
-Assert-Test (@($health2.json.tasks).Count -eq 4) 'Repeated health run must stay readable with four tasks'
+Assert-Test (@($health2.json.tasks).Count -eq 2) 'Repeated health run must stay readable with two tasks'
 $statePath = Join-Path $logDir 'health-notify-state.json'
 Assert-Test (Test-Path -LiteralPath $statePath) 'Notification dedup state was not written'
 $state = [IO.File]::ReadAllText($statePath, $utf8Strict) | ConvertFrom-Json
@@ -229,8 +227,8 @@ Assert-Test ($null -ne $cp936File) 'CP936 run did not write a health file'
 $cp936Health = Read-HealthFile $cp936File.FullName
 Assert-Test (-not $cp936Health.text.Contains([char]0xFFFD)) 'CP936 console corrupted the health file bytes'
 Assert-Test ([string]$cp936Health.json.checks[0].message -eq $chinese) 'CP936 console run lost Chinese health text'
-Assert-Test ($cp936Health.json.task_names.parse -eq 'Reliability Closure Health Probe CP936 Parse') 'CP936 run lost the parse task name'
-Assert-Test (@($cp936Health.json.tasks).Count -eq 4) 'CP936 run lost task readbacks'
+Assert-Test ($cp936Health.json.task_names.health -eq 'Reliability Closure Health Probe CP936 Health') 'CP936 run lost the health task name'
+Assert-Test (@($cp936Health.json.tasks).Count -eq 2) 'CP936 run lost task readbacks'
 
 # Phase A.4: notification component failure keeps the health file and exits 3.
 $failure = New-IsolatedConfig (Join-Path $root 'logic-notify-failure') 'Reliability Closure Health Probe Notify'
@@ -253,7 +251,7 @@ Assert-Test ($failureExit -eq 3) ('Notification component failure must exit 3, g
 $failureSummary = $failureStdout | ConvertFrom-Json
 Assert-Test ($failureSummary.notified -eq $false) 'Failed notification must report notified=false'
 $failureHealthAfter = Read-HealthFile $failureHealthFile.FullName
-Assert-Test (@($failureHealthAfter.json.tasks).Count -eq 4) 'Notification failure must keep the four-task health file readable'
+Assert-Test (@($failureHealthAfter.json.tasks).Count -eq 2) 'Notification failure must keep the two-task health file readable'
 Assert-Test ($failureHealthAfter.json.status -eq $beforeHealth.json.status) 'Notification failure must not alter the native health status'
 $errorRecord = Join-Path $failureLogDir 'health-notify-error.json'
 Assert-Test (Test-Path -LiteralPath $errorRecord) 'Notification failure must be recorded independently'
@@ -282,7 +280,7 @@ Assert-Test ([string]$execHealth.json.status -eq 'healthy') 'Enhanced health fil
 Assert-Test ([string]$execHealth.json.execution_status -eq 'failed') 'Enhanced health file must record execution_status=failed'
 Assert-Test ([int]$execHealth.json.program_exit_code -eq 1) 'Enhanced health file must record the actual program exit code'
 Assert-Test ([int]$execHealth.json.expected_program_exit_code -eq 0) 'Enhanced health file must record the expected program exit code'
-Assert-Test (@($execHealth.json.tasks).Count -eq 4) 'Execution failure must keep the four-task health file readable'
+Assert-Test (@($execHealth.json.tasks).Count -eq 2) 'Execution failure must keep the two-task health file readable'
 $execErrorPath = Join-Path $execLogDir 'health-execution-error.json'
 Assert-Test (Test-Path -LiteralPath $execErrorPath) 'Execution failure must be recorded in health-execution-error.json'
 $execError = [IO.File]::ReadAllText($execErrorPath, $utf8Strict) | ConvertFrom-Json
@@ -296,13 +294,13 @@ Assert-Test (-not (Test-Path -LiteralPath (Join-Path $execLogDir 'health-notify-
 $execState = [IO.File]::ReadAllText((Join-Path $execLogDir 'health-notify-state.json'), $utf8Strict) | ConvertFrom-Json
 Assert-Test ([string]$execState.codes -like '*HEALTH_PROGRAM_FAILED*') 'Notification reason must carry HEALTH_PROGRAM_FAILED'
 
-# Phase A.6: a healthy verdict with the expected exit 0 stays the success path.
+# Phase A.6: native execution succeeds; missing scheduled tasks still warn.
 $healthy = New-IsolatedConfig (Join-Path $root 'logic-healthy-exit0') 'Reliability Closure Health Probe Healthy'
 $healthyStub = Join-Path $root 'stub-health-healthy-exit0.ps1'
 New-HealthStub $healthyStub 'healthy' 0 $false
 $healthyStdout = & $script -Program $healthyStub -ConfigDirectory $healthy.config -NoNotify | Out-String
 $healthyExit = $LASTEXITCODE
-Assert-Test ($healthyExit -eq 0) ('Healthy report with program exit 0 must return 0, got ' + $healthyExit + ': ' + $healthyStdout)
+Assert-Test ($healthyExit -eq 1) ('Missing isolated tasks must warn despite healthy native output, got ' + $healthyExit + ': ' + $healthyStdout)
 $healthySummary = $healthyStdout | ConvertFrom-Json
 Assert-Test ([string]$healthySummary.execution_status -eq 'succeeded') 'Healthy run must report execution_status=succeeded'
 Assert-Test ([int]$healthySummary.program_exit_code -eq 0) 'Healthy run must report the program exit code 0'
@@ -313,7 +311,7 @@ $healthyHealth = Read-HealthFile ([string]$healthySummary.health_file)
 Assert-Test ([string]$healthyHealth.json.status -eq 'healthy') 'Healthy run health file must stay healthy'
 Assert-Test ([string]$healthyHealth.json.execution_status -eq 'succeeded') 'Healthy run health file must record execution_status=succeeded'
 Assert-Test ([int]$healthyHealth.json.program_exit_code -eq 0) 'Healthy run health file must record the program exit code'
-Assert-Test (@($healthyHealth.json.tasks).Count -eq 4) 'Healthy run health file must carry four task readbacks'
+Assert-Test (@($healthyHealth.json.tasks).Count -eq 2) 'Healthy run health file must carry two task readbacks'
 Assert-Test (-not (Test-Path -LiteralPath (Join-Path $healthyLogDir 'health-execution-error.json'))) 'Healthy run must not write an execution error record'
 
 # Historical dates participate in deduplication even when the general code is unchanged.
@@ -387,7 +385,7 @@ else {
     $nativeLogFile = Read-HealthFile $nativePath
     Assert-Test ($nativeLogFile.json.status -eq $nativeJson.json.status) 'Native and --output health files disagree on status'
     Assert-Test (-not ($nativeLogFile.json.PSObject.Properties.Name -contains 'tasks')) 'Native persist must not contain the notification task readback'
-    Assert-Test ($nativeLogFile.json.task_names.parse -eq 'Reliability Closure Health Probe Native Parse') 'Native persist must carry the parse task name'
+    Assert-Test ($nativeLogFile.json.task_names.health -eq 'Reliability Closure Health Probe Native Health') 'Native persist must carry the health task name'
     $scheduledLog = Join-Path ([string]$nativeJson.json.log_dir) ('scheduled-' + (Get-HealthFileName ([string]$nativeJson.json.generated_at)).Substring(7, 10) + '.jsonl')
     Assert-Test (Test-Path -LiteralPath $scheduledLog) 'Scheduled run must still write its scheduled log entry'
     Assert-Test (@(Get-ChildItem -LiteralPath ([string]$nativeJson.json.log_dir) -Filter '*.tmp' -ErrorAction SilentlyContinue).Count -eq 0) 'Program left temporary files in log_dir'
@@ -402,8 +400,8 @@ else {
     Assert-Test (Test-Path -LiteralPath $realFile) 'Real program run did not produce a health file'
     $realHealth = Read-HealthFile $realFile
     Assert-Test (-not $realHealth.text.Contains([char]0xFFFD)) 'Real program health file is not valid UTF-8'
-    Assert-Test (@($realHealth.json.tasks).Count -eq 4) 'Real program health file must carry four task readbacks'
-    Assert-Test ($realHealth.json.task_names.parse -eq 'Reliability Closure Health Probe Real Parse') 'Real program must report the parse task name'
+    Assert-Test (@($realHealth.json.tasks).Count -eq 2) 'Real program health file must carry two task readbacks'
+    Assert-Test ($realHealth.json.task_names.health -eq 'Reliability Closure Health Probe Real Health') 'Real program must report the health task name'
     Assert-Test ($realHealth.json.checks.Count -gt 0) 'Real program health file must carry checks'
     Assert-Test (-not (@($realSummary.anomalies) -contains 'HEALTH_NATIVE_FILE_MISSING')) 'Script must find the native file written by the program'
     $realLogDir = [string]$realHealth.json.log_dir
@@ -421,8 +419,8 @@ else {
     Assert-Test ($null -ne $realCp936File) 'Real CP936 run did not write a health file'
     $realCp936Health = Read-HealthFile $realCp936File.FullName
     Assert-Test (-not $realCp936Health.text.Contains([char]0xFFFD)) 'Real CP936 run corrupted the health file bytes'
-    Assert-Test (@($realCp936Health.json.tasks).Count -eq 4) 'Real CP936 run lost task readbacks'
-    Assert-Test ($realCp936Health.json.task_names.parse -eq 'Reliability Closure Health Probe Real CP936 Parse') 'Real CP936 run lost the parse task name'
+    Assert-Test (@($realCp936Health.json.tasks).Count -eq 2) 'Real CP936 run lost task readbacks'
+    Assert-Test ($realCp936Health.json.task_names.health -eq 'Reliability Closure Health Probe Real CP936 Health') 'Real CP936 run lost the health task name'
     Assert-Test (@($realCp936Health.json.checks | Where-Object { $_.level -ne 'ok' }).Count -gt 0) 'Real CP936 run must keep failing checks readable'
 }
 

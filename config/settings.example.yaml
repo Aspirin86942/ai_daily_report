@@ -65,11 +65,12 @@ retention:
 schedule:
   task_name: "AI Daily Report"
   local_time: "09:00"
-  logon_catchup: true
+  # personal + scan 只生成一个日历触发；错过时间由 StartWhenAvailable 补执行。
+  logon_catchup: false
   wake_to_run: false
   allow_on_battery: true
   stop_on_battery: false
-  restart_count: 2
+  restart_count: 0
   restart_interval_minutes: 15
   execution_limit_minutes: 6
 
@@ -120,37 +121,8 @@ scanner:
   worker_rss_limit_bytes: 536870912
 
 # personal 采集材料位于 data_dir/daily_cache，保留 7 天、合计最多 1 GiB。
-# evidence 继续使用旧 data_dir/archive；历史归档不自动迁移或清理。
+# 模型发送权限；沿用 archive 分组名称以兼容历史配置。
 archive:
-  # 按文件名前缀筛选模型输入；排除材料仅进入本地处理区。
-  model_ignored_prefixes: [".tmp-"]
-  model_group_max_units: 16
-  model_group_max_utf8_bytes: 8192
-  # 采集频率；必须为 30～1440 分钟且能整除一天，兼容默认值为 30。
-  collection_interval_minutes: 30
-  # null 保持旧全天模式；设为 {start: "09:00", end: "18:00"} 则仅周一至五采集。
-  # 窗口从 start 按频率触发，末次固定补到 end；登录和延后执行也受窗口限制。
-  collection_workday_window: null
-  # NTFS 透明压缩保留正文、随机定位和证据哈希。
-  compress_extractions: true
-  # work_dir 始终在采集范围内，其他目录默认仅供本地归档。
   roots: []
   model_roots: []
   allow_work_dir_for_model: true
-  # 首次运行 collect --baseline；个人日报只支持 archive 来源。
-  daily_source: archive
-  read_workers: 2
-  parse_workers: 5
-  memory_mib: 3072
-  system_reserve_mib: 2048
-  parent_memory_mib: 512
-  worker_memory_mib: 512
-  run_seconds: 120
-  copy_seconds: 120
-  parse_seconds: 120
-  max_input_mib: 50
-  max_output_mib: 16
-  warn_free_mib: 20480
-  reserve_free_mib: 5120
-  # 工作表标签 -> 唯一业务主键列；没有配置时仅推断两版均唯一的编号列。
-  table_keys: {}

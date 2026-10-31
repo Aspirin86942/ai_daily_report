@@ -19,6 +19,37 @@ fn open(root: &std::path::Path) -> ProcessingSession {
 }
 
 #[test]
+fn scan_retention_removes_only_expired_snapshots_without_creating_archive() {
+    let dir = tempfile::tempdir().unwrap();
+    let now = Utc::now();
+    let acquire = |at| {
+        ProcessingSession::at(
+            dir.path(),
+            at,
+            Instant::now() + Duration::from_secs(30),
+            32_768,
+            8_192,
+            Duration::ZERO,
+        )
+        .unwrap()
+    };
+    let session = acquire(now - chrono::Duration::days(8));
+    let expired = session.quota.root.join("snapshots/expired.json");
+    let historical = session.quota.root.join("history.txt");
+    session.quota.write(&expired, b"old input").unwrap();
+    session.quota.write(&historical, b"retained").unwrap();
+    drop(session);
+    let session = acquire(now);
+    let fresh = session.quota.root.join("snapshots/fresh.json");
+    session.quota.write(&fresh, b"recoverable").unwrap();
+    session.prune_snapshots().unwrap();
+    assert!(!expired.exists());
+    assert_eq!(fs::read(fresh).unwrap(), b"recoverable");
+    assert_eq!(fs::read(historical).unwrap(), b"retained");
+    assert!(!dir.path().join("archive").exists());
+}
+
+#[test]
 fn reservations_share_capacity_and_survive_reconciliation() {
     let dir = tempfile::tempdir().unwrap();
     let session = open(dir.path());
