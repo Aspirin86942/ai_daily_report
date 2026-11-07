@@ -130,6 +130,122 @@ fn standalone_personal_scan_publishes_once_without_collection() {
         "production_tasks_changed":0,"report_items":report.items.len(),"health":health})).unwrap()).unwrap();
 }
 
+#[test]
+#[ignore = "requires AI_DAILY_TEST_BUNDLE; model service switching acceptance"]
+fn standalone_model_service_switch_preserves_config_on_failure() {
+    let bundle = std::path::absolute(std::env::var_os("AI_DAILY_TEST_BUNDLE").unwrap()).unwrap();
+    let output = PathBuf::from(std::env::var_os("AI_DAILY_ACCEPTANCE_OUTPUT").unwrap());
+    let root = output.with_file_name(format!(
+        "{}-model-services",
+        output.file_name().unwrap().to_string_lossy()
+    ));
+    assert!(!root.exists());
+    fs::create_dir_all(root.join("config")).unwrap();
+    fs::create_dir(root.join("work")).unwrap();
+    let root = std::path::absolute(root).unwrap();
+    let config = root.join("config");
+    let server = Server::new();
+    let company = json!({
+        "llm":{"provider":"deepseek","model_id":"synthetic-local",
+            "base_url":format!("http://127.0.0.1:{}",server.port),"max_tokens":4096,
+            "context_window_tokens":128000,"verified_max_output_tokens":8192,
+            "thinking_mode":null,"thinking_parameter_location":null,"reasoning_effort":null},
+        "proxy":{"http_proxy":"","https_proxy":""}
+    });
+    let mut openai = company.clone();
+    openai["llm"]["provider"] = json!("openai");
+    openai["llm"]["model_id"] = json!("gpt-6-luna");
+    openai["llm"]["reasoning_effort"] = json!("none");
+    fs::write(
+        config.join("model-services.json"),
+        json!({"company":company,"openai":openai}).to_string(),
+    )
+    .unwrap();
+    fs::write(config.join("settings.yaml"),json!({
+        "paths":{"work_dir":root.join("work"),"data_dir":root.join("data"),"db_dir":root.join("db"),"reports_dir":root.join("reports"),"log_dir":root.join("logs")},
+        "report":{"profile":"personal"},"archive":{"allow_work_dir_for_model":true},
+        "schedule":{"task_name":"AI Daily Report Model Service Acceptance","execution_limit_minutes":6},
+        "llm":company["llm"]
+    }).to_string()).unwrap();
+    let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    let invoke = |service: &str, flags: &[&str], key: bool, conflicting_env: bool| {
+        let mut command =
+            Command::new(system.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
+        command
+            .env_clear()
+            .env("SystemRoot", &system)
+            .env("WINDIR", &system)
+            .env("TEMP", std::env::temp_dir())
+            .env("TMP", std::env::temp_dir())
+            .env("PATH", system.join("System32"))
+            .env("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+            .env("DEEPSEEK_API_KEY", "synthetic-company-key");
+        if key {
+            command.env("OPENAI_API_KEY", "synthetic-openai-key");
+        }
+        if conflicting_env {
+            command.env("DAILY_REPORT_LLM__MODEL_ID", "conflicting-model");
+        }
+        command
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(bundle.join("scripts/set_model_service.ps1"))
+            .args(["-Service", service, "-ConfigDirectory"])
+            .arg(&config)
+            .arg("-Program")
+            .arg(bundle.join("ai-daily-report.exe"))
+            .args(flags)
+            .creation_flags(0x08000000)
+            .output()
+            .unwrap()
+    };
+    let overlay = config.join("settings.windows.yaml");
+    let preview = invoke("openai", &[], false, false);
+    assert!(
+        preview.status.success(),
+        "{}",
+        String::from_utf8_lossy(&preview.stderr)
+    );
+    assert!(!overlay.exists());
+    assert_eq!(server.calls(), 0);
+    let missing_key = invoke("openai", &["-Apply"], false, false);
+    assert!(!missing_key.status.success());
+    assert!(String::from_utf8_lossy(&missing_key.stderr).contains("MODEL_CREDENTIAL_MISSING"));
+    assert!(!overlay.exists());
+    for service in ["openai", "company"] {
+        let result = invoke(service, &["-Apply", "-CheckModel"], true, false);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let value: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(value["applied"], true);
+        assert_eq!(value["model_calls"], 1);
+    }
+    assert_eq!(server.calls(), 2);
+    let saved = fs::read(&overlay).unwrap();
+    let result = invoke("company", &["-Apply"], true, false);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(server.calls(), 2);
+    let conflict = invoke("openai", &["-Apply", "-CheckModel"], true, true);
+    assert!(!conflict.status.success());
+    assert!(String::from_utf8_lossy(&conflict.stderr).contains("MODEL_SERVICE_READBACK_MISMATCH"));
+    assert_eq!(fs::read(&overlay).unwrap(), saved);
+    assert_eq!(server.calls(), 3);
+    fs::write(
+        root.join("acceptance.json"),
+        json!({"status":"passed","remote_model_calls":0,
+        "local_http_requests":server.calls(),"missing_key_preserved_config":true,
+        "readback_failure_restored_config":true,"production_tasks_changed":0})
+        .to_string(),
+    )
+    .unwrap();
+}
+
 fn modules(pid: u32) -> Vec<String> {
     use windows_sys::Win32::{
         Foundation::CloseHandle,

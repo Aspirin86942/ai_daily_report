@@ -15,6 +15,29 @@ ai-daily-report.exe --config-dir <配置目录> daily --target-date 2026-10-30 -
 
 人工补充可通过 `-i` 或 `report.notes_dir/YYYY-MM-DD.md` 提供。两处补充去除重复段落后合计最多 2,000 字，文件材料最多 18,000 字。手工指定旧日期取得的是当前仍可见的文件内容，覆盖边界保留在报告中。
 
+## 选择公司网关或 OpenAI
+
+在项目目录运行下面的命令。`company` 使用公司网关，`openai` 使用 OpenAI 兼容接口，当前连接本机 Magpie；切换后，手工命令和定时任务都读取同一份生效配置。
+
+```powershell
+# 查看目标接口、模型及密钥是否已配置，零模型调用。
+.\scripts\set_model_service.ps1 -Service openai
+
+# 首次使用 OpenAI：用虚构材料完成接口检查，然后切换。
+.\scripts\set_model_service.ps1 -Service openai -Apply -CheckModel
+
+# 切回已验证的公司网关，零模型调用。
+.\scripts\set_model_service.ps1 -Service company -Apply
+```
+
+OpenAI 密钥使用项目根目录现有 `.env` 中的 `OPENAI_API_KEY`，或 `config-rust/.secrets.yaml` 的 `api.openai_api_key`。添加密钥时保留已有公司网关配置，密钥不进入 Git 或诊断输出。缺少密钥、接口验证失败或配置回读不一致时，切换不会生效。
+
+`config-rust/model-services.json` 保存两种连接的模型、地址和代理参数；仓库中的安装示例为 `scripts/model-services.example.json`，发布包将其放在 `config/model-services.example.json`。切换器只更新 `settings.windows.yaml` 中的 `llm`、`proxy` 分组，并保留其余设置和原文件备份；该覆盖文件使用 JSON 文本，程序按 YAML 兼容格式读取。已有非 JSON 的覆盖文件需要先保留原件并转换格式。项目 `.env` 或进程中的 `DAILY_REPORT_LLM__*`、`DAILY_REPORT_PROXY__*` 具有更高优先级，应避免同时配置同一项。
+
+当前 OpenAI 连接地址为 `http://127.0.0.1:3425/v1`，模型为 Magpie 提供的 `openai/gpt-6.1-terra`，使用 `reasoning_effort: none` 和 `max_completion_tokens`。公司网关保持原有 DeepSeek 请求参数。模型参数依据 [GPT-6 官方说明](https://developers.openai.com/api/docs/guides/latest-model)与 [Chat Completions 参数说明](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)，具体路由以 Magpie 的模型列表和接口实测为准。旧冻结请求继续按保存时的格式校验和恢复。
+
+公司网关需要公司网络或 VPN；本机 OpenAI 入口需要 Magpie 持续运行并监听 3425 端口，程序直接访问本机接口。使用 OpenAI 官方服务时，可在连接配置中改为 `https://api.openai.com/v1`、官方模型名称及对应密钥。连接可单独设置 `proxy.https_proxy`，只作用于该程序。选择一项连接后，请求只发送给所选服务。
+
 ## 摘要与依据
 
 摘要通常为 3～5 项，目标 420～560 字，最多 5 项、1,500 字；材料稀少时允许更短。未超过硬上限的初稿完整发布。超长时使用单独记录的精简请求，保持事项数量、顺序、类别、确定程度和引用；精简失败才缩减完整事项，保留下一步计划。
@@ -42,6 +65,6 @@ ai-daily-report.exe --config-dir <配置目录> search --query 审批 --kind all
 
 处理文件与空间预留位于 `data_dir/daily_cache`，合计最多 1 GiB，正文材料最长保留 7 天。诊断细节保留 30 天、最多 8 MiB；个人运行日志保留 30 天、最多 2 MiB。历史异常在材料过期后仍可见，并在当前发布解决问题后解除。
 
-`health` 检查 Daily/Health 两项任务上下文、报告与附件哈希、运行与历史异常、扫描索引、磁盘和数据库完整性；零模型调用。退出码 0/1/2 分别表示健康、预警、不健康。正式健康任务每天 11:00、23:00 执行。
+`health` 检查 Daily/Health 两项任务上下文、报告与附件哈希、运行与历史异常、扫描索引、磁盘和数据库完整性；零模型调用。退出码 0/1/2 分别表示健康、预警、不健康。正式健康任务每天 11:00、23:00 执行，启用 `StartWhenAvailable`，错过计划时间后在任务可运行时补执行。
 
 周月报生成、批量补跑、覆盖修复作业、OCR 命令及 OCR 材料覆盖入口已退役。文件格式解析能力保持，图片文字识别保持关闭。

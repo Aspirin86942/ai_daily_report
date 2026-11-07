@@ -58,7 +58,7 @@ D:/DailyReport/
 
 任务直接运行 `ai-daily-report.exe --config-dir "..." daily --scheduled`。个人日报每天上海时间 09:00 触发一次，汇总前一天；错过时间由 `StartWhenAvailable` 补执行，无登录触发、日内重复触发或失败自动重启。目标日已发布时快速返回且不调用模型。发布 EXE 使用 Windows 图形子系统，调度时不打开终端窗口；命令行调用保留标准输出与退出码。personal 调度日志位于 `log_dir/personal/scheduled-YYYY-MM-DD.jsonl`，evidence 保持 `log_dir/scheduled-YYYY-MM-DD.jsonl`。每条记录 kind、运行编号、目标日期、阶段、结果、错误码与耗时，错误包含 `message/retryable`。
 
-健康任务 `AI Daily Report Health` 由 `scripts/install_daily_task.ps1 -Kind health -Apply` 注册，每日 11:00 与 23:00 运行 `scripts/health_notify.ps1`。Rust 先原子写入 `log_dir/health-YYYY-MM-DD.json`；脚本通过 `health --scheduled --output <临时文件>` 读取 UTF-8 JSON、回读 Daily 和 Health 两个任务后通知。通知组件异常另存错误，健康文件保持。health 任务不要求模型检查记录。
+健康任务 `AI Daily Report Health` 由 `scripts/install_daily_task.ps1 -Kind health -Apply` 注册，每日 11:00 与 23:00 运行 `scripts/health_notify.ps1`，启用 `StartWhenAvailable`，错过计划时间后在任务可运行时补执行。Rust 先原子写入 `log_dir/health-YYYY-MM-DD.json`；脚本通过 `health --scheduled --output <临时文件>` 读取 UTF-8 JSON、回读 Daily 和 Health 两个任务后通知。通知组件异常另存错误，健康文件保持。health 任务不要求模型检查记录。
 
 PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；机器 JSON 应显式按 UTF-8 解码。健康通知优先读取程序 `--output` 文件，避免 Windows PowerShell 5.1 按本地代码页转换 stdout。调度日志包含 execution_status、material_status、publication_status、errors、reason_codes；读取、解析或输入预算产生缺口时保留 partial，命令成功退出不表示所有材料均已覆盖。
 
@@ -67,6 +67,10 @@ PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；
 任务归属按持久配置的父目录生成。将配置从旧仓库移到新的安装根目录时，先保存并按原归属移除旧任务，再注册新任务，禁止绕过归属检查覆盖同名任务。
 
 ## 备份与回退
+
+2026-11-04 **17:47:09** 已切换至 `.releases/rust-20261104-xls-formula-01`，修复 XLS 中文公式导致的解析进程退出。当前回退包 `.releases/rust-20261101-personal-only-01` 完整保留。配置、两项任务 XML、报告库和扫描库一致备份、当前与历史冻结文件位于 `.artifacts/xls-parser-fix-20261104/deployment-01/before`，逐文件哈希见同级 [backup-manifest.json](../.artifacts/xls-parser-fix-20261104/deployment-01/backup-manifest.json)。回退时恢复配置中的两个解析程序路径及两项任务的执行动作，核对同包解析程序并执行 `doctor --strict` 与任务回读；业务数据库和切换后新增数据继续保留。正式任务手动执行、问题原文件解析及数据保持证据见[部署最终核验](../.artifacts/xls-parser-fix-20261104/deployment-01/final-verification.json)。
+
+以下较早部署记录按发生时状态保留；2026-11-03 已清理的历史备份不再可恢复，具体范围见[当前运行状态](current-state.md)。
 
 2026-11-01 **00:55:52** 已切换至 `.releases/rust-20261101-personal-only-01`，对应已验收包 `personal-ablation-20261101-final`。本次回退包为完整保留的 `.releases/rust-20261029-summary-1500-01`；配置、两项任务 XML、报告库与扫描库一致备份、当前与历史冻结文件位于 `.artifacts/personal-ablation-20261031/deployment-01/before`，逐文件哈希见同级 `backup-manifest.json`。两项任务仅修改执行动作和工作目录，配置仅修改 Office/PDF 路径；触发器、权限、启用状态与时限保持。回退时按 `before/settings.yaml` 和两份任务 XML 恢复对应程序路径与任务动作，核对同包解析程序并重新执行 `doctor --strict` 与任务回读。保留当前数据库及切换后新增数据，数据库备份用于核查与隔离恢复。部署与任务实跑证据见同级 [final-verification.json](../.artifacts/personal-ablation-20261031/deployment-01/final-verification.json)。
 

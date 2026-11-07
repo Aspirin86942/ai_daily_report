@@ -18,7 +18,7 @@
     {"name": "reqwest", "version": "0.13.5", "license": "MIT OR Apache-2.0", "source": "https://github.com/seanmonstar/reqwest"},
     {"name": "minijinja", "version": "3.0.0", "license": "Apache-2.0", "source": "https://github.com/mitsuhiko/minijinja"},
     {"name": "pdfium-render", "version": "0.9.4", "license": "MIT OR Apache-2.0", "source": "https://github.com/ajrcarey/pdfium-render"},
-    {"name": "calamine", "version": "0.36.1", "license": "MIT", "source": "https://github.com/tafia/calamine"},
+    {"name": "calamine", "version": "0.37.0", "license": "MIT", "source": "https://github.com/tafia/calamine"},
     {"name": "office_oxide", "version": "0.1.2", "license": "MIT OR Apache-2.0", "source": "https://crates.io/crates/office_oxide/0.1.2"}
   ]
 }

@@ -1,5 +1,61 @@
 # 当前运行与验收状态
 
+## 公司网关与 Magpie 双连接已生效（2026-11-08，Asia/Shanghai）
+
+当前正式包为 `.releases/rust-20261108-model-services-02`，00:51:28 完成任务与解析程序路径切换，活动配置仍为 `config-rust`。默认连接为 `openai`：通过本机 Magpie 的 `http://127.0.0.1:3425/v1` 调用 `openai/gpt-6.1-terra`。`company` 保留原公司网关 `https://ai-gateway.fsdev.cn` 与 `deepseek-v4-flash`。两种连接已完成实机双向切换，最终回到 Magpie，切换本身零模型调用。
+
+在项目目录执行 `scripts/set_model_service.ps1 -Service openai -Apply` 或 `-Service company -Apply`，会同步改变手工命令与定时任务读取的模型连接。连接参数保存于 `config-rust/model-services.json`，生效覆盖文件为 `config-rust/settings.windows.yaml`；私密凭据保存在本地 `.secrets.yaml`，这些文件均受 Git 忽略规则保护。Magpie 模式需要本机服务持续运行，公司模式仍需要公司网络或 VPN。完整用法见[连接选择说明](daily-report-operations.md#选择公司网关或-openai)。
+
+新增 OpenAI `reasoning_effort` 参数支持；当前设置为 `none`，请求使用 `max_completion_tokens`。公司网关的请求参数、旧配置指纹和冻结请求恢复行为保持兼容。切换器在应用前验证凭据和模型验收记录，原子更新覆盖文件，并在回读失败时恢复原配置。
+
+本次新增 **3 次真实模型调用，全部成功**：1 次虚构材料接口检查，以及 11 月 5、6 日日报恢复。两份恢复均重新扫描当前可见材料，并保留旧正文、附件、运行记录及调用账本。
+
+| 目标日期 | 恢复结果 | 文件材料 | 模型调用 |
+| --- | --- | --- | --- |
+| 2026-11-05 | 4 项、546 字，正文与附件哈希匹配 | 23 份，17,960 字符 | 1 次 |
+| 2026-11-06 | 4 项、525 字，正文与附件哈希匹配 | 5 份，17,886 字符 | 1 次 |
+
+两份新报告均无模型失败缺口，`quality=partial` 仅保留 `EXCERPT_BOUNDED`、`PARSE_BOUNDED`。对最新已到期目标 11 月 6 日的健康检查为 **0 项错误、2 项预警**，分别来自材料范围与 11 月 3 日的既有历史解析缺口。Daily、Health 回读均符合计划，09:00 日报及 11:00/23:00 健康触发、补跑设置和权限保持。
+
+验证通过：492 项 Rust 工作区测试、28 项 Windows 任务检查、3 项独立程序包验收、格式与严格 Clippy，最终发布包 465 项文件核验通过。完整记录见[最终核验](../.artifacts/personal-model-services-20261108/final-verification.json)。原配置、任务 XML、数据库与冻结材料备份位于同目录 `deployment-01/before`；最终脚本切换前的配置及任务备份位于 `deployment-02/before`。回退程序时应一并恢复相应的模型覆盖配置，业务数据和新增调用账本继续保留。
+
+## 健康任务补跑已修复，日报恢复等待公司网络（2026-11-07，Asia/Shanghai）
+
+正式程序于 **18:36:38** 切换至 `.releases/rust-20261107-health-catchup-01`，活动配置保持 `config-rust`。健康任务定义已补充 `StartWhenAvailable=true`，错过 11:00 或 23:00 后可在任务可运行时补执行；源码、正式任务和任务回读保持一致。两个任务的执行动作及配置中的两个解析程序路径已同步更新。触发时间、执行身份、权限、其他设置逐项保持。
+
+| 项目 | 实际验证 | 下一次计划执行 |
+| --- | --- | --- |
+| `AI Daily Report` | 18:37:26 经任务计划程序启动完成，退出 0，复用既有报告，模型调用 0 | 2026-11-08 09:00 |
+| `AI Daily Report Health` | 18:37:29 经任务计划程序启动完成，`execution_status=succeeded`；程序退出 2、任务退出 1，符合未恢复日报的告警状态 | 2026-11-07 23:00 |
+
+本次通过 490 项 Rust 工作区测试、28 项 Windows 任务检查、2 项独立程序包验收、格式与严格 Clippy，463 项发布文件核验通过。正式配置通过 `doctor --strict`，数据库、9 份模板和两个解析程序通信正常。补跑设置已经回读，尚未经历下一次自然漏跑后的补执行。
+
+11 月 5、6 日扫描预检分别取得 18、5 份材料，未再出现扫描未完成或解析程序通信失败。模型网关 `ai-gateway.fsdev.cn` 当前解析至公司内网 `10.1.250.37`，直连和现有代理均超时，因此尚未执行重新生成；两份原报告继续保留。11 月 3 日历史解析缺口也仍在原告警中。连接公司网络后可使用 `daily --target-date YYYY-MM-DD --regenerate --reason "..."` 恢复，原始运行和调用记录继续保留。
+
+切换前配置、任务 XML、报告库与扫描库一致备份、处理缓存和历史冻结文件位于 `.artifacts/personal-recovery-20261107/deployment-01/before`，哈希见同级 `backup-manifest.json`；上一正式包 `.releases/rust-20261104-xls-formula-01` 保留。回退只恢复配置及任务 XML，保留当前业务数据和调用账本。验证证据见[本地验收](../.artifacts/personal-recovery-20261107/verification.json)、[任务实跑](../.artifacts/personal-recovery-20261107/deployment-01/scheduled-acceptance.json)和[最终核验](../.artifacts/personal-recovery-20261107/deployment-01/final-verification.json)。
+
+## XLS 中文公式修复已正式切换（2026-11-04，Asia/Shanghai）
+
+正式程序于 **17:47:09** 切换至 `.releases/rust-20261104-xls-formula-01`，活动配置保持 `config-rust`。本次将 calamine 从 0.36.1 固定升级到 0.37.0，修复 XLS 公式中 UTF-16 字符串长度计算错误导致解析进程退出的问题。两个解析程序路径及 Daily、Health 任务的执行动作和工作目录已更新；触发器、权限、启用状态和超时逐项保持。
+
+修复包通过 490 项 Rust 工作区测试、2 项独立程序包验收、格式与严格 Clippy，463 项发布文件核验通过。正式配置通过 `doctor --strict`，9 份模板、报告库、扫描库及配套解析程序握手正常。
+
+| 项目 | 本次实际验证 | 下一次计划执行 |
+| --- | --- | --- |
+| `AI Daily Report` | 17:48:11 经任务计划程序手动启动，退出 0；693 ms 内复用 11 月 3 日日报，模型调用 0 | 2026-11-05 09:00 |
+| `AI Daily Report Health` | 新包健康脚本以 `-NoNotify` 手动执行成功，0 项错误、2 项既有材料预警；任务回读符合计划 | 2026-11-04 23:00 |
+| 问题 XLS 原文件 | 已安装的 Office 解析程序退出 0，按现有预算提取 4,492 个字符、保留 63 条来源行范围；原文件哈希保持 | — |
+
+11 月 3 日日报继续保留原生成结果，`HISTORICAL_REPORT_ATTENTION` 和 `REPORT_CONTENT_PARTIAL` 仍关联该报告的既有解析及覆盖缺口。本次切换新增真实模型调用 **0**；下一次自然生成尚未发生。
+
+233 份报告及附件、33 份处理缓存文件、4,244 份历史冻结文件、11,071 份归档文件逐文件哈希保持。扫描库全部业务表保持；报告、运行和模型调用数量保持，现有到期清理规则仅清空 11 条运行和 10 条调用的过期文件引用，原记录已保存在切换前数据库备份中。
+
+当前回退包 `.releases/rust-20261101-personal-only-01` 完整保留。配置、两项任务 XML、报告库与扫描库一致备份和冻结文件位于 `.artifacts/xls-parser-fix-20261104/deployment-01/before`，哈希见同级 [backup-manifest.json](../.artifacts/xls-parser-fix-20261104/deployment-01/backup-manifest.json)。回退仅恢复配置和程序路径，当前业务数据继续保留。完整证据见[部署最终核验](../.artifacts/xls-parser-fix-20261104/deployment-01/final-verification.json)和[修复验证记录](../.artifacts/xls-parser-fix-20261104/verification.json)。
+
+## 前期空间清理记录（2026-11-03）
+
+2026-11-03 空间清理更新：按用户明确授权，已删除部署前回滚副本、历史数据库恢复压缩包、退役采集恢复包及 57 个旧发布目录。当前运行包 `rust-20261101-personal-only-01` 保持；另保留 `rust-20261029-summary-1500-01`，用于仍需旧程序提供的历史档案维护。正式数据、当前配置和验收记录保持。下文所述已删除备份的位置仅代表当时的历史状态，相关回滚副本已无法用于恢复。
+
 ## 个人日报收敛版已正式切换（2026-11-01，Asia/Shanghai）
 
 源码已收敛为个人日报工具，周月报生成、旧通用日报、批量补跑、覆盖修复及 OCR 命令退役。历史检索、归档查询核验与备份、已保存正文和附件恢复继续可用；新增 `repair-output --run-id` 恢复旧日报及周月报。

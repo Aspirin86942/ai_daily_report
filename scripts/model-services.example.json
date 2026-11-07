@@ -1,0 +1,32 @@
+{
+  "company": {
+    "llm": {
+      "provider": "deepseek",
+      "model_id": "deepseek-chat",
+      "base_url": "https://gateway.example.com",
+      "temperature": 0.2,
+      "max_tokens": 8192,
+      "thinking_mode": "disabled",
+      "thinking_parameter_location": "extra_body",
+      "reasoning_effort": null,
+      "context_window_tokens": 128000,
+      "verified_max_output_tokens": 8192
+    },
+    "proxy": { "http_proxy": "", "https_proxy": "" }
+  },
+  "openai": {
+    "llm": {
+      "provider": "openai",
+      "model_id": "openai/gpt-6.1-terra",
+      "base_url": "http://127.0.0.1:3425/v1",
+      "temperature": 0.2,
+      "max_tokens": 8192,
+      "thinking_mode": null,
+      "thinking_parameter_location": null,
+      "reasoning_effort": "none",
+      "context_window_tokens": 1050000,
+      "verified_max_output_tokens": 128000
+    },
+    "proxy": { "http_proxy": "", "https_proxy": "" }
+  }
+}

@@ -270,7 +270,7 @@ pub fn task_plan_health(
     );
     let task_name = format!("{} Health", config.schedule.task_name);
     let document = format!(
-        r#"<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>{owner}</Description><Author>{sid}</Author></RegistrationInfo><Triggers>{triggers}</Triggers><Principals><Principal id="DailyReportUser"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><ExecutionTimeLimit>PT10M</ExecutionTimeLimit></Settings><Actions Context="DailyReportUser"><Exec><Command>powershell.exe</Command><Arguments>{arguments}</Arguments><WorkingDirectory>{root}</WorkingDirectory></Exec></Actions></Task>"#,
+        r#"<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task"><RegistrationInfo><Description>{owner}</Description><Author>{sid}</Author></RegistrationInfo><Triggers>{triggers}</Triggers><Principals><Principal id="DailyReportUser"><UserId>{sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals><Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><ExecutionTimeLimit>PT10M</ExecutionTimeLimit></Settings><Actions Context="DailyReportUser"><Exec><Command>powershell.exe</Command><Arguments>{arguments}</Arguments><WorkingDirectory>{root}</WorkingDirectory></Exec></Actions></Task>"#,
         owner = xml(&owner),
         sid = xml(sid),
         triggers = health_triggers(now),
@@ -293,6 +293,9 @@ pub fn task_plan_kind(
         "health" => task_plan_health(config, sid, now),
         _ => Err(ReportError::new("TASK_KIND_INVALID", "任务类型无效")),
     }?;
+    plan["llm"] = serde_json::to_value(&config.llm)?;
+    plan["endpoint"] = json!(config.endpoint());
+    plan["config_fingerprint"] = json!(config.fingerprint(false)?);
     plan["report_profile"] = json!(config.report.profile);
     plan["processing_dir"] = json!(display_path(&config.paths.data_dir.join(
         if config.report.profile == crate::config::ReportProfile::Personal {

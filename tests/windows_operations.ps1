@@ -84,6 +84,9 @@ Assert-Test ($healthPlan.kind -eq 'health') 'Health plan kind missing'
 Assert-Test ($healthPlan.task_name -like '* Health') 'Health task name missing'
 $healthFields = Get-ReportTaskXmlFields -Xml $healthPlan.xml
 Assert-Test ($healthFields['calendar_times'] -eq '11:00;23:00') ('Health trigger times: ' + $healthFields['calendar_times'])
+Assert-Test ($healthFields['/t:Task/t:Settings/t:StartWhenAvailable'] -eq 'true') 'Health task must catch up after a missed schedule'
+$missedHealthXml = $healthPlan.xml.Replace('<StartWhenAvailable>true</StartWhenAvailable>', '')
+Assert-Test (@(Get-ReportTaskDifferences -Plan $healthPlan -Xml $missedHealthXml).Count -eq 1) 'Health readback must detect a missing catch-up setting'
 Assert-Test ($healthFields['/t:Task/t:Actions/t:Exec/t:Command'] -match 'powershell') 'Health action must use PowerShell'
 Assert-Test ($healthFields['/t:Task/t:Actions/t:Exec/t:Arguments'] -match 'health_notify.ps1') 'Health action must call health_notify.ps1'
 $script:task = $null; $script:taskXml = ''; $script:registered = 0; $script:badReadback = $false
@@ -106,4 +109,4 @@ Assert-Test (@($healthJson.checks | Where-Object { $_.level -ne 'ok' }).Count -g
 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts/health_notify.ps1') -Program $Program -ConfigDirectory $healthConfig -NoNotify | Out-Null
 $healthJson2 = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
 Assert-Test (@($healthJson2.tasks).Count -eq 2) 'Repeated health run must stay readable'
-[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 26; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
+[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 28; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')

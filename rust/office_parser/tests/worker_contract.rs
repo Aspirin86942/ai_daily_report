@@ -116,6 +116,60 @@ fn native_worker_reads_binary_legacy_office_with_audited_ranges() {
 }
 
 #[test]
+fn xls_utf16_formula_preserves_cached_text_and_audited_rows() {
+    // Synthetic BIFF8 formula ="测试9号"; calamine 0.36.1 misread its UTF-16 bytes.
+    let path = fixture_path("legacy_unicode_formula.xls");
+    let original = fs::read(&path).unwrap();
+    let request = request_for_route(
+        &path,
+        ".xls",
+        ParserBackend::RustXlsCalamineV3,
+        source_version(&path),
+        1_000_000,
+    );
+
+    let result = parse_worker_request(&request).unwrap();
+    result.validate().unwrap();
+    assert!(result.content.contains("测试9号"));
+    assert!(result.content.contains("Legacy XLS worker content"));
+    assert_eq!(result.parser_backend, ParserBackend::RustXlsCalamineV3);
+    assert!(result
+        .evidence_audit
+        .unwrap()
+        .read_ranges
+        .unwrap()
+        .iter()
+        .any(|range| range.start == 4 && range.end == 5));
+    assert_eq!(fs::read(path).unwrap(), original);
+}
+
+#[test]
+fn archive_xls_preserves_utf16_formula_and_cached_text() {
+    let path = fixture_path("legacy_unicode_formula.xls");
+    let source = request_for_route(
+        &path,
+        ".xls",
+        ParserBackend::RustXlsCalamineV3,
+        source_version(&path),
+        1_000_000,
+    );
+    let directory = tempdir().unwrap();
+    let output_dir = directory.path().join("archive");
+    fs::create_dir(&output_dir).unwrap();
+    let request = ai_daily_worker_contract::archive::ArchiveRequest {
+        source,
+        raw_sha256: "a".repeat(64),
+        output_dir: output_dir.clone(),
+        max_output_bytes: 16 * 1024 * 1024,
+    };
+
+    let artifact = ai_daily_office_parser::parse_archive_request(&request).unwrap();
+    assert!(!artifact.truncated);
+    let body = fs::read_to_string(output_dir.join("body.md")).unwrap();
+    assert!(body.contains("公式：=\"测试9号\"；缓存值：测试9号"));
+}
+
+#[test]
 fn format_detection_selects_one_native_parser_and_keeps_the_original_name() {
     let directory = tempdir().unwrap();
     let path = directory.path().join("mislabeled.xls");

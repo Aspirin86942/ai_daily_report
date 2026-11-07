@@ -63,6 +63,7 @@ $Manifest = Join-Path $Evidence 'manifest.json'
 | 文件 | 用途 | 入口或前置条件 | 分类 |
 | --- | --- | --- | --- |
 | [install_daily_task.ps1](install_daily_task.ps1) | 预览或安装日报、健康任务 | `-ProjectRoot` 指向程序包，`-ConfigDirectory` 选择配置，`-Kind daily\|health`；`-Apply` 才安装，日报先做相应自检 | 计划任务 |
+| [set_model_service.ps1](set_model_service.ps1) | 预览或切换公司网关、OpenAI 模型连接 | `-Service company\|openai`；`-Apply` 生效，首次连接加 `-CheckModel` 做有审计的接口验证；复用现有正式任务定位程序与配置 | 模型配置 |
 | [remove_daily_task.ps1](remove_daily_task.ps1) | 预览或移除归属当前配置和用户的任务 | `-ProjectRoot`、`-ConfigDirectory`、`-Kind`；`-Apply` 才移除，保留业务数据 | 计划任务 |
 | [check_daily_task.ps1](check_daily_task.ps1) | 只读核对任务归属、配置差异和上海时间触发信息 | `-ProjectRoot`、`-ConfigDirectory`、`-Kind`；需要 Windows 调度器可读权限 | 计划任务 |
 | [daily_task_common.ps1](daily_task_common.ps1) | 共用 Rust `task plan`、任务 XML 校验和安装/移除逻辑 | 由任务脚本点加载；程序包内需有 `ai-daily-report.exe` | 计划任务 |

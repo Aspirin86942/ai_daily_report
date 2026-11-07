@@ -28,6 +28,9 @@ llm:
   # 直连使用 top_level；需要嵌套参数的网关使用 extra_body。
   # 有效值须与已设置的 thinking_mode 配合；未指定时保持原顶层发送格式。
   thinking_parameter_location: null
+  # OpenAI 当前模型使用 none/low/medium/high 等档位；公司网关保持 null。
+  # 设置后使用 max_completion_tokens；非 none 档位省略 temperature。
+  reasoning_effort: null
   max_request_utf8_bytes: 160000
   # 模型响应结构或引用无效时的额外重试次数；与 max_retries 共享单步骤总尝试上限。
   invalid_response_retries: 1

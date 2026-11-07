@@ -36,7 +36,7 @@ serde-saphyr = { version = "=2.0.0", default-features = false, features = ["dese
 reqwest = { version = "=0.13.5", default-features = false, features = ["blocking", "json", "native-tls"] }
 minijinja = { version = "=3.0.0", features = ["serde"] }
 pdfium-render = { version = "=0.9.4", default-features = false, features = ["pdfium_7881", "thread_safe"] }
-calamine = { version = "=0.36.1", default-features = false, features = ["dates"] }
+calamine = { version = "=0.37.0", default-features = false, features = ["dates"] }
 
 [profile.release]
 codegen-units = 1

@@ -32,6 +32,8 @@ pub struct Llm {
     pub response_format: String,
     pub thinking_mode: Option<String>,
     pub thinking_parameter_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     pub max_request_utf8_bytes: usize,
     pub max_sources_per_batch: usize,
     pub max_batches: usize,
@@ -623,6 +625,15 @@ impl AppConfig {
             || llm.invalid_response_retries > 2
         {
             return Err(invalid("llm 容量与截断设置"));
+        }
+        if let Some(effort) = llm.reasoning_effort.as_deref() {
+            if llm.provider != "openai"
+                || !["none", "minimal", "low", "medium", "high", "xhigh", "max"].contains(&effort)
+                || llm.thinking_mode.is_some()
+                || llm.thinking_parameter_location.is_some()
+            {
+                return Err(invalid("llm.reasoning_effort"));
+            }
         }
         let url = reqwest::Url::parse(&self.endpoint()).map_err(|_| invalid("llm.base_url"))?;
         if !["https", "http"].contains(&url.scheme())

@@ -63,6 +63,69 @@ impl ModelTransport for Network {
         Ok(HttpResponse{status:200,retry_after:None,body:json!({"choices":[{"finish_reason":"stop","message":{"content":content.to_string()}}],"usage":{"total_tokens":123}}).to_string().into_bytes()})
     }
 }
+struct OpenAiNetwork(Option<&'static str>);
+impl ModelTransport for OpenAiNetwork {
+    fn send(&self, request: &[u8], timeout: Duration) -> Result<HttpResponse, TransportFailure> {
+        let value: Value = serde_json::from_slice(request).unwrap();
+        if let Some(effort) = self.0 {
+            assert_eq!(value["reasoning_effort"], effort);
+            assert!(value["max_completion_tokens"].as_u64().unwrap() > 0);
+            assert!(value.get("max_tokens").is_none());
+            assert_eq!(value.get("temperature").is_some(), effort == "none");
+        } else {
+            assert!(value["max_tokens"].as_u64().unwrap() > 0);
+            assert!(value.get("max_completion_tokens").is_none());
+            assert!(value.get("reasoning_effort").is_none());
+            assert!(value.get("temperature").is_some());
+        }
+        assert!(value.get("thinking").is_none());
+        assert!(value.get("extra_body").is_none());
+        Network(true).send(request, timeout)
+    }
+}
+
+#[test]
+fn openai_model_probe_audits_modern_and_legacy_request_formats() {
+    for effort in [None, Some("none"), Some("medium")] {
+        let (_dir, mut config) = fixture();
+        config.llm.provider = "openai".into();
+        config.llm.model_id = "gpt-6-luna".into();
+        config.llm.reasoning_effort = effort.map(str::to_owned);
+        config.validate().unwrap();
+        let mut app = App::open(config, now()).unwrap();
+        app.transport = Box::new(OpenAiNetwork(effort));
+        let result = operations::model_check(&app, now()).unwrap();
+        assert_eq!(result["calls"], 1);
+        let calls = app.store.calls(result["run_id"].as_str().unwrap()).unwrap();
+        assert_eq!(calls[0]["status"], "succeeded");
+        assert_eq!(
+            operations::task_plan_kind(&app.config, "S-1-5-21-123", now(), "daily").unwrap()
+                ["model_check_verified"],
+            true
+        );
+    }
+}
+
+#[test]
+fn reasoning_configuration_preserves_legacy_fingerprints_and_rejects_mixed_protocols() {
+    let (_dir, mut config) = fixture();
+    let fingerprint = config.fingerprint(false).unwrap();
+    let mut serialized = serde_json::to_value(&config.llm).unwrap();
+    assert!(serialized.get("reasoning_effort").is_none());
+    serialized["reasoning_effort"] = Value::Null;
+    config.llm = serde_json::from_value(serialized).unwrap();
+    assert_eq!(config.fingerprint(false).unwrap(), fingerprint);
+    config.llm.reasoning_effort = Some("none".into());
+    assert_eq!(config.validate().unwrap_err().code, "CONFIG_INVALID");
+    config.llm.provider = "openai".into();
+    config.validate().unwrap();
+    config.llm.thinking_mode = Some("disabled".into());
+    assert_eq!(config.validate().unwrap_err().code, "CONFIG_INVALID");
+    config.llm.thinking_mode = None;
+    config.llm.reasoning_effort = Some("unsupported".into());
+    assert_eq!(config.validate().unwrap_err().code, "CONFIG_INVALID");
+}
+
 #[test]
 fn task_plan_is_read_only_escapes_xml_and_uses_direct_rust_entry() {
     let (_dir, config) = fixture();

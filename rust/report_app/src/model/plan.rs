@@ -43,6 +43,16 @@ pub(super) fn payload(
     max_tokens: u64,
 ) -> Result<Value, ReportError> {
     let mut value = json!({"model":llm.model_id,"messages":[{"role":"system","content":system},{"role":"user","content":String::from_utf8(canonical_json(&user)?).unwrap()}],"temperature":llm.temperature,"max_tokens":max_tokens,"response_format":{"type":"json_object"}});
+    // Opt-in keeps saved requests and configuration fingerprints byte-compatible.
+    if let Some(effort) = &llm.reasoning_effort {
+        let fields = value.as_object_mut().unwrap();
+        fields.remove("max_tokens");
+        fields.insert("max_completion_tokens".into(), json!(max_tokens));
+        fields.insert("reasoning_effort".into(), json!(effort));
+        if effort != "none" {
+            fields.remove("temperature");
+        }
+    }
     if let Some(mode) = &llm.thinking_mode {
         let thinking = json!({"type":mode});
         match llm.thinking_parameter_location.as_deref() {
@@ -120,9 +130,14 @@ impl PlannedStep {
         Ok(())
     }
     pub fn check_capacity(&self, llm: &Llm) -> Result<(), ReportError> {
-        if self.bytes()?.len()
-            > request_limit(llm, self.request["max_tokens"].as_u64().unwrap_or(0))?
-        {
+        let output = match (
+            self.request.get("max_tokens"),
+            self.request.get("max_completion_tokens"),
+        ) {
+            (Some(value), None) | (None, Some(value)) => value.as_u64().unwrap_or(0),
+            _ => 0,
+        };
+        if self.bytes()?.len() > request_limit(llm, output)? {
             return Err(ReportError::new(
                 "MODEL_REQUEST_TOO_LARGE",
                 "冻结模型请求超过容量",
