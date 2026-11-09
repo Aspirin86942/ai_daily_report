@@ -1,0 +1,631 @@
+{
+  "checked_at": "2026-11-10T00:12:53.202211+08:00",
+  "routes": [
+    {
+      "id": 1794099612842,
+      "time": "2026-11-08T09:00:10.8371002+08:00",
+      "model": "openai/gpt-6.1-terra",
+      "status": 502,
+      "duration_ms": 70110,
+      "candidate_count": 1,
+      "attempts": [
+        {
+          "start": "2026-11-08T09:00:12.8414101+08:00",
+          "status": 502,
+          "ms": 5017,
+          "again": 1000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-08T09:00:18.860757+08:00",
+          "status": 502,
+          "ms": 5006,
+          "again": 2000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-08T09:00:25.8676126+08:00",
+          "status": 502,
+          "ms": 5053,
+          "again": 2000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-08T09:00:32.9224727+08:00",
+          "status": 502,
+          "ms": 5004,
+          "again": 4000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-08T09:00:41.9283089+08:00",
+          "status": 502,
+          "ms": 5003,
+          "again": 8000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-08T09:00:54.9334312+08:00",
+          "status": 502,
+          "ms": 5005,
+          "again": 16000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-08T09:01:15.9397632+08:00",
+          "status": 502,
+          "ms": 5007,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        }
+      ]
+    },
+    {
+      "id": 1794125543020,
+      "time": "2026-11-08T16:19:27.3543839+08:00",
+      "model": "openai/gpt-6.1-terra",
+      "status": 200,
+      "duration_ms": 12810,
+      "candidate_count": 1,
+      "attempts": [
+        {
+          "start": "2026-11-08T16:19:29.36439+08:00",
+          "status": 200,
+          "ms": 10800,
+          "net": {
+            "own": 15.1,
+            "asks": 1,
+            "pool": 5.4,
+            "connect": 0.5,
+            "tls": 2740.5,
+            "send": 0.5,
+            "wait": 7887,
+            "head": 10649
+          }
+        }
+      ]
+    },
+    {
+      "id": 1794186014637,
+      "time": "2026-11-09T09:00:12.6067084+08:00",
+      "model": "openai/gpt-6.1-terra",
+      "status": 502,
+      "duration_ms": 70553,
+      "candidate_count": 1,
+      "attempts": [
+        {
+          "start": "2026-11-09T09:00:14.6372033+08:00",
+          "status": 502,
+          "ms": 5418,
+          "again": 1000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-09T09:00:21.0571323+08:00",
+          "status": 502,
+          "ms": 5007,
+          "again": 2000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-09T09:00:28.0658753+08:00",
+          "status": 502,
+          "ms": 5007,
+          "again": 2000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-09T09:00:35.0737143+08:00",
+          "status": 502,
+          "ms": 5008,
+          "again": 4000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-09T09:00:44.0824793+08:00",
+          "status": 502,
+          "ms": 5007,
+          "again": 8000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-09T09:00:57.0905983+08:00",
+          "status": 502,
+          "ms": 5007,
+          "again": 16000,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        },
+        {
+          "start": "2026-11-09T09:01:18.0986692+08:00",
+          "status": 502,
+          "ms": 5061,
+          "error": "Post \"https://api.openai.com/v1/chat/completions\": EOF"
+        }
+      ]
+    }
+  ],
+  "other_network_errors": {
+    "2026/11/08": {
+      "first_error": "2026/11/08 05:18:52",
+      "last_error": "2026/11/08 09:15:33",
+      "error_count": 15,
+      "sites": [
+        "api.openai.com",
+        "chatgpt.com",
+        "models.dev",
+        "usemagpie.ai"
+      ],
+      "events": [
+        {
+          "line": 3214,
+          "time": "2026/11/08 05:18:52",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3215,
+          "time": "2026/11/08 05:45:53",
+          "sites": [
+            "usemagpie.ai"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3216,
+          "time": "2026/11/08 05:47:53",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3217,
+          "time": "2026/11/08 05:48:52",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3218,
+          "time": "2026/11/08 06:18:52",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3219,
+          "time": "2026/11/08 06:47:58",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3220,
+          "time": "2026/11/08 06:48:52",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3221,
+          "time": "2026/11/08 07:18:52",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3222,
+          "time": "2026/11/08 07:48:03",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3223,
+          "time": "2026/11/08 07:48:52",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3224,
+          "time": "2026/11/08 08:18:52",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3225,
+          "time": "2026/11/08 08:48:08",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3226,
+          "time": "2026/11/08 08:48:52",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3228,
+          "time": "2026/11/08 09:01:20",
+          "sites": [
+            "api.openai.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3229,
+          "time": "2026/11/08 09:15:33",
+          "sites": [
+            "models.dev"
+          ],
+          "error": "EOF"
+        }
+      ]
+    },
+    "2026/11/09": {
+      "first_error": "2026/11/09 05:26:40",
+      "last_error": "2026/11/09 14:37:37",
+      "error_count": 38,
+      "sites": [
+        "api.openai.com",
+        "chatgpt.com",
+        "models.dev",
+        "usemagpie.ai"
+      ],
+      "events": [
+        {
+          "line": 3419,
+          "time": "2026/11/09 05:26:40",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3420,
+          "time": "2026/11/09 05:53:41",
+          "sites": [
+            "usemagpie.ai"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3421,
+          "time": "2026/11/09 05:55:41",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3422,
+          "time": "2026/11/09 05:56:40",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3423,
+          "time": "2026/11/09 06:26:40",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3424,
+          "time": "2026/11/09 06:55:44",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3425,
+          "time": "2026/11/09 06:56:40",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3426,
+          "time": "2026/11/09 07:26:40",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3427,
+          "time": "2026/11/09 07:55:49",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3428,
+          "time": "2026/11/09 07:56:40",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3429,
+          "time": "2026/11/09 08:54:05",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3430,
+          "time": "2026/11/09 08:55:54",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3432,
+          "time": "2026/11/09 09:01:23",
+          "sites": [
+            "api.openai.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3448,
+          "time": "2026/11/09 09:24:06",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3458,
+          "time": "2026/11/09 09:54:06",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3459,
+          "time": "2026/11/09 09:55:59",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3468,
+          "time": "2026/11/09 10:22:38",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3470,
+          "time": "2026/11/09 10:23:47",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3472,
+          "time": "2026/11/09 10:24:06",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3474,
+          "time": "2026/11/09 10:24:57",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3476,
+          "time": "2026/11/09 10:26:07",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3479,
+          "time": "2026/11/09 10:27:17",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3482,
+          "time": "2026/11/09 10:28:29",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3486,
+          "time": "2026/11/09 10:29:41",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3488,
+          "time": "2026/11/09 10:30:49",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3489,
+          "time": "2026/11/09 10:31:57",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3494,
+          "time": "2026/11/09 10:54:06",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3495,
+          "time": "2026/11/09 10:56:04",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "EOF"
+        },
+        {
+          "line": 3496,
+          "time": "2026/11/09 11:05:16",
+          "sites": [
+            "usemagpie.ai"
+          ],
+          "error": "TLS handshake timeout"
+        },
+        {
+          "line": 3501,
+          "time": "2026/11/09 11:24:11",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "TLS handshake timeout"
+        },
+        {
+          "line": 3504,
+          "time": "2026/11/09 12:15:27",
+          "sites": [
+            "usemagpie.ai"
+          ],
+          "error": "TLS handshake timeout"
+        },
+        {
+          "line": 3509,
+          "time": "2026/11/09 12:56:00",
+          "sites": [
+            "usemagpie.ai"
+          ],
+          "error": "TLS handshake timeout"
+        },
+        {
+          "line": 3510,
+          "time": "2026/11/09 12:56:00",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "TLS handshake timeout"
+        },
+        {
+          "line": 3511,
+          "time": "2026/11/09 12:56:04",
+          "sites": [
+            "models.dev"
+          ],
+          "error": "TLS handshake timeout"
+        },
+        {
+          "line": 3514,
+          "time": "2026/11/09 12:58:00",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "TLS handshake timeout"
+        },
+        {
+          "line": 3522,
+          "time": "2026/11/09 13:29:00",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "TLS handshake timeout"
+        },
+        {
+          "line": 3529,
+          "time": "2026/11/09 13:58:10",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "TLS handshake timeout"
+        },
+        {
+          "line": 3552,
+          "time": "2026/11/09 14:37:37",
+          "sites": [
+            "chatgpt.com"
+          ],
+          "error": "TLS handshake timeout"
+        }
+      ]
+    }
+  },
+  "current_proxy": {
+    "magpie_setting": "",
+    "windows_proxy_enabled": true,
+    "windows_proxy_server": "127.0.0.1:7897",
+    "observed_magpie_connection_to_proxy": true
+  },
+  "unauthenticated_openai_probe": {
+    "direct": {
+      "connect_timeout_seconds": 8,
+      "curl_exit": 28
+    },
+    "via_proxy": {
+      "http_status": 401,
+      "total_seconds": 1.419,
+      "curl_exit": 0
+    }
+  },
+  "findings": [
+    "Both scheduled requests reached Magpie.",
+    "Each failed after seven upstream attempts; individual attempts took about five seconds, plus 33 seconds of backoff and about two seconds of local processing.",
+    "Multiple external services failed in the same periods.",
+    "Each route had one provider candidate and no successful alternate route.",
+    "Current proxy path completes TLS and receives an HTTP response."
+  ],
+  "limits": [
+    "Historical routing records do not identify the failed proxy node or network hop.",
+    "Clash service log directory is inaccessible to the current user."
+  ],
+  "source_paths": [
+    "C:\\Users\\lcf\\AppData\\Local\\magpie\\logs\\app.log",
+    "C:\\Users\\lcf\\.config\\magpie\\routing"
+  ],
+  "proxy_selection_reference": "https://github.com/yetone/magpie/blob/main/internal/netproxy/netproxy.go"
+}

@@ -1,0 +1,16 @@
+[
+  {
+    "time": "2026-11-10T00:13:38+08:00",
+    "requested_model": "openai/gpt-6.1-terra",
+    "provider": "openai",
+    "model": "gpt-6.1-terra",
+    "served_model": "gpt-6.1-terra",
+    "status": "200",
+    "error": "false",
+    "duration_ms": "22016",
+    "cost_usd": "0.021053",
+    "tries": "",
+    "handed_on": "false",
+    "endpoint": "/v1/chat/completions"
+  }
+]

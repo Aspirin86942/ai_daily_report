@@ -1,0 +1,45 @@
+{
+  "target_date": "2026-11-08",
+  "run_id": "013fd4128db4e100ad90262261199fab",
+  "status": "succeeded",
+  "phase": "published",
+  "quality": "partial",
+  "finished_at": "2026-11-09T16:14:01.018204+00:00",
+  "item_count": 3,
+  "item_titles": [
+    "波锋举报线索待核查",
+    "二期考勤材料",
+    "OA审批节点讨论"
+  ],
+  "selection": {
+    "observed_files": 31,
+    "inspected_files": 31,
+    "selected_files": 18,
+    "selected_chars": 17718,
+    "incomplete_inventory": false
+  },
+  "gap_codes": [
+    "EXCERPT_BOUNDED",
+    "PARSE_BOUNDED"
+  ],
+  "summary_hash_matches": true,
+  "attachment_hash_matches": true,
+  "model_calls": [
+    {
+      "call_id": 1680,
+      "run_id": "013fd4128db4e100ad90262261199fab",
+      "status": "succeeded",
+      "error_code": null,
+      "duration_ms": 22059,
+      "started_at": "2026-11-09T16:13:38.895783+00:00",
+      "finished_at": "2026-11-09T16:14:00.979941+00:00",
+      "model": "openai/gpt-6.1-terra",
+      "request_hash_matches": true,
+      "response_hash_matches": true
+    }
+  ],
+  "config_unchanged": true,
+  "old_report_preserved": true,
+  "old_attachment_preserved": true,
+  "old_failed_call_preserved": true
+}

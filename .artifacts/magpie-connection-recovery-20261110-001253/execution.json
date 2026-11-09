@@ -1,0 +1,13 @@
+{
+  "exit_code": 0,
+  "duration_seconds": 35.629,
+  "result": {
+    "action": "published",
+    "model_calls": 1,
+    "output_path": "D:\\python_program\\ai_daily_report\\data\\reports\\2026-11\\2026-11-08.md",
+    "quality": "partial",
+    "run_id": "013fd4128db4e100ad90262261199fab",
+    "target_date": "2026-11-08"
+  },
+  "stderr": ""
+}

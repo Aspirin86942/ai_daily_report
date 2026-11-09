@@ -1,0 +1,538 @@
+{
+  "status": "warning",
+  "target_date": "2026-11-08",
+  "checks": [
+    {
+      "code": "REPORT_NOT_PUBLISHED",
+      "level": "ok",
+      "message": "2026-11-08 日报已发布（run 013fd4128db4e100ad90262261199fab，质量 partial）",
+      "evidence": {}
+    },
+    {
+      "code": "RUN_ATTENTION",
+      "level": "ok",
+      "message": "没有待续运行，近 24 小时没有失败运行",
+      "evidence": {
+        "failures": [],
+        "pending": 0,
+        "recent_failures": 0,
+        "resolved_failures": 0
+      }
+    },
+    {
+      "code": "HISTORICAL_REPORT_ATTENTION",
+      "level": "warning",
+      "message": "1 个历史日报仍需恢复，其中 0 个缺少有效总结；告警保留至有效发布完成",
+      "evidence": {
+        "reports": [
+          {
+            "calls_used": 2,
+            "material_window_open": true,
+            "missing_summary": false,
+            "reason_codes": [
+              "PARSE_UNAVAILABLE"
+            ],
+            "run_id": "8786139abea9fba4728223fa48426798",
+            "target_date": "2026-11-03"
+          }
+        ]
+      }
+    },
+    {
+      "code": "REPORT_CONTENT_PARTIAL",
+      "level": "warning",
+      "message": "日报已发布，内容仅部分可用",
+      "evidence": {
+        "gaps": [
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_007a9b58076a561221a63388f7b19fbe9a744c28fc70dc00ac40d6bfe412058c",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_0a8ac6feda1e38a2be67aeec20f24ea4262e4aa7e92073d16621015af2403308",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_0cf3c1daf5f96fe1cd49a25ac6258c16a14a0bb16bdfb66723be18738c3f1497",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_1517def1417878a2455cb77292b62a5bdfc436d466698f16b874c82029d5d856",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_1af36684053bd54e8e512050fde80db5f2278a2d52933fd340c228cb71a43e01",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_1d55fb5f03100bfba45a76545adcb385e0355fa27de2892e62ff65cc7d5ed362",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_21168b93883f019e0846b8c838d5fc4b28fa42a569f0b99b7e914b57afa23f3a",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_3009f744d40a9d4b79f030fbbf7ea8a997076d56d505ec885938a560f7c5c3ed",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_3177dae0821e0d2461194ea74c94375ee605d46426506ae362a21680a7f8341c",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_34d4432757902a9aced670bf7d00e65f455381e06569712ddf86e977163f955e",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_3794b2eef6442962798fa4c4acc8366411f6c35d0f1010a4a17ba51c255933d1",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_419e62893eb08fdbfa97b03e0c1c9981e18f5952132679f58cf4e9ceb1277f2a",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_57cc169cae361eb4971ac4bf7cbdffd590a85cd17a86a1c5a929598c36a07bdc",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_69b4e44f4c8b449b830bf172a12ab5831f4d9ecc300d2ae85d3600777cd6e195",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_6d23de025ab51bc692bfd43b45b354584c03abe9dabed1b1bc5663582779f1ac",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_6df2f47aa9c04df1a7fbdcb84fe783f9989d210974a99370d1e70e6ba0173eb4",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_6ec64d4fd701fb361c1651f0a89a75146291033daceac9ae15325207a32f2806",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_74438c6955a1f2cd748926fdf1fe02e20041a511e0e323629b3e6a2a97662e2d",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_77a3cc52e308f27a5318bf817e8af6ee26fa84b0415b9bfeda7ea8b766deea56",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_83fccd180edbb1839fd26e4b16f9c8f24d4d279bfa11e5c21ac6b736a0a54578",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_90d7d38a26e5af00e369a680a9f33a540fcb2926d21e9f4fea760adb7abcd0f7",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_95367bf1175987a71d17d9c2fa1899e483ccb0f43a84fb3dac091f5aa8de7e7f",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_af082ce21eba90cd89bcbdf31b382085ea5b67af12f7c7d79ebd50ae32a32816",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_bbc8c9817bd2a728aa03f0368b4f41534a58217a5d9132733ffba60754630095",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_bbf21dbd9db2a9b385c9a2ceb8e3b09bf40dfc3f4fbb160087ea8c1a36d9e25e",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_bca7c7caef7402cff9d4bf1b058af9a26f186b72a69b57e27d82cb2ab4a420e4",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_d3a94b6f284051fdea0afceed2172811b426879ee710526fd6da4fb68b342c6b",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_d4da153698d023b65c9959fef87fdb121355eaf7db2b1bf06cab990e14ae2ca3",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_d9ddf8a8517d954e235f4a6b1ee14ad0cfe7e3cc5809a7df2fc5e173a044d576",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_f31853270225c3f1b4897ac1ca0afa45949c7643e7f7e08cc4950363ca7692ec",
+            "stage": "excerpt"
+          },
+          {
+            "code": "EXCERPT_BOUNDED",
+            "message": "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
+            "relative_path": null,
+            "source_id": "src_fe18df5c393e10b472aaf5582fcb6d775184ffc5c4bc130b2f82629d8457acd3",
+            "stage": "excerpt"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_007a9b58076a561221a63388f7b19fbe9a744c28fc70dc00ac40d6bfe412058c",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_0a8ac6feda1e38a2be67aeec20f24ea4262e4aa7e92073d16621015af2403308",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_0cf3c1daf5f96fe1cd49a25ac6258c16a14a0bb16bdfb66723be18738c3f1497",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_1517def1417878a2455cb77292b62a5bdfc436d466698f16b874c82029d5d856",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_1af36684053bd54e8e512050fde80db5f2278a2d52933fd340c228cb71a43e01",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_1d55fb5f03100bfba45a76545adcb385e0355fa27de2892e62ff65cc7d5ed362",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_21168b93883f019e0846b8c838d5fc4b28fa42a569f0b99b7e914b57afa23f3a",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_3009f744d40a9d4b79f030fbbf7ea8a997076d56d505ec885938a560f7c5c3ed",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_3177dae0821e0d2461194ea74c94375ee605d46426506ae362a21680a7f8341c",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_34d4432757902a9aced670bf7d00e65f455381e06569712ddf86e977163f955e",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_3794b2eef6442962798fa4c4acc8366411f6c35d0f1010a4a17ba51c255933d1",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_419e62893eb08fdbfa97b03e0c1c9981e18f5952132679f58cf4e9ceb1277f2a",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_57cc169cae361eb4971ac4bf7cbdffd590a85cd17a86a1c5a929598c36a07bdc",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_69b4e44f4c8b449b830bf172a12ab5831f4d9ecc300d2ae85d3600777cd6e195",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_6d23de025ab51bc692bfd43b45b354584c03abe9dabed1b1bc5663582779f1ac",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_6df2f47aa9c04df1a7fbdcb84fe783f9989d210974a99370d1e70e6ba0173eb4",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_6ec64d4fd701fb361c1651f0a89a75146291033daceac9ae15325207a32f2806",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_74438c6955a1f2cd748926fdf1fe02e20041a511e0e323629b3e6a2a97662e2d",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_77a3cc52e308f27a5318bf817e8af6ee26fa84b0415b9bfeda7ea8b766deea56",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_83fccd180edbb1839fd26e4b16f9c8f24d4d279bfa11e5c21ac6b736a0a54578",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_90d7d38a26e5af00e369a680a9f33a540fcb2926d21e9f4fea760adb7abcd0f7",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_95367bf1175987a71d17d9c2fa1899e483ccb0f43a84fb3dac091f5aa8de7e7f",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_af082ce21eba90cd89bcbdf31b382085ea5b67af12f7c7d79ebd50ae32a32816",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_bbc8c9817bd2a728aa03f0368b4f41534a58217a5d9132733ffba60754630095",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_bbf21dbd9db2a9b385c9a2ceb8e3b09bf40dfc3f4fbb160087ea8c1a36d9e25e",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_bca7c7caef7402cff9d4bf1b058af9a26f186b72a69b57e27d82cb2ab4a420e4",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_d3a94b6f284051fdea0afceed2172811b426879ee710526fd6da4fb68b342c6b",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_d4da153698d023b65c9959fef87fdb121355eaf7db2b1bf06cab990e14ae2ca3",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_d9ddf8a8517d954e235f4a6b1ee14ad0cfe7e3cc5809a7df2fc5e173a044d576",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_f31853270225c3f1b4897ac1ca0afa45949c7643e7f7e08cc4950363ca7692ec",
+            "stage": "parse"
+          },
+          {
+            "code": "PARSE_BOUNDED",
+            "message": "只提取了限定页数、行数或字符范围，结论限于已读取部分。",
+            "relative_path": null,
+            "source_id": "src_fe18df5c393e10b472aaf5582fcb6d775184ffc5c4bc130b2f82629d8457acd3",
+            "stage": "parse"
+          }
+        ],
+        "quality": "partial",
+        "selection": {
+          "incomplete_inventory": false,
+          "inspected_files": 31,
+          "observed_files": 31,
+          "omissions": {
+            "no_usable_text": 13
+          },
+          "omitted_paths": [
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2026-1 月报(汇总)_20261108144832.xlsx",
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2026-10 月报(汇总)_20261108145314.xlsx",
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2026-7 月报(汇总)_20261108145117.xlsx",
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2025-7 月报(汇总)_20261108144520.xlsx",
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2026-3 月报(汇总)_20261108144920.xlsx",
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2026-5 月报(汇总)_20261108145017.xlsx",
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2026-9 月报(汇总)_20261108145218.xlsx",
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2026-4 月报(汇总)_20261108144948.xlsx",
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2026-6 月报(汇总)_20261108145045.xlsx",
+            "2026年/63- 波锋专项调查/调查二期/5.3-波锋人员考勤记录/02-2 月报/2026-8 月报(汇总)_20261108145146.xlsx"
+          ],
+          "selected_chars": 17718,
+          "selected_files": 18
+        }
+      }
+    },
+    {
+      "code": "SCAN_INDEX_INTEGRITY",
+      "level": "ok",
+      "message": "每日扫描索引完整性正常",
+      "evidence": {}
+    },
+    {
+      "code": "DISK_SPACE",
+      "level": "ok",
+      "message": "数据目录所在磁盘剩余 422.1 GiB",
+      "evidence": {}
+    },
+    {
+      "code": "PROCESSING_CACHE",
+      "level": "ok",
+      "message": "个人处理缓存已核对 15475301 字节",
+      "evidence": {
+        "complete": true,
+        "logical_bytes": 15475301,
+        "max_bytes": 1073741824,
+        "path": "D:\\python_program\\ai_daily_report\\data\\daily_cache",
+        "retention_days": 7
+      }
+    }
+  ],
+  "task_names": {
+    "daily": "AI Daily Report",
+    "health": "AI Daily Report Health"
+  },
+  "log_dir": "D:\\python_program\\ai_daily_report\\logs",
+  "generated_at": "2026-11-09T16:15:11.556477900+00:00"
+}
