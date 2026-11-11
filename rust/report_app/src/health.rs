@@ -2,7 +2,7 @@
 //!
 //! 该模块不调用模型、不扫描原目录、不修改数据库；`health` 命令与健康任务共用这里的检查结果。
 use crate::{config::AppConfig, operations::display_path, snapshots::digest, types, ReportError};
-use chrono::{DateTime, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -87,6 +87,7 @@ fn published_report(
     connection: &Connection,
     config: &AppConfig,
     target: NaiveDate,
+    now: DateTime<Utc>,
 ) -> Result<HealthCheck, ReportError> {
     let row = connection
         .query_row(
@@ -103,6 +104,35 @@ fn published_report(
         )
         .optional()?;
     let Some((run_id, quality, output_path, expected_sha256)) = row else {
+        if active_runs(connection, config, now)?
+            .iter()
+            .any(|(_, date)| *date == target.to_string())
+        {
+            return Ok(HealthCheck::ok(
+                "REPORT_IN_PROGRESS",
+                format!("{target} 日报正在生成，仍在运行预算内"),
+            ));
+        }
+        let scheduled = types::utc_window(target)?.1
+            + Duration::seconds(i64::from(
+                config.schedule.due_time()?.num_seconds_from_midnight(),
+            ));
+        if now < scheduled
+            || (now - scheduled)
+                .to_std()
+                .is_ok_and(|elapsed| elapsed.as_secs() < config.recovery.run_budget_seconds)
+        {
+            return Ok(HealthCheck::ok(
+                "REPORT_NOT_DUE",
+                format!(
+                    "{target} 日报尚未到应完成时间（计划 {}，运行预算 {} 秒）",
+                    scheduled
+                        .with_timezone(&types::shanghai())
+                        .format("%Y-%m-%d %H:%M"),
+                    config.recovery.run_budget_seconds
+                ),
+            ));
+        }
         return Ok(HealthCheck::error(
             "REPORT_NOT_PUBLISHED",
             format!("{target} 没有已发布的正式日报"),
@@ -161,17 +191,57 @@ fn published_report(
     ))
 }
 
-fn run_attention(connection: &Connection, now: DateTime<Utc>) -> Result<HealthCheck, ReportError> {
-    let pending: i64 = connection.query_row(
-        "SELECT count(*) FROM report_runs r WHERE run_kind='report' AND phase IN ('prepared','generating','db_committed') AND status!='succeeded' AND COALESCE(error_code,'')!='RUN_SUPERSEDED' AND COALESCE(regeneration_reason,'') NOT LIKE 'coverage_publish:%'
+fn active_runs(
+    connection: &Connection,
+    config: &AppConfig,
+    now: DateTime<Utc>,
+) -> Result<Vec<(String, String)>, ReportError> {
+    let mut statement = connection.prepare(
+        "SELECT run_id,target_date,created_at FROM report_runs WHERE scope_id=?
+         AND run_kind='report' AND status='running' AND finished_at IS NULL AND error_code IS NULL
+         AND phase IN ('created','scanning','prepared','generating','db_committed')",
+    )?;
+    let rows = statement.query_map([&config.report.scope_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    let mut active = Vec::new();
+    for row in rows {
+        let (id, date, created_at) = row?;
+        if let Ok(started) = DateTime::parse_from_rfc3339(&created_at) {
+            if let Ok(elapsed) = (now - started.with_timezone(&Utc)).to_std() {
+                if elapsed.as_secs() < config.recovery.run_budget_seconds {
+                    active.push((id, date));
+                }
+            }
+        }
+    }
+    Ok(active)
+}
+
+fn run_attention(
+    connection: &Connection,
+    config: &AppConfig,
+    now: DateTime<Utc>,
+) -> Result<HealthCheck, ReportError> {
+    let active = active_runs(connection, config, now)?;
+    let mut pending_statement = connection.prepare(
+        "SELECT run_id FROM report_runs r WHERE run_kind='report' AND phase IN ('prepared','generating','db_committed') AND status!='succeeded' AND COALESCE(error_code,'')!='RUN_SUPERSEDED' AND COALESCE(regeneration_reason,'') NOT LIKE 'coverage_publish:%'
          AND NOT EXISTS(SELECT 1 FROM daily_reports d JOIN report_runs p ON p.run_id=d.current_run_id
              WHERE p.scope_id=r.scope_id AND p.target_date=r.target_date AND p.created_at>r.created_at
              AND p.status='succeeded' AND p.phase='published'
              AND (COALESCE(json_extract(p.report_json,'$.schema_version'),0)!=5
                  OR json_array_length(p.report_json,'$.items')>0 OR p.quality='no_changes'))",
-        [],
-        |row| row.get(0),
     )?;
+    let pending = pending_statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter(|id| !active.iter().any(|(active_id, _)| active_id == id))
+        .count();
     let cutoff = now - Duration::hours(24);
     // 正式发布时间的上界：同一 scope/目标日、run_kind=report 且已完成 published 的运行。
     // 只有比失败更晚的发布才能证明该失败已恢复。
@@ -238,7 +308,10 @@ fn run_attention(connection: &Connection, now: DateTime<Utc>) -> Result<HealthCh
             code: "RUN_ATTENTION",
             level: "ok",
             message: if resolved_failures == 0 {
-                "没有待续运行，近 24 小时没有失败运行".to_string()
+                format!(
+                    "运行预算内 {} 个，没有待续运行，近 24 小时没有失败运行",
+                    active.len()
+                )
             } else {
                 format!(
                     "没有待续运行；近 24 小时的 {resolved_failures} 个失败已由更晚的正式发布恢复"
@@ -246,6 +319,7 @@ fn run_attention(connection: &Connection, now: DateTime<Utc>) -> Result<HealthCh
             },
             evidence: json!({
                 "pending": 0,
+                "active": active.len(),
                 "recent_failures": 0,
                 "resolved_failures": resolved_failures,
                 "failures": []
@@ -361,7 +435,7 @@ pub fn check(
     };
     match &reports {
         Some(connection) => {
-            match published_report(connection, config, target) {
+            match published_report(connection, config, target, now) {
                 Ok(check) => checks.push(check),
                 Err(_) => checks.push(HealthCheck::error(
                     "DATABASE_INTEGRITY",
@@ -369,7 +443,7 @@ pub fn check(
                     json!({"target_date": target}),
                 )),
             }
-            match run_attention(connection, now) {
+            match run_attention(connection, config, now) {
                 Ok(check) => checks.push(check),
                 Err(_) => checks.push(HealthCheck::error(
                     "DATABASE_INTEGRITY",

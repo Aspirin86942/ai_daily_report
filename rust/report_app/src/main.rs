@@ -194,10 +194,15 @@ fn execute(
             Ok(())
         }
         Command::Health(args) => {
-            let target = args.target_date.unwrap_or_else(|| {
-                (now.with_timezone(&ai_daily_report::types::shanghai()) - chrono::Days::new(1))
-                    .date_naive()
-            });
+            let target = match args.target_date {
+                Some(target) => target,
+                None => ai_daily_report::types::target_date(
+                    now,
+                    None,
+                    true,
+                    config.schedule.due_time()?,
+                )?,
+            };
             let started = std::time::Instant::now();
             let report = ai_daily_report::health::check(&config, target, now)?;
             if args.scheduled {

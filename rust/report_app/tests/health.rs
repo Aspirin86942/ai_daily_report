@@ -139,6 +139,188 @@ fn task_names_only_include_supported_tasks() {
     assert_eq!(report.task_names.health, format!("{name} Health"));
 }
 
+fn check_at(config: &AppConfig, target: &str, at: &str) -> health::HealthReport {
+    health::check(
+        config,
+        chrono::NaiveDate::parse_from_str(target, "%Y-%m-%d").unwrap(),
+        DateTime::parse_from_rfc3339(at)
+            .unwrap()
+            .with_timezone(&Utc),
+    )
+    .unwrap()
+}
+
+#[test]
+fn missing_report_waits_for_schedule_and_budget_then_alerts() {
+    let (_dir, mut config) = setup();
+    config.schedule.local_time = "09:00".into();
+    for at in [
+        "2026-10-18T00:50:00Z",
+        "2026-10-18T01:00:00Z",
+        "2026-10-18T01:04:59Z",
+    ] {
+        let result = check_at(&config, "2026-10-17", at);
+        assert!(
+            result
+                .checks
+                .iter()
+                .any(|c| c.code == "REPORT_NOT_DUE" && c.level == "ok"),
+            "{result:?}"
+        );
+        assert!(!result
+            .checks
+            .iter()
+            .any(|c| c.code == "REPORT_NOT_PUBLISHED" && c.level == "error"));
+    }
+    let result = check_at(&config, "2026-10-17", "2026-10-18T01:05:00Z");
+    assert!(result
+        .checks
+        .iter()
+        .any(|c| c.code == "REPORT_NOT_PUBLISHED" && c.level == "error"));
+}
+
+#[test]
+fn report_deadline_uses_configured_shanghai_time_across_midnight() {
+    let (_dir, mut config) = setup();
+    config.schedule.local_time = "23:59".into();
+    let before = check_at(&config, "2026-10-17", "2026-10-18T16:03:59Z");
+    assert!(before.checks.iter().any(|c| c.code == "REPORT_NOT_DUE"));
+    let after = check_at(&config, "2026-10-17", "2026-10-18T16:04:00Z");
+    assert!(after
+        .checks
+        .iter()
+        .any(|c| c.code == "REPORT_NOT_PUBLISHED" && c.level == "error"));
+}
+
+#[test]
+fn late_catchup_has_a_bounded_running_window_in_every_phase() {
+    for phase in [
+        "created",
+        "scanning",
+        "prepared",
+        "generating",
+        "db_committed",
+    ] {
+        let (_dir, config) = setup();
+        insert_run(
+            &config,
+            "catchup",
+            "2026-10-17",
+            "running",
+            phase,
+            "2026-10-18T02:58:00Z",
+        );
+        let during = check_at(&config, "2026-10-17", "2026-10-18T03:00:00Z");
+        assert!(
+            during
+                .checks
+                .iter()
+                .any(|c| c.code == "REPORT_IN_PROGRESS" && c.level == "ok"),
+            "{phase}: {during:?}"
+        );
+        let attention = during
+            .checks
+            .iter()
+            .find(|c| c.code == "RUN_ATTENTION")
+            .unwrap();
+        assert_eq!(attention.level, "ok", "{phase}: {attention:?}");
+        assert_eq!(attention.evidence["active"], 1);
+        let expired = check_at(&config, "2026-10-17", "2026-10-18T03:03:00Z");
+        assert!(
+            expired
+                .checks
+                .iter()
+                .any(|c| c.code == "REPORT_NOT_PUBLISHED" && c.level == "error"),
+            "{phase}: {expired:?}"
+        );
+    }
+}
+
+#[test]
+fn active_run_does_not_hide_missing_older_report_or_failed_run() {
+    let (_dir, config) = setup();
+    insert_run(
+        &config,
+        "active",
+        "2026-10-17",
+        "running",
+        "generating",
+        "2026-10-18T02:58:00Z",
+    );
+    insert_run(
+        &config,
+        "failed",
+        "2026-10-16",
+        "failed",
+        "prepared",
+        "2026-10-18T02:59:00Z",
+    );
+    let result = check_at(&config, "2026-10-16", "2026-10-18T03:00:00Z");
+    assert!(result
+        .checks
+        .iter()
+        .any(|c| c.code == "REPORT_NOT_PUBLISHED" && c.level == "error"));
+    let attention = result
+        .checks
+        .iter()
+        .find(|c| c.code == "RUN_ATTENTION")
+        .unwrap();
+    assert_eq!(attention.level, "warning");
+    assert_eq!(attention.evidence["pending"], 1);
+    assert_eq!(attention.evidence["recent_failures"], 1);
+}
+
+#[test]
+fn early_check_still_verifies_an_existing_publication() {
+    let (_dir, config) = setup();
+    insert_run(
+        &config,
+        "published",
+        "2026-10-17",
+        "succeeded",
+        "published",
+        "2026-10-18T00:00:00Z",
+    );
+    let connection =
+        rusqlite::Connection::open(config.paths.db_dir.join("reports.sqlite3")).unwrap();
+    connection
+        .execute(
+            "UPDATE report_runs SET expected_sha256='missing-file' WHERE run_id='published'",
+            [],
+        )
+        .unwrap();
+    let result = check_at(&config, "2026-10-17", "2026-10-18T00:50:00Z");
+    assert!(result
+        .checks
+        .iter()
+        .any(|c| c.code == "REPORT_HASH_MISMATCH" && c.level == "error"));
+    assert!(!result.checks.iter().any(|c| c.code == "REPORT_NOT_DUE"));
+}
+
+#[test]
+fn invalid_or_future_run_time_does_not_suppress_alerts() {
+    for at in ["invalid-time", "2026-10-18T04:00:00Z"] {
+        let (_dir, config) = setup();
+        insert_run(
+            &config,
+            "invalid-clock",
+            "2026-10-17",
+            "running",
+            "generating",
+            at,
+        );
+        let result = check_at(&config, "2026-10-17", "2026-10-18T03:00:00Z");
+        assert!(result
+            .checks
+            .iter()
+            .any(|c| c.code == "REPORT_NOT_PUBLISHED" && c.level == "error"));
+        assert!(result
+            .checks
+            .iter()
+            .any(|c| c.code == "RUN_ATTENTION" && c.level == "warning"));
+    }
+}
+
 #[test]
 fn run_attention_marks_failure_resolved_by_later_published_report() {
     let (_dir, config) = setup();
