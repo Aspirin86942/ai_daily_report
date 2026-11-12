@@ -1,4 +1,4 @@
-use crate::{types::shanghai, ReportError};
+use crate::{reports::personal::MAX_FILE_CHARS, types::shanghai, ReportError};
 use ai_daily_scanner_contract::{ReportMode, ScannerSettings};
 use chrono::{NaiveTime, Utc};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -526,8 +526,13 @@ impl AppConfig {
             if config.personal_scan() {
                 // Leave room for user notes and model execution within the daily budget.
                 config.scanner.max_workers = Some(1);
-                config.scanner.total_max_chars =
-                    Some(config.scanner.total_max_chars.unwrap_or(18_000).min(18_000));
+                config.scanner.total_max_chars = Some(
+                    config
+                        .scanner
+                        .total_max_chars
+                        .unwrap_or(MAX_FILE_CHARS as u64)
+                        .min(MAX_FILE_CHARS as u64),
+                );
                 config.scanner.total_deadline_ms = Some(
                     config
                         .scanner
@@ -566,6 +571,29 @@ impl AppConfig {
         crate::snapshots::fingerprint(
             &json!({"version":3,"report":self.report,"llm":llm,"scanner":self.scanner,"work_dir":self.paths.work_dir}),
         )
+    }
+
+    pub fn matches_personal_fingerprint(
+        &self,
+        expected: &str,
+        recovery: bool,
+    ) -> Result<bool, ReportError> {
+        if self.fingerprint(recovery)? == expected {
+            return Ok(true);
+        }
+        if !self.personal_scan()
+            || self
+                .scanner
+                .total_max_chars
+                .is_none_or(|chars| chars <= 18_000)
+        {
+            return Ok(false);
+        }
+        // Older executables capped the same YAML at 18,000 characters. A frozen
+        // request can retain that budget; every other configuration field must match.
+        let mut legacy = self.clone();
+        legacy.scanner.total_max_chars = Some(18_000);
+        Ok(legacy.fingerprint(recovery)? == expected)
     }
 
     pub fn endpoint(&self) -> String {

@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const MAX_INPUT_CHARS: usize = 20_000;
+pub const MAX_FILE_CHARS: usize = 180_000;
 pub const MAX_USER_CHARS: usize = 2_000;
+pub const MAX_INPUT_CHARS: usize = MAX_FILE_CHARS + MAX_USER_CHARS;
 pub const MAX_BODY_CHARS: usize = 1_500;
 pub const MAX_ITEMS: usize = 10;
 // Historical v5 reports retain their original validation limits.
@@ -20,7 +21,7 @@ pub const MAX_SUMMARY_CHARS: usize = 600;
 pub const MAX_SUMMARY_ITEMS: usize = 5;
 /// New personal plans keep at most five items while allowing the documented body bound.
 pub const MAX_SUMMARY_CHARS_EXTENDED: usize = MAX_BODY_CHARS;
-pub const MAX_REPORT_BYTES: usize = 100_000;
+pub const MAX_REPORT_BYTES: usize = 1_000_000;
 pub const TEMPLATE: &str = include_str!("../../../../templates/personal_daily_template_v5.md");
 pub const SCAN_TEMPLATE: &str =
     include_str!("../../../../templates/personal_daily_scan_template_v5.md");

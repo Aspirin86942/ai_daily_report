@@ -31,7 +31,7 @@ llm:
   # OpenAI 当前模型使用 none/low/medium/high 等档位；公司网关保持 null。
   # 设置后使用 max_completion_tokens；非 none 档位省略 temperature。
   reasoning_effort: null
-  max_request_utf8_bytes: 160000
+  max_request_utf8_bytes: 1600000
   # 模型响应结构或引用无效时的额外重试次数；与 max_retries 共享单步骤总尝试上限。
   invalid_response_retries: 1
   # 公司网关的模型能力经联调确认后填写；空值禁止发送业务正文。
@@ -98,14 +98,16 @@ scanner:
   # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.
   legacy_office_enabled: false
   max_workers: 4
-  excel_max_rows: 50
-  pdf_max_pages: 5
-  text_max_chars: 6000
+  excel_max_rows: 500
+  pdf_max_pages: 50
+  text_max_chars: 60000
   csv_encodings: [utf-8, utf-8-sig, gb18030]
   summary_excel_max_rows: 10
   summary_pdf_max_pages: 2
   summary_text_max_chars: 2000
-  total_max_chars: 50000
+  total_max_chars: 180000
+  # 解析内容进入摘录分配前的总容量；与最终送入模型的材料额度分别计算。
+  context_max_chars: 5000000
   max_file_size_mb: 50
   file_timeout_seconds: 30
   file_timeout_by_extension:

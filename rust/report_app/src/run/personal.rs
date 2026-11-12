@@ -232,7 +232,9 @@ pub fn finish(
             != fingerprint(
                 &json!({"context":input.context,"selection":input.selection,"plan":input.plan,"template":input.template}),
             )?
-        || input.recovery_fingerprint != app.fingerprint(true)?
+        || !app
+            .config
+            .matches_personal_fingerprint(&input.recovery_fingerprint, true)?
     {
         return Err(ReportError::new(
             "SNAPSHOT_CONTEXT_MISMATCH",
@@ -257,7 +259,9 @@ pub fn finish(
             snapshots: &snapshots,
             transport: &transport,
             llm: &app.config.llm,
-            allow_new_calls: run.config_fingerprint == app.fingerprint(false)?,
+            allow_new_calls: app
+                .config
+                .matches_personal_fingerprint(&run.config_fingerprint, false)?,
             run_id: id,
             started_at: Utc::now()
                 - chrono::Duration::from_std(started.elapsed()).unwrap_or_default(),

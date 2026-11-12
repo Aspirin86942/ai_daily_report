@@ -1,7 +1,12 @@
 use ai_daily_report::{
     config::AppConfig,
+    evidence::EvidenceRef,
     model::transport::{HttpResponse, ModelTransport, TransportFailure},
+    reports::personal::{
+        EvidenceAttachment, Material, Selection, MAX_FILE_CHARS, MAX_REPORT_BYTES, MAX_USER_CHARS,
+    },
     run::{run_daily, App},
+    snapshots::digest,
     types::{new_run_id, Period, ReportMode, ReportRequest, ReportSource, RunContext},
 };
 use chrono::{NaiveDate, Utc};
@@ -44,10 +49,15 @@ fn setup() -> (tempfile::TempDir, AppConfig) {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir(dir.path().join("config")).unwrap();
     fs::create_dir(dir.path().join("work")).unwrap();
+    let workers = std::env::var_os("AI_DAILY_TEST_WORKER_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug")
+        });
     fs::write(dir.path().join("config/settings.yaml"), json!({
         "paths":{"work_dir":"work"}, "report":{"profile":"personal"},
-        "scanner":{"office_worker_path": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug/ai-daily-office-parser.exe"),
-            "pdf_worker_path": std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug/ai-daily-pdf-parser.exe")},
+        "scanner":{"office_worker_path": workers.join("ai-daily-office-parser.exe"),
+            "pdf_worker_path": workers.join("ai-daily-pdf-parser.exe")},
         "llm":{"max_request_utf8_bytes":128000,"context_window_tokens":128000,"verified_max_output_tokens":8192,"max_tokens":4096},
         "recovery":{"enforce_model_budgets":false}
     }).to_string()).unwrap();
@@ -70,6 +80,121 @@ fn request(day: NaiveDate, save: bool) -> ReportRequest {
         dry_run: false,
         scheduled: false,
         regeneration_reason: None,
+    }
+}
+
+#[test]
+fn personal_scan_configuration_expands_file_budget_and_keeps_scan_deadline() {
+    let (dir, _) = setup();
+    let path = dir.path().join("config/settings.yaml");
+    let original: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for (configured, expected) in [
+        (None, MAX_FILE_CHARS as u64),
+        (Some(500_000), MAX_FILE_CHARS as u64),
+        (Some(18_000), 18_000),
+    ] {
+        let mut settings = original.clone();
+        if let Some(configured) = configured {
+            settings["scanner"]["total_max_chars"] = json!(configured);
+        }
+        settings["scanner"]["total_deadline_ms"] = json!(600_000);
+        fs::write(&path, settings.to_string()).unwrap();
+        let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
+        assert_eq!(config.scanner.total_max_chars, Some(expected));
+        assert_eq!(config.scanner.max_workers, Some(1));
+        assert_eq!(config.scanner.total_deadline_ms, Some(120_000));
+    }
+}
+
+#[test]
+fn expanded_personal_input_preserves_material_through_182000_chars_and_rejects_overflow() {
+    let (_dir, mut config) = setup();
+    config.llm.max_request_utf8_bytes = 1_000_000;
+    config.llm.context_window_tokens = Some(1_000_000);
+    let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+    let context = request(day, false).context;
+    let notes = "🦀".repeat(MAX_USER_CHARS);
+    for file_chars in [20_001, 180_000, 180_001] {
+        let mut text = "中🦀".repeat(file_chars / 2);
+        if file_chars % 2 == 1 {
+            text.push('中');
+        }
+        let mut source = ai_daily_report::reports::data::ReportSource::user(&text, Utc::now());
+        source.source_id = format!("src_{}", digest(b"large-material.md"));
+        source.source_kind = "file".into();
+        source.relative_path = Some("large-material.md".into());
+        let evidence = EvidenceRef {
+            source_id: source.source_id.clone(),
+            version_id: format!("scan-content:{}", source.excerpt_sha256),
+            extraction_id: "scan:expanded-input".into(),
+            unit_id: "scan-excerpt:expanded-input".into(),
+            side: "current".into(),
+            raw_sha256: source.excerpt_sha256.clone(),
+            unit_sha256: source.excerpt_sha256.clone(),
+            quote: text.clone(),
+            quote_sha256: source.excerpt_sha256.clone(),
+            unit_char_start: 0,
+            input_start: 0,
+            input_end: file_chars,
+            ranges: vec![],
+        };
+        let mut selection = Selection::default();
+        selection.summary.selected_files = 1;
+        selection.summary.selected_chars = file_chars + MAX_USER_CHARS;
+        selection.materials = vec![
+            Material {
+                source: ai_daily_report::reports::data::ReportSource::user(&notes, Utc::now()),
+                text: notes.clone(),
+                evidence: vec![],
+                priority: 0,
+            },
+            Material {
+                source,
+                text: text.clone(),
+                evidence: vec![evidence],
+                priority: 1,
+            },
+        ];
+        let plan =
+            ai_daily_report::model::personal::prepare_scan(&config.llm, &context, &mut selection);
+        if file_chars == 180_001 {
+            assert_eq!(plan.unwrap_err().code, "PERSONAL_REPORT_INVALID");
+            assert!(selection.validate().is_err());
+            continue;
+        }
+        let plan = plan.unwrap();
+        plan.validate(&config.llm).unwrap();
+        assert_eq!(plan.output_capacity_bytes, MAX_REPORT_BYTES);
+        assert!(plan.output_capacity_bytes > 100_000);
+        let input: Value =
+            serde_json::from_str(plan.request["messages"][1]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(input["sources"].as_array().unwrap().len(), 2);
+        assert_eq!(input["sources"][0]["text"], notes);
+        assert_eq!(input["sources"][1]["text"], text);
+        assert_eq!(
+            selection.summary.selected_chars,
+            file_chars + MAX_USER_CHARS
+        );
+        assert!(selection.summary.omissions.is_empty());
+    }
+}
+
+#[test]
+fn evidence_attachment_accepts_one_million_bytes_and_rejects_overflow() {
+    for bytes in [100_001, 1_000_000, 1_000_001] {
+        let markdown = "a".repeat(bytes);
+        let attachment = EvidenceAttachment {
+            sha256: digest(markdown.as_bytes()),
+            markdown,
+        };
+        if bytes <= 1_000_000 {
+            attachment.validate().unwrap();
+        } else {
+            assert_eq!(
+                attachment.validate().unwrap_err().code,
+                "PERSONAL_REPORT_INVALID"
+            );
+        }
     }
 }
 
@@ -304,7 +429,7 @@ fn publishes_one_request_and_repairs_after_processing_content_expires() {
     let output = run_daily(request(day, true), &app).unwrap();
     assert_eq!(sent.load(Ordering::SeqCst), 1);
     assert_eq!(output.action, "published");
-    assert!(output.markdown.len() <= 100_000);
+    assert!(output.markdown.len() <= MAX_REPORT_BYTES);
     assert!(output.markdown.contains("仍待审批"));
     let value: Value = serde_json::from_str(
         app.store
@@ -327,7 +452,7 @@ fn publishes_one_request_and_repairs_after_processing_content_expires() {
     );
     assert!(output.markdown.contains(&evidence.link(&day.to_string())));
     assert!(!output.markdown.contains("## 用户补充原文"));
-    assert!(output.markdown.len() + evidence.markdown.len() <= 100_000);
+    assert!(output.markdown.len() + evidence.markdown.len() <= MAX_REPORT_BYTES);
     let original = fs::read(&path).unwrap();
     drop(app);
     let future = Utc::now() + chrono::Duration::days(8);

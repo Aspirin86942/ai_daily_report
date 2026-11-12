@@ -350,6 +350,12 @@ pub struct ScannerSettings {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_optional_non_null"
     )]
+    pub context_max_chars: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
     pub excerpt_priority_paths: Option<Vec<String>>,
     #[serde(
         default,
@@ -616,6 +622,7 @@ impl Validate for ScannerSettings {
             }
         }
         range!(total_max_chars, 1, 10_000_000);
+        range!(context_max_chars, 100_000, 10_000_000);
         for (field, value) in [
             ("direct_text_max_bytes", self.direct_text_max_bytes),
             ("direct_text_read_bytes", self.direct_text_read_bytes),
@@ -1035,13 +1042,12 @@ impl Validate for NormalizedScannerSettings {
         self.parse.validate()?;
         self.context.validate()?;
         let expected = match self.report_mode {
-            ReportMode::Daily => ("daily_balanced_v1", 500_000, 100_000),
-            ReportMode::Weekly => ("weekly_balanced_v1", 500_000, 100_000),
-            ReportMode::Monthly => ("monthly_balanced_v1", 500_000, 100_000),
+            ReportMode::Daily => ("daily_balanced_v1", 100_000),
+            ReportMode::Weekly => ("weekly_balanced_v1", 100_000),
+            ReportMode::Monthly => ("monthly_balanced_v1", 100_000),
         };
         let actual = (
             self.context.profile_name.as_str(),
-            self.context.global_max_chars,
             self.context.per_file_max_chars,
         );
         if actual != expected {

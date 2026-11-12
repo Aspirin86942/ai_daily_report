@@ -3,7 +3,7 @@ use crate::{
     config::Llm,
     reports::personal::{
         body_chars, validate_items, ItemKind, PersonalItem, Selection, StatementKind,
-        MAX_BODY_CHARS, MAX_ITEMS, MAX_SUMMARY_CHARS, MAX_SUMMARY_CHARS_EXTENDED,
+        MAX_BODY_CHARS, MAX_ITEMS, MAX_REPORT_BYTES, MAX_SUMMARY_CHARS, MAX_SUMMARY_CHARS_EXTENDED,
         MAX_SUMMARY_ITEMS,
     },
     snapshots::{canonical_json, digest},
@@ -95,7 +95,7 @@ fn prepare_version(
                 .map(|m| (m.source.source_id.clone(), m.source.clone()))
                 .collect::<BTreeMap<_, _>>()),
             coverage: json!({}),
-            output_capacity_bytes: 100_000,
+            output_capacity_bytes: MAX_REPORT_BYTES,
             request: Value::Null,
         };
         rebuild(&mut step, llm)?;

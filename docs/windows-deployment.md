@@ -68,6 +68,10 @@ PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；
 
 ## 备份与回退
 
+2026-11-12 的十倍材料扩容已切换至 `.releases/rust-20261112-material-range-10x-01`。配置、两项任务 XML 和数据库一致备份位于 `.artifacts/material-range-10x-20261112/deployment/before`，逐文件哈希见同级 `backup-manifest.json`。正式任务保持原有触发器、权限、补跑设置与时限。
+
+如需撤回提取容量扩展，优先使用 `.artifacts/material-range-10x-20261112/rollback-config` 恢复旧限额并继续使用新版读取程序。该配置将文件材料恢复为 18,000 字符，同时保留新版对超过旧 100,000 字节上限的附件的读取与修复能力。原程序包继续保留用于隔离恢复；业务数据库、已发布文件、预览和新增调用记录持续保留。
+
 2026-11-04 **17:47:09** 已切换至 `.releases/rust-20261104-xls-formula-01`，修复 XLS 中文公式导致的解析进程退出。当前回退包 `.releases/rust-20261101-personal-only-01` 完整保留。配置、两项任务 XML、报告库和扫描库一致备份、当前与历史冻结文件位于 `.artifacts/xls-parser-fix-20261104/deployment-01/before`，逐文件哈希见同级 [backup-manifest.json](../.artifacts/xls-parser-fix-20261104/deployment-01/backup-manifest.json)。回退时恢复配置中的两个解析程序路径及两项任务的执行动作，核对同包解析程序并执行 `doctor --strict` 与任务回读；业务数据库和切换后新增数据继续保留。正式任务手动执行、问题原文件解析及数据保持证据见[部署最终核验](../.artifacts/xls-parser-fix-20261104/deployment-01/final-verification.json)。
 
 以下较早部署记录按发生时状态保留；2026-11-03 已清理的历史备份不再可恢复，具体范围见[当前运行状态](current-state.md)。

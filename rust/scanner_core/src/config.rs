@@ -68,11 +68,12 @@ pub fn normalize_scanner_settings(
             raw.pdf_max_pages.unwrap_or(5),
         )
     };
-    let (profile_name, global_max_chars, per_file_max_chars) = match report_mode {
-        ReportMode::Daily => ("daily_balanced_v1", 500_000, 100_000),
-        ReportMode::Weekly => ("weekly_balanced_v1", 500_000, 100_000),
-        ReportMode::Monthly => ("monthly_balanced_v1", 500_000, 100_000),
+    let (profile_name, per_file_max_chars) = match report_mode {
+        ReportMode::Daily => ("daily_balanced_v1", 100_000),
+        ReportMode::Weekly => ("weekly_balanced_v1", 100_000),
+        ReportMode::Monthly => ("monthly_balanced_v1", 100_000),
     };
+    let global_max_chars = raw.context_max_chars.unwrap_or(500_000);
     let max_file_size_bytes = raw
         .max_file_size_mb
         .unwrap_or(50)

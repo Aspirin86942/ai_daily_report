@@ -56,6 +56,11 @@
     "total_max_chars": {
       "$ref": "#/$defs/charBudget"
     },
+    "context_max_chars": {
+      "type": "integer",
+      "minimum": 100000,
+      "maximum": 10000000
+    },
     "fallback_after_timeout": {
       "type": "boolean"
     },

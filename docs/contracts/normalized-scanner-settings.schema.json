@@ -112,7 +112,8 @@
                 "const": "daily_balanced_v1"
               },
               "global_max_chars": {
-                "const": 500000
+                "minimum": 100000,
+                "maximum": 10000000
               },
               "per_file_max_chars": {
                 "const": 100000
@@ -138,7 +139,8 @@
                 "const": "weekly_balanced_v1"
               },
               "global_max_chars": {
-                "const": 500000
+                "minimum": 100000,
+                "maximum": 10000000
               },
               "per_file_max_chars": {
                 "const": 100000
@@ -164,7 +166,8 @@
                 "const": "monthly_balanced_v1"
               },
               "global_max_chars": {
-                "const": 500000
+                "minimum": 100000,
+                "maximum": 10000000
               },
               "per_file_max_chars": {
                 "const": 100000

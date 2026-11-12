@@ -20,6 +20,45 @@ fn empty_settings_receive_frozen_current_defaults() {
 }
 
 #[test]
+fn context_budget_is_explicit_and_preserves_default_profiles() {
+    let original: ScannerSettings = serde_json::from_value(serde_json::json!({})).unwrap();
+    assert!(serde_json::to_value(&original)
+        .unwrap()
+        .get("context_max_chars")
+        .is_none());
+    for mode in [ReportMode::Daily, ReportMode::Weekly, ReportMode::Monthly] {
+        let baseline = normalize_scanner_settings(&original, mode).unwrap();
+        let expanded = normalize_scanner_settings(
+            &ScannerSettings {
+                context_max_chars: Some(5_000_000),
+                ..original.clone()
+            },
+            mode,
+        )
+        .unwrap();
+        assert_eq!(baseline.context.global_max_chars, 500_000);
+        assert_eq!(expanded.context.global_max_chars, 5_000_000);
+        assert_eq!(
+            expanded.context.per_file_max_chars,
+            baseline.context.per_file_max_chars
+        );
+        assert_eq!(expanded.parse, baseline.parse);
+        expanded.validate().unwrap();
+    }
+    for value in [99_999, 10_000_001] {
+        let raw = ScannerSettings {
+            context_max_chars: Some(value),
+            ..original.clone()
+        };
+        assert!(normalize_scanner_settings(&raw, ReportMode::Daily).is_err());
+    }
+    assert!(serde_json::from_value::<ScannerSettings>(
+        serde_json::json!({"context_max_chars": null})
+    )
+    .is_err());
+}
+
+#[test]
 fn excerpt_priorities_are_canonical_relative_paths_in_the_frozen_profile() {
     let raw: ScannerSettings = serde_json::from_value(serde_json::json!({
         "excerpt_priority_paths": ["z\\salary.xlsx", "a.md", "a.md"]

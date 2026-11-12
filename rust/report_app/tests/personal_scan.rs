@@ -3,7 +3,7 @@ use ai_daily_report::{
     health,
     model::transport::{HttpResponse, ModelTransport, TransportFailure},
     operations,
-    reports::personal::PersonalReport,
+    reports::personal::{PersonalReport, MAX_FILE_CHARS, MAX_REPORT_BYTES},
     run::{run_daily, App},
     types::{new_run_id, utc_window, Period, ReportMode, ReportRequest, ReportSource, RunContext},
 };
@@ -74,7 +74,7 @@ impl Fixture {
         }).to_string()).unwrap();
         let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
         assert_eq!(config.scanner.max_workers, Some(1));
-        assert_eq!(config.scanner.total_max_chars, Some(18_000));
+        assert_eq!(config.scanner.total_max_chars, Some(MAX_FILE_CHARS as u64));
         assert_eq!(config.scanner.total_deadline_ms, Some(120_000));
         let mut app = App::open(config, Utc::now()).unwrap();
         let sent = Arc::new(Mutex::new(vec![]));
@@ -206,10 +206,183 @@ fn daily_scan_covers_calendar_boundaries_publishes_and_reuses_without_collection
 }
 
 #[test]
+fn expanded_scan_material_reaches_model_and_large_attachment_is_restored_without_loss() {
+    let mut f = Fixture::new();
+    f.app.config.llm.max_request_utf8_bytes = 1_000_000;
+    f.app.config.llm.context_window_tokens = Some(1_000_000);
+    let start = utc_window(f.day).unwrap().0;
+    let files: BTreeMap<_, _> = (0..30)
+        .map(|index| {
+            let name = format!("material-{index:02}.md");
+            let text: String = (0..100)
+                .map(|line| {
+                    format!(
+                        "材料 {index:02} 第 {line:03} 项：金额 120 元，审批条件和负责人待确认。\n"
+                    )
+                })
+                .collect();
+            f.file(&name, &text, start);
+            (name, text)
+        })
+        .collect();
+    let material_chars: usize = files.values().map(|text| text.chars().count()).sum();
+    assert!(material_chars > 100_000);
+    assert!(material_chars < MAX_FILE_CHARS);
+
+    let result = run_daily(f.request(), &f.app).unwrap();
+    assert_eq!(result.action, "published");
+    let sent = f.sent.lock().unwrap();
+    assert_eq!(
+        sent.len(),
+        1,
+        "{}",
+        f.app
+            .store
+            .get(&result.run_id)
+            .unwrap()
+            .report_json
+            .unwrap()
+    );
+    let sources = sent[0]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), files.len());
+    for source in sources {
+        let path = source["path"].as_str().unwrap();
+        let text = source["text"].as_str().unwrap();
+        let expected = files[path].replace('\n', "");
+        assert!(
+            text.replace('\n', "").ends_with(expected.as_str()),
+            "{path}"
+        );
+    }
+    drop(sent);
+
+    let stored = f.app.store.get(&result.run_id).unwrap();
+    let report: PersonalReport =
+        serde_json::from_str(stored.report_json.as_deref().unwrap()).unwrap();
+    report.validate().unwrap();
+    assert_eq!(report.selection.selected_files, files.len() as u64);
+    assert!(report.selection.selected_chars >= material_chars);
+    assert_eq!(report.selection.omissions.get("budget"), None);
+    assert_eq!(report.sources.len(), files.len());
+    let attachment = report.evidence_attachment.as_ref().unwrap();
+    assert!(attachment.markdown.len() > 100_000);
+    assert!(report.output_bytes(&result.markdown) <= MAX_REPORT_BYTES);
+    for text in files.values() {
+        for line in text.lines() {
+            assert!(attachment.markdown.contains(line));
+        }
+    }
+    for source in &report.sources {
+        let text = &report.evidence[&source.source_id][0].quote;
+        let expected = files[source.relative_path.as_deref().unwrap()].replace('\n', "");
+        assert!(text.replace('\n', "").ends_with(expected.as_str()));
+    }
+    let path = result.output_path.as_ref().unwrap();
+    let evidence_path = path
+        .parent()
+        .unwrap()
+        .join(attachment.link(&f.day.to_string()));
+    let original = fs::read(path).unwrap();
+    let original_evidence = attachment.markdown.as_bytes();
+    assert_eq!(fs::read(&evidence_path).unwrap(), original_evidence);
+    assert!(result
+        .markdown
+        .contains(&attachment.link(&f.day.to_string())));
+
+    let scans = f.scans();
+    fs::rename(
+        &f.app.config.paths.work_dir,
+        f.app.config.paths.work_dir.with_file_name("offline-work"),
+    )
+    .unwrap();
+    fs::remove_file(&evidence_path).unwrap();
+    ai_daily_report::run::repair_output(&f.app, &f.day.to_string(), Utc::now()).unwrap();
+    assert_eq!(fs::read(path).unwrap(), original);
+    assert_eq!(fs::read(&evidence_path).unwrap(), original_evidence);
+    let again = run_daily(f.request(), &f.app).unwrap();
+    assert_eq!(again.action, "existing");
+    assert_eq!(again.markdown, result.markdown);
+    assert_eq!(f.scans(), scans);
+    assert_eq!(f.sent.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn expanded_context_admits_all_files_before_bounding_personal_material() {
+    let mut f = Fixture::new();
+    let settings_path = f.app.config.config_dir.join("settings.yaml");
+    let mut settings: Value = serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+    settings["scanner"]["context_max_chars"] = json!(5_000_000);
+    settings["scanner"]["text_max_chars"] = json!(60_000);
+    settings["scanner"]["text_excerpt_max_chars"] = json!(60_000);
+    settings["llm"]["max_request_utf8_bytes"] = json!(1_600_000);
+    settings["llm"]["context_window_tokens"] = json!(1_050_000);
+    fs::write(&settings_path, settings.to_string()).unwrap();
+    f.app.config = AppConfig::load_with_env(f._dir.path(), None, &BTreeMap::new()).unwrap();
+    let start = utc_window(f.day).unwrap().0;
+    let files: BTreeMap<_, _> = (0..12)
+        .map(|index| {
+            let path = format!("wide-context-{index:02}.md");
+            let marker = format!("材料 {index:02}：");
+            let line = format!(
+                "{marker}{}。\n",
+                "金额 120 元，审批条件和负责人待确认；".repeat(7)
+            );
+            f.file(&path, &line.repeat(300), start);
+            (path, marker)
+        })
+        .collect();
+
+    let result = run_daily(f.request(), &f.app).unwrap();
+    assert_eq!(result.action, "published");
+    let sent = f.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    let sources = sent[0]["sources"].as_array().unwrap();
+    assert_eq!(sources.len(), files.len());
+    for source in sources {
+        let path = source["path"].as_str().unwrap();
+        assert!(source["text"]
+            .as_str()
+            .unwrap()
+            .contains(files[path].as_str()));
+    }
+    let selected_chars: usize = sources
+        .iter()
+        .map(|source| source["text"].as_str().unwrap().chars().count())
+        .sum();
+    assert!(selected_chars > 100_000);
+    assert!(selected_chars <= MAX_FILE_CHARS);
+    drop(sent);
+
+    let (parsed_files, parsed_chars): (i64, i64) =
+        rusqlite::Connection::open(&f.app.config.index_db_path)
+            .unwrap()
+            .query_row(
+                "SELECT count(*), coalesce(sum(length(json_extract(content, '$.text'))), 0) FROM parse_cache",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+    assert_eq!(parsed_files, files.len() as i64);
+    assert!(parsed_chars > 500_000);
+    let stored = f.app.store.get(&result.run_id).unwrap();
+    let report: PersonalReport =
+        serde_json::from_str(stored.report_json.as_deref().unwrap()).unwrap();
+    report.validate().unwrap();
+    assert_eq!(report.selection.selected_files, files.len() as u64);
+    assert_eq!(report.selection.selected_chars, selected_chars);
+    assert_eq!(report.selection.omissions.get("read_failed"), None);
+    assert!(!report
+        .gaps
+        .iter()
+        .any(|gap| gap.code == "SOURCE_UNAVAILABLE"));
+    assert!(report.sources.iter().all(|source| source.usable()));
+}
+
+#[test]
 fn scan_dry_run_keeps_budgets_and_reports_unread_ranges_without_model_calls() {
     let f = Fixture::new();
     let start = utc_window(f.day).unwrap().0;
-    for i in 0..6 {
+    for i in 0..40 {
         f.file(
             &format!("{i}.md"),
             &"金额待核对，未经审批不得生效。\n".repeat(350),
@@ -221,7 +394,9 @@ fn scan_dry_run_keeps_budgets_and_reports_unread_ranges_without_model_calls() {
     let result = run_daily(request, &f.app).unwrap();
     assert_eq!(result.action, "dry_run");
     let selection: Value = serde_json::from_str(&result.markdown).unwrap();
-    assert!(selection["summary"]["selected_chars"].as_u64().unwrap() <= 18_000);
+    let selected_chars = selection["summary"]["selected_chars"].as_u64().unwrap();
+    assert!(selected_chars > 20_000);
+    assert!(selected_chars <= MAX_FILE_CHARS as u64);
     assert!(!selection["gaps"].as_array().unwrap().is_empty());
     assert!(f.sent.lock().unwrap().is_empty());
     assert!(f.app.store.current(&f.day.to_string()).unwrap().is_none());
@@ -281,6 +456,160 @@ fn interrupted_scan_resumes_frozen_content_after_source_changes() {
         .unwrap()
         .replace('\n', "")
         .ends_with(original));
+}
+
+#[test]
+fn legacy_scan_cap_resumes_saved_response_with_same_yaml_and_rejects_other_changes() {
+    use ai_daily_report::{
+        model::ModelRunner,
+        run::personal::{finish, PersonalInput},
+        snapshots::{SnapshotRef, SnapshotStore},
+    };
+    use std::time::Instant;
+
+    for configured in [None, Some(50_000)] {
+        let mut f = Fixture::new();
+        let settings_path = f.app.config.config_dir.join("settings.yaml");
+        let mut settings: Value =
+            serde_json::from_slice(&fs::read(&settings_path).unwrap()).unwrap();
+        if let Some(chars) = configured {
+            settings["scanner"]["total_max_chars"] = json!(chars);
+        }
+        fs::write(&settings_path, settings.to_string()).unwrap();
+        let yaml = fs::read(&settings_path).unwrap();
+        f.app.config = AppConfig::load_with_env(f._dir.path(), None, &BTreeMap::new()).unwrap();
+        f.app.config.scanner.total_max_chars = Some(18_000);
+        let original = "金额 120 元。满足条件后生效；责任人与截止日期待确认。";
+        f.file("work.md", original, utc_window(f.day).unwrap().0);
+        f.app.transport = Box::new(Interrupted);
+        assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_daily(f.request(), &f.app)
+        }))
+        .is_err());
+        let run = f
+            .app
+            .store
+            .pending(Some(&f.day.to_string()))
+            .unwrap()
+            .remove(0);
+        let input_ref = SnapshotRef {
+            path: run.snapshot_path.clone().unwrap(),
+            sha256: run.snapshot_sha256.clone().unwrap(),
+        };
+        let session = f.app.processing.as_ref().unwrap();
+        let snapshots = SnapshotStore::with_quota(
+            session.quota.root.join("snapshots"),
+            ai_daily_report::processing_cache::MAX_BYTES,
+            Arc::clone(&session.quota),
+        )
+        .unwrap();
+        let frozen_bytes = snapshots.read_bytes(&input_ref).unwrap();
+        let input: PersonalInput = serde_json::from_slice(&frozen_bytes).unwrap();
+        let model = Model(f.sent.clone());
+        let started = Instant::now();
+        let saved = ModelRunner {
+            store: &f.app.store,
+            snapshots: &snapshots,
+            transport: &model,
+            llm: &f.app.config.llm,
+            allow_new_calls: true,
+            run_id: &run.run_id,
+            started_at: Utc::now(),
+            started,
+            deadline: started + Duration::from_secs(60),
+        }
+        .execute(input.plan.as_ref().unwrap())
+        .unwrap();
+        assert!(!saved.reused);
+        let calls = f.app.store.calls(&run.run_id).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["status"], "succeeded");
+
+        let config = AppConfig::load_with_env(f._dir.path(), None, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            config.scanner.total_max_chars,
+            Some(configured.unwrap_or(MAX_FILE_CHARS as u64))
+        );
+        assert_ne!(config.fingerprint(false).unwrap(), run.config_fingerprint);
+        assert!(config
+            .matches_personal_fingerprint(&run.config_fingerprint, false)
+            .unwrap());
+        assert!(config
+            .matches_personal_fingerprint(&input.recovery_fingerprint, true)
+            .unwrap());
+        let Fixture {
+            _dir,
+            app,
+            day,
+            sent,
+        } = f;
+        drop(app);
+        let mut f = Fixture {
+            app: App::open(config, Utc::now()).unwrap(),
+            _dir,
+            day,
+            sent,
+        };
+        f.app.transport = Box::new(Interrupted);
+        let unchanged = f.app.config.clone();
+        let mut restricted = unchanged.clone();
+        restricted.scanner.excluded_dirs = Some(vec![unchanged
+            .paths
+            .work_dir
+            .to_string_lossy()
+            .into_owned()]);
+        assert!(!ai_daily_report::evidence::permitted(
+            &restricted,
+            &unchanged.paths.work_dir.join("work.md")
+        ));
+        let mut different_model = unchanged.clone();
+        different_model.llm.model_id.push_str("-changed");
+        let mut different_path = unchanged.clone();
+        different_path.paths.work_dir = different_path.paths.work_dir.join("other-work");
+        for changed in [restricted, different_model, different_path] {
+            f.app.config = changed;
+            let started = Instant::now();
+            assert_eq!(
+                finish(
+                    &f.app,
+                    &run.run_id,
+                    started,
+                    started + Duration::from_secs(60)
+                )
+                .unwrap_err()
+                .code,
+                "SNAPSHOT_CONTEXT_MISMATCH"
+            );
+        }
+        f.app.config = unchanged;
+        let scans = f.scans();
+        fs::rename(
+            &f.app.config.paths.work_dir,
+            f.app.config.paths.work_dir.with_file_name("offline-work"),
+        )
+        .unwrap();
+        let result = run_daily(f.request(), &f.app).unwrap();
+        assert_eq!(result.action, "published");
+        assert_eq!(result.run_id, run.run_id);
+        assert_eq!(f.scans(), scans);
+        assert_eq!(f.sent.lock().unwrap().len(), 1);
+        assert_eq!(f.app.store.calls(&run.run_id).unwrap(), calls);
+        assert_eq!(snapshots.read_bytes(&input_ref).unwrap(), frozen_bytes);
+        assert_eq!(fs::read(&settings_path).unwrap(), yaml);
+        let stored = f.app.store.get(&result.run_id).unwrap();
+        assert_eq!(stored.config_fingerprint, run.config_fingerprint);
+        let report: PersonalReport =
+            serde_json::from_str(stored.report_json.as_deref().unwrap()).unwrap();
+        assert!(!report.items.is_empty());
+        assert_eq!(
+            report.evidence.values().next().unwrap()[0].quote,
+            input.selection.materials[0].text
+        );
+        let attachment = report.evidence_attachment.unwrap();
+        for sentence in original.split('。').filter(|part| !part.is_empty()) {
+            assert!(attachment.markdown.contains(sentence));
+        }
+    }
 }
 
 #[test]
