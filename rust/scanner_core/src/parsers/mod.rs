@@ -600,11 +600,29 @@ fn contract_failure(
     }
 }
 
+pub(crate) fn scheduled_request(
+    file: &ai_daily_discovery::DiscoveredFileOut,
+    route: crate::budget_model::RouteKind,
+    timeout_ms: u64,
+    profile: &NormalizedScannerSettings,
+    classifications: &std::collections::BTreeMap<String, crate::admission::PdfClassificationResult>,
+) -> crate::scheduler::ParseRequest {
+    crate::scheduler::ParseRequest {
+        selected_pdf_pages: classifications
+            .get(&file.file_identity)
+            .and_then(|result| document::selected_pages(&profile.parse.pdf, result)),
+        file: file.clone(),
+        route,
+        timeout_ms,
+    }
+}
+
 pub(crate) fn worker_request(
     file: &ai_daily_discovery::DiscoveredFileOut,
     route: ParserRoute,
     timeout_ms: u64,
     profile: &NormalizedScannerSettings,
+    selected_pdf_pages: Option<&[u64]>,
 ) -> ParseOperation {
     let backend = match route {
         ParserRoute::RustOffice => ParserBackend::RustOfficeOxideV2,
@@ -616,7 +634,7 @@ pub(crate) fn worker_request(
     };
     let parser_limits = match route {
         ParserRoute::Pdf => ParserLimits::Pdf {
-            selected_pages: None,
+            selected_pages: selected_pdf_pages.map(<[u64]>::to_vec),
             max_pages: profile.parse.pdf.max_pages,
             excerpt_max_chars: profile.parse.pdf.excerpt_max_chars,
         },

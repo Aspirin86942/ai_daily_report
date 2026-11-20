@@ -45,15 +45,30 @@ pub struct ReportSource {
 
 impl ReportSource {
     pub fn from_scan(source: &ScanSource) -> Result<Self, ReportError> {
-        let mut value = serde_json::to_value(source)?;
-        let map = value.as_object_mut().unwrap();
-        map.remove("excerpt");
-        map.insert(
-            "excerpt_chars".into(),
-            json!(source.excerpt.chars().count()),
-        );
-        map.insert("source_kind".into(), json!("file"));
-        let source: Self = serde_json::from_value(value)?;
+        let source = Self {
+            source_id: source.source_id.clone(),
+            source_kind: "file".into(),
+            relative_path: Some(source.relative_path.clone()),
+            extension: Some(source.extension.clone()),
+            size_bytes: source.size_bytes,
+            modified_at_utc: Some(source.modified_at_utc.clone()),
+            observed_at_utc: source.observed_at_utc.clone(),
+            content_sha256: source.content_sha256.clone(),
+            excerpt_sha256: source.excerpt_sha256.clone(),
+            excerpt_chars: source.excerpt.chars().count(),
+            model_chars: 0,
+            parser_backend: Some(source.parser_backend.clone()),
+            worker_lane: Some(serde_json::from_value(serde_json::to_value(
+                source.worker_lane,
+            )?)?),
+            parse_status: serde_json::from_value(serde_json::to_value(source.parse_status)?)?,
+            parse_truncated: source.parse_truncated,
+            excerpt_truncated: source.excerpt_truncated,
+            model_truncated: false,
+            coverage_limits: source.coverage_limits.clone(),
+            reason: source.reason.clone(),
+            snapshot_ref: None,
+        };
         source.validate()?;
         Ok(source)
     }

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{collections::BTreeSet, path::Path};
 
+mod excerpt;
 mod worker;
 pub use worker::{is_valid_text_char, worker_hello};
 
@@ -64,17 +65,12 @@ impl PdfReader {
         max_pages: u32,
         max_chars: usize,
     ) -> Result<PdfText, PdfError> {
-        let mut output = Vec::new();
-        let (total, truncated) =
-            self.visit_pages(path, selected_pages, max_pages, max_chars, |page| {
-                output.push(page);
-                true
-            })?;
-        Ok(PdfText {
-            pages_total: total,
-            pages: output,
-            truncated,
-        })
+        if max_pages == 0 || max_chars == 0 {
+            return Err(PdfError::Pages);
+        }
+        let document = self.pdfium.load_pdf_from_file(path, None)?;
+        let (total, pages) = page_numbers(&document, selected_pages, max_pages)?;
+        excerpt::read(&document, total, &pages, max_chars)
     }
 
     pub fn visit_pages(
@@ -85,74 +81,49 @@ impl PdfReader {
         max_chars: usize,
         mut visit: impl FnMut(PageText) -> bool,
     ) -> Result<(u32, bool), PdfError> {
-        self.visit_pages_with_audit(
-            path,
-            selected_pages,
-            max_pages,
-            max_chars,
-            false,
-            |page, _| visit(page),
-        )
+        let result = self.read(path, selected_pages, max_pages, max_chars)?;
+        let stopped = result.pages.into_iter().any(|page| !visit(page));
+        Ok((result.pages_total, result.truncated || stopped))
     }
-    pub(crate) fn visit_pages_with_audit(
+
+    pub(crate) fn visit_archive_pages(
         &self,
         path: &Path,
-        selected_pages: Option<&[u32]>,
-        max_pages: u32,
-        max_chars: usize,
-        inspect_images: bool,
-        mut visit: impl FnMut(PageText, Option<bool>) -> bool,
+        mut visit: impl FnMut(u32, &str, Option<bool>) -> bool,
     ) -> Result<(u32, bool), PdfError> {
-        if max_pages == 0 || max_chars == 0 {
-            return Err(PdfError::Pages);
-        }
         let document = self.pdfium.load_pdf_from_file(path, None)?;
         let total = u32::try_from(document.pages().len()).map_err(|_| PdfError::Pages)?;
-        let pages: Vec<u32> = selected_pages
-            .map(|values| values.to_vec())
-            .unwrap_or_else(|| (1..=total.min(max_pages)).collect());
-        if pages.is_empty()
-            || pages.len() > max_pages as usize
-            || pages.iter().any(|page| *page == 0 || *page > total)
-            || pages.iter().copied().collect::<BTreeSet<_>>().len() != pages.len()
-        {
+        if total == 0 {
             return Err(PdfError::Pages);
         }
-        let mut remaining = max_chars;
-        let mut truncated = pages.len() < total as usize;
-        for number in pages {
-            if remaining == 0 {
-                truncated = true;
-                break;
-            }
+        for number in 1..=total {
             let page = document.pages().get((number - 1) as PdfPageIndex)?;
             let text = page.text()?.all().replace("\r\n", "\n").replace('\r', "\n");
-            let chars_total = text.chars().count();
-            let excerpt: String = text.chars().take(remaining).collect();
-            let excerpt_chars = excerpt.chars().count();
-            remaining -= excerpt_chars;
-            let page_truncated = chars_total > excerpt_chars;
-            truncated |= page_truncated;
-            let images = if inspect_images {
-                page_images(&page)
-            } else {
-                None
-            };
-            if !visit(
-                PageText {
-                    page: number,
-                    text: excerpt,
-                    chars_total,
-                    truncated: page_truncated,
-                },
-                images,
-            ) {
-                truncated = true;
-                break;
+            if !visit(number, &text, page_images(&page)) {
+                return Ok((total, true));
             }
         }
-        Ok((total, truncated))
+        Ok((total, false))
     }
+}
+
+fn page_numbers(
+    document: &PdfDocument<'_>,
+    selected: Option<&[u32]>,
+    max_pages: u32,
+) -> Result<(u32, Vec<u32>), PdfError> {
+    let total = u32::try_from(document.pages().len()).map_err(|_| PdfError::Pages)?;
+    let pages = selected
+        .map(<[u32]>::to_vec)
+        .unwrap_or_else(|| (1..=total.min(max_pages)).collect());
+    if pages.is_empty()
+        || pages.len() > max_pages as usize
+        || pages.iter().any(|page| *page == 0 || *page > total)
+        || pages.iter().copied().collect::<BTreeSet<_>>().len() != pages.len()
+    {
+        return Err(PdfError::Pages);
+    }
+    Ok((total, pages))
 }
 
 pub(crate) fn page_images(page: &PdfPage<'_>) -> Option<bool> {

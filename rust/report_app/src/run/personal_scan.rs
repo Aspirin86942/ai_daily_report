@@ -2,7 +2,7 @@
 //! Scan identities describe a frozen observation, never an archive version.
 use super::{input, App};
 use crate::{
-    evidence::{permitted, EvidenceRef},
+    evidence::{EvidencePermissions, EvidenceRef},
     reports::{
         data::ReportSource,
         personal::{Material, Selection, MAX_INPUT_CHARS},
@@ -12,8 +12,167 @@ use crate::{
     ReportError,
 };
 use ai_daily_scanner_contract::EngineStatus;
-use serde_json::json;
-use std::collections::BTreeMap;
+use ai_daily_worker_contract::{ContentUnit, ContentUnitKind, SourceRange};
+use serde_json::{json, Value};
+use std::{collections::BTreeMap, path::Path};
+
+fn invalid_units() -> ReportError {
+    ReportError::new("SCAN_SOURCE_INVALID", "扫描摘录的结构位置与原文不一致")
+}
+
+/// Preserve native excerpt boundaries. The report and request can then choose
+/// different blocks without parsing Markdown or opening the source file again.
+fn materials(
+    mut source: ReportSource,
+    text: &str,
+    path: &Path,
+    run_id: &str,
+) -> Result<Vec<Material>, ReportError> {
+    let file_id = source.source_id.clone();
+    let raw_hash = source.content_sha256.clone().ok_or_else(invalid_units)?;
+    if digest(text.as_bytes()) != source.excerpt_sha256 {
+        return Err(invalid_units());
+    }
+    let audit = source.coverage_limits["evidence_audit"]
+        .as_object_mut()
+        .ok_or_else(invalid_units)?;
+    let units: Option<Vec<ContentUnit>> =
+        serde_json::from_value(audit.remove("content_units").unwrap_or(Value::Null))?;
+    let ends: Option<Vec<usize>> =
+        serde_json::from_value(audit.remove("excerpt_block_ends").unwrap_or(Value::Null))?;
+    let inherited: Option<Vec<Vec<usize>>> =
+        serde_json::from_value(audit.remove("excerpt_block_context").unwrap_or(Value::Null))?;
+    let excerpt_ranges: Option<Vec<SourceRange>> =
+        serde_json::from_value(audit.remove("excerpt_ranges").unwrap_or(Value::Null))?;
+    // Read ranges describe the file once. Excerpt ranges describe each individual block.
+    let read_ranges = audit.remove("read_ranges");
+    let units = units.unwrap_or_default();
+    let mut ends = ends.unwrap_or_else(|| vec![units.len()]);
+    let mut inherited = inherited.unwrap_or_else(|| vec![Vec::new(); ends.len()]);
+    if ends.is_empty()
+        || ends.last() != Some(&units.len())
+        || ends.len() != inherited.len()
+        || ends.windows(2).any(|pair| pair[0] >= pair[1])
+    {
+        return Err(invalid_units());
+    }
+    let offsets: Vec<usize> = text
+        .char_indices()
+        .map(|(byte, _)| byte)
+        .chain([text.len()])
+        .collect();
+    let total = offsets.len() - 1;
+    for unit in &units {
+        if unit.text_start >= unit.text_end || unit.text_end > total as u64 {
+            return Err(invalid_units());
+        }
+    }
+    if units.windows(2).any(|w| w[0].text_end > w[1].text_start) {
+        return Err(invalid_units());
+    }
+    // Keep a short note's qualifiers with its statement. It already fits a single
+    // native excerpt block and publishing a source per sentence wastes request space.
+    if total <= 512
+        && matches!(
+            source.extension.as_deref(),
+            Some(".md" | ".txt" | ".log" | ".json")
+        )
+        && units.iter().all(|u| {
+            matches!(
+                u.kind,
+                ContentUnitKind::Heading | ContentUnitKind::Paragraph | ContentUnitKind::Text
+            )
+        })
+    {
+        ends = vec![units.len()];
+        inherited = vec![Vec::new()];
+    }
+    let mut result = Vec::with_capacity(ends.len());
+    let mut first = 0;
+    let mut start_char = 0;
+    for (end, parents) in ends.into_iter().zip(inherited) {
+        let end_char = units
+            .get(end)
+            .map_or(total, |unit| unit.text_start as usize);
+        if end_char <= start_char || end > units.len() {
+            return Err(invalid_units());
+        }
+        let quote = &text[offsets[start_char]..offsets[end_char]];
+        let quote_hash = digest(quote.as_bytes());
+        let mut block = source.clone();
+        if first != 0 {
+            block.source_id = format!(
+                "src_{}",
+                digest(format!("{file_id}/{start_char}").as_bytes())
+            );
+        }
+        let mut ranges = Vec::new();
+        for range in units[first..end].iter().flat_map(|unit| &unit.ranges) {
+            if !ranges.contains(range) {
+                ranges.push(range.clone());
+            }
+        }
+        if units.is_empty() {
+            ranges = excerpt_ranges.clone().unwrap_or_default();
+        }
+        let mut context = Vec::with_capacity(parents.len());
+        for index in parents {
+            let unit = units
+                .get(index)
+                .filter(|_| index < first)
+                .ok_or_else(invalid_units)?;
+            context.push(json!({
+                "text": &text[offsets[unit.text_start as usize]..offsets[unit.text_end as usize]],
+                "ranges": unit.ranges,
+            }));
+        }
+        block.coverage_limits["personal"] = json!({
+            "absolute_path": path, "input_mode": "scan", "selection_basis": "modified_at",
+            "file_source_id": file_id, "excerpt_start": start_char, "excerpt_end": end_char,
+            "context": context,
+        });
+        block.coverage_limits["evidence_audit"]["excerpt_ranges"] = json!(ranges);
+        if first == 0 {
+            if let Some(read) = &read_ranges {
+                block.coverage_limits["evidence_audit"]["read_ranges"] = read.clone();
+            }
+        }
+        block.excerpt_chars = end_char - start_char;
+        block.excerpt_sha256 = quote_hash.clone();
+        let evidence = EvidenceRef {
+            source_id: block.source_id.clone(),
+            version_id: format!("scan-content:{raw_hash}"),
+            extraction_id: format!("scan:{run_id}:{file_id}"),
+            unit_id: format!("scan-excerpt:{quote_hash}"),
+            side: "current".into(),
+            raw_sha256: raw_hash.clone(),
+            unit_sha256: quote_hash.clone(),
+            quote: quote.to_owned(),
+            quote_sha256: quote_hash,
+            unit_char_start: 0,
+            input_start: 0,
+            input_end: block.excerpt_chars,
+            ranges,
+        };
+        let priority = if units[first..end]
+            .iter()
+            .any(|u| u.kind == ContentUnitKind::Total)
+        {
+            1
+        } else {
+            2
+        };
+        result.push(Material {
+            source: block,
+            text: quote.to_owned(),
+            evidence: vec![evidence],
+            priority,
+        });
+        first = end;
+        start_char = end_char;
+    }
+    Ok(result)
+}
 
 pub fn prepare(app: &App, request: &ReportRequest) -> Result<Selection, ReportError> {
     let mut selection = Selection::default();
@@ -37,7 +196,8 @@ pub fn prepare(app: &App, request: &ReportRequest) -> Result<Selection, ReportEr
         .iter()
         .map(|s| (s.source_id.as_str(), s))
         .collect();
-    for mut source in sources {
+    let permissions = EvidencePermissions::new(&app.config);
+    for source in sources {
         selection.summary.inspected_files += 1;
         let path = source
             .relative_path
@@ -45,7 +205,10 @@ pub fn prepare(app: &App, request: &ReportRequest) -> Result<Selection, ReportEr
             .unwrap_or_default()
             .to_owned();
         let absolute = app.config.paths.work_dir.join(&path);
-        if !permitted(&app.config, &absolute) {
+        if !permissions
+            .as_ref()
+            .is_some_and(|policy| policy.permits(&absolute))
+        {
             selection.summary.omit("out_of_scope", &path);
             continue;
         }
@@ -61,50 +224,20 @@ pub fn prepare(app: &App, request: &ReportRequest) -> Result<Selection, ReportEr
             continue;
         }
         let original = raw[source.source_id.as_str()];
-        let text = original.excerpt.clone();
-        let chars = text.chars().count();
+        let chars = source.excerpt_chars;
         if selection.summary.selected_chars + chars > MAX_INPUT_CHARS {
             // Keep the complete scanner excerpt; never cut a sentence or table row here.
             selection.summary.omit("budget", &path);
             continue;
         }
-        let hash = source
-            .content_sha256
-            .clone()
-            .ok_or_else(|| ReportError::new("SCAN_SOURCE_INVALID", "扫描来源缺少文件内容指纹"))?;
-        let quote_sha256 = digest(text.as_bytes());
-        let ranges = original.coverage_limits["evidence_audit"]["excerpt_ranges"].clone();
-        let ranges = if ranges.is_null() {
-            vec![]
-        } else {
-            serde_json::from_value(ranges)?
-        };
-        source.coverage_limits["personal"] = json!({
-            "absolute_path":absolute, "input_mode":"scan", "selection_basis":"modified_at",
-        });
-        let evidence = vec![EvidenceRef {
-            source_id: source.source_id.clone(),
-            version_id: format!("scan-content:{hash}"),
-            extraction_id: format!("scan:{}:{}", request.context.run_id, source.source_id),
-            unit_id: format!("scan-excerpt:{quote_sha256}"),
-            side: "current".into(),
-            raw_sha256: hash,
-            unit_sha256: quote_sha256.clone(),
-            quote: text.clone(),
-            quote_sha256,
-            unit_char_start: 0,
-            input_start: 0,
-            input_end: chars,
-            ranges,
-        }];
+        selection.materials.extend(materials(
+            source,
+            &original.excerpt,
+            &absolute,
+            &request.context.run_id,
+        )?);
         selection.summary.selected_files += 1;
         selection.summary.selected_chars += chars;
-        selection.materials.push(Material {
-            source,
-            text,
-            evidence,
-            priority: 1,
-        });
     }
     selection.validate()?;
     Ok(selection)

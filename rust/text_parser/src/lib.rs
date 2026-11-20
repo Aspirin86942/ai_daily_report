@@ -9,6 +9,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use thiserror::Error;
 
+mod daily_csv;
+use daily_csv::audited_csv;
+
 const TEXT_FILE_TYPES: &[&str] = &[".txt", ".md", ".csv", ".json", ".log"];
 const LEGACY_CSV_FIELD_SIZE_LIMIT: usize = 131_072;
 
@@ -347,6 +350,85 @@ fn byte_ranges(raw: &RawExcerpt) -> Vec<SourceRange> {
     )]
 }
 
+/// The same complete lines and sentences are used by both daily parsing and excerpt allocation.
+/// A table line and a decimal value stay intact. Returned slices retain their original offsets.
+pub fn text_segments(text: &str, include_final_fragment: bool) -> impl Iterator<Item = &str> {
+    text.split_inclusive('\n').flat_map(move |line| {
+        let table_line = line.trim_start().starts_with('|');
+        let mut rest = line;
+        std::iter::from_fn(move || {
+            if rest.is_empty() {
+                return None;
+            }
+            if !table_line {
+                for (byte, ch) in rest.char_indices() {
+                    let after = &rest[byte + ch.len_utf8()..];
+                    let end = match ch {
+                        '。' | '！' | '？' => true,
+                        '!' | '?' => after.starts_with(char::is_whitespace),
+                        '.' if after.starts_with(char::is_whitespace) => {
+                            // Keep initials, abbreviated names and numbered items with the
+                            // words they qualify. Decimal points never precede whitespace.
+                            rest[..byte]
+                                .split_whitespace()
+                                .next_back()
+                                .is_some_and(|word| {
+                                    let abbreviation = word.contains('.')
+                                        || (word.len() <= 3
+                                            && word.bytes().all(|b| b.is_ascii_alphabetic()));
+                                    !(abbreviation || word.ends_with(|c: char| c.is_ascii_digit()))
+                                })
+                        }
+                        _ => false,
+                    };
+                    if end {
+                        let next =
+                            after.trim_start_matches(['。', '！', '？', '”', '’', '」', '』']);
+                        let (part, tail) = rest.split_at(rest.len() - next.len());
+                        rest = tail;
+                        return Some(part);
+                    }
+                }
+            }
+            let part = std::mem::take(&mut rest);
+            (include_final_fragment || line.ends_with('\n')).then_some(part)
+        })
+    })
+}
+
+/// Signals on the actual fact, independent of row numbers, dates or column headings.
+pub fn is_attention_fact(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "异常",
+        "失败",
+        "错误",
+        "风险",
+        "告警",
+        "下一步",
+        "待办",
+        "待处理",
+        "阻塞",
+        "合计",
+        "小计",
+        "总计",
+        "exception",
+        "error",
+        "failed",
+        "next step",
+        "todo",
+        "#ref!",
+        "#value!",
+        "#div/0!",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || text.match_indices(['-', '−', '－']).any(|(at, sign)| {
+            !text[..at].ends_with(|c: char| c.is_ascii_alphanumeric())
+                && text[at + sign.len()..].starts_with(|c: char| c.is_ascii_digit())
+        })
+}
+
 fn audited_text(
     raw: &RawExcerpt,
     max_chars: u64,
@@ -370,34 +452,16 @@ fn audited_text(
     if let Some(warning) = warning {
         metadata.push(format!("warning: {}", warning.code()));
     }
-    builder.push(&metadata.join("\n"), ContentUnitKind::Heading, vec![]);
-    let mut segments = Vec::new();
-    let mut start = 0;
-    let mut chars = 0;
-    for (byte, ch) in raw.text.char_indices() {
-        chars += 1;
-        let table_line = raw.text[start..].trim_start().starts_with('|');
-        if ch == '\n'
-            || (!table_line
-                && (matches!(ch, '。' | '！' | '？')
-                    || (ch == '.'
-                        && raw.text[byte + 1..]
-                            .chars()
-                            .next()
-                            .is_some_and(|c| c.is_whitespace()))))
-        {
-            segments.push((start, byte + ch.len_utf8(), chars));
-            start = byte + ch.len_utf8();
-        }
-    }
-    // A cut read window cannot claim the final partial sentence or line.
-    if start < raw.text.len() && (!raw.truncated || tail) {
-        segments.push((start, raw.text.len(), chars));
-    }
+    let metadata = metadata.join("\n");
+    let meta_written = builder.push(&metadata, ContentUnitKind::Heading, vec![]);
+    let available = if meta_written {
+        max_chars - metadata.chars().count() as u64
+    } else {
+        max_chars.saturating_add(1)
+    };
     let mut pieces = Vec::new();
     let mut previous_chars = 0;
-    for (from, to, end_chars) in segments {
-        let text = &raw.text[from..to];
+    for text in text_segments(&raw.text, !raw.truncated || tail) {
         let trimmed = text.trim();
         let leading = text.chars().take_while(|c| c.is_whitespace()).count() as u64;
         let ranges = if !tail && !trimmed.is_empty() {
@@ -410,17 +474,19 @@ fn audited_text(
         } else {
             vec![]
         };
-        previous_chars = end_chars;
-        pieces.push((trimmed, ranges));
+        previous_chars += text.chars().count() as u64;
+        if !trimmed.is_empty() || !tail {
+            pieces.push((trimmed, ranges));
+        }
     }
     let mut selection_bounded = false;
     if tail {
         // Select complete latest lines, then restore their original order.
-        let mut remaining = max_chars.saturating_sub(64);
+        let mut remaining = available;
         let mut selected = Vec::new();
         for (text, ranges) in pieces.into_iter().rev() {
             let size = text.chars().count() as u64 + 1;
-            if size <= remaining {
+            if size <= remaining && selected.len() < 512 - usize::from(meta_written) {
                 remaining -= size;
                 selected.push((text, ranges));
             } else {
@@ -432,9 +498,19 @@ fn audited_text(
             builder.push(text, ContentUnitKind::Text, ranges);
         }
     } else {
+        // All candidates refer to the lines in the read window. A table's wide
+        // header is materialized only for a group that will actually be emitted.
+        struct Candidate {
+            header: std::ops::Range<usize>,
+            rows: std::ops::Range<usize>,
+            kind: ContentUnitKind,
+            cost: u64,
+            attention: bool,
+        }
+        let mut units = Vec::new();
         let mut index = 0;
         while index < pieces.len() {
-            let (text, ranges) = &pieces[index];
+            let text = pieces[index].0;
             if text.starts_with('|')
                 && text.ends_with('|')
                 && pieces
@@ -447,31 +523,44 @@ fn audited_text(
                     })
                     .unwrap_or(pieces.len());
                 if end > index + 2 {
-                    let headers = [&pieces[index], &pieces[index + 1]];
-                    let header_chars = headers
+                    let header = index..index + 2;
+                    let header_chars = pieces[header.clone()]
                         .iter()
                         .map(|(line, _)| line.chars().count() + 1)
                         .sum::<usize>();
+                    if header_chars as u64 >= available {
+                        selection_bounded = true;
+                        index = end;
+                        continue;
+                    }
+                    let header_attention = pieces[header.clone()]
+                        .iter()
+                        .any(|(line, _)| is_attention_fact(line));
                     let mut cursor = index + 2;
                     while cursor < end {
-                        let mut lines = headers.iter().map(|(line, _)| *line).collect::<Vec<_>>();
-                        let mut physical = headers
-                            .iter()
-                            .flat_map(|(_, ranges)| ranges.iter().cloned())
-                            .collect::<Vec<_>>();
                         let mut size = header_chars;
                         let first = cursor;
+                        let attention = is_attention_fact(pieces[first].0);
                         while cursor < end {
                             let cost = pieces[cursor].0.chars().count() + 1;
-                            if cursor > first && size + cost > 512 {
+                            if cursor > first
+                                && (size + cost > 512
+                                    || 2 + cursor - first == 128
+                                    || size + cost > available as usize
+                                    || is_attention_fact(pieces[cursor].0) != attention)
+                            {
                                 break;
                             }
                             size += cost;
-                            lines.push(pieces[cursor].0);
-                            physical.extend(pieces[cursor].1.iter().cloned());
                             cursor += 1;
                         }
-                        builder.push(&lines.join("\n"), ContentUnitKind::TableRow, physical);
+                        units.push(Candidate {
+                            header: header.clone(),
+                            rows: first..cursor,
+                            kind: ContentUnitKind::TableRow,
+                            cost: size as u64,
+                            attention: header_attention || attention,
+                        });
                     }
                     index = end;
                     continue;
@@ -482,8 +571,67 @@ fn audited_text(
             } else {
                 ContentUnitKind::Text
             };
-            builder.push(text, kind, ranges.clone());
+            if !text.is_empty() {
+                units.push(Candidate {
+                    header: 0..0,
+                    rows: index..index + 1,
+                    kind,
+                    cost: text.chars().count() as u64 + 1,
+                    attention: is_attention_fact(text),
+                });
+            }
             index += 1;
+        }
+        let limit = 512 - usize::from(meta_written);
+        let mut selected = vec![true; units.len()];
+        if units.iter().map(|unit| unit.cost).sum::<u64>() > available || units.len() > limit {
+            selected.fill(false);
+            let mut heading = None;
+            let mut order = Vec::new();
+            for (i, unit) in units.iter().enumerate() {
+                if unit.kind == ContentUnitKind::Heading {
+                    heading = Some(i);
+                } else {
+                    order.push((!unit.attention, i, heading));
+                }
+            }
+            order.sort_unstable();
+            let mut remaining = available;
+            let mut slots = limit;
+            for (_, i, heading) in order {
+                let required = heading.filter(|&h| !selected[h]);
+                let size = units[i].cost + required.map_or(0, |h| units[h].cost);
+                let count = 1 + usize::from(required.is_some());
+                if size <= remaining && count <= slots {
+                    selected[i] = true;
+                    if let Some(h) = required {
+                        selected[h] = true;
+                    }
+                    remaining -= size;
+                    slots -= count;
+                }
+            }
+            selection_bounded |= selected.contains(&false);
+        }
+        for (unit, keep) in units.into_iter().zip(selected) {
+            if !keep {
+                continue;
+            }
+            if unit.header.is_empty() {
+                let (line, ranges) = &pieces[unit.rows.start];
+                builder.push(line, unit.kind, ranges.clone());
+            } else {
+                let lines = unit.header.chain(unit.rows).map(|i| &pieces[i]);
+                let text = lines
+                    .clone()
+                    .map(|(line, _)| *line)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let ranges = lines
+                    .flat_map(|(_, ranges)| ranges.iter().cloned())
+                    .collect();
+                builder.push(&text, unit.kind, ranges);
+            }
         }
     }
     let (content, mut audit, bounded) = builder.finish();
@@ -504,84 +652,6 @@ fn markdown_separator(text: &str) -> bool {
             value.chars().filter(|ch| *ch == '-').count() >= 3
                 && value.chars().all(|ch| matches!(ch, '-' | ':' | ' '))
         })
-}
-
-fn audited_csv(
-    raw: &RawExcerpt,
-    max_chars: u64,
-) -> (String, bool, Option<LightTextWarning>, ParsedContentAudit) {
-    let input = if raw.truncated {
-        let mut in_quotes = false;
-        let mut last = 0;
-        let mut chars = raw.text.char_indices().peekable();
-        while let Some((byte, ch)) = chars.next() {
-            if ch == '"' {
-                if in_quotes && chars.peek().is_some_and(|(_, next)| *next == '"') {
-                    chars.next();
-                } else {
-                    in_quotes = !in_quotes;
-                }
-            } else if ch == '\n' && !in_quotes {
-                last = byte + 1;
-            }
-        }
-        &raw.text[..last]
-    } else {
-        &raw.text
-    };
-    let Ok(rows) = parse_csv(input.trim_start_matches('\u{feff}')) else {
-        let (content, truncated, _, audit) = audited_text(
-            raw,
-            max_chars,
-            false,
-            Some(LightTextWarning::CsvPreviewFallback),
-        );
-        return (
-            content,
-            truncated,
-            Some(LightTextWarning::CsvPreviewFallback),
-            audit,
-        );
-    };
-    let mut builder = AuditTextBuilder::new(max_chars, "csv");
-    for range in byte_ranges(raw) {
-        builder.read(range);
-    }
-    builder.push(
-        &metadata_lines("CSV preview", raw.source, raw.truncated).join("\n"),
-        ContentUnitKind::Heading,
-        vec![],
-    );
-    for (index, row) in rows.iter().enumerate() {
-        let range = SourceRange::new(
-            SourceRangeUnit::CsvRecord,
-            index as u64 + 1,
-            index as u64 + 2,
-            None,
-        );
-        builder.read(range.clone());
-        if index > 3 {
-            continue;
-        }
-        let (prefix, kind) = if index == 0 {
-            ("header: ".into(), ContentUnitKind::TableHeader)
-        } else {
-            (format!("row {index}: "), ContentUnitKind::TableRow)
-        };
-        builder.push(
-            &format!("{prefix}{}", format_csv_row(row)),
-            kind,
-            vec![range],
-        );
-    }
-    let (content, mut audit, bounded) = builder.finish();
-    audit.encoding = Some(raw.encoding.into());
-    (
-        content,
-        raw.truncated || bounded || rows.len() > 4,
-        None,
-        audit,
-    )
 }
 
 fn read_tail(

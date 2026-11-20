@@ -33,19 +33,17 @@ pub(crate) fn inspect(path: &Path) -> io::Result<EntryAccess> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
     use windows_sys::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, WIN32_FIND_DATAW};
+    // FindFirstFile does not accept drive roots. Inspect them in one call.
+    if path.parent().is_none() && path.is_absolute() {
+        use std::os::windows::fs::MetadataExt;
+        return Ok(classify(fs::symlink_metadata(path)?.file_attributes(), 0));
+    }
     // Exact-name enumeration returns both recall flags and the reparse tag,
     // without opening a data stream or traversing the directory.
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut data: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
     let handle = unsafe { FindFirstFileW(wide.as_ptr(), &mut data) };
     if handle == INVALID_HANDLE_VALUE {
-        // Drive roots cannot be passed to FindFirstFile. They are ordinary local
-        // roots; other errors retain their actual failure.
-        if path.parent().is_none() && path.is_absolute() {
-            let metadata = fs::symlink_metadata(path)?;
-            use std::os::windows::fs::MetadataExt;
-            return Ok(classify(metadata.file_attributes(), 0));
-        }
         return Err(io::Error::last_os_error());
     }
     unsafe { FindClose(handle) };

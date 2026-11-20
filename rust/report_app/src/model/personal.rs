@@ -1,15 +1,17 @@
-use super::plan::{payload, PlannedStep, StepKind};
+mod detailed;
+use super::plan::{payload, PlannedStep, StepKind, DETAILED_PLAN_VERSION};
 use crate::{
     config::Llm,
     reports::personal::{
-        body_chars, validate_items, ItemKind, PersonalItem, Selection, StatementKind,
-        MAX_BODY_CHARS, MAX_ITEMS, MAX_REPORT_BYTES, MAX_SUMMARY_CHARS, MAX_SUMMARY_CHARS_EXTENDED,
-        MAX_SUMMARY_ITEMS,
+        body_chars, validate_items, ItemKind, Material, PersonalItem, Selection, StatementKind,
+        MAX_BODY_CHARS, MAX_ITEMS, MAX_OVERVIEW_CHARS, MAX_REPORT_BYTES, MAX_SUMMARY_CHARS,
+        MAX_SUMMARY_CHARS_EXTENDED, MAX_SUMMARY_ITEMS,
     },
     snapshots::{canonical_json, digest},
     types::RunContext,
     ReportError,
 };
+pub use detailed::prepare_detailed_scan;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
@@ -27,6 +29,9 @@ pub const SCAN_PROMPT_EXTENDED: &str =
     include_str!("../../../../templates/personal_daily_scan_prompt_v7.md");
 pub const COMPACT_PROMPT_EXTENDED: &str =
     include_str!("../../../../templates/personal_daily_compact_prompt_v7.md");
+pub const SCAN_PROMPT_DETAILED: &str =
+    include_str!("../../../../templates/personal_daily_scan_prompt_v8.md");
+const DETAILED_PROMPT_VERSION: u32 = 8;
 
 pub fn schema() -> Value {
     json!({"schema_version":5,"items":[{"title":"简短标题","text":"事项正文",
@@ -74,31 +79,7 @@ fn prepare_version(
     prompt_version: u32,
 ) -> Result<PlannedStep, ReportError> {
     loop {
-        selection.validate()?;
-        let mut step = PlannedStep {
-            version: 6,
-            kind: StepKind::PersonalSummary,
-            logical_step: "personal_summary".into(),
-            revision: 0,
-            parent_sha256: None,
-            prompt_sha256: String::new(),
-            schema_sha256: String::new(),
-            target: json!({"date":context.target_date,"window_start_utc":context.window_start_utc,
-                "window_end_utc":context.window_end_utc,"selection":selection,
-                "summary_prompt_version":prompt_version,
-                "summary_limits":{"max_chars":summary_limit(prompt_version),"max_items":MAX_SUMMARY_ITEMS}}),
-            entries: vec![],
-            facts: vec![],
-            source_map: json!(selection
-                .materials
-                .iter()
-                .map(|m| (m.source.source_id.clone(), m.source.clone()))
-                .collect::<BTreeMap<_, _>>()),
-            coverage: json!({}),
-            output_capacity_bytes: MAX_REPORT_BYTES,
-            request: Value::Null,
-        };
-        rebuild(&mut step, llm)?;
+        let step = summary_step(llm, context, selection, prompt_version)?;
         match step.validate(llm) {
             Ok(()) => return Ok(step),
             Err(error) if error.code == "MODEL_REQUEST_TOO_LARGE" => {
@@ -125,15 +106,78 @@ fn prepare_version(
     }
 }
 
-pub(super) fn rebuild(step: &mut PlannedStep, llm: &Llm) -> Result<(), ReportError> {
-    let selection: Selection = serde_json::from_value(step.target["selection"].clone())?;
-    selection.validate()?;
+fn summary_step(
+    llm: &Llm,
+    context: &RunContext,
+    selection: &Selection,
+    prompt_version: u32,
+) -> Result<PlannedStep, ReportError> {
+    let mut target = json!({"date":context.target_date,"window_start_utc":context.window_start_utc,
+        "window_end_utc":context.window_end_utc,"selection":selection,
+        "summary_prompt_version":prompt_version});
+    let version = if prompt_version == DETAILED_PROMPT_VERSION {
+        DETAILED_PLAN_VERSION
+    } else {
+        target["summary_limits"] =
+            json!({"max_chars":summary_limit(prompt_version),"max_items":MAX_SUMMARY_ITEMS});
+        6
+    };
+    let mut step = PlannedStep {
+        version,
+        kind: StepKind::PersonalSummary,
+        logical_step: "personal_summary".into(),
+        revision: 0,
+        parent_sha256: None,
+        prompt_sha256: String::new(),
+        schema_sha256: String::new(),
+        target,
+        entries: vec![],
+        facts: vec![],
+        source_map: source_map(selection)?,
+        coverage: json!({}),
+        output_capacity_bytes: MAX_REPORT_BYTES,
+        request: Value::Null,
+    };
+    let output_tokens = llm
+        .max_tokens
+        .min(llm.verified_max_output_tokens.unwrap_or(llm.max_tokens));
+    rebuild(&mut step, llm, output_tokens)?;
+    Ok(step)
+}
+
+fn source_map(selection: &Selection) -> Result<Value, ReportError> {
     let sources: BTreeMap<_, _> = selection
         .materials
         .iter()
-        .map(|m| (m.source.source_id.clone(), m.source.clone()))
+        .map(|m| (&m.source.source_id, &m.source))
         .collect();
-    if step.source_map != serde_json::to_value(sources)?
+    Ok(serde_json::to_value(sources)?)
+}
+
+fn request_source(material: &Material, detailed: bool) -> Value {
+    let source = &material.source;
+    let mut value = json!({
+        "source_id":source.source_id,"path":source.relative_path,"source_kind":source.source_kind,
+        "text_unverified":source.unverified(),"text":material.text,
+        "parts":material.evidence.iter().map(|e| json!({"side":e.side,"start":e.input_start,
+            "end":e.input_end,"ranges":e.ranges})).collect::<Vec<_>>()
+    });
+    if detailed {
+        if let Some(context) = source.coverage_limits["personal"].get("context") {
+            value["context"] = context.clone();
+        }
+    }
+    value
+}
+
+pub(super) fn rebuild(
+    step: &mut PlannedStep,
+    llm: &Llm,
+    output_tokens: u64,
+) -> Result<(), ReportError> {
+    let selection: Selection = serde_json::from_value(step.target["selection"].clone())?;
+    selection.validate()?;
+    if step.source_map != source_map(&selection)?
         || !step.entries.is_empty()
         || !step.facts.is_empty()
     {
@@ -142,7 +186,12 @@ pub(super) fn rebuild(step: &mut PlannedStep, llm: &Llm) -> Result<(), ReportErr
             "个人日报来源与冻结材料不一致",
         ));
     }
+    let detailed = step.version == DETAILED_PLAN_VERSION;
     let prompt = match step.target.get("summary_prompt_version") {
+        _ if detailed => {
+            detailed::validate_shape(step)?;
+            SCAN_PROMPT_DETAILED
+        }
         None => LEGACY_PROMPT,
         Some(version) if version == &json!(2) => PROMPT,
         Some(version) if version == &json!(3) => SCAN_PROMPT,
@@ -164,11 +213,6 @@ pub(super) fn rebuild(step: &mut PlannedStep, llm: &Llm) -> Result<(), ReportErr
         response_schema["items"][0]["item_id"] = json!(1);
     }
     step.schema_sha256 = digest(&canonical_json(&response_schema)?);
-    let sources: Vec<_> = selection.materials.iter().map(|m| json!({
-        "source_id":m.source.source_id,"path":m.source.relative_path,"source_kind":m.source.source_kind,
-        "text_unverified":m.source.unverified(),"text":m.text,
-        "parts":m.evidence.iter().map(|e| json!({"side":e.side,"start":e.input_start,"end":e.input_end,"ranges":e.ranges})).collect::<Vec<_>>()
-    })).collect();
     let input = if matches!(prompt_version, Some(5 | 7)) {
         let draft: Vec<PersonalItem> =
             serde_json::from_value(step.target["summary_draft"].clone())?;
@@ -192,14 +236,18 @@ pub(super) fn rebuild(step: &mut PlannedStep, llm: &Llm) -> Result<(), ReportErr
             "max_chars":summary_cap(prompt_version).unwrap_or(MAX_SUMMARY_CHARS),
             "target_chars":560})
     } else {
+        let sources: Vec<_> = selection
+            .materials
+            .iter()
+            .map(|m| request_source(m, detailed))
+            .collect();
         json!({"date":step.target["date"],"sources":sources})
     };
     step.request = payload(
         llm,
         format!("{prompt}\n{response_schema}"),
         input,
-        llm.max_tokens
-            .min(llm.verified_max_output_tokens.unwrap_or(llm.max_tokens)),
+        output_tokens,
     )?;
     Ok(())
 }
@@ -236,8 +284,8 @@ pub fn generate(
         compact.parent_sha256 = Some(plan.identity()?);
         compact.target["summary_prompt_version"] = json!(compact_version);
         compact.target["summary_draft"] = serde_json::to_value(&output.items)?;
-        rebuild(&mut compact, runner.llm)?;
-        compact.validate(runner.llm)?;
+        // Derive the same child request on recovery. execute checks live limits before sending.
+        rebuild(&mut compact, runner.llm, plan.frozen_output_tokens()?)?;
         let result = runner.execute(&compact)?.output;
         Ok(result)
     })();
@@ -295,7 +343,8 @@ pub(super) fn validate_response(
     step: &PlannedStep,
     mut value: Value,
 ) -> Result<PersonalOutput, ReportError> {
-    if step.kind != StepKind::PersonalSummary || step.version != 6 {
+    if step.kind != StepKind::PersonalSummary || !matches!(step.version, 6 | DETAILED_PLAN_VERSION)
+    {
         return Err(super::contracts::invalid());
     }
     // The frozen personal request fixes the response format. Some providers omit
@@ -324,7 +373,7 @@ pub(super) fn validate_response(
     }
     let mut response: Response =
         serde_json::from_value(value).map_err(|_| super::contracts::invalid())?;
-    if response.schema_version != 5 || response.items.is_empty() {
+    if response.schema_version != 5 || (step.version == 6 && response.items.is_empty()) {
         return Err(super::contracts::invalid());
     }
     let selection: Selection = serde_json::from_value(step.target["selection"].clone())?;
@@ -351,6 +400,20 @@ pub(super) fn validate_response(
         }
     }
     validate_items(&response.items, &sources).map_err(|_| super::contracts::invalid())?;
+    if step.version == DETAILED_PLAN_VERSION {
+        if response
+            .items
+            .iter()
+            .any(|item| item.title.chars().count() > MAX_OVERVIEW_CHARS)
+        {
+            return Err(super::contracts::invalid());
+        }
+        return Ok(PersonalOutput {
+            items: response.items,
+            omitted: 0,
+            compaction_error: None,
+        });
+    }
     if let Some(cap) = summary_cap(prompt_version) {
         if step.target["summary_limits"] != json!({"max_chars":cap,"max_items":MAX_SUMMARY_ITEMS})
             || response.items.len() > MAX_SUMMARY_ITEMS

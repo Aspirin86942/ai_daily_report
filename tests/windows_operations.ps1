@@ -21,7 +21,8 @@ try {
     $encodingRestored = [Console]::OutputEncoding.CodePage -eq 936
 }
 finally { [Console]::OutputEncoding = $savedEncoding }
-function Assert-Test([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
+$script:checks = 0
+function Assert-Test([bool]$Condition, [string]$Message) { if (-not $Condition) { throw $Message }; $script:checks++ }
 Assert-Test ($plan.work_dir.Replace('\','/') -ceq $work) 'Task plan corrupted a Unicode work path under CP936'
 Assert-Test $encodingRestored 'Task plan did not restore the caller console encoding'
 $dailyFields = Get-ReportTaskXmlFields -Xml $plan.xml
@@ -36,11 +37,22 @@ $script:taskXml = ''
 $script:registered = 0
 $script:disabled = 0
 $script:badReadback = $false
-function Get-ScheduledTask { param($TaskPath) if ($null -ne $script:task) { $script:task } }
-function Export-ScheduledTask { param($TaskName,$TaskPath) $script:taskXml }
+$script:afterRegister = ''
+$script:readbackFault = ''
+function Get-ScheduledTask { param($TaskPath,$TaskName) if (-not $TaskName -and $null -ne $script:task) { $script:task } }
+function Get-ScheduledTaskInfo { param($TaskName) }
+function Export-ScheduledTask {
+    param($TaskName,$TaskPath)
+    $fault = $script:readbackFault
+    $script:readbackFault = ''
+    if ($fault -eq 'export') { throw 'injected export failure' }
+    if ($fault -eq 'xml') { return '<invalid' }
+    $script:taskXml
+}
 function Register-ScheduledTask { param($TaskName,$TaskPath,$Xml,[switch]$Force)
     $script:registered++; $script:task = [pscustomobject]@{ TaskName = $TaskName }; $script:taskXml = $Xml
     if ($script:badReadback) { $script:taskXml = $Xml.Replace('IgnoreNew','Parallel') }
+    $script:readbackFault = $script:afterRegister
 }
 function Disable-ScheduledTask { param($TaskName,$TaskPath) $script:disabled++ }
 function Unregister-ScheduledTask { param($TaskName,$TaskPath,[switch]$Confirm) $script:task = $null }
@@ -64,6 +76,21 @@ $script:taskXml = $plan.xml.Replace('IgnoreNew','Parallel'); $script:badReadback
 $blocked = $false
 try { Install-ReportDailyTask -Plan $plan -Apply | Out-Null } catch { $blocked = $_.Exception.Message -eq 'TASK_READBACK_MISMATCH_DISABLED' }
 Assert-Test ($blocked -and $script:disabled -eq 1) 'Mismatched readback was not disabled'
+$backupDir = Join-Path $plan.data_dir 'task_backups'
+$script:badReadback = $false
+foreach ($fault in @('export','xml')) {
+    $oldXml = $plan.xml.Replace('IgnoreNew','Parallel') + "<!-- $fault -->"
+    $script:taskXml = $oldXml
+    $script:afterRegister = $fault
+    $before = @(Get-ChildItem -LiteralPath $backupDir -File).FullName
+    $disabledBefore = $script:disabled
+    $message = ''
+    try { Install-ReportDailyTask -Plan $plan -Apply | Out-Null } catch { $message = $_.Exception.Message }
+    $backup = @(Get-ChildItem -LiteralPath $backupDir -File | Where-Object { $before -notcontains $_.FullName })
+    Assert-Test ($message -like 'TASK_READBACK_FAILED_DISABLED:*' -and $script:disabled -eq ($disabledBefore + 1)) "Registered task survived $fault readback failure"
+    Assert-Test ($backup.Count -eq 1 -and [IO.File]::ReadAllText($backup[0].FullName) -ceq $oldXml -and $message.Contains($backup[0].FullName)) "Old task XML was not retained after $fault"
+}
+$script:afterRegister = ''
 $script:taskXml = $plan.xml; Remove-ReportDailyTask -Plan $plan -Apply | Out-Null
 Assert-Test ($null -eq $script:task) 'Owned task removal failed'
 $pointer = Join-Path $root 'current.json'
@@ -97,8 +124,9 @@ $healthConfig = Join-Path $root 'health-config'
 $healthWork = (Join-Path $root 'work').Replace('\','/')
 $healthData = (Join-Path $root 'health-data').Replace('\','/')
 [IO.File]::WriteAllText((Join-Path $healthConfig 'settings.yaml'), "paths:`n  work_dir: '$healthWork'`n  data_dir: '$healthData'`n  reports_dir: '$healthData/reports'`n  db_dir: '$healthData/db'`n  log_dir: '$healthData/logs'`n", [Text.UTF8Encoding]::new($false))
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts/health_notify.ps1') -Program $Program -ConfigDirectory $healthConfig -NoNotify | Out-Null
-$healthFile = Join-Path $healthData ('logs/health-' + (Get-Date -Format 'yyyy-MM-dd') + '.json')
+$healthScript = Join-Path $repo 'scripts/health_notify.ps1'
+$summary = (& $healthScript -Program $Program -ConfigDirectory $healthConfig -NoNotify | Out-String) | ConvertFrom-Json
+$healthFile = $summary.health_file
 Assert-Test (Test-Path -LiteralPath $healthFile) 'Health file was not written'
 $healthJson = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
 Assert-Test ($healthJson.status -ne 'healthy') 'Empty data directory should not be healthy'
@@ -106,7 +134,8 @@ Assert-Test (@($healthJson.tasks).Count -eq 2) 'Health report must include two t
 $healthState = Join-Path $healthData 'logs/health-notify-state.json'
 Assert-Test (Test-Path -LiteralPath $healthState) 'Health notify state was not written'
 Assert-Test (@($healthJson.checks | Where-Object { $_.level -ne 'ok' }).Count -gt 0) 'Health report should list failing checks'
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo 'scripts/health_notify.ps1') -Program $Program -ConfigDirectory $healthConfig -NoNotify | Out-Null
+& $healthScript -Program $Program -ConfigDirectory $healthConfig -NoNotify | Out-Null
 $healthJson2 = Get-Content -LiteralPath $healthFile -Raw -Encoding UTF8 | ConvertFrom-Json
 Assert-Test (@($healthJson2.tasks).Count -eq 2) 'Repeated health run must stay readable'
-[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = 28; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
+[ordered]@{ status = 'passed'; scheduler = 'function doubles only'; real_tasks_changed = 0; checks = $script:checks; pointer_rollback_preserved_data = $true } | ConvertTo-Json | Tee-Object -FilePath (Join-Path $root 'result.json')
+exit 0

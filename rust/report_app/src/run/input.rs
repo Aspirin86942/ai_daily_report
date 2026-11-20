@@ -61,10 +61,11 @@ pub(super) fn scan_sources(
         .unwrap_or_default();
     for raw in &scan.sources {
         let mut source = ReportSource::from_scan(raw)?;
-        let mut audit = source.coverage_limits["evidence_audit"]
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
+        let unverified = source.unverified();
+        let mut audit = match source.coverage_limits["evidence_audit"].take() {
+            Value::Object(audit) => audit,
+            _ => Default::default(),
+        };
         let mut tags: BTreeSet<String> = audit
             .get("secondary_tags")
             .and_then(Value::as_array)
@@ -95,7 +96,7 @@ pub(super) fn scan_sources(
                 "文件未能成功读取或无法确认其稳定版本。",
             ));
         }
-        if source.parse_truncated || source.extension.as_deref() == Some(".csv") {
+        if source.parse_truncated {
             tags.insert("PARSE_BOUNDED".into());
             gaps.push(source_gap(
                 &source,
@@ -113,7 +114,7 @@ pub(super) fn scan_sources(
                 "此来源的摘录未覆盖全部内容，或没有取得有效文字。",
             ));
         }
-        if source.unverified() {
+        if unverified {
             tags.insert("OCR_TEXT_UNVERIFIED".into());
             audit.insert("text_unverified".into(), json!(true));
             gaps.push(source_gap(
@@ -154,8 +155,7 @@ pub(super) fn scan_sources(
                     {
                         tags.insert("PDF_OBSERVED_IMAGE".into());
                     }
-                    if classification["status"] == "no_text_in_parse_window" && !source.unverified()
-                    {
+                    if classification["status"] == "no_text_in_parse_window" && !unverified {
                         audit.insert("primary_reason".into(), json!("pdf_window_no_text"));
                         let ranges:Vec<_>=classification["page_audit"]["checked_pages"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|page|json!({"unit":"pdf_page","start":page,"end":page+1,"label":"classification"})).collect();
                         audit.insert("read_ranges".into(), json!(ranges));

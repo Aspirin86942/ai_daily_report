@@ -101,6 +101,10 @@ pub(crate) fn collect_sources(
             };
             audit["primary_status"] = serde_json::json!(status);
             audit["excerpt_ranges"] = serde_json::to_value(selected.ranges).unwrap();
+            if audit["content_units"].is_array() {
+                audit["excerpt_block_ends"] = serde_json::json!(selected.block_ends);
+                audit["excerpt_block_context"] = serde_json::json!(selected.block_context);
+            }
             audit["parser_version"] = serde_json::json!(item.parser_backend);
             audit["algorithm_versions"] = serde_json::json!({
                 "cache_payload": "1", "excerpt": crate::source_allocation::EXCERPT_POLICY_VERSION,
@@ -239,6 +243,8 @@ pub(crate) fn fingerprint_sources(
                 audit["usable_chars"] = serde_json::json!(0);
                 audit["content_units"] = serde_json::json!([]);
                 audit["excerpt_ranges"] = serde_json::json!([]);
+                audit["excerpt_block_ends"] = serde_json::json!([]);
+                audit["excerpt_block_context"] = serde_json::json!([]);
                 audit["primary_status"] = serde_json::json!("parse_failed");
             }
         }

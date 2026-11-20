@@ -148,6 +148,65 @@ mod windows {
     }
 
     #[test]
+    fn daily_pdf_selection_invalidates_cached_cover_and_reuses_five_page_evidence() {
+        let root = repository_root();
+        let (pdf, office, _) = local_runtime(&root).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        std::fs::copy(
+            root.join("rust/pdf_parser/tests/fixtures/settlement-pages.pdf"),
+            work.join("pages.pdf"),
+        )
+        .unwrap();
+        let scan = |max_pages| {
+            let request: BuildContextRequest = serde_json::from_value(json!({
+                "contract": "ai_daily_context", "protocol_version": 1,
+                "request_id": "72555555-7255-4255-8255-725555555555",
+                "work_dir": work, "scan_db_path": temp.path().join("scan_index_rust_v3.sqlite3"),
+                "start_date": "2000-01-01", "end_date": "2099-12-31", "report_mode": "daily",
+                "compression_profile": null,
+                "scanner_settings": {"allowed_extensions": [".pdf"], "max_workers": 1,
+                    "total_deadline_ms": 60000, "pdf_max_pages": max_pages,
+                    "document_excerpt_max_chars": 3200},
+                "adapters": {"office_worker_path": office, "pdf_worker_path": pdf}
+            }))
+            .unwrap();
+            let scanner = Scanner::open(ScannerConfig::from_build_request(&request)).unwrap();
+            let result = scanner
+                .build_context(&ScanRequest::from_build_request(&request))
+                .unwrap();
+            assert_eq!(result.exit_code, 0, "{:?}", result.value.envelope);
+            result.value
+        };
+        let cover = scan(1);
+        assert_eq!(cover.sources.len(), 1);
+        assert!(!cover.sources[0].excerpt.contains("Final settlement"));
+        let selected = scan(5);
+        let evidence = selected.evidence.unwrap();
+        assert_eq!(evidence.execution_metrics.parse_attempt_count, 1);
+        assert_eq!(
+            evidence.files[0].cache_miss_reason,
+            "parser_identity_changed"
+        );
+        let source = &selected.sources[0];
+        assert_eq!(source.parser_backend, "rust_pdfium_v3");
+        assert!(source.excerpt.contains("Final settlement USD 4817.25"));
+        assert!(source.excerpt.contains("Effective only after review"));
+        assert!(source.parse_truncated);
+        let warm = scan(5);
+        assert_eq!(
+            warm.evidence.unwrap().execution_metrics.parse_attempt_count,
+            0
+        );
+        assert_eq!(warm.sources[0].excerpt, source.excerpt);
+        assert_eq!(
+            warm.sources[0].coverage_limits["evidence_audit"]["read_ranges"],
+            source.coverage_limits["evidence_audit"]["read_ranges"]
+        );
+    }
+
+    #[test]
     fn native_scan_covers_all_office_formats_and_continues_after_corrupt_input() {
         let root = repository_root();
         let (pdf, office, pdf_fixture) = local_runtime(&root).unwrap();

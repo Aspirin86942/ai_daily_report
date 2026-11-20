@@ -5,11 +5,11 @@ use std::collections::BTreeMap;
 use std::fs::{self, Metadata};
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
-use walkdir::WalkDir;
+use std::time::{Instant, UNIX_EPOCH};
 
 mod access;
 mod bounded;
+mod walk;
 use access::EntryAccess;
 pub use bounded::{discover_files_bounded, discover_files_bounded_from, DiscoveryCursor};
 
@@ -92,11 +92,30 @@ pub struct DiscoveryReport {
 }
 
 pub fn discover_files_with_diagnostics(request: &DiscoveryRequest) -> io::Result<DiscoveryReport> {
-    discover_files_report(request)
+    discover_files_report(request, |_| Ok(()))
 }
 
-fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryReport> {
+/// The caller can stop waiting for an in-flight filesystem call. The walk checks
+/// this same absolute deadline before starting the next one.
+pub fn discover_files_until(
+    request: &DiscoveryRequest,
+    deadline: Instant,
+) -> io::Result<DiscoveryReport> {
+    discover_files_report(request, |_| {
+        if Instant::now() >= deadline {
+            Err(io::ErrorKind::TimedOut.into())
+        } else {
+            Ok(())
+        }
+    })
+}
+
+fn discover_files_report(
+    request: &DiscoveryRequest,
+    check: impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<DiscoveryReport> {
     validate_window(request)?;
+    check(&request.work_dir)?;
     let root_access = access::inspect(&request.work_dir).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             io::Error::new(
@@ -116,208 +135,132 @@ fn discover_files_report(request: &DiscoveryRequest) -> io::Result<DiscoveryRepo
             ))
         }
     }
+    check(&request.work_dir)?;
     validate_work_dir(&request.work_dir)?;
+    check(&request.work_dir)?;
     let resolved_root = fs::canonicalize(&request.work_dir)?;
 
     let ignored_patterns = compile_patterns(&request.ignored_patterns)?;
-    let excluded_dirs = resolve_excluded_dirs(&request.excluded_dirs, Some(&request.work_dir));
+    let excluded_dirs =
+        resolve_excluded_dirs_checked(&request.excluded_dirs, Some(&request.work_dir), &check)?;
     let mut files = Vec::new();
     let mut issues = Vec::new();
-    let access_issues = std::cell::RefCell::new(Vec::new());
-
-    let excluded_names: Vec<_> = request
-        .excluded_dirs
-        .iter()
-        .filter(|path| path.components().count() == 1)
-        .filter_map(|path| path.to_str().map(str::to_lowercase))
-        .collect();
-    let walker = WalkDir::new(&request.work_dir)
-        .follow_links(request.follow_symlinks)
-        .into_iter()
-        .filter_entry(|entry| {
-            if entry.depth() == 0 {
-                return true;
-            }
-            let entry_path = entry.path();
-            if !entry.file_type().is_dir() && !entry.path_is_symlink() {
-                let name = entry.file_name().to_string_lossy().to_lowercase();
-                if !has_allowed_extension(&name, &request.allowed_extensions)
-                    || matches_ignored_pattern(&name, &ignored_patterns)
-                {
-                    return false;
+    walk::visit_files(
+        request,
+        &resolved_root,
+        &excluded_dirs,
+        &ignored_patterns,
+        &check,
+        &mut issues,
+        |path, issues| {
+            // Most eligible files are outside a report's date window. A cheap
+            // metadata prefilter avoids resolving every historical path; accepted
+            // rows still run the canonicalize + metadata path below unchanged.
+            check(path)?;
+            if let Ok(metadata) = fs::metadata(path) {
+                if !metadata.is_file() {
+                    return Ok(());
                 }
-            }
-            if (entry.file_type().is_dir() || entry.path_is_symlink())
-                && (excluded_names.contains(&entry.file_name().to_string_lossy().to_lowercase())
-                    || is_excluded_dir(entry_path, &excluded_dirs))
-            {
-                return false;
-            }
-            let issue = match access::inspect(entry_path) {
-                Ok(EntryAccess::Local | EntryAccess::LocalCloud) => None,
-                Ok(EntryAccess::Link) if request.follow_symlinks => {
-                    match fs::canonicalize(entry_path) {
-                        Ok(target) if target.starts_with(&resolved_root) => None,
-                        _ => Some((
-                            DiscoveryIssueKind::OutsideRoot,
-                            "link target is outside work_dir",
-                        )),
+                if let Ok(in_window) = metadata_in_window(&metadata, request) {
+                    if !in_window {
+                        return Ok(());
                     }
                 }
-                Ok(EntryAccess::Link) => {
-                    Some((DiscoveryIssueKind::LinkExcluded, "link traversal disabled"))
+            }
+
+            check(path)?;
+            let resolved_path = match fs::canonicalize(path) {
+                Ok(value) => value,
+                Err(error) => {
+                    issues.push(path_issue(
+                        DiscoveryIssueKind::Canonicalize,
+                        path,
+                        format!("cannot canonicalize {}: {error}", path.display()),
+                    ));
+                    return Ok(());
                 }
-                Ok(EntryAccess::CloudUnavailable) => Some((
-                    DiscoveryIssueKind::CloudUnavailable,
-                    "cloud content unavailable locally; no hydration attempted",
-                )),
-                Ok(EntryAccess::UnknownReparse) => Some((
-                    DiscoveryIssueKind::UnknownReparse,
-                    "unknown reparse tag excluded",
-                )),
-                Err(_) => Some((
-                    DiscoveryIssueKind::Metadata,
-                    "cannot inspect entry metadata",
-                )),
             };
-            if let Some((kind, message)) = issue {
-                // Separate collection avoids borrowing the main diagnostics
-                // while the lazy walk iterator is active.
-                access_issues
-                    .borrow_mut()
-                    .push(path_issue(kind, entry_path, message.to_string()));
-                return false;
+            if !resolved_path.starts_with(&resolved_root) {
+                issues.push(path_issue(
+                    DiscoveryIssueKind::OutsideRoot,
+                    path,
+                    "resolved candidate is outside work_dir".to_string(),
+                ));
+                return Ok(());
             }
-            true
-        });
-
-    for entry_result in walker {
-        let entry = match entry_result {
-            Ok(value) => value,
-            Err(error) => {
-                issues.push(DiscoveryIssue {
-                    kind: DiscoveryIssueKind::Walk,
-                    path: error.path().map(contract_path_string),
-                    message: format!("cannot walk entry: {error}"),
-                });
-                continue;
-            }
-        };
-        let file_name = entry.file_name().to_string_lossy().to_string();
-        let file_name_lower = file_name.to_lowercase();
-        if !has_allowed_extension(&file_name_lower, &request.allowed_extensions) {
-            continue;
-        }
-        if matches_ignored_pattern(&file_name_lower, &ignored_patterns) {
-            continue;
-        }
-
-        // Most eligible files are outside a report's date window. A cheap
-        // metadata prefilter avoids resolving every historical path; accepted
-        // rows still run the canonicalize + metadata path below unchanged.
-        if let Ok(metadata) = fs::metadata(entry.path()) {
-            if !metadata.is_file() {
-                continue;
-            }
-            if let Ok(in_window) = metadata_in_window(&metadata, request) {
-                if !in_window {
-                    continue;
+            check(&resolved_path)?;
+            let metadata = match read_candidate_metadata(&resolved_path, path) {
+                Ok(value) => value,
+                Err(issue) => {
+                    issues.push(issue);
+                    return Ok(());
                 }
+            };
+            if !metadata.is_file() {
+                return Ok(());
             }
-        }
+            let modified_local = match metadata_modified_local(&metadata) {
+                Ok(value) => value,
+                Err(error) => {
+                    issues.push(path_issue(
+                        DiscoveryIssueKind::ModifiedTime,
+                        path,
+                        format!("cannot read modified time {}: {error}", path.display()),
+                    ));
+                    return Ok(());
+                }
+            };
+            let modified_naive = modified_local.naive_local();
+            if !metadata_in_window(&metadata, request)? {
+                return Ok(());
+            }
 
-        let resolved_path = match fs::canonicalize(entry.path()) {
-            Ok(value) => value,
-            Err(error) => {
-                issues.push(path_issue(
-                    DiscoveryIssueKind::Canonicalize,
-                    entry.path(),
-                    format!("cannot canonicalize {}: {error}", entry.path().display()),
-                ));
-                continue;
-            }
-        };
-        if !resolved_path.starts_with(&resolved_root) {
-            issues.push(path_issue(
-                DiscoveryIssueKind::OutsideRoot,
-                entry.path(),
-                "resolved candidate is outside work_dir".to_string(),
-            ));
-            continue;
-        }
-        let metadata = match read_candidate_metadata(&resolved_path, entry.path()) {
-            Ok(value) => value,
-            Err(issue) => {
-                issues.push(issue);
-                continue;
-            }
-        };
-        if !metadata.is_file() {
-            continue;
-        }
-        let modified_local = match metadata_modified_local(&metadata) {
-            Ok(value) => value,
-            Err(error) => {
-                issues.push(path_issue(
-                    DiscoveryIssueKind::ModifiedTime,
-                    entry.path(),
-                    format!(
-                        "cannot read modified time {}: {error}",
-                        entry.path().display()
-                    ),
-                ));
-                continue;
-            }
-        };
-        let modified_naive = modified_local.naive_local();
-        if !metadata_in_window(&metadata, request)? {
-            continue;
-        }
+            let size_bytes = metadata.len();
+            let mtime_ns = match metadata_mtime_ns(&metadata) {
+                Ok(value) => value,
+                Err(error) => {
+                    issues.push(path_issue(
+                        DiscoveryIssueKind::SourceVersion,
+                        path,
+                        format!(
+                            "cannot read modified nanoseconds {}: {error}",
+                            path.display()
+                        ),
+                    ));
+                    return Ok(());
+                }
+            };
+            check(path)?;
+            let discovered_path = match absolute_discovered_path(path) {
+                Ok(value) => value,
+                Err(error) => {
+                    issues.push(path_issue(
+                        DiscoveryIssueKind::AbsolutePath,
+                        path,
+                        format!(
+                            "cannot build absolute discovered path {}: {error}",
+                            path.display()
+                        ),
+                    ));
+                    return Ok(());
+                }
+            };
+            let resolved_path_text = contract_path_string(&resolved_path);
+            let discovered_path_text = contract_path_string(&discovered_path);
+            files.push(DiscoveredFileOut {
+                file_identity: bootstrap_file_identity_from_text(&resolved_path_text),
+                path: discovered_path_text,
+                extension: lower_extension(&discovered_path),
+                modified_at: modified_naive.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
+                size_bytes,
+                source_version: build_source_version(mtime_ns, size_bytes),
+                source_guard_kind: None,
+                source_guard_sha256: None,
+            });
+            Ok(())
+        },
+    )?;
 
-        let size_bytes = metadata.len();
-        let mtime_ns = match metadata_mtime_ns(&metadata) {
-            Ok(value) => value,
-            Err(error) => {
-                issues.push(path_issue(
-                    DiscoveryIssueKind::SourceVersion,
-                    entry.path(),
-                    format!(
-                        "cannot read modified nanoseconds {}: {error}",
-                        entry.path().display()
-                    ),
-                ));
-                continue;
-            }
-        };
-        let discovered_path = match absolute_discovered_path(entry.path()) {
-            Ok(value) => value,
-            Err(error) => {
-                issues.push(path_issue(
-                    DiscoveryIssueKind::AbsolutePath,
-                    entry.path(),
-                    format!(
-                        "cannot build absolute discovered path {}: {error}",
-                        entry.path().display()
-                    ),
-                ));
-                continue;
-            }
-        };
-        let resolved_path_text = contract_path_string(&resolved_path);
-        let discovered_path_text = contract_path_string(&discovered_path);
-        files.push(DiscoveredFileOut {
-            file_identity: bootstrap_file_identity_from_text(&resolved_path_text),
-            path: discovered_path_text,
-            extension: lower_extension(&discovered_path),
-            modified_at: modified_naive.format("%Y-%m-%dT%H:%M:%S%.6f").to_string(),
-            size_bytes,
-            source_version: build_source_version(mtime_ns, size_bytes),
-            source_guard_kind: None,
-            source_guard_sha256: None,
-        });
-    }
-
-    issues.extend(access_issues.into_inner());
     files.sort_by(|left, right| left.path.cmp(&right.path));
     deduplicate_resolved_aliases(&mut files, &mut issues);
     issues.sort_by(|left, right| {
@@ -398,6 +341,14 @@ fn validate_work_dir(work_dir: &Path) -> io::Result<()> {
 }
 
 fn resolve_excluded_dirs(paths: &[PathBuf], relative_root: Option<&Path>) -> Vec<PathBuf> {
+    resolve_excluded_dirs_checked(paths, relative_root, &|_| Ok(())).expect("unbounded walk")
+}
+
+fn resolve_excluded_dirs_checked(
+    paths: &[PathBuf],
+    relative_root: Option<&Path>,
+    check: &impl Fn(&Path) -> io::Result<()>,
+) -> io::Result<Vec<PathBuf>> {
     paths
         .iter()
         .filter(|path| !path.as_os_str().is_empty())
@@ -409,7 +360,8 @@ fn resolve_excluded_dirs(paths: &[PathBuf], relative_root: Option<&Path>) -> Vec
             } else {
                 path.clone()
             };
-            fs::canonicalize(&rooted).unwrap_or(rooted)
+            check(&rooted)?;
+            Ok(fs::canonicalize(&rooted).unwrap_or(rooted))
         })
         .collect()
 }
@@ -607,6 +559,43 @@ pub fn build_source_version(mtime_ns: u128, size_bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeout_inside_walk_stops_before_the_next_file_operation() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("report.md");
+        fs::write(&file, "source").unwrap();
+        let date = Local::now().date_naive();
+        let request = DiscoveryRequest {
+            work_dir: temp.path().into(),
+            start_date: date,
+            end_date: date,
+            window_start_utc: None,
+            window_end_utc: None,
+            follow_symlinks: false,
+            allowed_extensions: vec![".md".into()],
+            ignored_patterns: vec![],
+            excluded_dirs: vec![],
+        };
+        let checks = std::cell::Cell::new(0);
+        let expired = std::cell::Cell::new(false);
+        let result = discover_files_report(&request, |path| {
+            assert!(
+                !expired.get(),
+                "a file operation was attempted after timeout"
+            );
+            if path == file {
+                checks.set(checks.get() + 1);
+                if checks.get() == 2 {
+                    expired.set(true);
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+            }
+            Ok(())
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(expired.get());
+    }
 
     #[cfg(unix)]
     #[allow(dead_code)]

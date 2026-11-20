@@ -283,7 +283,8 @@ fn activated_history_reads_mixed_v2_v3_v4_and_lists_natural_missing_days() {
 fn unknown_history_schema_versions_remain_rejected() {
     for (version, expected) in [
         (0, "REPORT_SCHEMA_UNSUPPORTED"),
-        (6, "REPORT_SCHEMA_UNSUPPORTED"),
+        (7, "REPORT_SCHEMA_UNSUPPORTED"),
+        (6, "JSON_INVALID"),
         (5, "JSON_INVALID"),
     ] {
         let directory = tempfile::tempdir().unwrap();
@@ -354,5 +355,12 @@ fn preview_retains_body_and_never_creates_a_formal_history_row() {
             .expected_sha256
             .as_deref(),
         Some(digest(markdown.as_bytes()).as_str())
+    );
+}
+#[test]
+fn production_schema_matches_frozen_v1_database_definition() {
+    assert_eq!(
+        ai_daily_report::store::SCHEMA,
+        include_str!("fixtures/report-schema-v1.sql")
     );
 }

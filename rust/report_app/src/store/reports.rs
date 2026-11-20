@@ -38,7 +38,7 @@ fn validate_report(context_json: &str, report: &Value, markdown: &str) -> Result
         .and_then(|value| DateTime::parse_from_rfc3339(value).ok());
     if report["date"].as_str() != Some(context.target_date.to_string().as_str())
         || start.map(|value| value.with_timezone(&Utc)) != Some(context.window_start_utc)
-        || !matches!(report["schema_version"].as_u64(), Some(2..=5))
+        || !matches!(report["schema_version"].as_u64(), Some(2..=6))
         || !matches!(
             report["quality"].as_str(),
             Some("complete" | "partial" | "no_changes")
@@ -50,24 +50,10 @@ fn validate_report(context_json: &str, report: &Value, markdown: &str) -> Result
             "报告与冻结日期或格式不一致",
         ));
     }
-    if report["schema_version"] == 5 {
+    if matches!(report["schema_version"].as_u64(), Some(5 | 6)) {
         let personal: crate::reports::personal::PersonalReport =
             serde_json::from_value(report.clone())?;
-        personal.validate()?;
-        if personal.output_bytes(markdown) > crate::reports::personal::MAX_REPORT_BYTES {
-            return Err(ReportError::new(
-                "PERSONAL_REPORT_TOO_LARGE",
-                "日报与依据超过文件上限",
-            ));
-        }
-        if let Some(attachment) = &personal.evidence_attachment {
-            if !markdown.contains(&format!("]({})", attachment.link(&personal.date))) {
-                return Err(ReportError::new(
-                    "PERSONAL_REPORT_INVALID",
-                    "正文缺少完整依据附件链接",
-                ));
-            }
-        }
+        personal.validate_output(markdown)?;
     }
     Ok(())
 }
@@ -282,11 +268,12 @@ impl Store {
         end: NaiveDate,
     ) -> Result<(Vec<Value>, Vec<String>), ReportError> {
         let conn = self.connection()?;
-        let rows = query(
-            &conn,
-            "SELECT date,raw_json FROM daily_reports WHERE date>=? AND date<=? ORDER BY date",
-            params![start.to_string(), end.to_string()],
+        let mut statement = conn.prepare(
+            "SELECT d.date,d.raw_json,CASE WHEN d.schema_version=6 THEN r.markdown END,r.expected_sha256
+             FROM daily_reports d LEFT JOIN report_runs r ON r.run_id=d.current_run_id
+             WHERE d.date>=? AND d.date<=? ORDER BY d.date",
         )?;
+        let mut rows = statement.query(params![start.to_string(), end.to_string()])?;
         let activation: Option<String> = conn
             .query_row(
                 "SELECT value FROM report_metadata WHERE key='first_target_date'",
@@ -296,26 +283,43 @@ impl Store {
             .optional()?;
         let activation = activation.as_deref().map(parse_date).transpose()?;
         let mut reports = BTreeMap::new();
-        for row in rows {
-            let data: Value = serde_json::from_str(row["raw_json"].as_str().unwrap())?;
+        while let Some(row) = rows.next()? {
+            let date: String = row.get(0)?;
+            let data: Value = serde_json::from_str(&row.get::<_, String>(1)?)?;
             let version = data["schema_version"].as_u64().unwrap_or(1);
-            if !(1..=5).contains(&version) {
+            if !(1..=6).contains(&version) {
                 return Err(ReportError::new(
                     "REPORT_SCHEMA_UNSUPPORTED",
                     "历史报告格式不支持",
                 ));
             }
-            if data["date"] != row["date"] {
+            if data["date"] != date {
                 return Err(ReportError::new(
                     "REPORT_CONTEXT_MISMATCH",
                     "历史报告日期与数据库索引不一致",
                 ));
             }
-            if version == 5 {
-                serde_json::from_value::<crate::reports::personal::PersonalReport>(data.clone())?
-                    .validate()?;
+            if matches!(version, 5 | 6) {
+                let report: crate::reports::personal::PersonalReport =
+                    serde_json::from_value(data.clone())?;
+                if version == 6 {
+                    let markdown: String = row.get::<_, Option<String>>(2)?.ok_or_else(|| {
+                        ReportError::new("PERSONAL_REPORT_INVALID", "详细日报缺少已保存的正文")
+                    })?;
+                    report.validate_output(&markdown)?;
+                    if row.get::<_, Option<String>>(3)?.as_deref()
+                        != Some(&digest(markdown.as_bytes()))
+                    {
+                        return Err(ReportError::new(
+                            "STAGED_REPORT_HASH_MISMATCH",
+                            "历史日报正文哈希不符",
+                        ));
+                    }
+                } else {
+                    report.validate()?;
+                }
             }
-            reports.insert(parse_date(row["date"].as_str().unwrap())?, data);
+            reports.insert(parse_date(&date)?, data);
         }
         let mut missing = Vec::new();
         let mut day = start;

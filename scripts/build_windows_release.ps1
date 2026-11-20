@@ -5,7 +5,8 @@ param(
     [string]$Cargo = 'cargo',
     [string]$TargetDirectory = '',
     [string]$PdfiumDirectory = '',
-    [string]$GitCommit = ''
+    [string]$GitCommit = '',
+    [string]$Harness = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -15,9 +16,10 @@ if (-not $TargetDirectory) { $TargetDirectory = Join-Path $repoRoot '.artifacts/
 $buildPath = [IO.Path]::GetFullPath($TargetDirectory).TrimEnd('\','/')
 $activeTarget = [IO.Path]::GetFullPath((Join-Path $repoRoot 'rust/target')).TrimEnd('\','/')
 if ($buildPath.Equals($activeTarget, [StringComparison]::OrdinalIgnoreCase)) { throw 'Use a separate target directory to preserve the active Python release workers' }
-$outputPath = [IO.Path]::GetFullPath($OutputDirectory)
-Assert-ReleaseLocalPath $outputPath
-if (Test-Path -LiteralPath $outputPath) { throw 'OutputDirectory must not already exist' }
+$destination = [IO.Path]::GetFullPath($OutputDirectory).TrimEnd('\','/')
+Assert-ReleaseLocalPath $destination
+if (Test-Path -LiteralPath $destination) { throw 'OutputDirectory must not already exist' }
+if ($buildPath -ieq $destination -or $buildPath.StartsWith($destination + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Cargo target must be outside OutputDirectory' }
 if ($ReleaseVersion -notmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { throw 'Invalid ReleaseVersion' }
 if (-not $GitCommit) { $GitCommit = (& git -C $repoRoot rev-parse HEAD).Trim(); if ($LASTEXITCODE -ne 0) { throw 'Unable to read Git HEAD' } }
 $dirty = [bool](& git -C $repoRoot status --porcelain)
@@ -33,21 +35,35 @@ if ($LASTEXITCODE -ne 0) { throw 'Locked Rust build failed' }
 $metadataText = & $Cargo metadata --manifest-path (Join-Path $repoRoot 'rust/Cargo.toml') --format-version 1 --locked --offline --filter-platform x86_64-pc-windows-msvc
 if ($LASTEXITCODE -ne 0) { throw 'Unable to read locked dependency metadata' }
 $metadata = $metadataText | ConvertFrom-Json
-[IO.Directory]::CreateDirectory($outputPath) | Out-Null
+if (-not $Harness) {
+    $artifacts = & $Cargo test --manifest-path (Join-Path $repoRoot 'rust/Cargo.toml') -p ai-daily-report --test bundle_acceptance --no-run --locked --offline --target-dir $buildPath --message-format json
+    if ($LASTEXITCODE -ne 0) { throw 'Building the standalone acceptance harness failed' }
+    $executables = @($artifacts | ForEach-Object { $_ | ConvertFrom-Json } | Where-Object {
+        $_.reason -ceq 'compiler-artifact' -and $_.target.name -ceq 'bundle_acceptance' -and $_.executable
+    })
+    if ($executables.Count -ne 1) { throw 'Unable to identify the standalone acceptance harness' }
+    $Harness = $executables[0].executable
+}
+$Harness = (Resolve-Path -LiteralPath $Harness).Path
+$parent = Split-Path -Parent $destination
+$attempt = [guid]::NewGuid().ToString('N')
+$outputPath = Join-Path $parent ('.release-stage-' + $attempt)
+$acceptancePath = $destination + '-acceptance-' + $attempt
+New-Item -ItemType Directory -Path $outputPath -ErrorAction Stop | Out-Null
 foreach ($name in @('ai-daily-report.exe', 'ai-daily-office-parser.exe', 'ai-daily-pdf-parser.exe')) { Copy-Item -LiteralPath (Join-Path $buildPath "x86_64-pc-windows-msvc/release/$name") -Destination (Join-Path $outputPath $name) }
 Copy-Item -LiteralPath $dll -Destination (Join-Path $outputPath 'pdfium.dll')
 foreach ($folder in @('templates', 'config', 'scripts', 'docs', 'licenses/pdfium', 'licenses/rust')) { [IO.Directory]::CreateDirectory((Join-Path $outputPath $folder)) | Out-Null }
-foreach ($template in Get-ChildItem -LiteralPath (Join-Path $repoRoot 'templates') -Filter 'personal_daily*.md' -File) { Copy-Item -LiteralPath $template.FullName -Destination (Join-Path $outputPath 'templates') }
+foreach ($template in $ReleaseTemplates) { Copy-Item -LiteralPath (Join-Path $repoRoot "templates/$template") -Destination (Join-Path $outputPath 'templates') }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'config/settings.example.yaml') -Destination (Join-Path $outputPath 'config/settings.example.yaml')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts/model-services.example.json') -Destination (Join-Path $outputPath 'config/model-services.example.json')
-foreach ($script in @('daily_task_common.ps1', 'install_daily_task.ps1', 'check_daily_task.ps1', 'remove_daily_task.ps1', 'health_notify.ps1', 'set_model_service.ps1', 'archive_scanner_database.ps1', 'update_release_pointer.ps1', 'release_common.ps1', 'verify_windows_release.ps1')) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/$script") -Destination (Join-Path $outputPath 'scripts') }
+foreach ($script in $ReleaseScripts) { Copy-Item -LiteralPath (Join-Path $repoRoot "scripts/$script") -Destination (Join-Path $outputPath 'scripts') }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'rust/build-inputs.json') -Destination (Join-Path $outputPath 'build-inputs.json')
 foreach ($document in @('README.md', 'CONTEXT.md', 'AGENTS.md', 'CLAUDE.md')) { Copy-Item -LiteralPath (Join-Path $repoRoot $document) -Destination (Join-Path $outputPath $document) }
 $docsRoot = Join-Path $repoRoot 'docs'
 foreach ($document in Get-ChildItem -LiteralPath $docsRoot -Recurse -File) {
-    $destination = Join-Path $outputPath ('docs/' + $document.FullName.Substring($docsRoot.Length + 1))
-    [IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
-    Copy-Item -LiteralPath $document.FullName -Destination $destination
+    $documentPath = Join-Path $outputPath ('docs/' + $document.FullName.Substring($docsRoot.Length + 1))
+    [IO.Directory]::CreateDirectory((Split-Path -Parent $documentPath)) | Out-Null
+    Copy-Item -LiteralPath $document.FullName -Destination $documentPath
 }
 Copy-Item -LiteralPath (Join-Path $PdfiumDirectory 'LICENSE') -Destination (Join-Path $outputPath 'licenses/pdfium/LICENSE')
 Copy-Item -LiteralPath (Join-Path $PdfiumDirectory 'licenses') -Destination (Join-Path $outputPath 'licenses/pdfium/notices') -Recurse
@@ -81,8 +97,6 @@ $dependencies = foreach ($package in $metadata.packages | Sort-Object name, vers
 Write-ReleaseJson -Path (Join-Path $outputPath 'licenses/dependencies.json') -Value @($dependencies)
 $officeBuild = & (Join-Path $outputPath 'ai-daily-office-parser.exe') parser-build | ConvertFrom-Json
 if ($LASTEXITCODE -ne 0) { throw 'Office parser build inputs unavailable' }
-$pdfBuild = & (Join-Path $outputPath 'ai-daily-pdf-parser.exe') parser-build | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0 -or $officeBuild.parser_content_identity -cne $pdfBuild.parser_content_identity -or $officeBuild.engine_build -cne $pdfBuild.engine_build) { throw 'Mixed parser content identities' }
 Write-ReleaseJson -Path (Join-Path $outputPath 'parser-build.json') -Value $officeBuild
 $parserFiles = [ordered]@{}
 foreach ($name in @('ai-daily-office-parser.exe', 'ai-daily-pdf-parser.exe', 'pdfium.dll')) {
@@ -97,12 +111,14 @@ Write-ReleaseJson -Path (Join-Path $outputPath 'parser-manifest.json') -Value ([
 $files = foreach ($file in Get-ChildItem -LiteralPath $outputPath -Recurse -File | Sort-Object FullName) {
     [ordered]@{ path = $file.FullName.Substring($outputPath.Length + 1).Replace('\','/'); size = $file.Length; sha256 = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant() }
 }
-$office = & (Join-Path $outputPath 'ai-daily-office-parser.exe') hello | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'Office worker self-check failed' }
-$pdf = & (Join-Path $outputPath 'ai-daily-pdf-parser.exe') hello | ConvertFrom-Json
-if ($LASTEXITCODE -ne 0) { throw 'PDF worker self-check failed' }
-if ($office.worker_build -cne $pdf.worker_build -or $office.protocol_version -ne 4 -or $pdf.protocol_version -ne 4) { throw 'Mixed worker builds' }
-$manifest = [ordered]@{ schema_version = 'ai_daily_rust_release_v1'; release_version = $ReleaseVersion; git_commit = $GitCommit; source_dirty = $dirty; target = 'x86_64-pc-windows-msvc'; created_at_utc = [DateTime]::UtcNow.ToString('o'); engine_build = $office.worker_build; worker_protocol = $office.protocol_version; pdfium_version = $inputs.pdfium.version; files = @($files) }
+$manifest = [ordered]@{ schema_version = 'ai_daily_rust_release_v1'; release_version = $ReleaseVersion; git_commit = $GitCommit; source_dirty = $dirty; target = 'x86_64-pc-windows-msvc'; created_at_utc = [DateTime]::UtcNow.ToString('o'); engine_build = $officeBuild.engine_build; worker_protocol = 4; pdfium_version = $inputs.pdfium.version; files = @($files) }
 Write-ReleaseJson -Path (Join-Path $outputPath 'manifest.json') -Value $manifest
-$verified = Test-RustReleaseBundle $outputPath
-[ordered]@{ status = 'verified'; output_directory = $outputPath; release_version = $verified.release_version; files = @($verified.files).Count; bytes = ($verified.files | Measure-Object -Property size -Sum).Sum } | ConvertTo-Json
+& (Join-Path $PSScriptRoot 'accept_windows_bundle.ps1') -BundleDirectory $outputPath -OutputDirectory $acceptancePath -Harness $Harness | Out-Null
+$summary = [ordered]@{ status = 'verified'; output_directory = $destination; release_version = $ReleaseVersion; files = @($files).Count;
+    bytes = [long]($files | ForEach-Object { $_['size'] } | Measure-Object -Sum).Sum; acceptance = (Join-Path $acceptancePath 'acceptance.json') } | ConvertTo-Json
+# A same-volume rename is the only operation that makes the final directory visible.
+Assert-ReleaseLocalPath $destination
+$stage = (Resolve-Path -LiteralPath $outputPath).Path
+if ((Split-Path -Parent $stage) -ine $parent -or (Split-Path -Leaf $stage) -cne ('.release-stage-' + $attempt)) { throw 'Unexpected release staging path' }
+[IO.Directory]::Move($stage, $destination)
+$summary

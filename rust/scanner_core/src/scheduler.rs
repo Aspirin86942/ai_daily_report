@@ -2001,21 +2001,13 @@ impl BudgetedContextScheduler {
                         .insert(task.file.file_identity.clone(), task.profile_hash.clone());
                     continue;
                 }
-                requests.push(ParseRequest {
-                    selected_pdf_pages: classifications
-                        .get(&task.file.file_identity)
-                        .and_then(|result| result.page_count)
-                        .map(|count| {
-                            ai_daily_scanner_contract::pdf_sample_pages(
-                                count,
-                                profile.parse.pdf.max_pages,
-                                &profile.parse.pdf.selection_policy_version,
-                            )
-                        }),
-                    file: task.file.clone(),
-                    route: task.route,
-                    timeout_ms: task.own_timeout_ms.min(remaining),
-                });
+                requests.push(crate::parsers::scheduled_request(
+                    &task.file,
+                    task.route,
+                    task.own_timeout_ms.min(remaining),
+                    profile,
+                    classifications,
+                ));
                 wave_meta.push((
                     task.file.clone(),
                     guard,

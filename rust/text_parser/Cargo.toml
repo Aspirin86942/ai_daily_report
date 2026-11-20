@@ -11,4 +11,5 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+csv = "=1.4.0"
 tempfile.workspace = true

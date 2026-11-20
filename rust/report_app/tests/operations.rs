@@ -1,5 +1,6 @@
 use ai_daily_report::{
     config::AppConfig,
+    health,
     model::transport::{HttpResponse, ModelTransport, TransportFailure},
     operations,
     run::App,
@@ -7,7 +8,7 @@ use ai_daily_report::{
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -55,6 +56,10 @@ impl ModelTransport for Network {
             });
         }
         let value: Value = serde_json::from_slice(request).unwrap();
+        assert!(value["messages"][0]["content"]
+            .as_str()
+            .unwrap()
+            .starts_with(ai_daily_report::model::personal::SCAN_PROMPT_DETAILED));
         assert!(value["messages"][1]["content"]
             .as_str()
             .unwrap()
@@ -149,19 +154,43 @@ fn task_plan_is_read_only_escapes_xml_and_uses_direct_rust_entry() {
 fn strict_doctor_uses_real_same_build_workers_and_checks_packaged_templates() {
     let (dir, config) = fixture();
     let app = App::open(config, now()).unwrap();
+    let templates = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates");
+    let names = fs::read_dir(&templates)
+        .unwrap()
+        .map(|file| file.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.starts_with("personal_daily") && name.ends_with(".md"))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        names,
+        operations::TEMPLATES
+            .iter()
+            .map(|(name, _)| (*name).to_owned())
+            .collect()
+    );
+    for (name, body) in operations::TEMPLATES {
+        assert_eq!(
+            fs::read(templates.join(name)).unwrap(),
+            body.as_bytes(),
+            "{name}"
+        );
+    }
     let value = operations::doctor(&app, false, now()).unwrap();
     assert_eq!(value["status"], "ok");
+    assert_eq!(value["templates"], names.len());
     assert_eq!(app.store.list_runs(None, 100).unwrap().len(), 0);
-    fs::write(
-        dir.path()
-            .join("templates/personal_daily_scan_template_v5.md"),
-        "changed",
-    )
-    .unwrap();
-    assert_eq!(
-        operations::doctor(&app, false, now()).unwrap_err().code,
-        "TEMPLATE_BUILD_MISMATCH"
-    );
+    for name in [
+        "personal_daily_scan_template_v5.md",
+        "personal_daily_scan_template_v6.md",
+        "personal_daily_scan_prompt_v8.md",
+    ] {
+        let path = dir.path().join("templates").join(name);
+        fs::write(&path, "changed").unwrap();
+        assert_eq!(
+            operations::doctor(&app, false, now()).unwrap_err().code,
+            "TEMPLATE_BUILD_MISMATCH"
+        );
+        fs::copy(templates.join(name), &path).unwrap();
+    }
 }
 #[test]
 fn explicit_model_probe_is_audited_and_task_plan_requires_current_config_success() {
@@ -170,6 +199,20 @@ fn explicit_model_probe_is_audited_and_task_plan_requires_current_config_success
     app.transport = Box::new(Network(true));
     let result = operations::model_check(&app, now()).unwrap();
     assert_eq!(result["calls"], 1);
+    let record = app.store.get(result["run_id"].as_str().unwrap()).unwrap();
+    let snapshot: Value = serde_json::from_slice(
+        &fs::read(
+            app.config
+                .paths
+                .data_dir
+                .join("daily_cache/snapshots")
+                .join(record.snapshot_path.unwrap()),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(snapshot["plan"]["version"], 7);
+    assert_eq!(snapshot["plan"]["target"]["summary_prompt_version"], 8);
     let calls = app.store.calls(result["run_id"].as_str().unwrap()).unwrap();
     assert_eq!(calls[0]["status"], "succeeded");
     assert_eq!(
@@ -225,4 +268,58 @@ fn dotenv_uses_fixed_config_parent_and_process_override_without_exposing_values(
     assert_eq!(config.api_key(), "process-key");
     assert_eq!(config.llm.max_tokens, 3072);
     assert!(!format!("{config:?}").contains("process-key"));
+}
+
+#[test]
+fn health_keeps_attention_for_empty_personal_publications() {
+    let (_dir, config) = fixture();
+    let app = App::open(config, now()).unwrap();
+    let db = app.store.connection().unwrap();
+    db.execute_batch(
+        "INSERT INTO report_runs(run_id,scope_id,target_date,timezone,context_json,config_fingerprint,generation_id,phase,status,created_at,updated_at)
+         VALUES ('earlier','personal_work','2026-10-14','Asia/Shanghai','{}','fp','old','generating','failed','2026-10-15T01:00:00+00:00','2026-10-15T01:00:00+00:00'),
+                ('current','personal_work','2026-10-14','Asia/Shanghai','{}','fp','new','published','succeeded','2026-10-15T02:00:00+00:00','2026-10-15T02:00:00+00:00');
+         INSERT INTO daily_reports(date,completed_work,work_summary,next_plan,raw_json,current_run_id)
+         VALUES ('2026-10-14','','','','{}','current');"
+    ).unwrap();
+    for (version, items, quality, unresolved) in [
+        (4, json!([]), "partial", 0),
+        (5, json!([]), "partial", 1),
+        (6, json!([]), "partial", 1),
+        (6, json!([]), "no_changes", 0),
+        (6, json!([{"title":"已核对"}]), "partial", 0),
+    ] {
+        db.execute(
+            "UPDATE report_runs SET report_json=?1,quality=?2 WHERE run_id='current'",
+            rusqlite::params![
+                json!({"schema_version":version,"items":items}).to_string(),
+                quality
+            ],
+        )
+        .unwrap();
+        let report = health::check(&app.config, "2026-10-14".parse().unwrap(), now()).unwrap();
+        let attention = report
+            .checks
+            .iter()
+            .find(|check| check.code == "RUN_ATTENTION")
+            .unwrap();
+        assert_eq!(attention.evidence["pending"], unresolved);
+        assert_eq!(attention.evidence["recent_failures"], unresolved);
+    }
+}
+
+#[test]
+fn scheduled_health_preserves_a_newer_or_already_enriched_observation() {
+    let (_dir, config) = fixture();
+    let date = now().date_naive();
+    let earlier = health::check(&config, date, now()).unwrap();
+    let later = health::check(&config, date, now() + chrono::Duration::seconds(1)).unwrap();
+    let path = health::persist(&later).unwrap();
+    let mut combined = serde_json::to_value(&later).unwrap();
+    combined["tasks"] = json!([{"name":"verified"}]);
+    let bytes = serde_json::to_vec(&combined).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    assert_eq!(health::persist(&earlier).unwrap(), path);
+    assert_eq!(health::persist(&later).unwrap(), path);
+    assert_eq!(fs::read(path).unwrap(), bytes);
 }

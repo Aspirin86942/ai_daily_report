@@ -22,6 +22,32 @@ $utf8Strict = New-Object System.Text.UTF8Encoding($false, $true)
 $zone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
 $checks = 0
 $blockers = New-Object System.Collections.Generic.List[string]
+$interleave = @{}
+function Get-ScheduledTask {
+    param($TaskName)
+    if ($TaskName -eq 'Interleaved early' -and $interleave.Pending) {
+        $interleave.Pending = $false
+        $late = (& $interleave.Script -Program $interleave.Program -ConfigDirectory $interleave.Config -NoNotify | Out-String) | ConvertFrom-Json
+        $interleave.File = $late.health_file
+        $interleave.Hash = (Get-FileHash -LiteralPath $late.health_file).Hash
+        $interleave.StateHash = (Get-FileHash -LiteralPath (Join-Path (Split-Path -Parent $late.health_file) 'health-notify-state.json')).Hash
+    }
+}
+function Get-ScheduledTaskInfo { param($TaskName) }
+
+# The CP936 child also uses scheduler doubles. Capture the console encoding change locally.
+$cp936Runner = Join-Path $root 'cp936.ps1'
+[IO.File]::WriteAllText($cp936Runner, @'
+param($ScriptPath, $ProgramPath, $ConfigPath)
+function Get-ScheduledTask { param($TaskName) }
+function Get-ScheduledTaskInfo { param($TaskName) }
+$previous = [Console]::OutputEncoding
+try {
+    [Console]::OutputEncoding = [Text.Encoding]::GetEncoding(936)
+    & $ScriptPath -Program $ProgramPath -ConfigDirectory $ConfigPath -NoNotify
+    exit $LASTEXITCODE
+} finally { [Console]::OutputEncoding = $previous }
+'@, $utf8)
 
 function Assert-Test([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -62,7 +88,7 @@ function Get-HealthTempFiles {
 # log_dir health file like the real program, then returns the requested exit
 # code. A non-zero exit after a healthy report reproduces the scheduled-log
 # write failure that happens after the report has already been written.
-function New-HealthStub([string]$Path, [string]$Status, [int]$ExitCode, [bool]$FailScheduledLog, [string]$HistoricalDate = '') {
+function New-HealthStub([string]$Path, [string]$Status, [int]$ExitCode, [bool]$FailScheduledLog, [string]$HistoricalDate = '', [string]$GeneratedAt = '2026-10-18T16:30:00+00:00') {
     $stubText = @'
 param()
 $out = $null
@@ -86,7 +112,7 @@ $report = [ordered]@{
     )
     task_names = [ordered]@{ daily = $task; health = ($task + ' Health') }
     log_dir = $logDir
-    generated_at = '2026-10-18T16:30:00+00:00'
+    generated_at = '__GENERATED__'
 }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 if ('__HISTORICAL__') {
@@ -96,7 +122,7 @@ if ('__HISTORICAL__') {
 $json = $report | ConvertTo-Json -Depth 10
 [IO.File]::WriteAllText($out, $json, $utf8)
 $zone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
-$generated = [DateTimeOffset]::Parse('2026-10-18T16:30:00+00:00')
+$generated = [DateTimeOffset]::Parse('__GENERATED__')
 $name = 'health-' + [TimeZoneInfo]::ConvertTime($generated, $zone).ToString('yyyy-MM-dd') + '.json'
 [IO.File]::WriteAllText((Join-Path $logDir $name), $json, $utf8)
 if (__FAILLOG__ -eq 1) {
@@ -110,7 +136,7 @@ if (__FAILLOG__ -eq 1) {
 exit __EXIT__
 '@
     $stubText = $stubText.Replace('__STATUS__', $Status).Replace('__FAILLOG__', $(if ($FailScheduledLog) { '1' } else { '0' })).Replace('__EXIT__', [string]$ExitCode)
-    $stubText = $stubText.Replace('__HISTORICAL__', $HistoricalDate)
+    $stubText = $stubText.Replace('__HISTORICAL__', $HistoricalDate).Replace('__GENERATED__', $GeneratedAt)
     [IO.File]::WriteAllText($Path, $stubText, $utf8)
 }
 
@@ -218,8 +244,7 @@ Assert-Test ($lockedError.code -eq 'NOTIFY_FAILED') 'Blocked state replacement m
 
 # Phase A.3: CP936 console must not corrupt the health file.
 $cp936 = New-IsolatedConfig (Join-Path $root 'logic-cp936') 'Reliability Closure Health Probe CP936'
-$command = 'chcp 936 >nul & powershell -NoProfile -ExecutionPolicy Bypass -File "' + $script + '" -Program "' + $stub + '" -ConfigDirectory "' + $cp936.config + '" -NoNotify'
-$null = & cmd /c $command
+$null = & powershell -NoProfile -ExecutionPolicy Bypass -File $cp936Runner $script $stub $cp936.config
 Assert-Test ($LASTEXITCODE -eq 1) ('CP936 run must keep exit code 1, got ' + $LASTEXITCODE)
 $cp936LogDir = Join-Path $cp936.data 'logs'
 $cp936File = Get-ChildItem -LiteralPath $cp936LogDir -Filter 'health-*.json' | Where-Object { $_.Name -notlike '*state*' } | Select-Object -First 1
@@ -330,6 +355,25 @@ Assert-Test (@(Get-Content -LiteralPath $historicalLog).Count -eq 2) 'A differen
 $historicalState = [IO.File]::ReadAllText((Join-Path (Join-Path $historical.data 'logs') 'health-notify-state.json'), $utf8Strict) | ConvertFrom-Json
 Assert-Test ([string]$historicalState.codes -like '*HISTORICAL_REPORT_ATTENTION:2026-10-24*') 'Notification state must identify the historical target date'
 
+# Finish the second run during the first run's task readback (before its publish lock).
+foreach ($offset in @('16:31:00','16:30:00')) {
+    $suffix = $offset.Replace(':','')
+    $early = New-IsolatedConfig (Join-Path $root "early-$suffix") 'Interleaved early'
+    $late = New-IsolatedConfig (Join-Path $root "late-$suffix") 'Interleaved late'
+    $lateSettings = Join-Path $late.config 'settings.yaml'
+    $contents = [IO.File]::ReadAllText($lateSettings).Replace(($late.data + '/logs'), ($early.data + '/logs'))
+    [IO.File]::WriteAllText($lateSettings, $contents, $utf8)
+    $lateProgram = Join-Path $root "late-$suffix.ps1"
+    New-HealthStub $lateProgram 'unhealthy' 2 $false '2026-10-15' ("2026-10-18T" + $offset + "+00:00")
+    $interleave = @{ Pending = $true; Script = $script; Program = $lateProgram; Config = $late.config }
+    $earlyResult = (& $script -Program $healthyStub -ConfigDirectory $early.config -NoNotify | Out-String) | ConvertFrom-Json
+    Assert-Test ($earlyResult.superseded -and $null -eq $earlyResult.health_file -and $earlyResult.status -eq 'healthy') 'Late readback claimed a different observation as its own'
+    Assert-Test ((Get-FileHash -LiteralPath $interleave.File).Hash -ceq $interleave.Hash) 'Late readback overwrote a competing report'
+    $lateResult = (Read-HealthFile $interleave.File).json
+    Assert-Test ($lateResult.status -eq 'unhealthy' -and $lateResult.tasks[0].name -eq 'Interleaved late') 'Native status and scheduler evidence came from different observations'
+    Assert-Test ((Get-FileHash -LiteralPath (Join-Path (Split-Path -Parent $interleave.File) 'health-notify-state.json')).Hash -ceq $interleave.StateHash) 'Late readback overwrote notification history'
+}
+
 # Phase A.7: warning/unhealthy keep the exit-1 script contract only when the
 # program exit code matches the verdict mapping.
 $warning = New-IsolatedConfig (Join-Path $root 'logic-warning-exit1') 'Reliability Closure Health Probe Warning'
@@ -390,6 +434,22 @@ else {
     Assert-Test (Test-Path -LiteralPath $scheduledLog) 'Scheduled run must still write its scheduled log entry'
     Assert-Test (@(Get-ChildItem -LiteralPath ([string]$nativeJson.json.log_dir) -Filter '*.tmp' -ErrorAction SilentlyContinue).Count -eq 0) 'Program left temporary files in log_dir'
 
+    $nativeHash = (Get-FileHash -LiteralPath $nativePath).Hash
+    $gatePath = Join-Path ([string]$nativeJson.json.log_dir) '.health-publish.lock'
+    $gate = [IO.File]::Open($gatePath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+    $gate.Lock(0, 1)
+    $concurrentOut = Join-Path $root 'concurrent-native-output.json'
+    try {
+        $arguments = '--config-dir "' + $native.config + '" health --scheduled --output "' + $concurrentOut + '"'
+        $concurrent = Start-Process -FilePath $Program -ArgumentList $arguments -WindowStyle Hidden -PassThru
+        Assert-Test (-not $concurrent.WaitForExit(1000)) 'Native publisher ignored the scheduler readback lock'
+        Assert-Test ((Get-FileHash -LiteralPath $nativePath).Hash -ceq $nativeHash) 'Native publisher replaced the file under the scheduler lock'
+    } finally { $gate.Dispose() }
+    try {
+        Assert-Test ($concurrent.WaitForExit(20000) -and @(1,2) -contains $concurrent.ExitCode) 'Native publisher failed after releasing the scheduler lock'
+        Assert-Test ((Read-HealthFile $concurrentOut).json.generated_at -eq (Read-HealthFile $nativePath).json.generated_at) 'Released publisher did not save its own native observation'
+    } finally { $concurrent.Dispose() }
+
     # B.2: full script run against the real program.
     $real = New-IsolatedConfig (Join-Path $root 'real-program') 'Reliability Closure Health Probe Real'
     $realStdout = & $script -Program $Program -ConfigDirectory $real.config -NoNotify | Out-String
@@ -410,8 +470,7 @@ else {
 
     # B.3: CP936 console with the real program.
     $realCp936 = New-IsolatedConfig (Join-Path $root 'real-cp936') 'Reliability Closure Health Probe Real CP936'
-    $realCommand = 'chcp 936 >nul & powershell -NoProfile -ExecutionPolicy Bypass -File "' + $script + '" -Program "' + $Program + '" -ConfigDirectory "' + $realCp936.config + '" -NoNotify'
-    $null = & cmd /c $realCommand
+    $null = & powershell -NoProfile -ExecutionPolicy Bypass -File $cp936Runner $script $Program $realCp936.config
     $realCp936Exit = $LASTEXITCODE
     Assert-Test (@(1, 2) -contains $realCp936Exit) ('Real CP936 run must exit 1 or 2, got ' + $realCp936Exit)
     $realCp936Log = Join-Path $realCp936.data 'logs'
@@ -433,7 +492,7 @@ $status = if ($blockers.Count -gt 0) { 'passed_with_blocked_real_program_check' 
     real_program_check = $realStatus
     real_program_detail = $realDetail
     real_tasks_changed = 0
-    scheduler = 'read-only readback via Get-ScheduledTask'
+    scheduler = 'function doubles only'
     cp936_checked = $true
     notification_failure_exit_code = 3
     blockers = @($blockers)

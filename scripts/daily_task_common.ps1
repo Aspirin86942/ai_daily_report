@@ -199,11 +199,16 @@ function Install-ReportDailyTask {
         [IO.File]::WriteAllText($backup, $oldXml, [Text.UTF8Encoding]::new($false))
     }
     Register-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -Xml $Plan.xml -Force | Out-Null
-    $readback = Export-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path
-    $remaining = @(Get-ReportTaskDifferences -Plan $Plan -Xml $readback)
-    if ($remaining.Count -ne 0) {
-        Disable-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path | Out-Null
-        throw 'TASK_READBACK_MISMATCH_DISABLED'
+    try {
+        $readback = Export-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -ErrorAction Stop
+        if (@(Get-ReportTaskDifferences -Plan $Plan -Xml $readback).Count) { throw 'TASK_READBACK_MISMATCH' }
+    }
+    catch {
+        $reason = $_.Exception.Message
+        try { Disable-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -ErrorAction Stop | Out-Null }
+        catch { throw "TASK_READBACK_DISABLE_FAILED: $reason; $($_.Exception.Message); backup=$backup" }
+        if ($reason -eq 'TASK_READBACK_MISMATCH') { throw 'TASK_READBACK_MISMATCH_DISABLED' }
+        throw "TASK_READBACK_FAILED_DISABLED: $reason; backup=$backup"
     }
     return [pscustomobject]@{ Action = 'registered'; Applied = $true; TaskName = $Plan.task_name; Backup = $backup }
 }

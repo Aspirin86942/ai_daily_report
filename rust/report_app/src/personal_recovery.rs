@@ -17,7 +17,7 @@ pub struct Issue {
 }
 
 pub fn reasons(report: &Value) -> Vec<String> {
-    if report["schema_version"] != 5 {
+    if !matches!(report["schema_version"].as_u64(), Some(5 | 6)) {
         return vec![];
     }
     let mut reasons = BTreeSet::new();

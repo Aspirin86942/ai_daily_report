@@ -10,10 +10,7 @@ use std::{
 };
 
 pub fn digest(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    ai_daily_worker_contract::archive::hex(&Sha256::digest(bytes))
 }
 
 pub fn valid_hash(value: &str) -> bool {
@@ -26,54 +23,62 @@ pub fn valid_hash(value: &str) -> bool {
 /// Match the existing Python canonical JSON contract. Existing snapshots are
 /// always hashed as original bytes and are never rewritten through this function.
 pub fn canonical_json(value: &Value) -> Result<Vec<u8>, ReportError> {
-    fn write(value: &Value, output: &mut String) -> Result<(), ReportError> {
+    fn write(value: &Value, output: &mut Vec<u8>) -> Result<(), ReportError> {
         match value {
             Value::Object(values) => {
-                output.push('{');
-                let mut entries: Vec<_> = values.iter().collect();
-                entries.sort_by_key(|(key, _)| *key);
-                for (index, (key, value)) in entries.into_iter().enumerate() {
+                output.push(b'{');
+                let mut entry = |index, key: &str, value| -> Result<(), ReportError> {
                     if index != 0 {
-                        output.push(',');
+                        output.push(b',');
                     }
-                    output.push_str(&serde_json::to_string(key)?);
-                    output.push(':');
-                    write(value, output)?;
+                    serde_json::to_writer(&mut *output, key)?;
+                    output.push(b':');
+                    write(value, output)
+                };
+                if values.keys().is_sorted() {
+                    for (index, (key, value)) in values.iter().enumerate() {
+                        entry(index, key, value)?;
+                    }
+                } else {
+                    let mut entries: Vec<_> = values.iter().collect();
+                    entries.sort_unstable_by_key(|(key, _)| *key);
+                    for (index, (key, value)) in entries.into_iter().enumerate() {
+                        entry(index, key, value)?;
+                    }
                 }
-                output.push('}');
+                output.push(b'}');
             }
             Value::Array(values) => {
-                output.push('[');
+                output.push(b'[');
                 for (index, value) in values.iter().enumerate() {
                     if index != 0 {
-                        output.push(',');
+                        output.push(b',');
                     }
                     write(value, output)?;
                 }
-                output.push(']');
+                output.push(b']');
             }
             Value::Number(number) if number.is_f64() => {
                 let number = number
                     .as_f64()
                     .ok_or_else(|| ReportError::new("JSON_INVALID", "浮点数超出范围"))?;
-                let raw = serde_json::to_string(&number)?;
                 let scientific = number != 0.0 && (number.abs() < 0.0001 || number.abs() >= 1e16);
                 if scientific {
                     let exponent_form = format!("{number:e}");
                     let (mantissa, exponent) = exponent_form.split_once('e').unwrap();
                     let exponent: i32 = exponent.parse().unwrap();
-                    output.push_str(&format!("{mantissa}e{exponent:+03}"));
+                    write!(output, "{mantissa}e{exponent:+03}")?;
                 } else {
-                    output.push_str(&raw);
+                    serde_json::to_writer(output, &number)?;
                 }
             }
-            other => output.push_str(&serde_json::to_string(other)?),
+            other => serde_json::to_writer(output, other)?,
         }
         Ok(())
     }
-    let mut output = String::new();
+    let mut output = Vec::new();
     write(value, &mut output)?;
-    Ok(output.into_bytes())
+    Ok(output)
 }
 
 pub fn fingerprint(value: &Value) -> Result<String, ReportError> {

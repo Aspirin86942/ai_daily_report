@@ -110,20 +110,17 @@ pub fn execute(config: &AppConfig, args: &SearchArgs) -> Result<Value, ReportErr
         .map_err(index_error)?
         .collect::<Result<_, _>>()
         .map_err(index_error)?;
-    let index_rebuilt = args.reindex
-        || state
-            .metadata
-            .iter()
-            .any(|(key, value)| metadata.get(key) != Some(value));
-    let summary = if index_rebuilt {
-        rebuild(&snapshot, &transaction, &state)?
-    } else {
-        Value::Null
-    };
+    let force =
+        args.reindex || metadata.get("schema_version") != state.metadata.get("schema_version");
+    let metadata_changed = state
+        .metadata
+        .iter()
+        .any(|(key, value)| metadata.get(key) != Some(value));
+    let summary = refresh(&snapshot, &transaction, &state, force, metadata_changed)?;
     let result = if args.reindex {
         summary
     } else {
-        search(&transaction, args, query, index_rebuilt)?
+        search(&transaction, args, query, summary["index_rebuilt"] == true)?
     };
     transaction.commit().map_err(index_error)?;
     Ok(result)
@@ -146,6 +143,10 @@ fn initialize(index: &Connection) -> Result<(), ReportError> {
     index
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS index_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE IF NOT EXISTS indexed_reports(
+                 kind TEXT NOT NULL, report_key TEXT NOT NULL, raw_sha256 TEXT NOT NULL,
+                 fragments INTEGER NOT NULL, PRIMARY KEY(kind,report_key)
+             ) WITHOUT ROWID;
              CREATE VIRTUAL TABLE IF NOT EXISTS report_search USING fts5(
                  report_key UNINDEXED,
                  kind UNINDEXED,
@@ -197,7 +198,7 @@ fn source_state(reports: &Connection) -> Result<SourceState, ReportError> {
         tables,
         count,
         metadata: BTreeMap::from([
-            ("schema_version".into(), "2".into()),
+            ("schema_version".into(), "3".into()),
             ("source_count".into(), count.to_string()),
             ("source_max_updated_at".into(), latest.unwrap_or_default()),
             ("source_tables".into(), json!(signature).to_string()),
@@ -205,22 +206,32 @@ fn source_state(reports: &Connection) -> Result<SourceState, ReportError> {
     })
 }
 
-fn rebuild(
+fn refresh(
     reports: &Connection,
     index: &Connection,
     state: &SourceState,
+    force: bool,
+    metadata_changed: bool,
 ) -> Result<Value, ReportError> {
-    index
-        .execute("DELETE FROM report_search", [])
+    if force {
+        index
+            .execute_batch("DELETE FROM report_search; DELETE FROM indexed_reports;")
+            .map_err(index_error)?;
+    }
+    let mut previous: BTreeMap<(String, String), String> = index
+        .prepare("SELECT kind, report_key, raw_sha256 FROM indexed_reports")
+        .map_err(index_error)?
+        .query_map([], |r| Ok(((r.get(0)?, r.get(1)?), r.get(2)?)))
+        .map_err(index_error)?
+        .collect::<Result<_, _>>()
         .map_err(index_error)?;
+    let mut changed = force || metadata_changed;
     let mut insert = index
         .prepare(
             "INSERT INTO report_search(report_key,kind,report_label,report_date,title,body,sources)
              VALUES (?1,?2,?1,?3,?4,?5,?6)",
         )
         .map_err(index_error)?;
-    let mut indexed_fragments = 0;
-    let mut skipped_reports = 0;
     for table in &state.tables {
         let mut select = reports
             .prepare(&format!(
@@ -235,15 +246,29 @@ fn rebuild(
             .map_err(source_error)?;
         for row in rows {
             let (key, raw) = row.map_err(source_error)?;
-            let Ok(report) = serde_json::from_str::<Value>(raw.as_deref().unwrap_or("")) else {
-                skipped_reports += 1;
-                continue;
-            };
-            let fragments = fragments(&report, table.kind);
-            if fragments.is_empty() {
-                skipped_reports += 1;
+            let raw = raw.as_deref().unwrap_or("");
+            let sha = crate::snapshots::digest(raw.as_bytes());
+            let old = previous.remove(&(table.kind.to_owned(), key.clone()));
+            if old.as_ref() == Some(&sha) {
                 continue;
             }
+            changed = true;
+            if old.is_some() {
+                index
+                    .execute(
+                        "DELETE FROM report_search WHERE kind=?1 AND report_key=?2",
+                        params![table.kind, key],
+                    )
+                    .map_err(index_error)?;
+            }
+            let fragments = serde_json::from_str(raw)
+                .map(|report| fragments(&report, table.kind))
+                .unwrap_or_default();
+            index.execute(
+                "INSERT INTO indexed_reports(kind,report_key,raw_sha256,fragments) VALUES (?1,?2,?3,?4)
+                 ON CONFLICT(kind,report_key) DO UPDATE SET raw_sha256=excluded.raw_sha256,fragments=excluded.fragments",
+                params![table.kind,key,sha,fragments.len() as i64],
+            ).map_err(index_error)?;
             let date = (table.kind == "daily").then_some(key.as_str());
             for fragment in fragments {
                 insert
@@ -256,26 +281,41 @@ fn rebuild(
                         fragment.sources
                     ])
                     .map_err(index_error)?;
-                indexed_fragments += 1;
             }
         }
     }
-    index
-        .execute("DELETE FROM index_meta", [])
-        .map_err(index_error)?;
-    let mut metadata = state.metadata.clone();
-    metadata.insert("indexed_fragments".into(), indexed_fragments.to_string());
-    metadata.insert("skipped_reports".into(), skipped_reports.to_string());
-    for (key, value) in metadata {
+    for (kind, key) in previous.into_keys() {
+        changed = true;
         index
             .execute(
-                "INSERT INTO index_meta(key,value) VALUES (?1,?2)",
-                params![key, value],
+                "DELETE FROM report_search WHERE kind=?1 AND report_key=?2",
+                params![kind, key],
+            )
+            .map_err(index_error)?;
+        index
+            .execute(
+                "DELETE FROM indexed_reports WHERE kind=?1 AND report_key=?2",
+                params![kind, key],
             )
             .map_err(index_error)?;
     }
+    let (indexed_fragments,skipped_reports):(i64,i64) = index.query_row(
+        "SELECT coalesce(sum(fragments),0),count(*) FILTER (WHERE fragments=0) FROM indexed_reports",
+        [], |r| Ok((r.get(0)?,r.get(1)?)),
+    ).map_err(index_error)?;
+    if changed {
+        let mut metadata = state.metadata.clone();
+        metadata.insert("indexed_fragments".into(), indexed_fragments.to_string());
+        metadata.insert("skipped_reports".into(), skipped_reports.to_string());
+        for (key, value) in metadata {
+            index.execute(
+                "INSERT INTO index_meta(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, value],
+            ).map_err(index_error)?;
+        }
+    }
     Ok(json!({
-        "index_rebuilt": true,
+        "index_rebuilt": changed,
         "source_count": state.count,
         "indexed_fragments": indexed_fragments,
         "skipped_reports": skipped_reports,
@@ -385,9 +425,15 @@ fn add_fragment(fragments: &mut Vec<Fragment>, report: &Value, item: &Value, tit
         body.push_str(" 来源：");
         body.push_str(&hints.join(" "));
     }
+    let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
     fragments.push(Fragment {
         title: bounded(&title.split_whitespace().collect::<Vec<_>>().join(" ")),
-        body: bounded(&body.split_whitespace().collect::<Vec<_>>().join(" ")),
+        // Detailed reports can carry long, source-validated items. Their tail is searchable too.
+        body: if report["schema_version"] == 6 {
+            body
+        } else {
+            bounded(&body)
+        },
         sources: labels.join(" "),
     });
 }
@@ -395,7 +441,7 @@ fn add_fragment(fragments: &mut Vec<Fragment>, report: &Value, item: &Value, tit
 fn fragments(report: &Value, kind: &str) -> Vec<Fragment> {
     let mut result = Vec::new();
     if kind == "daily" {
-        if report["schema_version"] == 5 {
+        if matches!(report["schema_version"].as_u64(), Some(5 | 6)) {
             if serde_json::from_value::<crate::reports::personal::PersonalReport>(report.clone())
                 .and_then(|r| r.validate().map_err(serde::de::Error::custom))
                 .is_err()

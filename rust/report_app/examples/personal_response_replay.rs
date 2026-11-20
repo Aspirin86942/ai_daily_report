@@ -6,7 +6,7 @@ use ai_daily_report::{
         transport::{HttpResponse, ModelTransport, TransportFailure},
         ModelRunner,
     },
-    reports::personal::{body_chars, PersonalReport, StatementKind, MAX_REPORT_BYTES},
+    reports::personal::{body_chars, StatementKind},
     run::personal::PersonalInput,
     snapshots::{digest, SnapshotStore},
     store::Store,
@@ -38,7 +38,7 @@ impl ModelTransport for SavedResponse {
         let response = self
             .responses
             .get(body)
-            .expect("replay request has no matching saved response");
+            .ok_or(TransportFailure::Configuration)?;
         Ok(HttpResponse {
             status: 200,
             retry_after: None,
@@ -114,37 +114,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         deadline: started + Duration::from_secs(30),
     };
     let output = ai_daily_report::model::personal::generate(&runner, plan)?;
-    let mut report = PersonalReport::from_selection(&input.context, "work", &input.selection);
-    report.items = output.items;
-    report.retain_cited();
+    let omitted = output.omitted;
+    let mut report = input.report(&config.report.root_alias, Some(Ok(output)));
     let initial_items = report.items.len();
-    let body = loop {
-        report.evidence_attachment = None;
-        report.evidence_attachment = report.render_attachment(&input.template)?;
-        if report.output_bytes("") <= MAX_REPORT_BYTES {
-            let body = report.render(&input.template)?;
-            if report.output_bytes(&body) <= MAX_REPORT_BYTES {
-                break body;
-            }
-        }
-        let remove = if compaction_plan {
-            report
-                .items
-                .iter()
-                .rposition(|item| {
-                    item.kind != ai_daily_report::reports::personal::ItemKind::NextStep
-                })
-                .ok_or("required next-step evidence exceeds report budget")?
-        } else {
-            report
-                .items
-                .len()
-                .checked_sub(1)
-                .ok_or("required evidence exceeds report budget")?
-        };
-        report.items.remove(remove);
-        report.retain_cited();
-    };
+    let body = input.render_output(&mut report)?;
     if report.items.is_empty() {
         return Err("saved response has no publishable items".into());
     }
@@ -155,9 +128,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "remote_model_calls":0, "isolated_fixture_calls":store.calls(id)?.len(),
             "input_sha256":input_hash, "response_sha256":response_hash,
             "initial_items":initial_items, "publishable_items":report.items.len(),
-            "omitted_items":output.omitted, "body_chars":body_chars(&report.items),
+            "omitted_items":omitted, "body_chars":body_chars(&report.items),
             "uncertain_items":report.items.iter().filter(|i| i.statement_kind == StatementKind::Uncertain).count(),
-            "output_bytes":body.len(), "sources":report.sources.len(),
+            "output_bytes":body.len(), "output_sha256":digest(body.as_bytes()),
+            "attachment_sha256":report.evidence_attachment.as_ref().map(|a| &a.sha256),
+            "sources":report.sources.len(),
             "references":report.evidence.values().map(Vec::len).sum::<usize>(),
         }))?
     );

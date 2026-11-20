@@ -24,7 +24,7 @@ use std::{
     time::Duration,
 };
 
-pub const SCHEMA: &str = include_str!("../../tests/fixtures/report-schema-v1.sql");
+pub const SCHEMA: &str = include_str!("schema-v1.sql");
 
 impl From<rusqlite::Error> for ReportError {
     fn from(_error: rusqlite::Error) -> Self {
@@ -341,6 +341,27 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    pub(crate) fn freeze_personal_plan(
+        &self,
+        materials: &RunRecord,
+        planned: &SnapshotRef,
+        fingerprint: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), ReportError> {
+        let changed = self.connection()?.execute(
+            "UPDATE report_runs SET snapshot_path=?1,snapshot_sha256=?2,input_fingerprint=?3,updated_at=?4
+             WHERE run_id=?5 AND phase='prepared' AND status='running'
+               AND snapshot_path=run_id||'/personal-materials-'||?6||'.json'
+               AND snapshot_sha256=?6 AND input_fingerprint=?7
+               AND generation_id=?8 AND config_fingerprint=?9
+               AND NOT EXISTS (SELECT 1 FROM report_model_calls WHERE generation_id=report_runs.generation_id)",
+            params![planned.path, planned.sha256, fingerprint, timestamp(now), materials.run_id,
+                    materials.snapshot_sha256, materials.input_fingerprint,
+                    materials.generation_id, materials.config_fingerprint],
+        )?;
+        changed_one(changed, "RUN_INPUT_ALREADY_FROZEN")
     }
 
     pub fn resume(&self, id: &str, now: DateTime<Utc>) -> Result<RunRecord, ReportError> {

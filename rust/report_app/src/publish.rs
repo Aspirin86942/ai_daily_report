@@ -40,28 +40,44 @@ fn output_hash(path: &Path) -> Result<Option<String>, ReportError> {
     )))
 }
 
-fn attachment(report_json: &str) -> Result<Option<(String, EvidenceAttachment)>, ReportError> {
+fn attachment(
+    report_json: &str,
+    validate_detailed: impl FnOnce(&PersonalReport) -> Result<(), ReportError>,
+) -> Result<Option<(String, EvidenceAttachment)>, ReportError> {
     let value: serde_json::Value = serde_json::from_str(report_json)?;
-    if value["evidence_attachment"].is_null() {
+    if value["evidence_attachment"].is_null() && value["schema_version"] != 6 {
         return Ok(None);
     }
     let report: PersonalReport = serde_json::from_value(value)?;
-    report.validate()?;
+    if report.schema_version == 6 {
+        validate_detailed(&report)?;
+    } else {
+        report.validate_saved()?;
+    }
     Ok(report.evidence_attachment.map(|a| (report.date, a)))
 }
 
 pub(crate) fn verify_attachment(target: &Path, report_json: &str) -> Result<(), ReportError> {
-    if let Some((date, evidence)) = attachment(report_json)? {
+    if let Some((date, evidence)) = attachment(report_json, |report| {
+        reject_redirects(target, "OUTPUT_PATH_REDIRECTED")?;
+        report.validate_output_size(fs::metadata(target)?.len())?;
+        report.validate_output(&fs::read_to_string(target)?)
+    })? {
         let path = target
             .parent()
             .ok_or_else(|| ReportError::new("OUTPUT_PATH_INVALID", "日报路径缺少目录"))?
             .join(evidence.link(&date));
-        if output_hash(&path)?.as_deref() != Some(&evidence.sha256) {
-            return Err(ReportError::new(
-                "REPORT_EVIDENCE_MISMATCH",
-                "依据附件缺失或内容已改变",
-            ));
-        }
+        verify_attachment_file(&path, &evidence.sha256)?;
+    }
+    Ok(())
+}
+
+fn verify_attachment_file(path: &Path, expected: &str) -> Result<(), ReportError> {
+    if output_hash(path)?.as_deref() != Some(expected) {
+        return Err(ReportError::new(
+            "REPORT_EVIDENCE_MISMATCH",
+            "依据附件缺失或内容已改变",
+        ));
     }
     Ok(())
 }
@@ -143,11 +159,15 @@ impl<'a> Publisher<'a> {
         Ok(path)
     }
 
-    fn publish_attachment(&self, run: &RunRecord, target: &Path) -> Result<(), ReportError> {
-        let Some((date, evidence)) = attachment(run.report_json.as_deref().unwrap_or("{}"))? else {
+    fn publish_attachment(
+        &self,
+        attachment: &Option<(String, EvidenceAttachment)>,
+        target: &Path,
+    ) -> Result<(), ReportError> {
+        let Some((date, evidence)) = attachment else {
             return Ok(());
         };
-        let path = target.parent().unwrap().join(evidence.link(&date));
+        let path = target.parent().unwrap().join(evidence.link(date));
         self.check(&path)?;
         if let Some(hash) = output_hash(&path)? {
             if hash == evidence.sha256 {
@@ -170,10 +190,28 @@ impl<'a> Publisher<'a> {
                 return Err(error.into());
             }
         }
-        verify_attachment(target, run.report_json.as_deref().unwrap_or("{}"))
+        verify_attachment_file(&path, &evidence.sha256)
     }
 
     pub fn publish(&self, run_id: &str, now: DateTime<Utc>) -> Result<PathBuf, ReportError> {
+        self.publish_inner(run_id, now, None)
+    }
+
+    pub fn publish_with_config(
+        &self,
+        run_id: &str,
+        now: DateTime<Utc>,
+        config: &crate::config::AppConfig,
+    ) -> Result<PathBuf, ReportError> {
+        self.publish_inner(run_id, now, Some(config))
+    }
+
+    fn publish_inner(
+        &self,
+        run_id: &str,
+        now: DateTime<Utc>,
+        config: Option<&crate::config::AppConfig>,
+    ) -> Result<PathBuf, ReportError> {
         let run = self.store.get(run_id)?;
         if !matches!(run.phase, RunPhase::DbCommitted | RunPhase::Published)
             || run.markdown.as_ref().is_none_or(String::is_empty)
@@ -229,6 +267,18 @@ impl<'a> Publisher<'a> {
                 "正式报告版本已经变化",
             ));
         }
+        let evidence = attachment(run.report_json.as_deref().unwrap_or("{}"), |report| {
+            report.validate_output(run.markdown.as_deref().unwrap_or(""))?;
+            if run.phase == RunPhase::DbCommitted
+                && report.sources.iter().any(|s| s.source_kind == "file")
+            {
+                let config = config.ok_or_else(crate::evidence::permission_denied)?;
+                if !crate::evidence::denied_sources(config, report.sources.iter())?.is_empty() {
+                    return Err(crate::evidence::permission_denied());
+                }
+            }
+            Ok(())
+        })?;
         let existing = output_hash(&target)?;
         if run.error_code.as_deref() == Some("OUTPUT_CONFLICT_CAPTURED")
             && existing == run.expected_sha256
@@ -239,7 +289,7 @@ impl<'a> Publisher<'a> {
             ));
         }
         if existing == run.expected_sha256 {
-            self.publish_attachment(&run, &target)?;
+            self.publish_attachment(&evidence, &target)?;
             if run.phase == RunPhase::DbCommitted {
                 self.store
                     .mark_published(run_id, existing.as_deref().unwrap(), now)?;
@@ -259,7 +309,7 @@ impl<'a> Publisher<'a> {
             ));
         }
         // Publish the attachment first; a visible summary must have usable evidence.
-        self.publish_attachment(&run, &target)?;
+        self.publish_attachment(&evidence, &target)?;
         fs::create_dir_all(target.parent().unwrap())?;
         self.check(&target)?;
         let mut temporary = tempfile::NamedTempFile::new_in(target.parent().unwrap())?;

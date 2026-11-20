@@ -222,6 +222,24 @@ fn active_runs(
     Ok(active)
 }
 
+fn historical_issues(
+    connection: &Connection,
+    config: &AppConfig,
+    now: DateTime<Utc>,
+) -> Result<Vec<crate::personal_recovery::Issue>, ReportError> {
+    // Read the issue and its activity from the same database observation.
+    let tx = connection.unchecked_transaction()?;
+    let mut issues = crate::personal_recovery::issues(&tx, &config.report.scope_id, now)?;
+    if !issues.is_empty() {
+        let active = active_runs(&tx, config, now)?;
+        issues.retain(|issue| {
+            issue.reason_codes.as_slice() != ["REPORT_NOT_PUBLISHED"]
+                || !active.iter().any(|(id, _)| id == &issue.run_id)
+        });
+    }
+    Ok(issues)
+}
+
 fn run_attention(
     connection: &Connection,
     config: &AppConfig,
@@ -233,7 +251,7 @@ fn run_attention(
          AND NOT EXISTS(SELECT 1 FROM daily_reports d JOIN report_runs p ON p.run_id=d.current_run_id
              WHERE p.scope_id=r.scope_id AND p.target_date=r.target_date AND p.created_at>r.created_at
              AND p.status='succeeded' AND p.phase='published'
-             AND (COALESCE(json_extract(p.report_json,'$.schema_version'),0)!=5
+             AND (COALESCE(json_extract(p.report_json,'$.schema_version'),0) NOT IN (5,6)
                  OR json_array_length(p.report_json,'$.items')>0 OR p.quality='no_changes'))",
     )?;
     let pending = pending_statement
@@ -248,7 +266,7 @@ fn run_attention(
     let mut published_statement = connection.prepare(
         "SELECT scope_id,target_date,MAX(COALESCE(finished_at,created_at)) FROM report_runs \
          WHERE run_kind='report' AND status='succeeded' AND phase='published' \
-         AND (COALESCE(json_extract(report_json,'$.schema_version'),0)!=5 \
+         AND (COALESCE(json_extract(report_json,'$.schema_version'),0) NOT IN (5,6) \
              OR json_array_length(report_json,'$.items')>0 OR quality='no_changes') \
          GROUP BY scope_id,target_date",
     )?;
@@ -452,7 +470,7 @@ pub fn check(
                 )),
             }
             if config.report.profile == crate::config::ReportProfile::Personal {
-                match crate::personal_recovery::issues(connection, &config.report.scope_id, now) {
+                match historical_issues(connection, config, now) {
                     Ok(issues) => {
                         let missing = issues.iter().filter(|issue| issue.missing_summary).count();
                         checks.push(HealthCheck {
@@ -544,12 +562,6 @@ pub fn check(
     })
 }
 
-fn shanghai_date_of(generated_at: &str) -> Result<NaiveDate, ReportError> {
-    DateTime::parse_from_rfc3339(generated_at)
-        .map(|value| value.with_timezone(&types::shanghai()).date_naive())
-        .map_err(|_| ReportError::new("HEALTH_TIMESTAMP_INVALID", "健康结果生成时间无效"))
-}
-
 /// 原子写入健康 JSON：临时文件与目标同目录，显式 UTF-8，刷新后替换。
 pub fn write_report(report: &HealthReport, path: &Path) -> Result<(), ReportError> {
     if path.file_name().is_none() {
@@ -576,8 +588,52 @@ pub fn write_report(report: &HealthReport, path: &Path) -> Result<(), ReportErro
 
 /// 按 generated_at 的上海日期写入 `log_dir/health-YYYY-MM-DD.json`。
 pub fn persist(report: &HealthReport) -> Result<PathBuf, ReportError> {
-    let day = shanghai_date_of(&report.generated_at)?;
-    let path = PathBuf::from(&report.log_dir).join(format!("health-{day}.json"));
+    let generated = DateTime::parse_from_rfc3339(&report.generated_at)
+        .map_err(|_| ReportError::new("HEALTH_TIMESTAMP_INVALID", "健康结果生成时间无效"))?;
+    let day = generated.with_timezone(&types::shanghai()).date_naive();
+    let directory = Path::new(&report.log_dir);
+    let path = directory.join(format!("health-{day}.json"));
+    crate::snapshots::reject_redirects(&path, "HEALTH_PATH_REDIRECTED")?;
+    fs::create_dir_all(directory)?;
+    // health_notify.ps1 takes the same OS file lock while enriching this observation.
+    let lock_path = directory.join(".health-publish.lock");
+    crate::snapshots::reject_redirects(&lock_path, "HEALTH_PATH_REDIRECTED")?;
+    let lock = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(lock_path)?;
+    let wait = std::time::Instant::now();
+    loop {
+        match lock.try_lock() {
+            Ok(()) => break,
+            Err(fs::TryLockError::WouldBlock) if wait.elapsed().as_secs() < 15 => {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(ReportError::new(
+                    "HEALTH_PUBLISH_BUSY",
+                    "另一项健康检查正在写入结果",
+                ));
+            }
+            Err(fs::TryLockError::Error(error)) => return Err(error.into()),
+        }
+    }
+    match fs::read(&path) {
+        Ok(bytes) => {
+            let previous = serde_json::from_slice::<Value>(&bytes)
+                .ok()
+                .and_then(|value| {
+                    DateTime::parse_from_rfc3339(value["generated_at"].as_str()?).ok()
+                });
+            if previous.is_some_and(|previous| previous >= generated) {
+                return Ok(path);
+            }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
     write_report(report, &path)?;
     Ok(path)
 }

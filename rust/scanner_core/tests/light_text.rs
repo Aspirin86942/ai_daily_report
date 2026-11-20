@@ -308,6 +308,241 @@ fn markdown_table_is_a_complete_unit_with_original_cell_ranges() {
         .all(|range| range.end <= text.chars().count() as u64));
 }
 
+#[test]
+fn cramped_csv_keeps_complete_tail_totals_actions_negatives_and_their_unit() {
+    use ai_daily_worker_contract::{ContentUnitKind, SourceRangeUnit};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ledger.csv");
+    let mut data = String::from("项目,金额\n单位,万元\n");
+    for i in 1..=35 {
+        data += &format!("采购项目{i}{},100.00\n", "附录".repeat(30));
+    }
+    data += "\"返工\n退款\",-1234.56\n异常,45.6\n下一步,11\n合计,6789.01\n已签收,7.80\n";
+    fs::write(&path, &data).unwrap();
+    let parsed = parse_light_text(&path, ".csv", &text_profile(16_000, 1024, 166), 16_000).unwrap();
+    assert!(parsed.truncated);
+    assert!(parsed.content.chars().count() <= 166 && parsed.warnings.is_empty());
+    parsed.evidence_audit.validate(&parsed.content).unwrap();
+    let units = parsed.evidence_audit.content_units.as_ref().unwrap();
+    let chars: Vec<_> = parsed.content.chars().collect();
+    for (record, expected, kind) in [
+        (1, "header: 项目 | 金额", ContentUnitKind::TableHeader),
+        (2, "row 1: 单位 | 万元", ContentUnitKind::Unit),
+        (
+            38,
+            "row 37: 返工\n退款 | -1234.56",
+            ContentUnitKind::TableRow,
+        ),
+        (39, "row 38: 异常 | 45.6", ContentUnitKind::TableRow),
+        (40, "row 39: 下一步 | 11", ContentUnitKind::TableRow),
+        (41, "row 40: 合计 | 6789.01", ContentUnitKind::Total),
+        (42, "row 41: 已签收 | 7.80", ContentUnitKind::TableRow),
+    ] {
+        let unit = units
+            .iter()
+            .find(|u| {
+                u.ranges.iter().any(|r| {
+                    r.unit == SourceRangeUnit::CsvRecord && (r.start, r.end) == (record, record + 1)
+                })
+            })
+            .unwrap_or_else(|| panic!("record {record}: {}", parsed.content));
+        assert_eq!(unit.kind, kind);
+        assert_eq!(
+            chars[unit.text_start as usize..unit.text_end as usize]
+                .iter()
+                .collect::<String>(),
+            expected
+        );
+    }
+    assert_eq!(
+        parsed.evidence_audit.read_ranges.as_ref().unwrap().len(),
+        43
+    );
+}
+
+#[test]
+fn plentiful_budget_keeps_more_than_512_csv_records_with_exact_coverage() {
+    use ai_daily_worker_contract::SourceRangeUnit;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("ledger.csv");
+    let mut data = String::from("单位,金额\n");
+    for i in 1..=619 {
+        data += &format!("采购{i},{i}.02\n");
+    }
+    data += "合计,620.02\n";
+    fs::write(&path, &data).unwrap();
+    let parsed =
+        parse_light_text(&path, ".csv", &text_profile(65_536, 1024, 50_000), 65_536).unwrap();
+    assert!(!parsed.truncated);
+    assert_eq!(parsed.content.matches("\nrow ").count(), 620);
+    assert!(parsed.content.ends_with("row 620: 合计 | 620.02"));
+    let audit = &parsed.evidence_audit;
+    audit.validate(&parsed.content).unwrap();
+    let total = audit.content_units.as_ref().unwrap().last().unwrap();
+    assert_eq!(total.kind, ai_daily_worker_contract::ContentUnitKind::Total);
+    assert_eq!((total.ranges[0].start, total.ranges[0].end), (621, 622));
+    let records: Vec<_> = audit
+        .content_units
+        .as_ref()
+        .unwrap()
+        .iter()
+        .flat_map(|u| &u.ranges)
+        .filter(|r| r.unit == SourceRangeUnit::CsvRecord)
+        .flat_map(|r| r.start..r.end)
+        .collect();
+    assert_eq!(records, (1..=621).collect::<Vec<_>>());
+    assert!(audit
+        .read_ranges
+        .as_ref()
+        .unwrap()
+        .iter()
+        .any(|r| r.unit == SourceRangeUnit::CsvRecord && (r.start, r.end) == (1, 622)));
+}
+
+#[test]
+fn cut_window_keeps_unquoted_literal_quote_and_excludes_unfinished_quoted_record() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("cut.csv");
+    let complete = "字段,值\nab\"cd,-1.25\n";
+    fs::write(&path, format!("{complete}\"第一行\n未完\",999\n")).unwrap();
+    let parsed = parse_light_text(
+        &path,
+        ".csv",
+        &text_profile((complete.len() + 11) as u64, 1024, 4096),
+        4096,
+    )
+    .unwrap();
+    assert!(parsed.warnings.is_empty() && parsed.truncated);
+    assert!(parsed.content.ends_with("row 1: ab\"cd | -1.25"));
+    assert!(!parsed.content.contains("第一行"));
+}
+
+#[test]
+fn bounded_text_keeps_late_action_and_precise_source_characters() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("notes.md");
+    let mut input = String::from("# 差额复核\n");
+    for i in 1..=30 {
+        input += &format!("说明{i}{}。\n", "背景".repeat(30));
+    }
+    let fact = "下一步核对－1234.56万元，含𠀀项目。";
+    input += fact;
+    fs::write(&path, &input).unwrap();
+    let parsed = parse_light_text(&path, ".md", &text_profile(16_000, 1024, 190), 16_000).unwrap();
+    assert!(parsed.truncated && parsed.content.contains("# 差额复核"));
+    assert!(parsed.content.contains(fact));
+    parsed.evidence_audit.validate(&parsed.content).unwrap();
+    let chars: Vec<_> = input.chars().collect();
+    assert!(parsed
+        .evidence_audit
+        .content_units
+        .unwrap()
+        .iter()
+        .flat_map(|u| &u.ranges)
+        .any(|r| chars[r.start as usize..r.end as usize]
+            .iter()
+            .collect::<String>()
+            == fact));
+}
+
+#[test]
+fn tight_csv_keeps_both_amount_and_quantity_units_with_the_total() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("quantities.csv");
+    let input = format!(
+        "项目,金额,数量\n金额单位,万元,\n计量单位,件,\n{},5,6\n合计,-12.30,17\n",
+        "日常说明".repeat(100)
+    );
+    fs::write(&path, input).unwrap();
+    let parsed = parse_light_text(&path, ".csv", &text_profile(4096, 1024, 90), 4096).unwrap();
+    assert!(parsed.truncated);
+    for line in [
+        "header: 项目 | 金额 | 数量",
+        "金额单位 | 万元",
+        "计量单位 | 件",
+        "合计 | -12.30 | 17",
+    ] {
+        assert!(parsed.content.contains(line), "{}", parsed.content);
+    }
+    assert!(!parsed.content.contains("日常说明"));
+    parsed.evidence_audit.validate(&parsed.content).unwrap();
+}
+
+#[test]
+fn standalone_unit_and_company_amounts_keep_their_distinct_record_numbers() {
+    use ai_daily_worker_contract::{ContentUnitKind, SourceRangeUnit};
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("companies.csv");
+    std::fs::write(
+        &path,
+        "公司,金额\n单位：万元,\n单位：甲公司,100\n单位：乙公司,200\n",
+    )
+    .unwrap();
+    let parsed = parse_light_text(&path, ".csv", &text_profile(1024, 1024, 1000), 1024).unwrap();
+    let chars: Vec<_> = parsed.content.chars().collect();
+    parsed.evidence_audit.validate(&parsed.content).unwrap();
+    let expected = [
+        (1, ContentUnitKind::TableHeader, "header: 公司 | 金额"),
+        (2, ContentUnitKind::Unit, "row 1: 单位：万元 |"),
+        (3, ContentUnitKind::TableRow, "row 2: 单位：甲公司 | 100"),
+        (4, ContentUnitKind::TableRow, "row 3: 单位：乙公司 | 200"),
+    ];
+    let units: Vec<_> = parsed
+        .evidence_audit
+        .content_units
+        .unwrap()
+        .into_iter()
+        .filter(|u| u.kind != ContentUnitKind::Heading)
+        .collect();
+    assert_eq!(units.len(), expected.len());
+    for (unit, (record, kind, line)) in units.iter().zip(expected) {
+        assert_eq!(unit.kind, kind);
+        assert_eq!(unit.ranges.len(), 1);
+        let r = &unit.ranges[0];
+        assert_eq!(
+            (r.unit, r.start, r.end),
+            (SourceRangeUnit::CsvRecord, record, record + 1)
+        );
+        assert_eq!(
+            chars[unit.text_start as usize..unit.text_end as usize]
+                .iter()
+                .collect::<String>(),
+            line
+        );
+    }
+    assert!(!parsed.truncated);
+}
+
+#[test]
+fn tight_sectioned_csv_total_uses_the_current_quantity_header() {
+    use ai_daily_worker_contract::ContentUnitKind;
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("sections.csv");
+    std::fs::write(&path, "项目,金额(元)\n甲,10\n项目,数量(台)\n合计,8\n").unwrap();
+    let expected = "header: 项目 | 数量(台)\nrow 3: 合计 | 8";
+    let parsed = parse_light_text(
+        &path,
+        ".csv",
+        &text_profile(1024, 1024, expected.chars().count() as u64),
+        1024,
+    )
+    .unwrap();
+    assert_eq!(parsed.content, expected);
+    assert!(parsed.truncated);
+    parsed.evidence_audit.validate(&parsed.content).unwrap();
+    let units = parsed.evidence_audit.content_units.unwrap();
+    assert_eq!(
+        units
+            .iter()
+            .map(|u| (u.kind, u.ranges[0].start, u.ranges[0].end))
+            .collect::<Vec<_>>(),
+        [
+            (ContentUnitKind::TableHeader, 3, 4),
+            (ContentUnitKind::Total, 4, 5)
+        ]
+    );
+}
+
 fn text_profile(read_head_bytes: u64, read_tail_bytes: u64, max_chars: u64) -> TextParseProfile {
     TextParseProfile {
         csv_encodings: ai_daily_scanner_contract::default_csv_encodings(),

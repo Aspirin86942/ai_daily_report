@@ -33,6 +33,10 @@ impl Fixture {
         Publisher::new(&self._dir.path().join("reports"), &self.store).unwrap()
     }
     fn stage(&self, id: &str, text: &str) {
+        let report = json!({"date":"2026-10-11","window_start_utc":"2026-10-10T16:00:00Z","schema_version":3,"quality":"complete","sources":[]});
+        self.stage_value(id, text, &report);
+    }
+    fn stage_value(&self, id: &str, text: &str, report: &Value) {
         let mut context: RunContext =
             serde_json::from_str(include_str!("fixtures/context-v2.json")).unwrap();
         context.run_id = id.into();
@@ -46,13 +50,12 @@ impl Fixture {
         self.store
             .prepare(id, &snapshot, &snapshot.sha256, &[], now())
             .unwrap();
-        let report: Value = json!({"date":"2026-10-11","window_start_utc":"2026-10-10T16:00:00Z","schema_version":3,"quality":"complete","sources":[]});
         let path = self.publisher().output_path("2026-10-11").unwrap();
         self.store
             .stage_report(
                 id,
                 &StagedReport {
-                    report: &report,
+                    report,
                     markdown: text,
                     output_path: path.to_str().unwrap(),
                     publication_fingerprint: &digest(text.as_bytes()),
@@ -60,6 +63,46 @@ impl Fixture {
                 now(),
             )
             .unwrap();
+    }
+}
+
+#[test]
+fn frozen_v5_inline_and_attached_reports_restore_their_saved_bytes() {
+    use ai_daily_report::reports::personal::{EvidenceAttachment, PersonalReport, Selection};
+    let context: RunContext =
+        serde_json::from_str(include_str!("fixtures/context-v2.json")).unwrap();
+    for attached in [false, true] {
+        let fixture = Fixture::new();
+        let mut report = PersonalReport::from_selection(&context, "work", &Selection::default());
+        assert_eq!(report.schema_version, 5);
+        let mut body = "# 既有日报\n\n原排版  \n下一段\t旧版原文。\n".to_owned();
+        if attached {
+            let original = "# 旧版依据\n\n第一行  \n第二行\t100 元。\n".to_owned();
+            let evidence = EvidenceAttachment {
+                sha256: digest(original.as_bytes()),
+                markdown: original,
+            };
+            body.push_str(&format!("\n[完整依据]({})\n", evidence.link(&report.date)));
+            report.evidence_attachment = Some(evidence);
+        }
+        let id = "a".repeat(32);
+        fixture.stage_value(&id, &body, &serde_json::to_value(&report).unwrap());
+        let publisher = fixture.publisher();
+        let path = publisher.publish(&id, now()).unwrap();
+        fs::remove_file(&path).unwrap();
+        let appendix = report
+            .evidence_attachment
+            .as_ref()
+            .map(|e| path.parent().unwrap().join(e.link(&report.date)));
+        if let Some(file) = &appendix {
+            fs::remove_file(file).unwrap();
+        }
+        publisher.publish(&id, now()).unwrap();
+        assert_eq!(fs::read(path).unwrap(), body.as_bytes());
+        if let (Some(file), Some(evidence)) = (appendix, report.evidence_attachment) {
+            assert_eq!(fs::read(file).unwrap(), evidence.markdown.as_bytes());
+        }
+        assert!(fixture.store.calls(&id).unwrap().is_empty());
     }
 }
 

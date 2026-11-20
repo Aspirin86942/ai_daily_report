@@ -168,6 +168,13 @@ fn standalone_model_service_switch_preserves_config_on_failure() {
         "llm":company["llm"]
     }).to_string()).unwrap();
     let system = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+    // Model connection switching only needs a readback of sibling tasks. Keep this
+    // standalone bundle test reproducible on a host with no registered tasks.
+    let wrapper = root.join("isolated-service.ps1");
+    fs::write(&wrapper, r#"param($ServiceScript, $Service, $ConfigDirectory, $Program, [switch]$Apply, [switch]$CheckModel)
+function Get-ScheduledTask { [CmdletBinding()] param($TaskName, $TaskPath) }
+& $ServiceScript -Service $Service -ConfigDirectory $ConfigDirectory -Program $Program -Apply:$Apply -CheckModel:$CheckModel
+"#).unwrap();
     let invoke = |service: &str, flags: &[&str], key: bool, conflicting_env: bool| {
         let mut command =
             Command::new(system.join("System32/WindowsPowerShell/v1.0/powershell.exe"));
@@ -188,6 +195,8 @@ fn standalone_model_service_switch_preserves_config_on_failure() {
         }
         command
             .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&wrapper)
+            .arg("-ServiceScript")
             .arg(bundle.join("scripts/set_model_service.ps1"))
             .args(["-Service", service, "-ConfigDirectory"])
             .arg(&config)

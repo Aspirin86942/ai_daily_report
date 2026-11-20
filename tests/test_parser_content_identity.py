@@ -15,10 +15,11 @@ CARGO = Path.home() / ".cargo/bin/cargo.exe"
 
 class ParserContentIdentityTests(unittest.TestCase):
     def setUp(self):
-        builds = list((RUST / "target/debug/build").glob("ai-daily-scanner-core-*/build-script-build.exe"))
+        build_dir = Path(os.environ.get("CARGO_TARGET_DIR", RUST / "target")) / "debug/build"
+        builds = list(build_dir.glob("ai-daily-scanner-core-*/build-script-build.exe"))
         self.assertTrue(builds, "Build debug workers first")
         self.program = max(builds, key=lambda p: p.stat().st_mtime_ns)
-        outputs = list((RUST / "target/debug/build").glob("ai-daily-scanner-core-*/out/parser-build.json"))
+        outputs = list(build_dir.glob("ai-daily-scanner-core-*/out/parser-build.json"))
         document = json.loads(max(outputs, key=lambda p: p.stat().st_mtime_ns).read_bytes())
         self.temp = tempfile.TemporaryDirectory(prefix="parser-identity-")
         self.root = Path(self.temp.name)
@@ -35,6 +36,8 @@ class ParserContentIdentityTests(unittest.TestCase):
                 if (path / "build.rs").exists():
                     shutil.copy2(path / "build.rs", target / "build.rs")
         self.environment = dict(os.environ)
+        # The host target locates the executable; each disposable build has its own OUT_DIR.
+        self.environment.pop("CARGO_TARGET_DIR", None)
         for name in list(self.environment):
             if name.startswith("CARGO_CFG_"):
                 del self.environment[name]
@@ -73,9 +76,9 @@ class ParserContentIdentityTests(unittest.TestCase):
         self.assertNotEqual(candidate["AI_DAILY_ENGINE_BUILD"], self.baseline["AI_DAILY_ENGINE_BUILD"])
 
     def test_parser_protocol_budget_and_dependency_features_invalidate(self):
-        for name in ("text_parser/src/lib.rs", "worker_contract/src/lib.rs",
+        for name in ("text_parser/src/lib.rs", "worker_contract/src/lib.rs", "worker_contract/src/archive.rs",
                      "scanner_core/src/config.rs", "pdf_parser/src/lib.rs", "build-inputs.json",
-                     "report_app/src/archive/parse_request.rs"):
+                     "scanner_core/src/parsers/mod.rs"):
             path = self.root / name
             original = path.read_bytes()
             path.write_bytes(original + b"\n ")
@@ -84,6 +87,19 @@ class ParserContentIdentityTests(unittest.TestCase):
         path = self.root / "Cargo.toml"
         path.write_text(path.read_text(encoding="utf-8").replace('["arbitrary_precision"]', '["arbitrary_precision", "raw_value"]'), encoding="utf-8")
         self.assertNotEqual(self.identity()["AI_DAILY_PARSER_BUILD"], self.baseline["AI_DAILY_PARSER_BUILD"])
+
+    def test_pdf_selected_pages_and_excerpt_allocation_invalidate_content(self):
+        for name, needle, replacement in (
+            ("scanner_core/src/parsers/document.rs", b"profile.max_pages == 2", b"profile.max_pages == 3"),
+            ("pdf_parser/src/excerpt.rs", b"const MAX_LINES: usize = 512", b"const MAX_LINES: usize = 511"),
+        ):
+            with self.subTest(name=name):
+                path = self.root / name
+                original = path.read_bytes()
+                self.assertIn(needle, original)
+                path.write_bytes(original.replace(needle, replacement, 1))
+                self.assertNotEqual(self.identity()["AI_DAILY_PARSER_BUILD"], self.baseline["AI_DAILY_PARSER_BUILD"])
+                path.write_bytes(original)
 
     def test_build_label_cannot_override_parser_identity(self):
         self.environment["AI_DAILY_BUILD_ID"] = "explicit-audit-label"

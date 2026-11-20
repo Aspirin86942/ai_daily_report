@@ -254,6 +254,90 @@ fn read_dotenv(path: &Path) -> Result<BTreeMap<String, String>, ReportError> {
     Ok(values)
 }
 
+fn merged_settings(
+    config_dir: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Value, ReportError> {
+    let mut raw = json!({});
+    let mut found = false;
+    for name in ["settings.yaml", "settings.windows.yaml", ".secrets.yaml"] {
+        let path = config_dir.join(name);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                found |= name != ".secrets.yaml";
+                // YAML diagnostics can include source lines; never echo a secret file's contents.
+                let value: Value = serde_saphyr::from_str(text.trim_start_matches('\u{feff}'))
+                    .map_err(|_| {
+                        ReportError::new(
+                            "CONFIG_YAML_INVALID",
+                            format!("无法读取 {name} 的 YAML 结构"),
+                        )
+                    })?;
+                if !value.is_object() {
+                    return Err(invalid(name));
+                }
+                merge(&mut raw, normalize_keys(value));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    if !found {
+        return Err(ReportError::new(
+            "CONFIG_MISSING",
+            "配置目录缺少 settings.yaml 或 settings.windows.yaml",
+        ));
+    }
+    for (name, text) in env {
+        let Some(name) = name.strip_prefix("DAILY_REPORT_") else {
+            continue;
+        };
+        let name = name.to_lowercase();
+        let path: Vec<_> = name.split("__").collect();
+        if ![
+            "paths",
+            "llm",
+            "api",
+            "report",
+            "recovery",
+            "retention",
+            "schedule",
+            "scanner",
+            "archive",
+            "proxy",
+        ]
+        .contains(&path[0])
+        {
+            continue;
+        }
+        let value =
+            serde_saphyr::from_str::<Value>(text).unwrap_or_else(|_| Value::String(text.clone()));
+        set_leaf(&mut raw, &path, value)?;
+    }
+    for key in raw.as_object().unwrap().keys() {
+        if ![
+            "app",
+            "paths",
+            "llm",
+            "api",
+            "proxy",
+            "report",
+            "recovery",
+            "retention",
+            "schedule",
+            "scanner",
+            "archive",
+        ]
+        .contains(&key.as_str())
+        {
+            return Err(invalid(key));
+        }
+    }
+    let mut settings: Value = serde_json::from_str(include_str!("config.defaults.json"))?;
+    merge(&mut settings, raw);
+    Ok(settings)
+}
+
 impl AppConfig {
     pub fn load(program_dir: &Path, requested_dir: Option<&Path>) -> Result<Self, ReportError> {
         Self::load_with_env(program_dir, requested_dir, &std::env::vars().collect())
@@ -278,83 +362,7 @@ impl AppConfig {
         let mut effective_env = read_dotenv(&config_dir.parent().unwrap().join(".env"))?;
         effective_env.extend(env.clone());
         let env = &effective_env;
-        let mut raw = json!({});
-        let mut found = false;
-        for name in ["settings.yaml", "settings.windows.yaml", ".secrets.yaml"] {
-            let path = config_dir.join(name);
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    found |= name != ".secrets.yaml";
-                    // YAML diagnostics can include source lines; never echo a secret file's contents.
-                    let value: Value = serde_saphyr::from_str(text.trim_start_matches('\u{feff}'))
-                        .map_err(|_| {
-                            ReportError::new(
-                                "CONFIG_YAML_INVALID",
-                                format!("无法读取 {name} 的 YAML 结构"),
-                            )
-                        })?;
-                    if !value.is_object() {
-                        return Err(invalid(name));
-                    }
-                    merge(&mut raw, normalize_keys(value));
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
-            }
-        }
-        if !found {
-            return Err(ReportError::new(
-                "CONFIG_MISSING",
-                "配置目录缺少 settings.yaml 或 settings.windows.yaml",
-            ));
-        }
-        for (name, text) in env {
-            let Some(name) = name.strip_prefix("DAILY_REPORT_") else {
-                continue;
-            };
-            let name = name.to_lowercase();
-            let path: Vec<_> = name.split("__").collect();
-            if ![
-                "paths",
-                "llm",
-                "api",
-                "report",
-                "recovery",
-                "retention",
-                "schedule",
-                "scanner",
-                "archive",
-                "proxy",
-            ]
-            .contains(&path[0])
-            {
-                continue;
-            }
-            let value = serde_saphyr::from_str::<Value>(text)
-                .unwrap_or_else(|_| Value::String(text.clone()));
-            set_leaf(&mut raw, &path, value)?;
-        }
-        for key in raw.as_object().unwrap().keys() {
-            if ![
-                "app",
-                "paths",
-                "llm",
-                "api",
-                "proxy",
-                "report",
-                "recovery",
-                "retention",
-                "schedule",
-                "scanner",
-                "archive",
-            ]
-            .contains(&key.as_str())
-            {
-                return Err(invalid(key));
-            }
-        }
-        let mut settings: Value = serde_json::from_str(include_str!("config.defaults.json"))?;
-        merge(&mut settings, raw);
+        let mut settings = merged_settings(&config_dir, env)?;
         let legacy_key = settings["llm"]
             .as_object_mut()
             .ok_or_else(|| invalid("llm"))?

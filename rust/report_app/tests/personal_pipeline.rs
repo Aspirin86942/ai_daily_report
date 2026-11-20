@@ -4,10 +4,17 @@ use ai_daily_report::{
     model::transport::{HttpResponse, ModelTransport, TransportFailure},
     reports::personal::{
         EvidenceAttachment, Material, Selection, MAX_FILE_CHARS, MAX_REPORT_BYTES, MAX_USER_CHARS,
+        SCAN_TEMPLATE,
     },
-    run::{run_daily, App},
-    snapshots::digest,
-    types::{new_run_id, Period, ReportMode, ReportRequest, ReportSource, RunContext},
+    run::{
+        personal::{finish, PersonalInput},
+        run_daily, App,
+    },
+    snapshots::{digest, fingerprint, SnapshotStore},
+    types::{
+        new_run_id, Period, ReportMode, ReportOutcome, ReportRequest, ReportSource, RunContext,
+    },
+    ReportError,
 };
 use chrono::{NaiveDate, Utc};
 use serde_json::{json, Value};
@@ -81,6 +88,62 @@ fn request(day: NaiveDate, save: bool) -> ReportRequest {
         scheduled: false,
         regeneration_reason: None,
     }
+}
+
+/// Persist the pre-upgrade input exactly as a prepared scan did, then recover it from disk.
+fn finish_frozen_v5(app: &App, request: ReportRequest) -> Result<ReportOutcome, ReportError> {
+    let mut context = request.context;
+    context.config_fingerprint = app.fingerprint(false)?;
+    let now = context.started_at;
+    let source = ai_daily_report::reports::data::ReportSource::user(&request.input, now);
+    let mut selection = Selection::default();
+    selection.summary.selected_chars = source.excerpt_chars;
+    selection.materials.push(Material {
+        source,
+        text: request.input,
+        evidence: vec![],
+        priority: 0,
+    });
+    let plan =
+        ai_daily_report::model::personal::prepare_scan(&app.config.llm, &context, &mut selection)?;
+    assert_eq!(plan.version, 6);
+    let input_fingerprint = fingerprint(&json!({
+        "context":context,"selection":selection,"plan":plan,"template":SCAN_TEMPLATE
+    }))?;
+    let input = PersonalInput {
+        version: 5,
+        context,
+        selection,
+        plan: Some(plan),
+        template: SCAN_TEMPLATE.into(),
+        input_fingerprint,
+        recovery_fingerprint: app.fingerprint(true)?,
+    };
+    let id = &input.context.run_id;
+    app.store.create_personal(
+        &input.context,
+        "report",
+        id,
+        request.regeneration_reason.as_deref(),
+        now,
+    )?;
+    app.store.set_scanning(id, now)?;
+    let cache = &app.processing.as_ref().unwrap().quota;
+    let snapshots = SnapshotStore::with_quota(
+        cache.root.join("snapshots"),
+        ai_daily_report::processing_cache::MAX_BYTES,
+        Arc::clone(cache),
+    )?;
+    let saved = snapshots.put(id, "personal-input", &json!(input))?;
+    app.store.prepare(
+        id,
+        &saved,
+        &input.input_fingerprint,
+        &[json!(input.selection.materials[0].source)],
+        now,
+    )?;
+    let started = Instant::now();
+    finish(app, id, started, started + Duration::from_secs(60))
 }
 
 #[test]
@@ -322,7 +385,7 @@ fn personal_response_version_omission_preserves_content_validation_and_call_audi
         let outcome = run_daily(request(day, true), &app).unwrap();
         let run = app.store.get(&outcome.run_id).unwrap();
         let report: Value = serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
-        assert_eq!(report["schema_version"], 5);
+        assert_eq!(report["schema_version"], 6);
         assert_eq!(
             report["items"].as_array().unwrap().len(),
             usize::from(valid)
@@ -440,7 +503,7 @@ fn publishes_one_request_and_repairs_after_processing_content_expires() {
             .unwrap(),
     )
     .unwrap();
-    assert_eq!(value["schema_version"], 5);
+    assert_eq!(value["schema_version"], 6);
     assert_eq!(app.store.reports_in_range(day, day).unwrap().0.len(), 1);
     let path = output.output_path.unwrap();
     let evidence: ai_daily_report::reports::personal::EvidenceAttachment =
@@ -451,7 +514,7 @@ fn publishes_one_request_and_repairs_after_processing_content_expires() {
         evidence.markdown
     );
     assert!(output.markdown.contains(&evidence.link(&day.to_string())));
-    assert!(!output.markdown.contains("## 用户补充原文"));
+    assert!(!output.markdown.contains("### 用户补充原文"));
     assert!(output.markdown.len() + evidence.markdown.len() <= MAX_REPORT_BYTES);
     let original = fs::read(&path).unwrap();
     drop(app);
@@ -600,7 +663,7 @@ fn oversized_summaries_compact_complete_items_and_validate_all_sources() {
             invalid_last_source,
         });
         let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
-        let output = run_daily(request(day, true), &app).unwrap();
+        let output = finish_frozen_v5(&app, request(day, true)).unwrap();
         assert_eq!(sent.load(Ordering::SeqCst), calls);
         assert!(output.markdown.contains("条件满足后生效"));
         assert!(output.markdown.contains("待确认"));
@@ -710,7 +773,7 @@ fn thousand_five_hundred_boundary_compacts_all_items_and_reuses_both_audited_cal
             behavior: "valid",
         });
         let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
-        let outcome = run_daily(request(day, true), &app).unwrap();
+        let outcome = finish_frozen_v5(&app, request(day, true)).unwrap();
         let run = app.store.get(&outcome.run_id).unwrap();
         let report: ai_daily_report::reports::personal::PersonalReport =
             serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
@@ -748,12 +811,15 @@ fn thousand_five_hundred_boundary_compacts_all_items_and_reuses_both_audited_cal
         };
         let input: ai_daily_report::run::personal::PersonalInput =
             serde_json::from_value(snapshots.read(&saved).unwrap()).unwrap();
+        assert_eq!(input.version, 5);
+        let mut lower = app.config.llm.clone();
+        lower.verified_max_output_tokens = Some(2048);
         let started = Instant::now();
         let runner = ai_daily_report::model::ModelRunner {
             store: &app.store,
             snapshots: &snapshots,
             transport: app.transport.as_ref(),
-            llm: &app.config.llm,
+            llm: &lower,
             allow_new_calls: false,
             run_id: &outcome.run_id,
             started_at: Utc::now(),
@@ -790,7 +856,7 @@ fn failed_compaction_preserves_next_steps_and_audits_bounded_fallback() {
             behavior,
         });
         let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
-        let outcome = run_daily(request(day, true), &app).unwrap();
+        let outcome = finish_frozen_v5(&app, request(day, true)).unwrap();
         let run = app.store.get(&outcome.run_id).unwrap();
         let report: ai_daily_report::reports::personal::PersonalReport =
             serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
@@ -883,7 +949,7 @@ fn complete_draft_within_extended_limit_publishes_every_item_without_compaction(
         draft: extended_draft(913),
     });
     let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
-    let outcome = run_daily(request(day, true), &app).unwrap();
+    let outcome = finish_frozen_v5(&app, request(day, true)).unwrap();
     let run = app.store.get(&outcome.run_id).unwrap();
     let report: ai_daily_report::reports::personal::PersonalReport =
         serde_json::from_str(run.report_json.as_deref().unwrap()).unwrap();
@@ -935,7 +1001,7 @@ fn oversized_next_steps_never_replace_an_existing_valid_report_with_an_empty_fal
     });
     let mut regenerate = request(day, true);
     regenerate.regeneration_reason = Some("verify protected plans".into());
-    let error = run_daily(regenerate, &app).unwrap_err();
+    let error = finish_frozen_v5(&app, regenerate).unwrap_err();
     assert_eq!(error.code, "PERSONAL_RECOVERY_INCOMPLETE");
     assert_eq!(
         app.store.current(&day.to_string()).unwrap().unwrap().run_id,
@@ -958,7 +1024,9 @@ fn no_save_preview_carries_evidence_without_publishing_files() {
     assert!(preview.output_path.is_none());
     assert!(preview.markdown.contains("[查看依据](#item-1)"));
     assert!(preview.markdown.contains("id=\"item-1\""));
-    assert!(preview.markdown.contains("## 用户补充原文"));
+    assert!(preview.markdown.contains("## 今日概览"));
+    assert!(preview.markdown.contains("## 事项详述"));
+    assert!(preview.markdown.contains("### 用户补充原文 · S001"));
     assert!(!app.config.paths.reports_dir.join("2026-10").exists());
 }
 

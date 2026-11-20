@@ -19,6 +19,8 @@ use std::{
     sync::OnceLock,
     time::{Duration, Instant},
 };
+pub(crate) const PERSONAL_WORK_BUDGET: Duration = Duration::from_secs(270);
+pub(crate) const PERSONAL_APP_BUDGET: Duration = Duration::from_secs(300);
 pub struct App {
     pub processing: Option<crate::processing_cache::ProcessingSession>,
     pub started: Instant,
@@ -54,7 +56,7 @@ impl App {
                 Some(crate::processing_cache::ProcessingSession::acquire(
                     &config,
                     now,
-                    started + Duration::from_secs(300),
+                    started + PERSONAL_APP_BUDGET,
                 )?)
             } else {
                 None
@@ -64,9 +66,8 @@ impl App {
             &path,
             &config.report.scope_id,
             if processing.is_some() {
-                Duration::from_secs(5).min(
-                    (started + Duration::from_secs(270)).saturating_duration_since(Instant::now()),
-                )
+                Duration::from_secs(5)
+                    .min((started + PERSONAL_WORK_BUDGET).saturating_duration_since(Instant::now()))
             } else {
                 Duration::from_secs_f64(config.recovery.lock_wait_seconds)
             },
@@ -77,7 +78,7 @@ impl App {
             store.compact_personal_until(
                 now,
                 &session.quota.root.join("snapshots"),
-                (started + Duration::from_secs(270)).min(Instant::now() + Duration::from_secs(2)),
+                (started + PERSONAL_WORK_BUDGET).min(Instant::now() + Duration::from_secs(2)),
             )?;
         }
         let snapshot_root = config.paths.data_dir.join("run_snapshots");
@@ -169,7 +170,11 @@ pub fn run_daily(request: ReportRequest, app: &App) -> Result<ReportOutcome, Rep
     run_report(request, app)
 }
 pub fn repair_run(app: &App, id: &str, now: DateTime<Utc>) -> Result<ReportOutcome, ReportError> {
-    let path = Publisher::new(&app.config.paths.reports_dir, &app.store)?.publish(id, now)?;
+    let path = Publisher::new(&app.config.paths.reports_dir, &app.store)?.publish_with_config(
+        id,
+        now,
+        &app.config,
+    )?;
     let run = app.store.get(id)?;
     Ok(ReportOutcome {
         run_id: id.into(),

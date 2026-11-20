@@ -318,6 +318,14 @@ pub fn task_plan_kind(
 
 pub const TEMPLATES: &[(&str, &str)] = &[
     (
+        "personal_daily_scan_template_v6.md",
+        crate::reports::personal::DETAILED_SCAN_TEMPLATE,
+    ),
+    (
+        "personal_daily_scan_prompt_v8.md",
+        crate::model::personal::SCAN_PROMPT_DETAILED,
+    ),
+    (
         "personal_daily_scan_prompt_v7.md",
         crate::model::personal::SCAN_PROMPT_EXTENDED,
     ),
@@ -428,7 +436,8 @@ pub fn doctor(app: &App, check_model: bool, now: DateTime<Utc>) -> Result<Value,
         json!({"checked":false,"calls":0})
     };
     Ok(
-        json!({"status":"ok","strict":true,"runtime":"rust","build":env!("AI_DAILY_REPORT_BUILD"),"scanner":result.value,"templates":TEMPLATES.len(),"database":"ok","model":model}),
+        json!({"status":"ok","strict":true,"runtime":"rust","build":env!("AI_DAILY_REPORT_BUILD"),"scanner":result.value,
+            "parser_content_identity":ai_daily_scanner_core::PARSER_CONTENT_IDENTITY,"templates":TEMPLATES.len(),"database":"ok","model":model}),
     )
 }
 
@@ -460,7 +469,7 @@ pub fn model_check(app: &App, now: DateTime<Utc>) -> Result<Value, ReportError> 
         evidence: vec![],
         priority: 0,
     });
-    let plan = personal::prepare_scan(&app.config.llm, &context, &mut selection)?;
+    let plan = personal::prepare_detailed_scan(&app.config.llm, &context, &selection)?;
     let personal_snapshots = app
         .processing
         .as_ref()

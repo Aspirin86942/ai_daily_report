@@ -244,15 +244,20 @@ fn expanded_scan_material_reaches_model_and_large_attachment_is_restored_without
             .unwrap()
     );
     let sources = sent[0]["sources"].as_array().unwrap();
-    assert_eq!(sources.len(), files.len());
+    let mut received = BTreeMap::<&str, String>::new();
     for source in sources {
         let path = source["path"].as_str().unwrap();
-        let text = source["text"].as_str().unwrap();
-        let expected = files[path].replace('\n', "");
-        assert!(
-            text.replace('\n', "").ends_with(expected.as_str()),
-            "{path}"
-        );
+        received
+            .entry(path)
+            .or_default()
+            .push_str(source["text"].as_str().unwrap());
+    }
+    assert_eq!(received.len(), files.len());
+    for (path, expected) in &files {
+        let text = &received[path.as_str()];
+        for line in expected.lines() {
+            assert!(text.contains(line), "{path}: {line}");
+        }
     }
     drop(sent);
 
@@ -263,7 +268,6 @@ fn expanded_scan_material_reaches_model_and_large_attachment_is_restored_without
     assert_eq!(report.selection.selected_files, files.len() as u64);
     assert!(report.selection.selected_chars >= material_chars);
     assert_eq!(report.selection.omissions.get("budget"), None);
-    assert_eq!(report.sources.len(), files.len());
     let attachment = report.evidence_attachment.as_ref().unwrap();
     assert!(attachment.markdown.len() > 100_000);
     assert!(report.output_bytes(&result.markdown) <= MAX_REPORT_BYTES);
@@ -272,10 +276,17 @@ fn expanded_scan_material_reaches_model_and_large_attachment_is_restored_without
             assert!(attachment.markdown.contains(line));
         }
     }
+    let mut frozen = BTreeMap::<&str, String>::new();
     for source in &report.sources {
-        let text = &report.evidence[&source.source_id][0].quote;
-        let expected = files[source.relative_path.as_deref().unwrap()].replace('\n', "");
-        assert!(text.replace('\n', "").ends_with(expected.as_str()));
+        let path = source.relative_path.as_deref().unwrap();
+        for evidence in &report.evidence[&source.source_id] {
+            frozen.entry(path).or_default().push_str(&evidence.quote);
+        }
+    }
+    for (path, expected) in &files {
+        for line in expected.lines() {
+            assert!(frozen[path.as_str()].contains(line), "{path}: {line}");
+        }
     }
     let path = result.output_path.as_ref().unwrap();
     let evidence_path = path
@@ -337,14 +348,18 @@ fn expanded_context_admits_all_files_before_bounding_personal_material() {
     let sent = f.sent.lock().unwrap();
     assert_eq!(sent.len(), 1);
     let sources = sent[0]["sources"].as_array().unwrap();
-    assert_eq!(sources.len(), files.len());
+    let mut seen_paths = std::collections::BTreeSet::new();
     for source in sources {
         let path = source["path"].as_str().unwrap();
-        assert!(source["text"]
+        if source["text"]
             .as_str()
             .unwrap()
-            .contains(files[path].as_str()));
+            .contains(files[path].as_str())
+        {
+            seen_paths.insert(path);
+        }
     }
+    assert_eq!(seen_paths.len(), files.len());
     let selected_chars: usize = sources
         .iter()
         .map(|source| source["text"].as_str().unwrap().chars().count())
@@ -422,6 +437,217 @@ fn scan_dry_run_keeps_budgets_and_reports_unread_ranges_without_model_calls() {
 }
 
 struct Interrupted;
+
+#[test]
+fn staged_first_publication_rechecks_permissions_but_published_byte_repair_is_historical() {
+    use ai_daily_report::{publish::Publisher, snapshots::SnapshotRef, store::StagedReport};
+    let f = Fixture::new();
+    f.file("receipt.md", "收款120元。", utc_window(f.day).unwrap().0);
+    let mut preview = f.request();
+    preview.save = false;
+    preview.scheduled = false;
+    let preview = run_daily(preview, &f.app).unwrap();
+    let preview = f.app.store.get(&preview.run_id).unwrap();
+    let value: Value = serde_json::from_str(preview.report_json.as_deref().unwrap()).unwrap();
+    let report: PersonalReport = serde_json::from_value(value.clone()).unwrap();
+    let markdown = preview.markdown.unwrap();
+    let mut context = f.request().context;
+    context.config_fingerprint = f.app.fingerprint(false).unwrap();
+    let id = &context.run_id;
+    let now = Utc::now();
+    f.app
+        .store
+        .create_personal(&context, "report", id, None, now)
+        .unwrap();
+    let snapshot = SnapshotRef {
+        path: preview.snapshot_path.unwrap(),
+        sha256: preview.snapshot_sha256.unwrap(),
+    };
+    f.app
+        .store
+        .prepare(id, &snapshot, &preview.input_fingerprint.unwrap(), &[], now)
+        .unwrap();
+    let path = Publisher::new(&f.app.config.paths.reports_dir, &f.app.store)
+        .unwrap()
+        .output_path(&context.target_date.to_string())
+        .unwrap();
+    let attachment = report.evidence_attachment.unwrap();
+    let appendix = path.parent().unwrap().join(attachment.link(&report.date));
+    f.app
+        .store
+        .stage_report(
+            id,
+            &StagedReport {
+                report: &value,
+                markdown: &markdown,
+                output_path: path.to_str().unwrap(),
+                publication_fingerprint: &ai_daily_report::snapshots::digest(markdown.as_bytes()),
+            },
+            now,
+        )
+        .unwrap();
+    let settings_path = f.app.config.config_dir.join("settings.yaml");
+    let original = fs::read(&settings_path).unwrap();
+    let mut restricted: Value = serde_json::from_slice(&original).unwrap();
+    restricted["scanner"]["ignored_patterns"] = json!(["receipt.md"]);
+    fs::write(&settings_path, restricted.to_string()).unwrap();
+    assert_eq!(
+        run_daily(f.request(), &f.app).unwrap_err().code,
+        "ARCHIVE_MODEL_PERMISSION_DENIED"
+    );
+    let repair = || ai_daily_report::run::repair_output(&f.app, &report.date, Utc::now());
+    assert_eq!(
+        repair().unwrap_err().code,
+        "ARCHIVE_MODEL_PERMISSION_DENIED"
+    );
+    assert!(!path.exists() && !appendix.exists());
+    assert!(f.app.store.current(&report.date).unwrap().is_none());
+    fs::write(&settings_path, original).unwrap();
+    repair().unwrap();
+    fs::write(&settings_path, restricted.to_string()).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::remove_file(&appendix).unwrap();
+    repair().unwrap();
+    assert_eq!(fs::read(path).unwrap(), markdown.as_bytes());
+    assert_eq!(fs::read(appendix).unwrap(), attachment.markdown.as_bytes());
+    assert_eq!(f.sent.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn publication_rechecks_cited_and_supplemental_materials_after_the_model_returns() {
+    struct ChangePermission {
+        config: std::path::PathBuf,
+        exclude: &'static str,
+    }
+    impl ModelTransport for ChangePermission {
+        fn send(&self, bytes: &[u8], _: Duration) -> Result<HttpResponse, TransportFailure> {
+            let request: Value = serde_json::from_slice(bytes).unwrap();
+            let input: Value =
+                serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+            let cited = input["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["path"] == "cited.md")
+                .unwrap();
+            let mut settings: Value =
+                serde_json::from_slice(&fs::read(&self.config).unwrap()).unwrap();
+            settings["scanner"]["ignored_patterns"] = json!([self.exclude]);
+            fs::write(&self.config, settings.to_string()).unwrap();
+            let output = json!({"schema_version":5,"items":[{"title":"金额已登记","text":"金额为120元。",
+                "kind":"progress","statement_kind":"observed","source_ids":[cited["source_id"]]}]});
+            Ok(HttpResponse{status:200,retry_after:None, body:serde_json::to_vec(
+                &json!({"choices":[{"finish_reason":"stop","message":{"content":output.to_string()}}]})).unwrap()})
+        }
+    }
+    for exclude in ["cited.md", "supplement.md"] {
+        let mut f = Fixture::new();
+        let start = utc_window(f.day).unwrap().0;
+        f.file("cited.md", "金额为120元。", start);
+        f.file("supplement.md", "内部补充材料。", start);
+        f.app.transport = Box::new(ChangePermission {
+            config: f.app.config.config_dir.join("settings.yaml"),
+            exclude,
+        });
+        let result = run_daily(f.request(), &f.app);
+        if exclude == "cited.md" {
+            assert_eq!(result.unwrap_err().code, "ARCHIVE_MODEL_PERMISSION_DENIED");
+            assert!(f.app.store.current(&f.day.to_string()).unwrap().is_none());
+        } else {
+            let outcome = result.unwrap();
+            let record = f.app.store.get(&outcome.run_id).unwrap();
+            let report: PersonalReport =
+                serde_json::from_str(record.report_json.as_deref().unwrap()).unwrap();
+            assert!(report
+                .gaps
+                .iter()
+                .any(|g| g.code == "PUBLISH_PERMISSION_CHANGED"));
+            assert!(report
+                .sources
+                .iter()
+                .all(|s| s.relative_path.as_deref() == Some("cited.md")));
+            assert!(!report
+                .evidence_attachment
+                .unwrap()
+                .markdown
+                .contains("内部补充材料"));
+        }
+    }
+}
+
+#[test]
+fn detailed_daily_publishes_eight_grounded_items_and_uncited_evidence() {
+    struct EchoDetails;
+    impl ModelTransport for EchoDetails {
+        fn send(&self, bytes: &[u8], _: Duration) -> Result<HttpResponse, TransportFailure> {
+            let request: Value = serde_json::from_slice(bytes).unwrap();
+            let input: Value =
+                serde_json::from_str(request["messages"][1]["content"].as_str().unwrap()).unwrap();
+            let sources = input["sources"].as_array().unwrap();
+            let mut items = Vec::new();
+            for i in 1..=8 {
+                let path = format!("项目{i}.md");
+                let blocks: Vec<_> = sources.iter().filter(|s| s["path"] == path).collect();
+                assert!(!blocks.is_empty(), "{path}");
+                let text = blocks
+                    .iter()
+                    .map(|s| s["text"].as_str().unwrap())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                items.push(json!({"title":format!("项目{i}预算待复核"),"text":text,
+                    "kind":"attention","statement_kind":"observed",
+                    "source_ids":blocks.iter().map(|s| &s["source_id"]).collect::<Vec<_>>() }));
+            }
+            let response = json!({"schema_version":5,"items":items});
+            Ok(HttpResponse { status:200, retry_after:None, body:serde_json::to_vec(
+                &json!({"choices":[{"finish_reason":"stop","message":{"content":response.to_string()}}],"usage":{"prompt_tokens":300,"completion_tokens":1200}})
+            ).unwrap() })
+        }
+    }
+    let mut fixture = Fixture::new();
+    fixture.app.transport = Box::new(EchoDetails);
+    let start = utc_window(fixture.day).unwrap().0;
+    for i in 1..=8 {
+        let source: String = (1..=8)
+            .map(|j| {
+                format!(
+                    "项目{i}第{j}批的合同预算为{}元，支付前须核对发票和实收数量。\n",
+                    i * 100 + j
+                )
+            })
+            .collect();
+        fixture.file(&format!("项目{i}.md"), &source, start);
+    }
+    let other = "补充原文：样品需留存三十日。";
+    fixture.file("补充材料.md", other, start);
+    let result = run_daily(fixture.request(), &fixture.app).unwrap();
+    let stored = fixture.app.store.get(&result.run_id).unwrap();
+    let report: PersonalReport =
+        serde_json::from_str(stored.report_json.as_deref().unwrap()).unwrap();
+    assert_eq!(report.schema_version, 6);
+    assert_eq!(report.items.len(), 8);
+    assert!(ai_daily_report::reports::personal::body_chars(&report.items) > 1_500);
+    assert!(result.markdown.contains("概览"));
+    assert!(!result.markdown.contains(other));
+    let attachment = report.evidence_attachment.as_ref().unwrap();
+    assert!(attachment.markdown.contains(other));
+    assert_eq!(fixture.app.store.calls(&result.run_id).unwrap().len(), 1);
+    let path = result
+        .output_path
+        .as_ref()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(attachment.link(&report.date));
+    fs::remove_file(&path).unwrap();
+    assert_eq!(
+        run_daily(fixture.request(), &fixture.app).unwrap().action,
+        "existing"
+    );
+    assert_eq!(fs::read(path).unwrap(), attachment.markdown.as_bytes());
+    assert_eq!(fixture.app.store.calls(&result.run_id).unwrap().len(), 1);
+}
+
 impl ModelTransport for Interrupted {
     fn prepare(&self) -> Result<(), ai_daily_report::ReportError> {
         panic!("interrupted after input freeze")
@@ -635,4 +861,333 @@ fn personal_scan_plan_has_one_daily_trigger_and_no_background_recovery() {
             "TASK_KIND_INVALID"
         );
     }
+}
+
+#[test]
+fn material_checkpoint_resumes_before_selection_and_replays_the_committed_request() {
+    use ai_daily_report::{
+        run::personal::PersonalInput,
+        snapshots::{digest, fingerprint},
+        store::{RunRecord, Store},
+        types::RunPhase,
+    };
+    use std::path::PathBuf;
+
+    fn saved_input(root: &Path, run: &RunRecord) -> (Vec<u8>, PersonalInput) {
+        let bytes = fs::read(root.join(run.snapshot_path.as_ref().unwrap())).unwrap();
+        assert_eq!(digest(&bytes), *run.snapshot_sha256.as_ref().unwrap());
+        let input: PersonalInput = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            Some(&input.input_fingerprint),
+            run.input_fingerprint.as_ref()
+        );
+        (bytes, input)
+    }
+
+    struct CheckBeforeSend {
+        store: Store,
+        root: PathBuf,
+        id: String,
+        sent: Arc<Mutex<Vec<Value>>>,
+    }
+    impl ModelTransport for CheckBeforeSend {
+        fn send(&self, bytes: &[u8], _: Duration) -> Result<HttpResponse, TransportFailure> {
+            let run = self.store.get(&self.id).unwrap();
+            assert_eq!(run.phase, RunPhase::Generating);
+            let (_, input) = saved_input(&self.root, &run);
+            let plan = input.plan.unwrap();
+            assert_eq!(plan.bytes().unwrap(), bytes);
+            let calls = self.store.calls(&self.id).unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0]["status"], "reserved");
+            assert_eq!(
+                calls[0]["request_fingerprint"],
+                fingerprint(&json!({
+                    "generation_id":run.generation_id, "config_fingerprint":run.config_fingerprint,
+                    "plan_sha256":plan.identity().unwrap(), "request_sha256":digest(bytes),
+                }))
+                .unwrap()
+            );
+            assert_eq!(
+                fs::read(self.root.join(calls[0]["request_path"].as_str().unwrap())).unwrap(),
+                bytes
+            );
+            let payload: Value =
+                serde_json::from_str(plan.request["messages"][1]["content"].as_str().unwrap())
+                    .unwrap();
+            let file = payload["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["path"] == "work.md")
+                .unwrap();
+            let output = json!({"schema_version":5,"items":[{
+                "title":"金额待审批","text":"金额 120 元，条件满足后生效。","kind":"attention",
+                "statement_kind":"observed","source_ids":[file["source_id"]]
+            }]});
+            self.sent.lock().unwrap().push(payload);
+            Ok(HttpResponse { status:200, retry_after:None, body:serde_json::to_vec(
+                &json!({"choices":[{"finish_reason":"stop","message":{"content":output.to_string()}}]})
+            ).unwrap() })
+        }
+    }
+
+    let f = Fixture::new();
+    let original = "金额 120 元，条件满足后生效。";
+    f.file("work.md", original, utc_window(f.day).unwrap().0);
+    let mut request = f.request();
+    request.input = "原始用户附注。".into();
+    let id = request.context.run_id.clone();
+    let root = f.app.config.paths.data_dir.join("daily_cache/snapshots");
+    // Stop the real report at its first durable prepared state, before its planner can run.
+    let conn = f.app.store.connection().unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER stop_before_selection AFTER UPDATE OF phase ON report_runs
+         WHEN OLD.phase='scanning' AND NEW.phase='prepared' BEGIN
+           UPDATE report_runs SET status='failed' WHERE run_id=NEW.run_id;
+         END;",
+    )
+    .unwrap();
+    assert_eq!(
+        run_daily(request, &f.app).unwrap_err().code,
+        "RUN_PHASE_INVALID"
+    );
+    conn.execute_batch("DROP TRIGGER stop_before_selection")
+        .unwrap();
+    let materials = f
+        .app
+        .store
+        .pending(Some(&f.day.to_string()))
+        .unwrap()
+        .remove(0);
+    assert_eq!(materials.run_id, id);
+    assert_eq!(materials.phase, RunPhase::Prepared);
+    assert_eq!(f.scans(), 1);
+    let path = root.join(materials.snapshot_path.as_ref().unwrap());
+    let (original_bytes, observation) = saved_input(&root, &materials);
+    assert!(observation.plan.is_none());
+    assert_eq!(fs::read_dir(root.join(&id)).unwrap().count(), 1);
+    assert!(f.app.store.calls(&id).unwrap().is_empty());
+    assert_eq!(observation.selection.materials.len(), 2);
+    let file = observation
+        .selection
+        .materials
+        .iter()
+        .find(|m| m.source.source_kind == "file")
+        .unwrap();
+    assert!(file.text.contains(original));
+    assert!(!file.evidence[0].ranges.is_empty());
+    let sources: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM report_run_sources WHERE run_id=?",
+            [&id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(sources as usize, observation.selection.materials.len());
+    let health = health::check(&f.app.config, f.day, Utc::now()).unwrap();
+    assert!(health
+        .checks
+        .iter()
+        .any(|c| c.code == "RUN_ATTENTION" && c.evidence["pending"] == 1));
+
+    f.file("work.md", "改写后的内容。", utc_window(f.day).unwrap().0);
+    let Fixture {
+        _dir,
+        app,
+        day,
+        sent,
+    } = f;
+    let config = AppConfig::load_with_env(
+        _dir.path(),
+        None,
+        &BTreeMap::from([("DEEPSEEK_API_KEY".into(), "synthetic-key".into())]),
+    )
+    .unwrap();
+    drop(app);
+    let mut f = Fixture {
+        app: App::open(config, Utc::now()).unwrap(),
+        _dir,
+        day,
+        sent,
+    };
+    f.app.store.resume(&id, Utc::now()).unwrap();
+    let health = health::check(&f.app.config, f.day, Utc::now()).unwrap();
+    assert!(health
+        .checks
+        .iter()
+        .any(|c| c.code == "REPORT_IN_PROGRESS" && c.level == "ok"));
+    assert!(health.checks.iter().any(|c| c.code == "RUN_ATTENTION"
+        && c.evidence["active"] == 1
+        && c.evidence["pending"] == 0));
+    let historical = health
+        .checks
+        .iter()
+        .find(|c| c.code == "HISTORICAL_REPORT_ATTENTION")
+        .unwrap();
+    let templates = f._dir.path().join("templates");
+    fs::create_dir(&templates).unwrap();
+    for (name, body) in operations::TEMPLATES {
+        fs::write(templates.join(name), body).unwrap();
+    }
+    let doctor = operations::doctor(&f.app, false, Utc::now()).unwrap();
+    assert_eq!(doctor["status"], "ok");
+    assert_eq!(doctor["model"]["calls"], 0);
+    fs::rename(
+        &f.app.config.paths.work_dir,
+        f._dir.path().join("offline-work"),
+    )
+    .unwrap();
+    let context_limit = f.app.config.llm.context_window_tokens;
+    f.app.config.llm.context_window_tokens = Some(64_000);
+    assert_eq!(
+        run_daily(f.request(), &f.app).unwrap_err().code,
+        "RECOVERY_CONFIG_CHANGED"
+    );
+    assert_eq!(
+        saved_input(&root, &f.app.store.get(&id).unwrap()).0,
+        original_bytes
+    );
+    f.app.config.llm.context_window_tokens = context_limit;
+    let quota = &f.app.processing.as_ref().unwrap().quota;
+    let reservation = quota.reserve(quota.available_bytes().unwrap()).unwrap();
+    assert_eq!(
+        run_daily(f.request(), &f.app).unwrap_err().code,
+        "PROCESSING_CACHE_FULL"
+    );
+    assert_eq!(
+        saved_input(&root, &f.app.store.get(&id).unwrap()).0,
+        original_bytes
+    );
+    assert!(f.app.store.calls(&id).unwrap().is_empty());
+    drop(reservation);
+
+    // Interrupt after the answer is saved, while the final input and call are still recoverable.
+    conn.execute_batch(
+        "CREATE TRIGGER stop_before_publish BEFORE UPDATE OF phase ON report_runs
+         WHEN NEW.phase='db_committed' BEGIN SELECT RAISE(ABORT,'test interruption'); END;",
+    )
+    .unwrap();
+    f.app.transport = Box::new(CheckBeforeSend {
+        store: f.app.store.clone(),
+        root: root.clone(),
+        id: id.clone(),
+        sent: f.sent.clone(),
+    });
+    assert_eq!(
+        run_daily(f.request(), &f.app).unwrap_err().code,
+        "REPORT_DATABASE_FAILED"
+    );
+    conn.execute_batch("DROP TRIGGER stop_before_publish")
+        .unwrap();
+    assert_eq!(f.scans(), 1);
+    assert!(!path.exists());
+    let planned = f.app.store.get(&id).unwrap();
+    let (planned_bytes, input) = saved_input(&root, &planned);
+    assert_eq!(
+        json!(input.selection.materials),
+        json!(observation.selection.materials)
+    );
+    assert_eq!(planned.generation_id, materials.generation_id);
+    assert_eq!(planned.config_fingerprint, materials.config_fingerprint);
+    let sent = f.sent.lock().unwrap();
+    assert_eq!(sent.len(), 1);
+    let payload = sent[0]["sources"].to_string();
+    assert!(payload.contains(original) && payload.contains("原始用户附注"));
+    assert!(!payload.contains("改写后的内容"));
+    drop(sent);
+    let calls = f.app.store.calls(&id).unwrap();
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["status"], "succeeded");
+    let response = root.join(calls[0]["response_path"].as_str().unwrap());
+    let response_bytes = fs::read(&response).unwrap();
+    f.app.transport = Box::new(Interrupted);
+    let (first, second) = (f.request(), f.request());
+    std::thread::scope(|scope| {
+        let other = scope.spawn(|| run_daily(second, &f.app).unwrap());
+        let one = run_daily(first, &f.app).unwrap();
+        let two = other.join().unwrap();
+        assert_eq!((&one.run_id, &two.run_id), (&id, &id));
+        let mut actions = [one.action, two.action];
+        actions.sort();
+        assert_eq!(actions, ["existing", "published"]);
+    });
+    assert_eq!(f.scans(), 1);
+    assert_eq!(f.app.store.calls(&id).unwrap(), calls);
+    assert_eq!(
+        saved_input(&root, &f.app.store.get(&id).unwrap()).0,
+        planned_bytes
+    );
+    assert_eq!(fs::read(response).unwrap(), response_bytes);
+    assert_eq!(historical.level, "ok", "{}", historical.evidence);
+}
+
+#[test]
+fn failed_plan_swap_keeps_the_material_reference_and_both_files_expire() {
+    use ai_daily_report::{
+        processing_cache::{ProcessingSession, CONTROL_BYTES, MAX_BYTES, RETENTION_DAYS},
+        snapshots::digest,
+    };
+    let f = Fixture::new();
+    f.file(
+        "original.md",
+        "待核实的金额为 120 元。",
+        utc_window(f.day).unwrap().0,
+    );
+    let request = f.request();
+    let id = request.context.run_id.clone();
+    let conn = f.app.store.connection().unwrap();
+    conn.execute_batch(
+        "CREATE TRIGGER stop_plan_swap BEFORE UPDATE OF snapshot_path ON report_runs
+         WHEN OLD.phase='prepared' BEGIN SELECT RAISE(ABORT,'test interruption'); END;",
+    )
+    .unwrap();
+    assert_eq!(
+        run_daily(request, &f.app).unwrap_err().code,
+        "REPORT_DATABASE_FAILED"
+    );
+    conn.execute_batch("DROP TRIGGER stop_plan_swap").unwrap();
+    let run = f.app.store.get(&id).unwrap();
+    let cache = &f.app.processing.as_ref().unwrap().quota.root;
+    let competing = ProcessingSession::at(
+        cache,
+        Utc::now(),
+        std::time::Instant::now() + Duration::from_secs(3),
+        MAX_BYTES,
+        CONTROL_BYTES,
+        Duration::ZERO,
+    );
+    assert!(matches!(competing, Err(e) if e.code == "REPORT_ALREADY_RUNNING"));
+    let root = cache.join("snapshots");
+    let files: Vec<_> = fs::read_dir(root.join(&id))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 2);
+    let ledger: Value =
+        serde_json::from_slice(&fs::read(cache.join(".cache-ledger.json")).unwrap()).unwrap();
+    for path in &files {
+        let key = path
+            .strip_prefix(cache)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
+        assert_eq!(ledger[&key]["pending"], false);
+    }
+    let path = run.snapshot_path.as_ref().unwrap();
+    assert!(path.starts_with(&format!("{id}/personal-materials-")));
+    let material = fs::read(root.join(path)).unwrap();
+    assert_eq!(Some(digest(&material)), run.snapshot_sha256);
+    assert!(serde_json::from_slice::<Value>(&material).unwrap()["plan"].is_null());
+    assert!(f.app.store.calls(&id).unwrap().is_empty());
+    assert_eq!(f.scans(), 1);
+    let config = f.app.config.clone();
+    drop(f.app);
+    let expired = App::open(
+        config,
+        Utc::now() + chrono::Duration::days(RETENTION_DAYS + 1),
+    )
+    .unwrap();
+    assert!(files.iter().all(|file| !file.exists()));
+    assert!(expired.store.get(&id).unwrap().snapshot_path.is_none());
 }

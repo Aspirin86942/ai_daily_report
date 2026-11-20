@@ -96,7 +96,7 @@ C:/ProgramData/miniforge3/python.exe .artifacts/project-space-cleanup-20261027/p
 
 如需恢复旧日内链路，另行确认恢复范围后，先从 `cache.zip`、`collector-config.zip`、`retired-release-complete.zip` 恢复清单中的三个原路径并逐文件核验。旧任务定义位于同一 `before` 目录的 `collect.xml`、`parse.xml`；只有相应目录、匹配程序及配置均恢复完成后才能注册。`cache-ledger.json` 保存退役前登记表；如已有新扫描快照，按仍然存在的文件合并恢复，不能覆盖新增登记。旧数据库一致备份用于核查与隔离恢复。
 
-旧 Rust 二进制可能无法读取新增 v5 报告。回退时应为旧程序使用隔离的数据目录，保留新程序对新增报告的只读访问和修复能力。新处理缓存可以到期，但报告库及其新记录必须保留；禁止用切换前的数据库备份覆盖新增记录。
+回退前应在隔离副本验证目标程序能读取新产生的 v6 详报及大附件。保留支持 v6 的程序用于查询和原样恢复。旧 Rust 二进制可能无法读取新增 v5 报告。回退时应为旧程序使用隔离的数据目录，保留新程序对新增报告的只读访问和修复能力。新处理缓存可以到期，但报告库及其新记录必须保留；禁止用切换前的数据库备份覆盖新增记录。
 
 ```powershell
 ./ai-daily-report.exe --config-dir D:/DailyReport/shared/config backup --output D:/DailyReport/shared/backups/reports-before-switch.sqlite3 | Out-Host

@@ -1,6 +1,6 @@
 use ai_daily_discovery::{
-    discover_files_with_diagnostics, normalize_contract_path_text, DiscoveredFileOut,
-    DiscoveryIssue, DiscoveryReport, DiscoveryRequest,
+    discover_files_until, normalize_contract_path_text, DiscoveredFileOut, DiscoveryIssue,
+    DiscoveryReport, DiscoveryRequest,
 };
 use ai_daily_scanner_contract::{
     AuditWorkerLane, BuildContextRequest, CacheMissReason, CacheStatus, ContextAction,
@@ -2208,6 +2208,7 @@ fn discover_with_timeout(
     profile: &ai_daily_scanner_contract::NormalizedScannerSettings,
     timeout: Duration,
 ) -> Result<DiscoveryReport, Diagnostic> {
+    let deadline = Instant::now() + timeout;
     let start_date = NaiveDate::parse_from_str(&request.start_date, "%Y-%m-%d").map_err(|_| {
         diagnostic(
             ErrorCode::InvalidRequest,
@@ -2249,9 +2250,9 @@ fn discover_with_timeout(
     };
     let (sender, receiver) = mpsc::sync_channel(1);
     let handle = thread::spawn(move || {
-        let _ = sender.send(discover_files_with_diagnostics(&discovery_request));
+        let _ = sender.send(discover_files_until(&discovery_request, deadline));
     });
-    match receiver.recv_timeout(timeout) {
+    match receiver.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
         Ok(Ok(report)) => {
             if handle.join().is_err() {
                 Err(diagnostic(
@@ -2263,6 +2264,9 @@ fn discover_with_timeout(
             } else {
                 Ok(report)
             }
+        }
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::TimedOut => {
+            Err(discovery_timeout_diagnostic())
         }
         Ok(Err(error)) => {
             let error_code = match error.kind() {
@@ -2277,12 +2281,7 @@ fn discover_with_timeout(
                 DiagnosticStage::Discovery,
             ))
         }
-        Err(mpsc::RecvTimeoutError::Timeout) => Err(diagnostic(
-            ErrorCode::InternalError,
-            "file discovery exceeded its configured deadline".to_string(),
-            true,
-            DiagnosticStage::Discovery,
-        )),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(discovery_timeout_diagnostic()),
         Err(mpsc::RecvTimeoutError::Disconnected) => Err(diagnostic(
             ErrorCode::InternalError,
             "file discovery worker exited without a result".to_string(),
@@ -2290,6 +2289,15 @@ fn discover_with_timeout(
             DiagnosticStage::Discovery,
         )),
     }
+}
+
+fn discovery_timeout_diagnostic() -> Diagnostic {
+    diagnostic(
+        ErrorCode::InternalError,
+        "file discovery exceeded its configured deadline".to_string(),
+        true,
+        DiagnosticStage::Discovery,
+    )
 }
 
 fn discovery_issue_diagnostic(issue: &DiscoveryIssue) -> Diagnostic {
@@ -2728,6 +2736,23 @@ fn empty_summary() -> ContextSummary {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn discovery_timeout_is_reported_by_the_active_scanner() {
+        let root = tempdir().unwrap();
+        let request: BuildContextRequest =
+            serde_json::from_str(include_str!("../tests/fixtures/request.json")).unwrap();
+        let profile =
+            normalize_scanner_settings(&request.scanner_settings, request.report_mode).unwrap();
+        let error = discover_with_timeout(
+            &root.path().join("missing"),
+            &request,
+            &profile,
+            Duration::ZERO,
+        )
+        .unwrap_err();
+        assert_eq!(error, discovery_timeout_diagnostic());
+    }
 
     #[test]
     fn committed_terminal_output_survives_restore_and_opportunistic_gc_failures() {

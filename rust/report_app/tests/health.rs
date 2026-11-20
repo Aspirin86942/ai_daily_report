@@ -150,6 +150,14 @@ fn check_at(config: &AppConfig, target: &str, at: &str) -> health::HealthReport 
     .unwrap()
 }
 
+fn historical(report: &health::HealthReport) -> &health::HealthCheck {
+    report
+        .checks
+        .iter()
+        .find(|check| check.code == "HISTORICAL_REPORT_ATTENTION")
+        .unwrap()
+}
+
 #[test]
 fn missing_report_waits_for_schedule_and_budget_then_alerts() {
     let (_dir, mut config) = setup();
@@ -210,6 +218,10 @@ fn late_catchup_has_a_bounded_running_window_in_every_phase() {
             phase,
             "2026-10-18T02:58:00Z",
         );
+        Store::open(&config.paths.db_dir.join("reports.sqlite3"), now())
+            .unwrap()
+            .register_personal_run("catchup")
+            .unwrap();
         let during = check_at(&config, "2026-10-17", "2026-10-18T03:00:00Z");
         assert!(
             during
@@ -225,6 +237,7 @@ fn late_catchup_has_a_bounded_running_window_in_every_phase() {
             .unwrap();
         assert_eq!(attention.level, "ok", "{phase}: {attention:?}");
         assert_eq!(attention.evidence["active"], 1);
+        assert_eq!(historical(&during).level, "ok");
         let expired = check_at(&config, "2026-10-17", "2026-10-18T03:03:00Z");
         assert!(
             expired
@@ -233,7 +246,88 @@ fn late_catchup_has_a_bounded_running_window_in_every_phase() {
                 .any(|c| c.code == "REPORT_NOT_PUBLISHED" && c.level == "error"),
             "{phase}: {expired:?}"
         );
+        let history = historical(&expired);
+        assert_eq!(history.level, "error");
+        let issue = &history.evidence["reports"][0];
+        assert_eq!(issue["run_id"], "catchup");
+        assert_eq!(
+            issue["reason_codes"],
+            serde_json::json!(["REPORT_NOT_PUBLISHED"])
+        );
     }
+}
+
+#[test]
+fn historical_attention_keeps_a_different_failed_run_for_the_same_date() {
+    let (_dir, config) = setup();
+    let store = Store::open(&config.paths.db_dir.join("reports.sqlite3"), now()).unwrap();
+    let target = "2026-10-17";
+    for (id, status, at) in [
+        ("active", "running", "2026-10-18T02:58:00Z"),
+        ("failed", "failed", "2026-10-18T02:59:00Z"),
+    ] {
+        insert_run(&config, id, target, status, "prepared", at);
+        store.register_personal_run(id).unwrap();
+    }
+    let result = check_at(&config, target, "2026-10-18T03:00:00Z");
+    let history = historical(&result);
+    assert_eq!(history.level, "error");
+    let issues = history.evidence["reports"].as_array().unwrap();
+    assert_eq!(issues.len(), 1);
+    assert_eq!(issues[0]["run_id"], "failed");
+    assert_eq!(
+        issues[0]["reason_codes"],
+        serde_json::json!(["REPORT_NOT_PUBLISHED"])
+    );
+
+    // A failed attempt that preceded the active retry still has its own run warning.
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE report_runs SET created_at='2026-10-18T02:57:00Z' WHERE run_id='failed'",
+            [],
+        )
+        .unwrap();
+    let attention = attention(&config, target);
+    assert_eq!(attention.level, "warning");
+    assert_eq!(attention.evidence["recent_failures"], 1);
+    assert_eq!(attention.evidence["pending"], 1);
+}
+
+#[test]
+fn historical_attention_keeps_a_model_error_on_an_active_staged_report() {
+    let (_dir, config) = setup();
+    let store = Store::open(&config.paths.db_dir.join("reports.sqlite3"), now()).unwrap();
+    let target = "2026-10-17";
+    insert_run(
+        &config,
+        "active",
+        target,
+        "running",
+        "db_committed",
+        "2026-10-18T02:58:00Z",
+    );
+    store.register_personal_run("active").unwrap();
+    let partial = serde_json::json!({"schema_version":6,"quality":"partial","items":[],
+        "gaps":[{"code":"MODEL_HTTP_ERROR"}]});
+    store
+        .connection()
+        .unwrap()
+        .execute(
+            "UPDATE report_runs SET report_json=? WHERE run_id='active'",
+            [partial.to_string()],
+        )
+        .unwrap();
+    let result = check_at(&config, target, "2026-10-18T03:00:00Z");
+    let history = historical(&result);
+    assert_eq!(history.level, "error");
+    let issue = &history.evidence["reports"][0];
+    assert_eq!(issue["run_id"], "active");
+    assert_eq!(
+        issue["reason_codes"],
+        serde_json::json!(["MODEL_HTTP_ERROR"])
+    );
 }
 
 #[test]

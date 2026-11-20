@@ -11,6 +11,24 @@ $ErrorActionPreference = 'Stop'
 # local code page). All UTF-8 handling below is explicit through this encoder.
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 $zone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
+$jsonOptions = @{}
+if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) { $jsonOptions.DateKind = 'String' }
+
+function Get-HealthPublishLock([string]$Directory) {
+    # Rust's File::lock and FileStream.Lock both lock the first byte on Windows.
+    $path = Join-Path $Directory '.health-publish.lock'
+    $stream = [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::ReadWrite)
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    try {
+        while ($true) {
+            try { $stream.Lock(0, 1); return $stream }
+            catch [IO.IOException] {
+                if (($_.Exception.HResult -band 65535) -ne 33 -or $wait.Elapsed.TotalSeconds -ge 15) { throw }
+                Start-Sleep -Milliseconds 50
+            }
+        }
+    } catch { $stream.Dispose(); throw }
+}
 
 # Write the target file atomically: temp file in the same directory, then replace.
 function Write-AtomicUtf8 {
@@ -43,6 +61,7 @@ $code = 0
 $expectedCode = -1
 $executionStatus = 'succeeded'
 $executionErrorFile = $null
+$lock = $null
 try {
     # Real program: --scheduled writes the scheduled log, --output writes the report
     # atomically to this script's own temp file. The pipe is only used to wait for the
@@ -57,13 +76,13 @@ try {
     }
     if (-not (Test-Path -LiteralPath $temp)) { throw 'HEALTH_OUTPUT_MISSING' }
     $text = [IO.File]::ReadAllText($temp, $utf8)
-    $report = $text | ConvertFrom-Json
+    $report = $text | ConvertFrom-Json @jsonOptions
     if ($null -eq $report -or -not ($report.PSObject.Properties.Name -contains 'status')) {
         throw 'HEALTH_OUTPUT_INVALID'
     }
     # Keep the untouched program result: the execution-failure record must never
     # pretend the health verdict changed.
-    $originalReport = $text | ConvertFrom-Json
+    $originalReport = $text | ConvertFrom-Json @jsonOptions
 
     # The program writes the report before append_scheduled_log, so a write
     # failure can leave a healthy report behind while the process exits 1.
@@ -117,42 +136,50 @@ try {
         }
         $tasks += [pscustomobject]@{ name = $name; exists = $true; expected_enabled = $expectedEnabled; state = $taskState; last_result = $last; next_run_shanghai = $next }
     }
-    if ($report.PSObject.Properties.Name -contains 'tasks') {
-        $report.PSObject.Properties.Remove('tasks')
-    }
-    $report | Add-Member -NotePropertyName tasks -NotePropertyValue $tasks -Force
-
-    # Rust already wrote the native health file for the Shanghai date of generated_at;
-    # merge the task readback into that content instead of replacing it.
-    $generated = [DateTimeOffset]::Parse([string]$report.generated_at)
+    $generated = [DateTimeOffset]$report.generated_at
     $date = [TimeZoneInfo]::ConvertTime($generated, $zone).ToString('yyyy-MM-dd')
     $logDir = [string]$report.log_dir
     [IO.Directory]::CreateDirectory($logDir) | Out-Null
     $healthFile = Join-Path $logDir ('health-' + $date + '.json')
-    $target = $report
+    $lock = Get-HealthPublishLock $logDir
+    $superseded = $false
     if (Test-Path -LiteralPath $healthFile) {
-        try { $target = [IO.File]::ReadAllText($healthFile, $utf8) | ConvertFrom-Json }
-        catch { $anomalies.Add('HEALTH_NATIVE_FILE_INVALID') }
+        $currentText = [IO.File]::ReadAllText($healthFile, $utf8)
+        try {
+            $current = $currentText | ConvertFrom-Json @jsonOptions
+            $currentTime = [DateTimeOffset]$current.generated_at
+            $superseded = $currentTime -gt $generated
+            if ($currentTime -eq $generated -and $currentText -cne $text) {
+                # Equal timestamps can belong to different runs. Ignore added scheduler
+                # fields and compare every native field before enriching this result.
+                foreach ($field in $originalReport.PSObject.Properties) {
+                    $other = $current.PSObject.Properties[$field.Name]
+                    if ($null -eq $other -or (ConvertTo-Json -InputObject $other.Value -Compress -Depth 32) -cne
+                        (ConvertTo-Json -InputObject $field.Value -Compress -Depth 32)) { $superseded = $true; break }
+                }
+            }
+        } catch { $anomalies.Add('HEALTH_NATIVE_FILE_INVALID') }
     }
     else {
         # A missing native file is an anomaly, but the notification path stays usable.
         $anomalies.Add('HEALTH_NATIVE_FILE_MISSING')
     }
-    if ($target.PSObject.Properties.Name -contains 'tasks') {
-        $target.PSObject.Properties.Remove('tasks')
+    if ($superseded) {
+        # The shared filename now denotes another observation.
+        $healthFile = $null
+    } else {
+        $report | Add-Member -NotePropertyName tasks -NotePropertyValue $tasks -Force
+        $report | Add-Member -NotePropertyName execution_status -NotePropertyValue $executionStatus -Force
+        $report | Add-Member -NotePropertyName program_exit_code -NotePropertyValue $code -Force
+        $report | Add-Member -NotePropertyName expected_program_exit_code -NotePropertyValue $expectedCode -Force
+        Write-AtomicUtf8 -Path $healthFile -Text ($report | ConvertTo-Json -Depth 32)
     }
-    $target | Add-Member -NotePropertyName tasks -NotePropertyValue $tasks -Force
-    # Execution evidence is additive: status/checks/target_date stay exactly as the
-    # program reported them, only the run evidence is attached.
-    $target | Add-Member -NotePropertyName execution_status -NotePropertyValue $executionStatus -Force
-    $target | Add-Member -NotePropertyName program_exit_code -NotePropertyValue $code -Force
-    $target | Add-Member -NotePropertyName expected_program_exit_code -NotePropertyValue $expectedCode -Force
-    Write-AtomicUtf8 -Path $healthFile -Text ($target | ConvertTo-Json -Depth 12)
 
     # A mismatched exit code is its own execution failure. Keep a separate record
     # with the untouched program report so the healthy verdict stays auditable.
     if ($executionStatus -eq 'failed') {
         $executionErrorFile = Join-Path $logDir 'health-execution-error.json'
+        if ($superseded) { $executionErrorFile = Join-Path $logDir ('health-execution-error-' + [guid]::NewGuid().ToString('N') + '.json') }
         try {
             Write-AtomicUtf8 -Path $executionErrorFile -Text ([ordered]@{
                 date = $date
@@ -196,7 +223,7 @@ try {
     $already = $null -ne $state -and $state.date -eq $date -and $state.codes -eq $codes
 
     $notified = $false
-    if ($notify -and -not $already) {
+    if ($notify -and -not $already -and -not $superseded) {
         # Notification is an add-on step: any failure here must preserve the health file
         # and be recorded separately instead of pretending the run was healthy.
         try {
@@ -231,9 +258,10 @@ try {
         }
     }
 
-    [ordered]@{ status = [string]$report.status; target_date = [string]$report.target_date; health_file = $healthFile; tasks = @($tasks).Count; notified = $notified; execution_status = $executionStatus; program_exit_code = $code; expected_program_exit_code = $expectedCode; execution_error_file = $executionErrorFile; anomalies = @($anomalies) } | ConvertTo-Json -Depth 5
+    [ordered]@{ status = [string]$report.status; target_date = [string]$report.target_date; health_file = $healthFile; superseded = $superseded; tasks = @($tasks).Count; notified = $notified; execution_status = $executionStatus; program_exit_code = $code; expected_program_exit_code = $expectedCode; execution_error_file = $executionErrorFile; anomalies = @($anomalies) } | ConvertTo-Json -Depth 5
 }
 finally {
+    if ($null -ne $lock) { $lock.Dispose() }
     # Remove only the temp file this script created.
     if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue }
 }

@@ -1,5 +1,7 @@
 # Native scanner domain contract
 
+This historical contract describes the retained Python/PyO3 scanner and its matching workers. The current Windows Rust release uses worker protocol v4. See [current scanner and parser interfaces](../scanner-backends.md).
+
 ## Authority and transport
 
 The JSON Schemas in this directory and the matching Rust/Pydantic types define

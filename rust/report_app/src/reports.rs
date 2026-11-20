@@ -180,11 +180,15 @@ fn split_paragraphs(text: &str) -> Vec<&str> {
     paragraphs
 }
 
-pub fn evidence_text(value: &str) -> String {
-    let escaped = value
+fn literal_html(value: &str) -> String {
+    value
         .replace('&', "&amp;")
         .replace('<', "&lt;")
-        .replace('>', "&gt;");
+        .replace('>', "&gt;")
+}
+
+pub fn evidence_text(value: &str) -> String {
+    let escaped = literal_html(value);
     let mut output = String::with_capacity(escaped.len());
     for (index, ch) in escaped.chars().enumerate() {
         if "\\`*_|".contains(ch) || ch == '#' && index == 0 {
@@ -195,9 +199,43 @@ pub fn evidence_text(value: &str) -> String {
     output
 }
 
+fn markdown_inline(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let leading_digits = value.bytes().take_while(u8::is_ascii_digit).count();
+    for (i, ch) in value.char_indices() {
+        match ch {
+            '&' => output.push_str("&amp;"),
+            '<' => output.push_str("&lt;"),
+            '>' => output.push_str("&gt;"),
+            '\r' | '\n' => output.push(' '),
+            _ => {
+                if "\\`*_|[]~#".contains(ch)
+                    || i == 0 && matches!(ch, '-' | '+' | '=')
+                    || i == leading_digits && leading_digits > 0 && matches!(ch, '.' | ')')
+                {
+                    output.push('\\');
+                }
+                output.push(ch);
+            }
+        }
+    }
+    output
+}
+
 pub fn environment() -> Environment<'static> {
     let mut env = Environment::new();
     env.add_filter("evidence_text", |value: String| evidence_text(&value));
+    env.add_filter("report_inline", markdown_inline);
+    env.add_filter("report_lines", |value: &str| {
+        value
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .split('\n')
+            .map(markdown_inline)
+            .collect::<Vec<_>>()
+            .join("  \n")
+    });
+    env.add_filter("source_literal", literal_html);
     env.add_filter("shanghai_time", |value: String| -> Result<String, Error> {
         let timestamp = DateTime::parse_from_rfc3339(&value)
             .map_err(|_| Error::new(ErrorKind::InvalidOperation, "invalid report timestamp"))?;

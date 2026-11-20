@@ -254,17 +254,13 @@ impl ProductionParser {
         request: &ParseRequest,
         pool: &crate::session::WorkerPool,
     ) -> ParseResult {
-        let mut worker_request = crate::parsers::worker_request(
+        let worker_request = crate::parsers::worker_request(
             &request.file,
             parser_route(request.route),
             request.timeout_ms,
             &self.profile,
+            request.selected_pdf_pages.as_deref(),
         );
-        if let ai_daily_worker_contract::ParserLimits::Pdf { selected_pages, .. } =
-            &mut worker_request.parser_limits
-        {
-            *selected_pages = request.selected_pdf_pages.clone();
-        }
         match pool.parse_worker(&worker_request, Duration::from_millis(request.timeout_ms)) {
             Ok(outcome) => {
                 let duration_ms = outcome.duration_ms;

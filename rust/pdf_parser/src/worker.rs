@@ -46,42 +46,35 @@ impl PdfReader {
         let mut image_pages = vec![];
         let mut unchecked_pages = vec![];
         let (pages, truncated) = self
-            .visit_pages_with_audit(
-                Path::new(path),
-                None,
-                u32::MAX,
-                usize::MAX,
-                true,
-                |page, images| {
-                    match images {
-                        Some(true) => {
-                            image_pages.push(page.page);
-                            writer.gap("PDF_IMAGE_CONTENT_NOT_EXTRACTED");
-                        }
-                        None => {
-                            unchecked_pages.push(page.page);
-                            writer.gap("PDF_IMAGE_INSPECTION_BOUNDED");
-                        }
-                        _ => {}
+            .visit_archive_pages(Path::new(path), |page, text, images| {
+                match images {
+                    Some(true) => {
+                        image_pages.push(page);
+                        writer.gap("PDF_IMAGE_CONTENT_NOT_EXTRACTED");
                     }
-                    let range = SourceRange::new(
-                        SourceRangeUnit::PdfPage,
-                        u64::from(page.page),
-                        u64::from(page.page) + 1,
-                        None,
-                    );
-                    if !page.text.chars().any(is_valid_text_char) {
-                        no_text_pages.push(page.page);
-                        writer.gap("PDF_PAGE_WITHOUT_TEXT");
+                    None => {
+                        unchecked_pages.push(page);
+                        writer.gap("PDF_IMAGE_INSPECTION_BOUNDED");
                     }
-                    for line in page.text.lines() {
-                        if !writer.push(line, ContentUnitKind::Text, vec![range.clone()]) {
-                            return false;
-                        }
+                    _ => {}
+                }
+                let range = SourceRange::new(
+                    SourceRangeUnit::PdfPage,
+                    u64::from(page),
+                    u64::from(page) + 1,
+                    None,
+                );
+                if !text.chars().any(is_valid_text_char) {
+                    no_text_pages.push(page);
+                    writer.gap("PDF_PAGE_WITHOUT_TEXT");
+                }
+                for line in text.lines() {
+                    if !writer.push(line, ContentUnitKind::Text, vec![range.clone()]) {
+                        return false;
                     }
-                    true
-                },
-            )
+                }
+                true
+            })
             .map_err(|e| parse_error(path, &e))?;
         if source(path)?.0 != before.0 {
             return Err(diagnostic(path, "SOURCE_VERSION_CHANGED", true));
@@ -248,20 +241,7 @@ impl PdfReader {
                 .all()
                 .chars()
                 .any(is_valid_text_char);
-            let mut has_image = Some(false);
-            for (index, object) in page.objects().iter().enumerate() {
-                if index >= 2048 {
-                    has_image = None;
-                    break;
-                }
-                if object.as_image_object().is_some() {
-                    has_image = Some(true);
-                    break;
-                }
-                if object.as_x_object_form_object().is_some() {
-                    has_image = None;
-                }
-            }
+            let has_image = crate::page_images(&page);
             audit.checked_pages.push(number);
             audit
                 .observations

@@ -7,6 +7,13 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
+
+pub(super) const DETAILED_PLAN_VERSION: u32 = 7;
+
+pub(super) fn request_too_large() -> ReportError {
+    ReportError::new("MODEL_REQUEST_TOO_LARGE", "冻结模型请求超过容量")
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum StepKind {
@@ -75,7 +82,7 @@ pub fn request_limit(llm: &Llm, output: u64) -> Result<usize, ReportError> {
     let maximum = llm
         .verified_max_output_tokens
         .ok_or_else(|| ReportError::new("MODEL_CAPABILITY_UNVERIFIED", "模型输出容量尚未确认"))?;
-    if output > maximum || output == 0 {
+    if output > maximum.min(llm.max_tokens) || output == 0 {
         return Err(ReportError::new(
             "MODEL_OUTPUT_LIMIT_INVALID",
             "模型输出上限无效",
@@ -104,7 +111,7 @@ impl PlannedStep {
         self.check_capacity(llm)
     }
     pub fn validate_identity(&self, llm: &Llm) -> Result<(), ReportError> {
-        if self.version != 6
+        if !matches!(self.version, 6 | DETAILED_PLAN_VERSION)
             || self.kind != StepKind::PersonalSummary
             || self.revision > 1
             || self.logical_step.is_empty()
@@ -116,7 +123,9 @@ impl PlannedStep {
             ));
         }
         let mut expected = self.clone();
-        super::personal::rebuild(&mut expected, llm)?;
+        // A completed call keeps its original output allowance even if today's
+        // verified capacity is lower. Model identity and payload fields still match.
+        super::personal::rebuild(&mut expected, llm, self.frozen_output_tokens()?)?;
         if expected.prompt_sha256 != self.prompt_sha256
             || expected.schema_sha256 != self.schema_sha256
             || expected.request != self.request
@@ -129,19 +138,27 @@ impl PlannedStep {
         }
         Ok(())
     }
-    pub fn check_capacity(&self, llm: &Llm) -> Result<(), ReportError> {
-        let output = match (
+    pub(super) fn frozen_output_tokens(&self) -> Result<u64, ReportError> {
+        let tokens = match (
             self.request.get("max_tokens"),
             self.request.get("max_completion_tokens"),
         ) {
-            (Some(value), None) | (None, Some(value)) => value.as_u64().unwrap_or(0),
-            _ => 0,
+            (Some(value), None) | (None, Some(value)) => value.as_u64(),
+            _ => None,
         };
-        if self.bytes()?.len() > request_limit(llm, output)? {
-            return Err(ReportError::new(
-                "MODEL_REQUEST_TOO_LARGE",
-                "冻结模型请求超过容量",
-            ));
+        tokens.filter(|&n| n > 0).ok_or_else(|| {
+            ReportError::new(
+                "MODEL_PLAN_IDENTITY_MISMATCH",
+                "冻结模型请求缺少有效的输出上限",
+            )
+        })
+    }
+    pub(super) fn byte_limit(&self, llm: &Llm) -> Result<usize, ReportError> {
+        request_limit(llm, self.frozen_output_tokens()?)
+    }
+    pub fn check_capacity(&self, llm: &Llm) -> Result<(), ReportError> {
+        if self.bytes()?.len() > self.byte_limit(llm)? {
+            return Err(request_too_large());
         }
         Ok(())
     }

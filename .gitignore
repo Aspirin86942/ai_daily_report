@@ -78,6 +78,7 @@ scripts/corpus/
 .artifacts/personal-*/
 .artifacts/model-quota-removal-*/
 .artifacts/material-range-*/
+.artifacts/rich-daily-*/
 .artifacts/daily-scan-*/
 .artifacts/project-space-cleanup-*/
 .releases/

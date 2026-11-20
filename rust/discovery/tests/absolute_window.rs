@@ -1,4 +1,6 @@
-use ai_daily_discovery::{discover_files_with_diagnostics, DiscoveryIssueKind, DiscoveryRequest};
+use ai_daily_discovery::{
+    discover_files_until, discover_files_with_diagnostics, DiscoveryIssueKind, DiscoveryRequest,
+};
 use chrono::{DateTime, NaiveDate, Utc};
 use std::{fs, time::SystemTime};
 
@@ -90,6 +92,21 @@ fn incomplete_window_is_rejected_before_traversal() {
     assert_eq!(
         discover_files_with_diagnostics(&input).unwrap_err().kind(),
         std::io::ErrorKind::InvalidInput
+    );
+}
+
+#[test]
+fn expired_active_walk_does_not_even_stat_a_missing_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let input = request(&temp.path().join("missing"));
+    let deadline = std::time::Instant::now();
+    assert_eq!(
+        discover_files_until(&input, deadline).unwrap_err().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert_eq!(
+        discover_files_with_diagnostics(&input).unwrap_err().kind(),
+        std::io::ErrorKind::NotFound
     );
 }
 

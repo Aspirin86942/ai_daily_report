@@ -13,7 +13,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use contracts::MAX_RESPONSE_BYTES;
-use plan::PlannedStep;
+use plan::{PlannedStep, DETAILED_PLAN_VERSION};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use transport::ModelTransport;
@@ -36,7 +36,10 @@ pub struct ModelRunner<'a> {
     pub started: Instant,
     pub deadline: Instant,
 }
-fn response_content(body: &[u8]) -> Result<(Value, Value), ReportError> {
+fn validate_response(
+    step: &PlannedStep,
+    body: &[u8],
+) -> Result<personal::PersonalOutput, ReportError> {
     let response: Value = serde_json::from_slice(body).map_err(|_| contracts::invalid())?;
     let choices = response["choices"]
         .as_array()
@@ -52,21 +55,13 @@ fn response_content(body: &[u8]) -> Result<(Value, Value), ReportError> {
     if choice["finish_reason"] != "stop" || !choice["message"]["refusal"].is_null() {
         return Err(contracts::invalid());
     }
+    // The transport bounds the whole response. Detailed reports apply their combined
+    // byte ceiling to the rendered body and evidence, after decoding the model JSON.
     let text = choice["message"]["content"]
         .as_str()
-        .filter(|s| s.len() <= MAX_RESPONSE_BYTES)
+        .filter(|s| step.version == DETAILED_PLAN_VERSION || s.len() <= MAX_RESPONSE_BYTES)
         .ok_or_else(contracts::invalid)?;
-    Ok((
-        serde_json::from_str(text).map_err(|_| contracts::invalid())?,
-        response["usage"].clone(),
-    ))
-}
-
-fn validate_response(
-    step: &PlannedStep,
-    body: &[u8],
-) -> Result<personal::PersonalOutput, ReportError> {
-    let (content, _) = response_content(body)?;
+    let content = serde_json::from_str(text).map_err(|_| contracts::invalid())?;
     personal::validate_response(step, content)
 }
 fn reference(row: &Value, prefix: &str) -> Result<SnapshotRef, ReportError> {

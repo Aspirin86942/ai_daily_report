@@ -1,8 +1,13 @@
 tests/fixtures/pdf_benchmark/*.pdf binary
 tests/fixtures/pdf_classifier/*.pdf binary
+rust/pdf_parser/tests/fixtures/*.pdf binary
+rust/office_parser/tests/fixtures/* binary
 requirements.lock text eol=lf
 rust/report_app/tests/fixtures/*.md text eol=lf
 templates/evidence_*_prompt_v3.md text eol=lf
+templates/personal_daily_scan_prompt_v8.md text eol=lf
+templates/personal_daily_scan_template_v6.md text eol=lf
+rust/report_app/src/store/schema-v1.sql text eol=lf
 rust/**/*.rs text eol=lf
 rust/**/Cargo.toml text eol=lf
 rust/Cargo.toml text eol=lf

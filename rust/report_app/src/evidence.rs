@@ -1,8 +1,9 @@
 //! Evidence identities and sending permissions shared by personal reporting.
-use crate::config::AppConfig;
+use crate::{config::AppConfig, ReportError};
 use ai_daily_worker_contract::SourceRange;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -38,36 +39,89 @@ fn within(path: &Path, root: &Path) -> bool {
             .is_some_and(|suffix| suffix.starts_with('/'))
 }
 pub fn permitted(config: &AppConfig, path: &Path) -> bool {
-    // Additional roots stay local until explicitly granted, including nested roots.
-    let allowed = config
-        .archive
-        .model_roots
-        .iter()
-        .any(|root| within(path, root))
-        || config.archive.allow_work_dir_for_model
-            && within(path, &config.paths.work_dir)
-            && !config.archive.roots.iter().any(|root| within(path, root));
-    if !allowed {
-        return false;
+    EvidencePermissions::new(config).is_some_and(|policy| policy.permits(path))
+}
+
+pub(crate) struct EvidencePermissions<'a> {
+    config: &'a AppConfig,
+    profile: ai_daily_scanner_contract::DiscoveryProfile,
+    excluded: Vec<PathBuf>,
+}
+
+impl<'a> EvidencePermissions<'a> {
+    pub fn new(config: &'a AppConfig) -> Option<Self> {
+        let profile = ai_daily_scanner_core::config::normalize_scanner_settings(
+            &config.scanner,
+            ai_daily_scanner_contract::ReportMode::Daily,
+        )
+        .ok()?
+        .discovery;
+        let excluded = profile.excluded_dirs.iter().map(PathBuf::from).collect();
+        Some(Self {
+            config,
+            profile,
+            excluded,
+        })
     }
-    let Ok(profile) = ai_daily_scanner_core::config::normalize_scanner_settings(
-        &config.scanner,
-        ai_daily_scanner_contract::ReportMode::Daily,
-    ) else {
-        return false;
-    };
-    let excluded: Vec<_> = profile
-        .discovery
-        .excluded_dirs
-        .iter()
-        .map(std::path::PathBuf::from)
-        .collect();
-    ai_daily_discovery::archived_path_allowed(
-        path,
-        &config.paths.work_dir,
-        &profile.discovery.allowed_extensions,
-        &profile.discovery.ignored_patterns,
-        &excluded,
-    )
-    .unwrap_or(false)
+
+    pub fn permits(&self, path: &Path) -> bool {
+        let config = self.config;
+        // Additional roots stay local until explicitly granted, including nested roots.
+        let allowed = config
+            .archive
+            .model_roots
+            .iter()
+            .any(|root| within(path, root))
+            || config.archive.allow_work_dir_for_model
+                && within(path, &config.paths.work_dir)
+                && !config.archive.roots.iter().any(|root| within(path, root));
+        if !allowed {
+            return false;
+        }
+        ai_daily_discovery::archived_path_allowed(
+            path,
+            &config.paths.work_dir,
+            &self.profile.allowed_extensions,
+            &self.profile.ignored_patterns,
+            &self.excluded,
+        )
+        .unwrap_or(false)
+    }
+}
+
+pub(crate) fn permission_denied() -> ReportError {
+    ReportError::new("ARCHIVE_MODEL_PERMISSION_DENIED", "来源当前未获使用许可")
+}
+
+pub(crate) fn denied_sources<'a>(
+    config: &AppConfig,
+    sources: impl Iterator<Item = &'a crate::reports::data::ReportSource>,
+) -> Result<BTreeSet<String>, ReportError> {
+    let mut files = sources.filter(|s| s.source_kind == "file").peekable();
+    let mut denied = BTreeSet::new();
+    if files.peek().is_none() {
+        return Ok(denied);
+    }
+    let current = crate::config::AppConfig::load(&config.program_dir, Some(&config.config_dir))?;
+    let initial = EvidencePermissions::new(config);
+    let active = EvidencePermissions::new(&current);
+    let mut checked = BTreeMap::new();
+    for source in files {
+        let path = source.coverage_limits["personal"]["absolute_path"]
+            .as_str()
+            .ok_or_else(|| {
+                ReportError::new("ARCHIVE_MODEL_PERMISSION_DENIED", "缺少来源权限信息")
+            })?;
+        let allowed = checked.entry(path).or_insert_with(|| {
+            [&initial, &active].into_iter().all(|policy| {
+                policy
+                    .as_ref()
+                    .is_some_and(|policy| policy.permits(Path::new(path)))
+            })
+        });
+        if !*allowed {
+            denied.insert(source.source_id.clone());
+        }
+    }
+    Ok(denied)
 }
