@@ -7,7 +7,7 @@ pub(super) fn visit_files(
     patterns: &[Pattern],
     check: &impl Fn(&Path) -> io::Result<()>,
     issues: &mut Vec<DiscoveryIssue>,
-    mut visit: impl FnMut(&Path, &mut Vec<DiscoveryIssue>) -> io::Result<()>,
+    mut visit: impl FnMut(&Path, &Metadata, &mut Vec<DiscoveryIssue>) -> io::Result<()>,
 ) -> io::Result<()> {
     let excluded_names: Vec<_> = request
         .excluded_dirs
@@ -37,6 +37,10 @@ pub(super) fn visit_files(
                 continue;
             }
         };
+        // A queued directory may have changed since enumeration.
+        if dir != request.work_dir && excluded.iter().any(|path| resolved.starts_with(path)) {
+            continue;
+        }
         if request.follow_symlinks {
             if ancestors.contains(&resolved) {
                 issues.push(path_issue(
@@ -46,7 +50,7 @@ pub(super) fn visit_files(
                 ));
                 continue;
             }
-            ancestors.push(resolved);
+            ancestors.push(resolved.clone());
         }
         check(&dir)?;
         let mut entries = match fs::read_dir(&dir) {
@@ -94,24 +98,33 @@ pub(super) fn visit_files(
                 if excluded_names.contains(&name) {
                     continue;
                 }
-                check(&path)?;
-                if is_excluded_dir(&path, excluded) {
-                    continue;
-                }
             } else if !eligible {
                 continue;
             }
             check(&path)?;
-            let issue = match access::inspect(&path) {
-                Ok(EntryAccess::Local | EntryAccess::LocalCloud) => {
+            let inspected = access::inspect_entry(&entry);
+            if !excluded.is_empty() && (kind.is_dir() || kind.is_symlink()) {
+                check(&path)?;
+                let excluded_path = if matches!(&inspected, Ok((EntryAccess::Local, _))) {
+                    let ordinary = resolved.join(entry.file_name());
+                    excluded.iter().any(|dir| ordinary.starts_with(dir))
+                } else {
+                    is_excluded_dir(&path, excluded)
+                };
+                if excluded_path {
+                    continue;
+                }
+            }
+            let issue = match inspected {
+                Ok((EntryAccess::Local | EntryAccess::LocalCloud, metadata)) => {
                     if kind.is_dir() {
                         pending.push((path, ancestors.clone()));
                     } else if eligible {
-                        visit(&path, issues)?;
+                        visit(&path, &metadata, issues)?;
                     }
                     continue;
                 }
-                Ok(EntryAccess::Link) if request.follow_symlinks => {
+                Ok((EntryAccess::Link, _)) if request.follow_symlinks => {
                     check(&path)?;
                     match fs::canonicalize(&path) {
                         Ok(target) if target.starts_with(root) => {
@@ -120,7 +133,7 @@ pub(super) fn visit_files(
                                 Ok(meta) if meta.is_dir() => {
                                     pending.push((path, ancestors.clone()))
                                 }
-                                Ok(_) if eligible => visit(&path, issues)?,
+                                Ok(meta) if eligible => visit(&path, &meta, issues)?,
                                 Ok(_) => {}
                                 Err(error) => issues.push(path_issue(
                                     DiscoveryIssueKind::Metadata,
@@ -136,14 +149,14 @@ pub(super) fn visit_files(
                         ),
                     }
                 }
-                Ok(EntryAccess::Link) => {
+                Ok((EntryAccess::Link, _)) => {
                     (DiscoveryIssueKind::LinkExcluded, "link traversal disabled")
                 }
-                Ok(EntryAccess::CloudUnavailable) => (
+                Ok((EntryAccess::CloudUnavailable, _)) => (
                     DiscoveryIssueKind::CloudUnavailable,
                     "cloud content unavailable locally; no hydration attempted",
                 ),
-                Ok(EntryAccess::UnknownReparse) => (
+                Ok((EntryAccess::UnknownReparse, _)) => (
                     DiscoveryIssueKind::UnknownReparse,
                     "unknown reparse tag excluded",
                 ),

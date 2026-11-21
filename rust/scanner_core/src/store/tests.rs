@@ -968,12 +968,22 @@ fn expired_owner_cannot_revive_its_own_stale_lease() {
             .unwrap(),
     );
 
+    let expired_at = 1_000 + LEASE_GRACE_MS + 1;
     assert_eq!(
-        harness
-            .store
-            .heartbeat(&active, 1_000 + LEASE_GRACE_MS + 1)
-            .unwrap_err(),
+        harness.store.heartbeat(&active, expired_at).unwrap_err(),
         StoreError::LeaseLost
+    );
+    let clock = FixedClock(0);
+    let deadlines = RunDeadlines::derive(5_000, &clock).unwrap();
+    assert_eq!(
+        harness.store.finalize(
+            &active,
+            &error_batch(&active),
+            expired_at,
+            deadlines,
+            &clock
+        ),
+        Err(StoreError::LeaseLost)
     );
 }
 
@@ -1277,6 +1287,11 @@ fn error_run_with_file_rows_produces_complete_evidence() {
             }),
             worker_handshake_ms: 5,
             discovery_ms: 2,
+            session_restart_count: 1,
+            session_restart_reasons: Some(ai_daily_scanner_contract::SessionRestartCounts {
+                transport: 1,
+                ..Default::default()
+            }),
             ..Default::default()
         }),
     };
@@ -1315,6 +1330,34 @@ fn error_run_with_file_rows_produces_complete_evidence() {
     assert_eq!(evidence.artifact_id.0, None, "error run has no artifact");
     assert_eq!(evidence.execution_metrics.worker_handshake_ms, 5);
     assert_eq!(evidence.execution_metrics.discovery_ms, 2);
+    assert_eq!(
+        evidence
+            .execution_metrics
+            .session_restart_reasons
+            .unwrap()
+            .transport,
+        1
+    );
+    harness.store.connection.execute(
+        "UPDATE scan_runs SET final_envelope_metadata_json=json_set(final_envelope_metadata_json,
+            '$.session_restart_reasons.transport',2) WHERE scan_run_id=?1",
+        [active.scan_run_id() as i64],
+    ).unwrap();
+    assert!(harness.store.load_evidence(active.scan_run_id()).is_err());
+    harness.store.connection.execute(
+        "UPDATE scan_runs SET final_envelope_metadata_json=json_remove(final_envelope_metadata_json,
+            '$.session_restart_reasons') WHERE scan_run_id=?1",
+        [active.scan_run_id() as i64],
+    ).unwrap();
+    assert!(harness
+        .store
+        .load_evidence(active.scan_run_id())
+        .unwrap()
+        .execution_metrics
+        .as_ref()
+        .unwrap()
+        .session_restart_reasons
+        .is_none());
     harness.store.connection.execute(
             "UPDATE scan_runs SET final_envelope_metadata_json=json_set(final_envelope_metadata_json,
                 '$.pdf_page_audits', json('{\"invented\":{\"policy_version\":\"pdf_text_presence_v2\",\"checked_pages\":[1],\"observations\":null}}')) WHERE scan_run_id=?1",
@@ -1777,6 +1820,88 @@ fn cache_lookup_distinguishes_miss_reasons_and_corrupt_rows() {
         )
         .expect_err("invalid exact-row values must fail the run-level lookup");
     assert!(matches!(value_error, StoreError::RunCorrupt(_)));
+}
+
+#[test]
+fn cache_touch_avoids_a_writer_lock_until_the_utc_bucket_changes() {
+    let mut harness = harness("00000000-0000-4000-8000-000000000034");
+    let active = started(
+        harness
+            .store
+            .begin_run(
+                &harness.request.request_id,
+                &harness.canonical,
+                &harness.runtime,
+                1,
+            )
+            .unwrap(),
+    );
+    let identity = "file-bucket";
+    let source = "mtime_ns=100:size=5";
+    let midnight = 1_577_923_200_000;
+    let hits = [identity.to_string()];
+    harness
+        .store
+        .prepare_inventory(&[inventory_record(identity, source)], active.scan_run_id, 1)
+        .unwrap();
+    harness
+        .store
+        .write_success_parse_cache(
+            &[cache_record(identity, source, &"a".repeat(64), "body")],
+            midnight - 1,
+        )
+        .unwrap();
+    harness
+        .store
+        .write_success_classification_cache(
+            &[ClassificationCacheWriteRecord {
+                file_identity: identity.to_string(),
+                source_version: source.to_string(),
+                source_guard_kind: "content_sha256_v1".to_string(),
+                source_guard_sha256: "0".repeat(64),
+                classifier_profile_hash: "b".repeat(64),
+                classifier_build: "c".repeat(64),
+                status: "text_in_parse_window".to_string(),
+                page_count: 1,
+                result_examined_pages: 1,
+            }],
+            midnight - 1,
+        )
+        .unwrap();
+
+    let locker = Connection::open(&harness.db_path).unwrap();
+    locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    harness
+        .store
+        .connection
+        .busy_timeout(Duration::ZERO)
+        .unwrap();
+    harness
+        .store
+        .touch_cache_access(midnight - 1, &hits, &hits)
+        .unwrap();
+    assert!(matches!(
+        harness.store.touch_cache_access(midnight, &hits, &hits),
+        Err(StoreError::CacheWrite { .. })
+    ));
+    locker.execute_batch("ROLLBACK").unwrap();
+    harness
+        .store
+        .touch_cache_access(midnight, &hits, &hits)
+        .unwrap();
+
+    let buckets: (String, String) = harness
+        .store
+        .connection
+        .query_row(
+            "SELECT p.last_accessed_bucket, c.last_accessed_bucket
+         FROM parse_cache p JOIN classification_cache c USING(file_identity)
+         WHERE p.file_identity=?1",
+            [identity],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(buckets, ("2020-01-02".into(), "2020-01-02".into()));
 }
 
 #[test]
@@ -2476,6 +2601,75 @@ fn prepare_inventory_deadline_after_first_batch_preserves_only_the_global_prefix
 }
 
 #[test]
+fn cache_batch_reports_only_attributable_record_rejections_as_record_errors() {
+    let mut harness = harness("00000000-0000-4000-8000-000000000036");
+    let active = started(
+        harness
+            .store
+            .begin_run(
+                &harness.request.request_id,
+                &harness.canonical,
+                &harness.runtime,
+                1,
+            )
+            .unwrap(),
+    );
+    let source = "mtime_ns=100:size=5";
+    let inventory = ["good", "rejected"].map(|identity| inventory_record(identity, source));
+    harness
+        .store
+        .prepare_inventory(&inventory, active.scan_run_id, 1)
+        .unwrap();
+    let profile_hash = "a".repeat(64);
+    let good = cache_record("good", source, &profile_hash, "body");
+    let mut rejected = cache_record("rejected", source, &profile_hash, "body");
+    rejected.content_sha256.clear();
+    assert!(matches!(
+        harness
+            .store
+            .write_success_parse_cache(&[good.clone(), rejected], 2),
+        Err(StoreError::CacheRecord { .. })
+    ));
+
+    let mut unranked = cache_record("rejected", source, &profile_hash, "body");
+    unranked.parser_backend = "unranked".into();
+    assert!(matches!(
+        harness
+            .store
+            .write_success_parse_cache(&[good.clone(), unranked], 2),
+        Err(StoreError::CacheRecord { .. })
+    ));
+    let missing_inventory = cache_record("missing", source, &profile_hash, "body");
+    assert!(matches!(
+        harness
+            .store
+            .write_success_parse_cache(&[good.clone(), missing_inventory], 2),
+        Err(StoreError::CacheWrite { .. })
+    ));
+    let count: i64 = harness
+        .store
+        .connection
+        .query_row("SELECT count(*) FROM parse_cache", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "both rejected batches roll back the earlier cache row"
+    );
+
+    let locker = Connection::open(&harness.db_path).unwrap();
+    locker.execute_batch("BEGIN IMMEDIATE").unwrap();
+    harness
+        .store
+        .connection
+        .busy_timeout(Duration::ZERO)
+        .unwrap();
+    assert!(matches!(
+        harness.store.write_success_parse_cache(&[good], 2),
+        Err(StoreError::CacheWrite { .. })
+    ));
+}
+
+#[test]
 fn cache_commit_remains_authoritative_when_work_deadline_expires_on_return() {
     let mut harness = harness("00000000-0000-4000-8000-000000000206");
     let active = started(
@@ -2524,6 +2718,55 @@ fn cache_commit_remains_authoritative_when_work_deadline_expires_on_return() {
         .collect::<rusqlite::Result<_>>()
         .unwrap();
     assert_eq!(persisted, vec!["file-a".to_string()]);
+}
+
+#[test]
+fn terminal_write_uses_full_sync_and_restores_normal_on_the_reused_connection() {
+    let mut harness = harness("00000000-0000-4000-8000-000000000035");
+    let active = started(
+        harness
+            .store
+            .begin_run(
+                &harness.request.request_id,
+                &harness.canonical,
+                &harness.runtime,
+                1,
+            )
+            .unwrap(),
+    );
+    harness
+        .store
+        .connection
+        .execute_batch(
+            "CREATE TEMP TABLE observed_synchronous(mode INTEGER NOT NULL);
+         CREATE TEMP TRIGGER observe_terminal_sync AFTER UPDATE OF status ON main.scan_runs
+         WHEN NEW.status = 'error'
+         BEGIN
+             INSERT INTO observed_synchronous SELECT synchronous FROM pragma_synchronous;
+         END;",
+        )
+        .unwrap();
+    let clock = FixedClock(0);
+    let deadlines = RunDeadlines::derive(5_000, &clock).unwrap();
+    harness
+        .store
+        .finalize(&active, &error_batch(&active), 2, deadlines, &clock)
+        .unwrap();
+
+    let terminal_mode: i64 = harness
+        .store
+        .connection
+        .query_row("SELECT mode FROM observed_synchronous", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let restored_mode: i64 = harness
+        .store
+        .connection
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .unwrap();
+    assert_eq!(terminal_mode, 2, "terminal writes use FULL");
+    assert_eq!(restored_mode, 1, "later work uses NORMAL");
 }
 
 #[test]
@@ -2604,6 +2847,12 @@ fn busy_timeout_restore_failure_preserves_commit_and_surfaces_rollback_failure()
         .unwrap();
     assert_eq!(status, "running");
     assert_eq!(diagnostics, 0);
+    let mode: i64 = rolled_back
+        .store
+        .connection
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, 1, "rollback also restores NORMAL");
 }
 
 #[test]

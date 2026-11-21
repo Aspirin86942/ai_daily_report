@@ -31,6 +31,35 @@ struct CellBuilder {
     in_formula: bool,
 }
 
+/// Sample cheap XML events together. Large tokens and completed rows still
+/// check the wall clock before decoding or emitting evidence.
+struct XmlDeadline {
+    end: Option<Instant>,
+    events_left: u8,
+    next_byte_check: u64,
+}
+
+impl XmlDeadline {
+    fn new(end: Option<Instant>) -> Self {
+        Self {
+            end,
+            events_left: 0,
+            next_byte_check: 0,
+        }
+    }
+
+    fn expired(&mut self, position: u64, boundary: bool) -> bool {
+        let Some(end) = self.end else { return false };
+        if self.events_left != 0 && position < self.next_byte_check && !boundary {
+            self.events_left -= 1;
+            return false;
+        }
+        self.events_left = u8::MAX;
+        self.next_byte_check = position.saturating_add(16 * 1024);
+        Instant::now() >= end
+    }
+}
+
 pub(super) fn parse_workbook_sheets(
     xml: &str,
     max_sheets: usize,
@@ -176,12 +205,18 @@ pub(super) fn visit_sheet_rows(
     let mut current_row = None;
     let mut current_cell: Option<CellBuilder> = None;
     let mut truncated = false;
+    let mut clock = XmlDeadline::new(deadline);
+    if clock.expired(0, true) {
+        return Ok(true);
+    }
     loop {
-        if deadline.is_some_and(|end| Instant::now() >= end) {
-            return Ok(true);
-        }
         let event = worksheet_event(&mut reader, &mut buf, partial_at, &mut depth)
             .map_err(|e| format!("worksheet XML error: {e}"))?;
+        let boundary = matches!(&event, Event::Eof)
+            || matches!(&event, Event::End(e) if is_local_name(e.name().as_ref(), b"row"));
+        if clock.expired(reader.buffer_position(), boundary) {
+            return Ok(true);
+        }
         let empty = matches!(event, Event::Empty(_));
         match event {
             Event::Start(e) | Event::Empty(e)
@@ -405,13 +440,20 @@ pub(super) fn read_string_table(
     let mut in_si = false;
     let mut in_text = false;
     let mut current_text = String::new();
+    let mut clock = XmlDeadline::new(deadline);
+    if clock.expired(0, true) {
+        return Ok((result, true));
+    }
     loop {
-        if deadline.is_some_and(|end| Instant::now() >= end) || current_index >= limit {
+        if current_index >= limit {
             return Ok((result, true));
         }
-        match worksheet_event(&mut reader, &mut buf, partial_at, &mut depth)
-            .map_err(|e| format!("sharedStrings XML error: {e}"))?
-        {
+        let event = worksheet_event(&mut reader, &mut buf, partial_at, &mut depth)
+            .map_err(|e| format!("sharedStrings XML error: {e}"))?;
+        if clock.expired(reader.buffer_position(), matches!(&event, Event::Eof)) {
+            return Ok((result, true));
+        }
+        match event {
             Event::Empty(e) if is_local_name(e.name().as_ref(), b"si") => {
                 result.insert(current_index, String::new());
                 current_index += 1;

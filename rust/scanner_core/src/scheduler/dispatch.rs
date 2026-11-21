@@ -1,3 +1,4 @@
+use super::cache_batch::nominal_values;
 use super::*;
 
 fn route_timeout_ms(route: RouteKind, profile: &NormalizedScannerSettings) -> u64 {
@@ -89,16 +90,14 @@ impl BudgetedContextScheduler {
         existed_before: &HashSet<String>,
         runtime_classification: &HashSet<String>,
         metrics: &mut ExecutionMetrics,
-        executor: &WaveExecutor,
+        executor: &RollingExecutor,
     ) -> Result<ParseOutputs, SchedulerFailure> {
         let mut results = HashMap::new();
         let mut runtime_not_parsed = HashSet::new();
-        let mut parse_cache_receipts = Vec::new();
         let classification_cache_receipts = Vec::new();
         let mut parse_profile_hashes = HashMap::new();
         let mut parse_cache_status = HashMap::new();
         let mut parse_cache_miss_reason = HashMap::new();
-        let mut cache_write_warnings = Vec::new();
         let mut parse_warnings = Vec::new();
         let mut parse_fresh_hits = Vec::new();
         let mut any_lookup = false;
@@ -199,12 +198,14 @@ impl BudgetedContextScheduler {
                             metrics.stage_deadline_exhausted_count = 1;
                             continue;
                         }
-                        let remaining = work_deadline.saturating_sub(self.clock.now_ms());
-                        let timeout_ms = route_timeout_ms(*route, profile).min(remaining);
+                        let Some(guard) = expected_guard(file) else {
+                            continue;
+                        };
                         admitted.push(ParseTask {
                             file: (*file).clone(),
                             route: *route,
-                            own_timeout_ms: timeout_ms,
+                            guard,
+                            own_timeout_ms: route_timeout_ms(*route, profile),
                             profile_hash,
                         });
                     }
@@ -212,57 +213,48 @@ impl BudgetedContextScheduler {
             }
         }
 
-        // ---- Phase B (bounded waves, spec P4-T0): dispatch a batch only while
-        // `remaining_to_work_deadline > 0`. A batch is at most
-        // `max_workers` parses; files not yet dispatched when the
-        // deadline is reached are queued -> runtime NotParsed. Results are merged
-        // back by nominal rank, so completion order cannot change the outcome.
-        // In-flight parses preserve their effective per-file timeout
-        // `min(route timeout, remaining_to_work_deadline)`. ----
-        let mut index = 0;
-        while index < admitted.len() {
-            if self.clock.now_ms() >= work_deadline {
-                for task in &admitted[index..] {
-                    runtime_not_parsed.insert(task.file.file_identity.clone());
+        let mut cache_batch = CacheBatch::new(self);
+        executor.run(
+            &admitted,
+            self.clock.as_ref(),
+            work_deadline,
+            |task| match task.route {
+                RouteKind::LightText => WorkLane::Inline,
+                RouteKind::Pdf | RouteKind::PdfImageOcr { .. } => WorkLane::Pdf,
+                RouteKind::RustOffice
+                | RouteKind::RustXls
+                | RouteKind::RustXlsx
+                | RouteKind::RustLegacyOffice => WorkLane::Office,
+            },
+            |task| {
+                if !self.guard.verify(&task.file.path, &task.guard) {
+                    return Some(source_version_changed_parse(&task.file));
                 }
-                metrics.stage_deadline_exhausted_count = 1;
-                break;
-            }
-            let wave_end = (index + executor.concurrency).min(admitted.len());
-            let mut wave = Vec::new();
-            for task in &admitted[index..wave_end] {
-                let Some(guard) = expected_guard(&task.file) else {
-                    continue;
-                };
-                if !self.guard.verify(&task.file.path, &guard) {
-                    results.insert(
-                        task.file.file_identity.clone(),
-                        source_version_changed_parse(&task.file),
-                    );
-                    parse_profile_hashes
-                        .insert(task.file.file_identity.clone(), task.profile_hash.clone());
-                    continue;
-                }
-                wave.push((task, guard));
-            }
-            let outputs = executor.map(&wave, |(task, _)| {
+                let mut request = crate::parsers::scheduled_request(
+                    &task.file,
+                    task.route,
+                    task.own_timeout_ms,
+                    profile,
+                    classifications,
+                );
                 let remaining = work_deadline.saturating_sub(self.clock.now_ms());
-                (remaining > 0).then(|| {
-                    self.parser.parse(&crate::parsers::scheduled_request(
-                        &task.file,
-                        task.route,
-                        task.own_timeout_ms.min(remaining),
-                        profile,
-                        classifications,
-                    ))
-                })
-            });
-            for ((task, guard), result) in wave.into_iter().zip(outputs) {
+                if remaining == 0 {
+                    return None;
+                }
+                request.timeout_ms = request.timeout_ms.min(remaining);
+                Some(self.parser.parse(&request))
+            },
+            |event| {
+                let DispatchEvent::Completed(index, result) = event else {
+                    cache_batch.flush();
+                    return None;
+                };
+                let task = &admitted[index];
                 let file = &task.file;
-                let Some(result) = result else {
+                let Some(mut result) = result else {
                     runtime_not_parsed.insert(file.file_identity.clone());
                     metrics.stage_deadline_exhausted_count = 1;
-                    continue;
+                    return cache_batch.flush_at();
                 };
                 metrics.parse_attempt_count = metrics
                     .parse_attempt_count
@@ -272,69 +264,57 @@ impl BudgetedContextScheduler {
                         .pdfplumber_invocations
                         .saturating_add(result.parse_attempt_count);
                 }
-                parse_warnings.extend(result.warnings.iter().cloned());
+                parse_warnings.extend(
+                    result
+                        .warnings
+                        .iter()
+                        .cloned()
+                        .map(|warning| (index, warning)),
+                );
                 if result.parse_status == ParseStatus::Success {
-                    if !self.guard.verify(&file.path, &guard) {
-                        results.insert(
-                            file.file_identity.clone(),
-                            source_version_changed_after_parse(file, result),
-                        );
-                        parse_profile_hashes
-                            .insert(file.file_identity.clone(), task.profile_hash.clone());
-                        continue;
-                    }
-                    if self.clock.now_ms() < work_deadline {
+                    if !self.guard.verify(&file.path, &task.guard) {
+                        result = source_version_changed_after_parse(file, result);
+                    } else if self.clock.now_ms() < work_deadline {
                         let (worker_contract, worker_version, worker_build) =
                             self.worker_identity_for(task.route);
-                        let record = CacheWriteRecord {
-                            file_identity: file.file_identity.clone(),
-                            source_version: file.source_version.clone(),
-                            source_guard_kind: crate::source_guard::source_guard_kind_text(
-                                guard.kind,
-                            )
-                            .to_string(),
-                            source_guard_sha256: guard.guard_sha256.clone().unwrap_or_default(),
-                            parse_profile_hash: task.profile_hash.clone(),
-                            content: result.content.clone(),
-                            content_sha256: result.content_sha256.clone(),
-                            evidence_audit: result.evidence_audit.clone(),
-                            cache_payload_version: crate::store::cache::PARSE_CACHE_PAYLOAD_VERSION,
-                            parser_backend: result.parser_backend.clone(),
-                            worker_lane: result.worker_lane.clone(),
-                            truncated: result.truncated,
-                            worker_contract_version: worker_contract,
-                            worker_version,
-                            worker_build,
-                        };
-                        // spec Solution: cache COMMIT is a receipt; a failed write
-                        // is a SKIPPED receipt with a warning, never a committed one.
-                        match self
-                            .cache
-                            .write_parse(self.clock.now_ms(), std::slice::from_ref(&record))
-                        {
-                            Ok(()) => parse_cache_receipts.push(record),
-                            Err(CachePortError::DeadlineExhausted { .. }) => {
-                                metrics.stage_deadline_exhausted_count = 1;
-                            }
-                            Err(error) => cache_write_warnings.push(Diagnostic {
-                                error_code: ErrorCode::CacheWriteFailed,
-                                message: format!(
-                                    "parse cache write skipped: {}",
-                                    error.diagnostic(DiagnosticStage::Cache).message
-                                ),
-                                retryable: true,
-                                stage: DiagnosticStage::Cache,
-                                file_path: Nullable(Some(file.path.clone())),
-                                backend: Nullable(Some(task.route.backend().to_string())),
-                            }),
-                        }
+                        cache_batch.push(
+                            index,
+                            &file.path,
+                            task.route.backend(),
+                            CacheWriteRecord {
+                                file_identity: file.file_identity.clone(),
+                                source_version: file.source_version.clone(),
+                                source_guard_kind: crate::source_guard::source_guard_kind_text(
+                                    task.guard.kind,
+                                )
+                                .to_string(),
+                                source_guard_sha256: task
+                                    .guard
+                                    .guard_sha256
+                                    .clone()
+                                    .unwrap_or_default(),
+                                parse_profile_hash: task.profile_hash.clone(),
+                                content: result.content.clone(),
+                                content_sha256: result.content_sha256.clone(),
+                                evidence_audit: result.evidence_audit.clone(),
+                                cache_payload_version:
+                                    crate::store::cache::PARSE_CACHE_PAYLOAD_VERSION,
+                                parser_backend: result.parser_backend.clone(),
+                                worker_lane: result.worker_lane.clone(),
+                                truncated: result.truncated,
+                                worker_contract_version: worker_contract,
+                                worker_version,
+                                worker_build,
+                            },
+                        );
                     }
                 }
                 results.insert(file.file_identity.clone(), result);
                 parse_profile_hashes.insert(file.file_identity.clone(), task.profile_hash.clone());
-            }
-            index = wave_end;
-        }
+                cache_batch.flush_at()
+            },
+        )?;
+        let (parse_cache_receipts, cache_write_warnings) = cache_batch.finish(metrics);
         if any_lookup {
             metrics.parse_cache_all_hit =
                 Some(metrics.parse_cache_all_hit.unwrap_or(true) && !any_miss);
@@ -348,7 +328,7 @@ impl BudgetedContextScheduler {
             parse_cache_status,
             parse_cache_miss_reason,
             cache_write_warnings,
-            parse_warnings,
+            parse_warnings: nominal_values(parse_warnings),
             parse_fresh_hits,
         })
     }

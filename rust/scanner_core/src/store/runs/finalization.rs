@@ -18,6 +18,9 @@ impl ScannerStore {
             .map_err(cache_write)?;
         let result =
             self.finalize_with_bounded_busy_timeout(active, batch, now_ms, deadlines, clock);
+        if schema::restore_work_synchronous(&self.connection).is_err() {
+            eprintln!("scanner warning: SQLite synchronous mode restore failed after finalization");
+        }
         let restore = restore_default_busy_timeout(&self.connection);
         match (result, restore) {
             (Ok(timings), Ok(())) => Ok(timings),
@@ -66,9 +69,6 @@ impl ScannerStore {
             .map_err(|error| StoreError::RunCorrupt(error.to_string()))?;
         let status = terminal_status_text(batch.status)?;
         let audit_size = compute_audit_size_with_check(batch, &ensure_deadline)?;
-        ensure_deadline()?;
-        schema::require_durable_finalization(&self.connection)
-            .map_err(|error| cache_write(error.to_string()))?;
         ensure_deadline()?;
 
         // All JSON construction, artifact loading/dedup comparison, size
@@ -173,7 +173,7 @@ impl ScannerStore {
         .map_err(|message| {
             StoreError::RunCorrupt(format!("rebuilt envelope is invalid: {message}"))
         })?;
-        if canonical_envelope_json(&rebuilt)? != batch.envelope_json {
+        if rebuilt != envelope {
             return Err(StoreError::RunCorrupt(
                 "rebuilt envelope disagrees with the committed envelope".to_string(),
             ));
@@ -182,12 +182,19 @@ impl ScannerStore {
         let terminal_rows_written =
             compute_terminal_rows_written(batch, dedup_artifact_id.is_some());
         ensure_deadline()?;
+        schema::require_durable_finalization(&self.connection).map_err(cache_write)?;
+        ensure_deadline()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(cache_write)?;
         let transaction_started = clock.now_ms();
-        heartbeat_in_transaction(&transaction, active, now_ms)?;
+        // This write transaction holds the lease stable until its terminal deletion.
+        ensure_owner(&transaction, active)?;
+        lease_expiry(now_ms)?;
+        if !query_lease(&transaction)?.is_some_and(|lease| lease_is_live(&lease, now_ms)) {
+            return Err(StoreError::LeaseLost);
+        }
         ensure_engine_fingerprint(&transaction, active, &envelope)?;
         let handshake_failed = batch.diagnostics.iter().any(|record| {
             record.severity == DiagnosticSeverity::Error

@@ -1,7 +1,6 @@
-use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use ai_daily_scanner_contract::SourceGuardKind;
 use ai_daily_scanner_contract::{ErrorCode, ReportMode, ScannerSettings};
@@ -12,43 +11,51 @@ use ai_daily_scanner_core::fallback::FailureClass;
 use ai_daily_scanner_core::parsers::{register_worker, register_worker_pair, WorkerCommand};
 use ai_daily_worker_contract::WorkerKind;
 
+mod support;
+use support::process_fixture_path;
+
+const OFFICE_MARKER: &str = "office.started";
+const PDF_MARKER: &str = "pdf.started";
+
 #[test]
 fn office_and_pdf_worker_handshakes_overlap() {
-    let Some(python) = pdf_worker_path() else {
-        return;
-    };
     let directory = tempfile::tempdir().expect("temporary worker root should exist");
-    let script = directory.path().join("fake_worker.py");
-    fs::write(&script, FAKE_WORKER).expect("fake worker should be writable");
-    let office_marker = directory.path().join("office.started");
-    let python_marker = directory.path().join("python.started");
-    let command = |kind: WorkerKind, own: &Path, peer: &Path| {
-        let (required_backends, required_extensions) = capabilities(kind);
-        WorkerCommand {
-            program: python.clone(),
-            base_args: vec![
-                OsString::from(script.as_os_str()),
-                OsString::from("rendezvous"),
-                OsString::from(match kind {
-                    WorkerKind::Office => "office",
-                    WorkerKind::Pdf => "python",
-                }),
-                OsString::from(own.as_os_str()),
-                OsString::from(peer.as_os_str()),
-            ],
-            current_dir: Some(directory.path().to_path_buf()),
-            expected_kind: kind,
-            required_backends,
-            required_extensions,
-        }
-    };
-    let office = command(WorkerKind::Office, &office_marker, &python_marker);
-    let pdf = command(WorkerKind::Pdf, &python_marker, &office_marker);
+    let office = rendezvous_worker(WorkerKind::Office, directory.path());
+    let pdf = rendezvous_worker(WorkerKind::Pdf, directory.path());
 
     let (office_result, pdf_result) = register_worker_pair(&office, &pdf, Duration::from_secs(5));
 
-    office_result.expect("office handshake should rendezvous");
-    pdf_result.expect("Python handshake should rendezvous");
+    office_result.expect("Office handshake should rendezvous");
+    pdf_result.expect("PDF handshake should rendezvous");
+    assert_eq!(
+        fs::read_to_string(directory.path().join(OFFICE_MARKER)).unwrap(),
+        "office\n"
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join(PDF_MARKER)).unwrap(),
+        "pdf\n"
+    );
+}
+
+#[test]
+fn worker_handshake_fails_after_waiting_for_a_missing_peer() {
+    let directory = tempfile::tempdir().expect("temporary worker root should exist");
+    let office = rendezvous_worker(WorkerKind::Office, directory.path());
+
+    let started = Instant::now();
+    let failure = register_worker(&office, Duration::from_secs(5))
+        .expect_err("Office must not handshake without its peer");
+
+    assert_eq!(failure.class, FailureClass::ContractFailure);
+    assert_eq!(
+        failure.diagnostic.error_code,
+        ErrorCode::WorkerHandshakeFailed
+    );
+    assert_eq!(
+        fs::read_to_string(directory.path().join(OFFICE_MARKER)).unwrap(),
+        "office\n"
+    );
+    assert!(started.elapsed() >= Duration::from_secs(2));
 }
 
 #[test]
@@ -143,123 +150,18 @@ fn legacy_office_profile() -> ai_daily_scanner_contract::NormalizedScannerSettin
     normalize_scanner_settings(&raw, ReportMode::Daily).expect("legacy profile should normalize")
 }
 
-fn pdf_worker_path() -> Option<PathBuf> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    let candidates = if cfg!(windows) {
-        vec![root.join(".venv").join("Scripts").join("python.exe")]
-    } else {
-        vec![root.join(".venv").join("bin").join("python")]
+fn rendezvous_worker(kind: WorkerKind, directory: &Path) -> WorkerCommand {
+    let (required_backends, required_extensions) = capabilities(kind);
+    let (role, marker, peer) = match kind {
+        WorkerKind::Office => ("office", OFFICE_MARKER, PDF_MARKER),
+        WorkerKind::Pdf => ("pdf", PDF_MARKER, OFFICE_MARKER),
     };
-    candidates.into_iter().find(|path| path.is_file())
-}
-
-const FAKE_WORKER: &str = r#"
-import json
-import os
-import sys
-import time
-
-mode = sys.argv[1]
-kind = sys.argv[2]
-operation = sys.argv[-1]
-
-if kind == "office":
-    worker_kind = "office"
-    backends = ["rust_office_oxide_v2", "rust_xlsx_bounded_v2"]
-    extensions = [".docx", ".pptx", ".xlsx"]
-else:
-    worker_kind = "pdf"
-    backends = ["rust_pdfium_v3", "rust_xls_calamine_v3", "rust_legacy_office_v3"]
-    extensions = [".doc", ".docx", ".pdf", ".ppt", ".pptx", ".xls", ".xlsx"]
-
-if operation == "hello":
-    if len(sys.argv) > 4:
-        with open(sys.argv[3], "a", encoding="ascii") as marker:
-            marker.write(kind + "\n")
-    if mode == "version_sleep":
-        time.sleep(30)
-    if mode == "rendezvous":
-        deadline = time.monotonic() + 2
-        while not os.path.exists(sys.argv[4]) and time.monotonic() < deadline:
-            time.sleep(0.005)
-        if not os.path.exists(sys.argv[4]):
-            raise SystemExit(7)
-    operations = ["office_parse"] if kind == "office" else [
-        "pdf_classify", "pdf_parse"
-    ]
-    print(json.dumps({
-        "contract": "ai_daily_worker",
-        "protocol_version": 4,
-        "frame": "hello",
-        "worker_contract_version": "ai_daily_worker_v4",
-        "worker_kind": worker_kind,
-        "worker_version": "0.1.0",
-        "worker_build": "fake-build",
-        "supported_operations": operations,
-    }))
-    raise SystemExit(0)
-
-request = json.load(sys.stdin)
-if mode == "sleep":
-    time.sleep(30)
-if mode == "crash":
-    os._exit(9)
-if mode == "invalid_json":
-    print("not-json")
-    raise SystemExit(0)
-if mode == "recoverable_slow":
-    time.sleep(0.05)
-if mode == "recoverable_late":
-    time.sleep(0.9)
-if mode == "valid_slow":
-    time.sleep(1.3)
-
-backend = request["backend"]
-lane = "rust_office_process_v3" if backend.startswith("rust_") else "rust_pdf_process_v3"
-error = None
-status = "ok"
-content = "parsed"
-exit_code = 0
-if mode in {"recoverable_slow", "recoverable_late", "early_timeout", "retryable_timeout"}:
-    status = "error"
-    content = ""
-    exit_code = 1
-    error = {
-        "error_code": "PARSER_TIMEOUT" if mode in {"early_timeout", "retryable_timeout"} else "PARSER_FAILED",
-        "message": "synthetic worker failure",
-        "retryable": mode in {"recoverable_slow", "recoverable_late", "retryable_timeout"},
-        "stage": "parse",
-        "file_path": request["file_path"],
-        "backend": backend,
+    WorkerCommand {
+        program: process_fixture_path(),
+        base_args: vec!["rendezvous".into(), role.into(), marker.into(), peer.into()],
+        current_dir: Some(directory.to_path_buf()),
+        expected_kind: kind,
+        required_backends,
+        required_extensions,
     }
-
-response = {
-    "contract": "ai_daily_worker",
-    "protocol_version": 1,
-    "request_id": request["request_id"],
-    "status": status,
-    "file_path": request["file_path"],
-    "file_type": request["file_type"],
-    "content": content,
-    "parser_backend": backend,
-    "worker_lane": lane,
-    "truncated": False,
-    "warnings": [],
-    "error": error,
-    "duration_ms": 1,
-    "worker_contract_version": "ai_daily_worker_v4",
-    "worker_version": "0.1.0",
-    "worker_build": "changed-build" if mode == "wrong_build" else "fake-build",
-    "observed_source_version": request["expected_source_version"],
 }
-if mode == "large_response":
-    response["content"] = "x" * 5_000_000
-if mode == "content_over_budget":
-    response["content"] = "x" * 101
-if mode == "wrong_path":
-    response["file_path"] = request["file_path"] + ".other"
-if mode == "wrong_backend":
-    response["parser_backend"] = "rust_office_oxide_v2"
-print(json.dumps(response))
-raise SystemExit(exit_code)
-"#;

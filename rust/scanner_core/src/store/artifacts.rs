@@ -147,6 +147,14 @@ pub(super) fn envelope_metadata_json(
         value["refill_audit"] = serde_json::to_value(refill)
             .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
     }
+    if let Some(counts) = batch
+        .execution_metrics
+        .as_ref()
+        .and_then(|metrics| metrics.session_restart_reasons)
+    {
+        value["session_restart_reasons"] = serde_json::to_value(counts)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+    }
     let mut pages = std::collections::BTreeMap::new();
     let mut open_failures = std::collections::BTreeMap::new();
     for record in &batch.file_results {
@@ -438,7 +446,7 @@ fn load_owned_rows<T>(
     sql: &str,
     decode: impl Fn(&rusqlite::Row<'_>) -> Result<T, StoreError>,
 ) -> Result<Vec<T>, StoreError> {
-    let mut statement = connection.prepare(sql).map_err(cache_open)?;
+    let mut statement = connection.prepare_cached(sql).map_err(cache_open)?;
     let mut rows = statement.query([artifact_id]).map_err(cache_open)?;
     let mut result = Vec::new();
     while let Some(row) = rows.next().transpose() {

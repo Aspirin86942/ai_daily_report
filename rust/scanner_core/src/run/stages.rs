@@ -383,14 +383,22 @@ impl ActiveBuild<'_> {
             Box::new(timing.clock.clone()),
             Box::new(RealGuardVerifier::new(timing.source_guards.clone())),
         );
+        let initial_restarts = ai_daily_scanner_contract::SessionRestartCounts::combine(
+            office_pool.stats().session_restart_reasons,
+            pdf_pool.stats().session_restart_reasons,
+        );
         let mut outcome = match scheduler.execute(input) {
             Ok(outcome) => outcome,
             Err(failure) => {
                 return self.fail(warnings, failure.diagnostic);
             }
         };
-        let session_stats =
+        let mut session_stats =
             crate::session::SessionPoolStats::combine(office_pool.stats(), pdf_pool.stats());
+        session_stats.session_restart_reasons = session_stats
+            .session_restart_reasons
+            .since(initial_restarts);
+        session_stats.session_restart_count = session_stats.session_restart_reasons.total();
         let peak_worker_rss_bytes = combine_peak_rss(
             self.rss_tracker.peak_worker_rss_bytes(),
             session_stats.peak_worker_rss_bytes,

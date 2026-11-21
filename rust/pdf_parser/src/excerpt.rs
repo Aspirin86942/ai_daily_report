@@ -3,6 +3,7 @@ use pdfium_render::prelude::*;
 use std::collections::{BTreeMap, BinaryHeap};
 
 mod layout;
+pub(super) use layout::{format_page_text, read_page_text};
 
 // AuditTextBuilder can record at most 512 complete units, including their page ranges.
 const MAX_LINES: usize = 512;
@@ -65,11 +66,12 @@ pub(super) fn read(
     max_chars: usize,
 ) -> Result<PdfText, PdfError> {
     read_pages(total, numbers, max_chars, |number| {
-        layout::page_text(document, number)
+        let page = document.pages().get((number - 1) as PdfPageIndex)?;
+        read_page_text(&page)
     })
 }
 
-fn read_pages(
+pub(super) fn read_pages(
     total: u32,
     numbers: &[u32],
     max_chars: usize,

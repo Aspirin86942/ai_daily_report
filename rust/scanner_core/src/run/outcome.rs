@@ -213,6 +213,7 @@ pub(super) fn assemble_scheduler_execution_metrics(
     output.classification_cache_all_hit = Nullable(metrics.classification_cache_all_hit);
     output.stage_deadline_exhausted_count = metrics.stage_deadline_exhausted_count;
     output.session_restart_count = session.map_or(0, |stats| stats.session_restart_count);
+    output.session_restart_reasons = session.map(|stats| stats.session_restart_reasons);
     output.classify_attempt_count = metrics.classify_attempt_count;
     output.parse_attempt_count = metrics.parse_attempt_count;
     output.reserved_chars = metrics.reserved_chars;
@@ -246,6 +247,7 @@ pub(super) fn assemble_snapshot_execution_metrics(
         peak_worker_rss_bytes,
     );
     output.snapshot_hit = true;
+    output.session_restart_reasons = Some(Default::default());
     output.reserved_chars = reserved_chars;
     output.rendered_chars = rendered_chars;
     output.snapshot_lookup_ms = snapshot_lookup_ms;

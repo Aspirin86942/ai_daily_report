@@ -80,7 +80,7 @@ pub(in crate::store) fn validate_finalization_with_check(
     let envelope: ContextEnvelope = serde_json::from_str(&batch.envelope_json)
         .map_err(|_| invalid_request("final envelope JSON is invalid"))?;
     envelope.validate().map_err(StoreError::InvalidRequest)?;
-    if canonical_envelope_json(&envelope).as_deref() != Ok(batch.envelope_json.as_str()) {
+    if serde_json::to_string(&envelope).ok().as_deref() != Some(batch.envelope_json.as_str()) {
         return Err(invalid_request(
             "final envelope JSON must use canonical serialization",
         ));

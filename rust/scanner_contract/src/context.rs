@@ -122,6 +122,54 @@ impl Validate for RefillAudit {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionRestartCounts {
+    pub lane_switch: u64,
+    pub request_limit: u64,
+    pub idle_ttl: u64,
+    pub rss_limit: u64,
+    pub timeout: u64,
+    pub transport: u64,
+    pub rejected: u64,
+}
+
+impl SessionRestartCounts {
+    pub fn total(self) -> u64 {
+        [
+            self.lane_switch,
+            self.request_limit,
+            self.idle_ttl,
+            self.rss_limit,
+            self.timeout,
+            self.transport,
+            self.rejected,
+        ]
+        .into_iter()
+        .fold(0, u64::saturating_add)
+    }
+
+    fn zip(self, other: Self, op: fn(u64, u64) -> u64) -> Self {
+        Self {
+            lane_switch: op(self.lane_switch, other.lane_switch),
+            request_limit: op(self.request_limit, other.request_limit),
+            idle_ttl: op(self.idle_ttl, other.idle_ttl),
+            rss_limit: op(self.rss_limit, other.rss_limit),
+            timeout: op(self.timeout, other.timeout),
+            transport: op(self.transport, other.transport),
+            rejected: op(self.rejected, other.rejected),
+        }
+    }
+
+    pub fn combine(left: Self, right: Self) -> Self {
+        left.zip(right, u64::saturating_add)
+    }
+
+    pub fn since(self, previous: Self) -> Self {
+        self.zip(previous, u64::saturating_sub)
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionMetricsV2 {
@@ -149,6 +197,8 @@ pub struct ExecutionMetricsV2 {
     pub classification_cache_all_hit: Nullable<bool>,
     pub stage_deadline_exhausted_count: u64,
     pub session_restart_count: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_restart_reasons: Option<SessionRestartCounts>,
     pub session_fallback_count: u64,
     pub classify_attempt_count: u64,
     pub parse_attempt_count: u64,
@@ -168,6 +218,12 @@ pub struct ExecutionMetricsV2 {
 
 impl Validate for ExecutionMetricsV2 {
     fn validate(&self) -> Result<(), String> {
+        if self
+            .session_restart_reasons
+            .is_some_and(|counts| counts.total() != self.session_restart_count)
+        {
+            return Err("session restart reasons disagree with their total".into());
+        }
         if let Some(refill) = &self.refill_audit {
             refill.validate()?;
         }

@@ -12,7 +12,7 @@ mod excerpt;
 mod ocr;
 mod worker;
 pub use ai_daily_worker_contract::OCR_RANGE_LABEL;
-pub use worker::{is_valid_text_char, worker_hello};
+pub use worker::{is_valid_text_char, worker_hello, PdfSession};
 
 pub const BUILD_INPUTS: &str = include_str!("../../build-inputs.json");
 

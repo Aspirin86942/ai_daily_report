@@ -149,19 +149,21 @@ fn discover_files_report(
         &ignored_patterns,
         &check,
         &mut issues,
-        |path, issues| {
-            // Most eligible files are outside a report's date window. A cheap
-            // metadata prefilter avoids resolving every historical path; accepted
-            // rows still run the canonicalize + metadata path below unchanged.
+        |path, enumerated, issues| {
             check(path)?;
-            if let Ok(metadata) = fs::metadata(path) {
-                if !metadata.is_file() {
+            if !enumerated.is_file() {
+                return Ok(());
+            }
+            if matches!(metadata_in_window(enumerated, request), Ok(false)) {
+                // NTFS directory timestamps can lag writes through a different hard link.
+                // Confirm only an exclusion; admitted files get a fresh observation below.
+                #[cfg(windows)]
+                let outside = fs::metadata(path)
+                    .is_ok_and(|actual| matches!(metadata_in_window(&actual, request), Ok(false)));
+                #[cfg(not(windows))]
+                let outside = true;
+                if outside {
                     return Ok(());
-                }
-                if let Ok(in_window) = metadata_in_window(&metadata, request) {
-                    if !in_window {
-                        return Ok(());
-                    }
                 }
             }
 

@@ -1,4 +1,5 @@
 use super::*;
+use serde::Deserialize;
 
 pub(crate) fn load_evidence_snapshot(
     transaction: &Transaction<'_>,
@@ -263,22 +264,31 @@ fn load_execution_metrics(
             "persisted metric bool is invalid".to_string(),
         )),
     };
-    let refill_audit = match metadata_json {
+    let (refill_audit, session_restart_reasons) = match metadata_json {
         Some(text) => {
             let value: serde_json::Value = serde_json::from_str(text)
                 .map_err(|_| EvidenceAuditError::RunCorrupt("invalid run metadata JSON".into()))?;
-            value
+            let refill = value
                 .get("refill_audit")
                 .cloned()
                 .map(serde_json::from_value)
                 .transpose()
-                .map_err(|_| EvidenceAuditError::RunCorrupt("invalid refill audit".into()))?
+                .map_err(|_| EvidenceAuditError::RunCorrupt("invalid refill audit".into()))?;
+            let reasons = value
+                .get("session_restart_reasons")
+                .map(ai_daily_scanner_contract::SessionRestartCounts::deserialize)
+                .transpose()
+                .map_err(|_| {
+                    EvidenceAuditError::RunCorrupt("invalid session restart reasons".into())
+                })?;
+            (refill, reasons)
         }
-        None => None,
+        None => (None, None),
     };
     let metrics = ExecutionMetricsV2 {
         discovery_observed_file_count: count("discovery_observed_file_count")?,
         refill_audit,
+        session_restart_reasons,
         source_guard_content_hash_file_count: count("source_guard_content_hash_file_count")?,
         source_guard_unavailable_count: count("source_guard_unavailable_count")?,
         source_guard_bytes_read: count("source_guard_bytes_read")?,

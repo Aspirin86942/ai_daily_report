@@ -11,10 +11,10 @@ use serde::{de::value::StrDeserializer, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    artifact::ArtifactDraft,
+    artifact::{ArtifactDraft, ArtifactFileRow},
     decision::ContextFileEvidence,
     source_guard::{source_guard_kind_from_text, SourceGuardObserver, SourceGuardV2},
-    store::{CacheLookup, ScannerStore},
+    store::ScannerStore,
 };
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,6 +234,12 @@ pub(crate) fn snapshot_sources(
         .rev()
         .map(|row| (row.file_identity.as_str(), &row.reason))
         .collect();
+    let mut entries = store.lookup_snapshot_cache(
+        artifact
+            .file_rows
+            .iter()
+            .filter(|row| has_parse_payload(row)),
+    )?;
     let mut evidence = Vec::with_capacity(artifact.file_rows.len());
     for row in &artifact.file_rows {
         let file = files.get(row.file_identity.as_str())?;
@@ -250,30 +256,15 @@ pub(crate) fn snapshot_sources(
                 return None;
             }
         }
-        let (content, evidence_audit) = if row.parse_status == ParseStatus::Success
-            && row.parser_backend != "pdf_metadata_v2"
-        {
-            match store
-                .lookup_cache(
-                    &row.file_identity,
-                    &row.legacy_source_version,
-                    row.source_guard_kind.as_deref()?,
-                    row.source_guard_sha256.as_deref()?,
-                    &row.parse_profile_hash,
-                    true,
-                )
-                .ok()?
-                .decode_payload(crate::store::cache::PARSE_CACHE_PAYLOAD_VERSION)
+        let (content, evidence_audit) = if has_parse_payload(row) {
+            let entry = entries.remove(&row.file_identity)?;
+            if entry.content_sha256 != row.content_sha256
+                || entry.parser_backend != row.parser_backend
+                || entry.worker_lane != row.worker_lane
             {
-                CacheLookup::Fresh(entry)
-                    if entry.content_sha256 == row.content_sha256
-                        && entry.parser_backend == row.parser_backend
-                        && entry.worker_lane == row.worker_lane =>
-                {
-                    (entry.content, entry.evidence_audit)
-                }
-                _ => return None,
+                return None;
             }
+            (entry.content, entry.evidence_audit)
         } else {
             (String::new(), None)
         };
@@ -300,6 +291,10 @@ pub(crate) fn snapshot_sources(
         });
     }
     Some(collect_indexed_sources(&evidence, &files, profile))
+}
+
+fn has_parse_payload(row: &ArtifactFileRow) -> bool {
+    row.parse_status == ParseStatus::Success && row.parser_backend != "pdf_metadata_v2"
 }
 
 pub(crate) fn fingerprint_sources(

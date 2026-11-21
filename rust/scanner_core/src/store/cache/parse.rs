@@ -1,4 +1,19 @@
 use super::*;
+use std::collections::HashMap;
+
+fn read_cache_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<CacheEntry> {
+    Ok(CacheEntry {
+        evidence_audit: None,
+        content: row.get(0)?,
+        content_sha256: row.get(1)?,
+        parser_backend: row.get(2)?,
+        worker_lane: row.get(3)?,
+        truncated: row.get::<_, i64>(4)? != 0,
+        worker_contract_version: row.get(5)?,
+        worker_version: row.get(6)?,
+        worker_build: row.get(7)?,
+    })
+}
 
 pub(crate) fn lookup_cache(
     connection: &Connection,
@@ -10,13 +25,15 @@ pub(crate) fn lookup_cache(
     inventory_existed_before: bool,
 ) -> rusqlite::Result<CacheLookup> {
     let fresh = connection
-        .query_row(
+        .prepare_cached(
             "SELECT content, content_sha256, parser_backend, worker_lane, truncated,
                     worker_contract_version, worker_version, worker_build
              FROM parse_cache
              WHERE file_identity=?1 AND source_version=?2
                AND source_guard_kind=?3 AND source_guard_sha256=?4
                AND parse_profile_hash=?5",
+        )?
+        .query_row(
             params![
                 file_identity,
                 source_version,
@@ -24,19 +41,7 @@ pub(crate) fn lookup_cache(
                 source_guard_sha256,
                 parse_profile_hash
             ],
-            |row| {
-                Ok(CacheEntry {
-                    evidence_audit: None,
-                    content: row.get(0)?,
-                    content_sha256: row.get(1)?,
-                    parser_backend: row.get(2)?,
-                    worker_lane: row.get(3)?,
-                    truncated: row.get::<_, i64>(4)? != 0,
-                    worker_contract_version: row.get(5)?,
-                    worker_version: row.get(6)?,
-                    worker_build: row.get(7)?,
-                })
-            },
+            read_cache_entry,
         )
         .optional()?;
     if let Some(entry) = fresh {
@@ -59,6 +64,44 @@ pub(crate) fn lookup_cache(
         CachedSource::Absent => CacheMissReason::NewFile,
     };
     Ok(CacheLookup::Miss(reason))
+}
+
+pub(in crate::store) fn lookup_snapshot_cache(
+    connection: &Connection,
+    keys: &[[&str; 5]],
+) -> Option<HashMap<String, CacheEntry>> {
+    let mut entries = HashMap::with_capacity(keys.len());
+    for chunk in keys.chunks(crate::store::CACHE_TRANSACTION_BATCH_SIZE) {
+        let values = std::iter::repeat_n("(?, ?, ?, ?, ?)", chunk.len())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH requested(file_identity, source_version, source_guard_kind,
+                            source_guard_sha256, parse_profile_hash) AS (VALUES {values})
+             SELECT p.content, p.content_sha256, p.parser_backend, p.worker_lane, p.truncated,
+                    p.worker_contract_version, p.worker_version, p.worker_build, p.file_identity
+             FROM requested r CROSS JOIN parse_cache p
+             WHERE p.file_identity = r.file_identity AND p.source_version = r.source_version
+               AND p.source_guard_kind = r.source_guard_kind
+               AND p.source_guard_sha256 = r.source_guard_sha256
+               AND p.parse_profile_hash = r.parse_profile_hash"
+        );
+        let mut statement = connection.prepare_cached(&sql).ok()?;
+        let mut rows = statement
+            .query(rusqlite::params_from_iter(chunk.iter().flatten()))
+            .ok()?;
+        while let Some(row) = rows.next().ok()? {
+            let entry = read_cache_entry(row).ok()?;
+            if !entry.is_valid() {
+                return None;
+            }
+            entries.insert(
+                row.get(8).ok()?,
+                entry.decode_authenticated_payload(PARSE_CACHE_PAYLOAD_VERSION)?,
+            );
+        }
+    }
+    (entries.len() == keys.len()).then_some(entries)
 }
 
 /// spec Part 4 parse eviction `recompute_rank`：light_text=1、xlsx=2、office=2、
@@ -147,20 +190,17 @@ pub(crate) fn write_success_cache_with_check(
         ensure_mutation_deadline(deadline_open)?;
         // spec Part 4: 新 parser backend 未升级 retention policy → fail closed。
         if recompute_rank(&record.parser_backend).is_none() {
-            return Err(over_cap_error(format!(
-                "parse cache backend '{}' has no retention recompute_rank",
-                record.parser_backend
-            ))
-            .into());
+            return Err(CacheMutationError::Record(
+                "parse cache backend has no retention recompute_rank".into(),
+            ));
         }
         let (stored, stored_sha256) = stored_content(record);
         let entry_size = stored_entry_size(record, &stored);
         if entry_size > PARSE_CACHE_MAX_BYTES {
             // 单 entry 大于载体 cap → skipped receipt warning。
-            return Err(over_cap_error(format!(
+            return Err(CacheMutationError::Record(format!(
                 "parse cache entry exceeds the {PARSE_CACHE_MAX_BYTES} byte hard cap"
-            ))
-            .into());
+            )));
         }
         statement.execute(params![
             record.file_identity,

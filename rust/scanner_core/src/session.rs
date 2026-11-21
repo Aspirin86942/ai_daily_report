@@ -7,19 +7,20 @@
 //! 杀掉 pool 中其他 session。生命周期计数唯一为 `max_requests_per_session`；
 //! `batch_size` 已删除。
 
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use ai_daily_scanner_contract::NormalizedScannerSettings;
+use ai_daily_worker_contract::stdio::{FrameBuffer, MAX_RESPONSE_FRAME_BYTES};
 use ai_daily_worker_contract::{
     ClassifyRequest, ClassifyResult, ParseResult, ParserBackend, WorkerDiagnostic, WorkerHello,
-    WorkerOperation, WorkerRequest, WorkerResponse, CONTRACT, CONTRACT_VERSION, PROTOCOL_VERSION,
+    WorkerKind, WorkerOperation, WorkerResponse, CONTRACT, CONTRACT_VERSION, PROTOCOL_VERSION,
 };
 
 use crate::fallback::ParseFailure;
@@ -38,7 +39,7 @@ pub const SESSION_CLASSIFY_FRAME_LIMIT: usize = 1024 * 1024;
 pub const SESSION_STDERR_LIMIT: usize = 1024 * 1024;
 /// 读取线程的硬上限，防止单帧把父进程内存打爆；具体 frame 限制由客户端
 /// 在收到后按 operation 再次校验。
-const SESSION_STDOUT_HARD_CAP: usize = 64 * 1024 * 1024;
+const SESSION_STDOUT_HARD_CAP: usize = MAX_RESPONSE_FRAME_BYTES;
 
 /// spec Part 7.3：PDF classify 与 PDF parse 各自独立 attempt 上限 3，
 /// 一个 text PDF 依次产生两个独立 operation，禁止混成“单文件共 3 次”。
@@ -99,7 +100,9 @@ enum LineEvent {
 /// 持续排空的 stderr reader。
 struct SessionChild {
     child: Child,
-    requests: Sender<Vec<u8>>,
+    requests: Sender<FrameBuffer>,
+    written: Receiver<FrameBuffer>,
+    request_buffer: Option<FrameBuffer>,
     lines: Receiver<LineEvent>,
     stderr_budget: Arc<StderrBudget>,
     rss_tracker: WorkerRssTracker,
@@ -145,37 +148,53 @@ impl SessionChild {
                 }
             }
         };
-        let mut stdin = child.stdin.take().ok_or(SessionError::IoFailed)?;
-        let stdout = child.stdout.take().ok_or(SessionError::IoFailed)?;
-        let stderr = child.stderr.take().ok_or(SessionError::IoFailed)?;
         let (sender, receiver) = mpsc::channel();
-        // Pipe writes can block if a worker stops reading. The caller waits on
-        // the response/error channel under the same deadline as the write.
-        let (requests, frames) = mpsc::channel::<Vec<u8>>();
-        let write_errors = sender.clone();
-        thread::spawn(move || {
-            for frame in frames {
-                if stdin.write_all(&frame).and_then(|_| stdin.flush()).is_err() {
-                    let _ = write_errors.send(LineEvent::Error(SessionError::Eof));
-                    break;
-                }
-            }
-        });
-        let stdout_sender = sender.clone();
-        thread::spawn(move || read_stdout_lines(stdout, stdout_sender));
-        let stderr_budget = Arc::new(StderrBudget::default());
-        let stderr_reader_budget = stderr_budget.clone();
-        thread::spawn(move || drain_stderr(stderr, sender, stderr_reader_budget));
-        Ok(Self {
+        let (requests, frames) = mpsc::channel::<FrameBuffer>();
+        let (returned, written) = mpsc::channel();
+        let mut session = Self {
             child,
             requests,
+            written,
+            // The established request limit excludes the NDJSON newline.
+            request_buffer: Some(FrameBuffer::new(SESSION_REQUEST_FRAME_LIMIT + 1)),
             lines: receiver,
-            stderr_budget,
+            stderr_budget: Arc::new(StderrBudget::default()),
             rss_tracker: rss_tracker.clone(),
             #[cfg(windows)]
             job,
             last_activity: Instant::now(),
-        })
+        };
+        // Own the child before extracting its pipes or starting readers so a
+        // partial initialization still terminates and reaps the child.
+        let mut stdin = session.child.stdin.take().ok_or(SessionError::IoFailed)?;
+        let stdout = session.child.stdout.take().ok_or(SessionError::IoFailed)?;
+        let stderr = session.child.stderr.take().ok_or(SessionError::IoFailed)?;
+
+        // Pipe writes can block if a worker stops reading. The caller waits on
+        // the response/error channel under the same deadline as the write.
+        let write_errors = sender.clone();
+        thread::Builder::new()
+            .spawn(move || {
+                for frame in frames {
+                    if frame.write_to(&mut stdin).is_err() {
+                        let _ = write_errors.send(LineEvent::Error(SessionError::Eof));
+                        break;
+                    }
+                    if returned.send(frame).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|_| SessionError::StartFailed)?;
+        let stdout_sender = sender.clone();
+        thread::Builder::new()
+            .spawn(move || read_stdout_lines(stdout, stdout_sender))
+            .map_err(|_| SessionError::StartFailed)?;
+        let stderr_reader_budget = session.stderr_budget.clone();
+        thread::Builder::new()
+            .spawn(move || drain_stderr(stderr, sender, stderr_reader_budget))
+            .map_err(|_| SessionError::StartFailed)?;
+        Ok(session)
     }
 
     fn read_line(&self, timeout: Duration) -> Result<Vec<u8>, SessionError> {
@@ -208,22 +227,43 @@ impl SessionChild {
         serde_json::from_slice(&line).map_err(|_| SessionError::ProtocolCorruption(invalid.into()))
     }
 
-    fn write_line(&mut self, mut frame: Vec<u8>) -> Result<(), SessionError> {
-        // stderr accounting is per in-flight request. Hello uses the initial
-        // zeroed budget; every subsequent request starts a fresh 1 MiB window.
+    fn write_frame(
+        &mut self,
+        payload: &impl serde::Serialize,
+        started: Instant,
+        timeout: Duration,
+    ) -> Result<(), SessionError> {
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(SessionError::Timeout);
+        }
+        let mut frame = match self.request_buffer.take() {
+            Some(frame) => frame,
+            None => self
+                .written
+                .recv_timeout(remaining)
+                .map_err(|error| match error {
+                    RecvTimeoutError::Timeout => SessionError::Timeout,
+                    RecvTimeoutError::Disconnected => SessionError::Eof,
+                })?,
+        };
+        if let Err(error) = frame.encode(payload) {
+            self.request_buffer = Some(frame);
+            return Err(
+                if error.io_error_kind() == Some(std::io::ErrorKind::FileTooLarge) {
+                    SessionError::FrameTooLarge
+                } else {
+                    SessionError::IoFailed
+                },
+            );
+        }
+        if started.elapsed() >= timeout {
+            self.request_buffer = Some(frame);
+            return Err(SessionError::Timeout);
+        }
+        // Hello uses the initial zeroed budget. Each request gets a fresh 1 MiB window.
         self.stderr_budget.reset();
-        frame.push(b'\n');
         self.requests.send(frame).map_err(|_| SessionError::Eof)
-    }
-
-    fn recycle_due(&self, params: &SessionParams) -> bool {
-        // Idle TTL measures elapsed time since the last completed request, not
-        // process age. Peak Job memory is monotonic for one session generation,
-        // which makes it a deterministic recycle signal after a full response.
-        self.last_activity.elapsed() >= params.idle_ttl
-            || self
-                .peak_rss_bytes()
-                .is_some_and(|rss| rss >= params.rss_limit_bytes)
     }
 
     fn peak_rss_bytes(&self) -> Option<u64> {
@@ -247,7 +287,7 @@ impl Drop for SessionChild {
         self.rss_tracker
             .observe_started_child(self.peak_rss_bytes());
         #[cfg(windows)]
-        if let Some(job) = self.job.as_ref() {
+        if let Some(job) = self.job.take() {
             let _ = job.terminate(124);
         }
         let _ = self.child.kill();
@@ -405,6 +445,9 @@ impl WorkerSession {
         rss_tracker: &WorkerRssTracker,
         timeout: Duration,
     ) -> Result<Self, SessionError> {
+        if timeout.is_zero() {
+            return Err(SessionError::Timeout);
+        }
         let started = Instant::now();
         let mut child = SessionChild::spawn(command, rss_tracker)?;
         let hello: WorkerHello = child.read_frame(
@@ -448,12 +491,25 @@ impl WorkerSession {
     /// 达到任一 recycle 条件（request 数 / idle TTL）时在当前 response 完整
     /// 接收后由调用方优雅重建；这里只做只读判断。
     pub fn recycle_due(&self) -> bool {
-        let child = match self.child.as_ref() {
-            Some(child) => child,
-            None => return true,
+        self.recycle_reason().is_some()
+    }
+
+    fn recycle_reason(&self) -> Option<SessionRestartReason> {
+        let Some(child) = self.child.as_ref() else {
+            return Some(SessionRestartReason::Transport);
         };
-        self.requests_served >= self.params.max_requests_per_session
-            || child.recycle_due(&self.params)
+        if self.requests_served >= self.params.max_requests_per_session {
+            Some(SessionRestartReason::RequestLimit)
+        } else if child.last_activity.elapsed() >= self.params.idle_ttl {
+            Some(SessionRestartReason::IdleTtl)
+        } else if child
+            .peak_rss_bytes()
+            .is_some_and(|rss| rss >= self.params.rss_limit_bytes)
+        {
+            Some(SessionRestartReason::RssLimit)
+        } else {
+            None
+        }
     }
 
     pub fn is_alive(&self) -> bool {
@@ -474,19 +530,23 @@ impl WorkerSession {
         started: Instant,
         timeout: Duration,
     ) -> Result<serde_json::Value, SessionError> {
-        let envelope = WorkerRequest {
-            contract: CONTRACT.into(),
-            protocol_version: SESSION_PROTOCOL_VERSION,
-            request_id: request_id.into(),
-            operation,
-            payload: serde_json::to_value(payload).map_err(|_| SessionError::IoFailed)?,
-        };
-        let frame = serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?;
-        if frame.len() > SESSION_REQUEST_FRAME_LIMIT {
-            return Err(SessionError::FrameTooLarge);
+        #[derive(serde::Serialize)]
+        struct Request<'a, T> {
+            contract: &'static str,
+            protocol_version: u64,
+            request_id: &'a str,
+            operation: WorkerOperation,
+            payload: &'a T,
         }
+        let envelope = Request {
+            contract: CONTRACT,
+            protocol_version: SESSION_PROTOCOL_VERSION,
+            request_id,
+            operation,
+            payload,
+        };
         let child = self.child.as_mut().ok_or(SessionError::Eof)?;
-        child.write_line(frame)?;
+        child.write_frame(&envelope, started, timeout)?;
         let response: WorkerResponse = child.read_frame(
             timeout.saturating_sub(started.elapsed()),
             capture_limit,

@@ -8,6 +8,8 @@ pub enum StoreError {
     CacheOpen { detail: String },
     #[error("scanner database transaction failed")]
     CacheWrite { detail: String },
+    #[error("scanner cache record was rejected: {detail}")]
+    CacheRecord { detail: String },
     #[error("another scanner run owns the database lease")]
     ScanAlreadyRunning,
     #[error("this request is already running")]
@@ -39,9 +41,10 @@ impl StoreError {
         match self {
             Self::InvalidRequest(_) => ErrorCode::InvalidRequest,
             Self::CacheOpen { .. } => ErrorCode::CacheOpenFailed,
-            Self::CacheWrite { .. } | Self::BusyTimeoutRestore { .. } | Self::LeaseLost => {
-                ErrorCode::CacheWriteFailed
-            }
+            Self::CacheWrite { .. }
+            | Self::CacheRecord { .. }
+            | Self::BusyTimeoutRestore { .. }
+            | Self::LeaseLost => ErrorCode::CacheWriteFailed,
             Self::ScanAlreadyRunning => ErrorCode::ScanAlreadyRunning,
             Self::RequestInProgress => ErrorCode::RequestInProgress,
             Self::RequestIdConflict => ErrorCode::RequestIdConflict,

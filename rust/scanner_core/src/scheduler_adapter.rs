@@ -81,6 +81,7 @@ fn map_store_error(error: StoreError) -> CachePortError {
         StoreError::WorkDeadlineExhausted => CachePortError::DeadlineExhausted {
             detail: error.to_string(),
         },
+        StoreError::CacheRecord { detail } => CachePortError::Record { detail },
         _ => CachePortError::Store {
             detail: error.to_string(),
         },

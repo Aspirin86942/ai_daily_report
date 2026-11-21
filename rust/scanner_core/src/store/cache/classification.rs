@@ -278,10 +278,9 @@ pub(crate) fn write_success_classification_cache_with_check(
         ensure_mutation_deadline(deadline_open)?;
         let entry_size = classification_entry_size_bytes(record);
         if entry_size > CLASSIFICATION_CACHE_MAX_BYTES {
-            return Err(over_cap_error(format!(
+            return Err(CacheMutationError::Record(format!(
                 "classification cache entry exceeds the {CLASSIFICATION_CACHE_MAX_BYTES} byte hard cap"
-            ))
-            .into());
+            )));
         }
         statement.execute(params![
             record.file_identity,

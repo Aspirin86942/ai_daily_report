@@ -399,6 +399,10 @@ pub fn configure_connection(connection: &Connection) -> Result<(), SchemaError> 
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.execute_batch("PRAGMA auto_vacuum = INCREMENTAL;")?;
     let _: String = connection.query_row("PRAGMA journal_mode = WAL", [], |row| row.get(0))?;
+    restore_work_synchronous(connection)
+}
+
+pub(super) fn restore_work_synchronous(connection: &Connection) -> Result<(), SchemaError> {
     connection.pragma_update(None, "synchronous", "NORMAL")?;
     Ok(())
 }

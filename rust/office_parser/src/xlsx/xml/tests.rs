@@ -76,6 +76,49 @@ fn expired_worksheet_deadline_emits_no_unread_rows() {
 }
 
 #[test]
+fn xml_deadline_checks_long_tokens_rows_and_even_tiny_events() {
+    use std::time::Duration;
+
+    let mut clock = XmlDeadline::new(Some(Instant::now() + Duration::from_secs(60)));
+    assert!(!clock.expired(0, true));
+    clock.end = Some(Instant::now());
+    for pos in 1..=255 {
+        assert!(!clock.expired(pos, false));
+    }
+    assert!(clock.expired(256, false));
+    assert!(clock.expired(256 + 16 * 1024, false));
+    assert!(clock.expired(257 + 16 * 1024, true));
+}
+
+#[test]
+fn timeout_before_a_long_cell_keeps_only_the_previous_complete_row() {
+    let xml = format!(
+        "<worksheet><row r='1'><c><v>7</v></c></row>\
+        <row r='2'><c><v>{}</v></c></row></worksheet>",
+        "x".repeat(80 * 1024)
+    );
+    let deadline = Instant::now() + std::time::Duration::from_secs(1);
+    let mut emitted = Vec::new();
+    let limited = visit_sheet_rows(
+        xml.as_bytes(),
+        10,
+        10,
+        false,
+        Some(deadline),
+        None,
+        |n, _| {
+            emitted.push(n);
+            // Simulate time consumed handling an already completed row.
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()));
+            Ok(true)
+        },
+    )
+    .unwrap();
+    assert!(limited);
+    assert_eq!(emitted, [1]);
+}
+
+#[test]
 fn wrapped_vertical_sum_is_a_total_but_horizontal_sum_is_not() {
     assert!(vertical_sum_formula("ROUND(SUM($B$2:$B$8),2)", 9));
     assert!(vertical_sum_formula("SUBTOTAL(109,B2:B8)", 9));

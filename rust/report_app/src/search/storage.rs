@@ -149,13 +149,10 @@ pub(super) fn insert(
     kind: &str,
     key: &str,
     fragment: Fragment,
+    utf8: bool,
 ) -> rusqlite::Result<()> {
     let title = terms::encode(&fragment.title);
     let body = terms::encode(&fragment.body);
-    // phrase_content slices a BLOB in the database encoding. Rust byte offsets are UTF-8.
-    let utf8 = index
-        .prepare_cached("PRAGMA encoding")?
-        .query_row([], |r| Ok(r.get_ref(0)?.as_str()? == "UTF-8"))?;
     let range_body = if utf8 { body.as_str() } else { "" };
     let ordinary_pad =
         ordinary_padding(&fragment.title, &title) + ordinary_padding(&fragment.body, &body);

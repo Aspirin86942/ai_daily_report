@@ -499,6 +499,106 @@ fn date_bucket_for_ms_is_utc_date() {
 }
 
 #[test]
+fn snapshot_cache_batch_uses_every_key_field_and_authenticates_each_entry_once() {
+    use ai_daily_worker_contract::{
+        AuditTextBuilder, ContentUnitKind, SourceRange, SourceRangeUnit,
+    };
+
+    let mut connection = fresh_v2_db();
+    let version = "mtime_ns=1:size=2";
+    let profile = "a".repeat(64);
+    let records = ["fixture:b", "fixture:a"].map(|identity| {
+        insert_inventory(&connection, identity, version);
+        let mut record = parse_record(identity, version, &profile);
+        let mut builder = AuditTextBuilder::new(200, "text");
+        let range = SourceRange::new(SourceRangeUnit::TextChar, 0, identity.len() as u64, None);
+        builder.read(range.clone());
+        builder.push(identity, ContentUnitKind::Paragraph, vec![range]);
+        let (text, audit, _) = builder.finish();
+        record.content_sha256 = sha256_hex(text.as_bytes());
+        record.content = text;
+        record.cache_payload_version = 1;
+        record.evidence_audit = Some(audit);
+        record
+    });
+    let transaction = connection.transaction().unwrap();
+    write_success_cache(&transaction, 1, &records).unwrap();
+    transaction.commit().unwrap();
+    let keys = records.each_ref().map(|record| {
+        [
+            record.file_identity.as_str(),
+            record.source_version.as_str(),
+            record.source_guard_kind.as_str(),
+            record.source_guard_sha256.as_str(),
+            record.parse_profile_hash.as_str(),
+        ]
+    });
+
+    TEST_OUTER_CACHE_VALIDATIONS.with(|count| count.set(0));
+    let entries = lookup_snapshot_cache(&connection, &keys).unwrap();
+    assert_eq!(
+        TEST_OUTER_CACHE_VALIDATIONS.with(|count| count.get()),
+        records.len()
+    );
+    for record in &records {
+        let entry = &entries[&record.file_identity];
+        assert_eq!(entry.content_sha256, record.content_sha256);
+        assert_eq!(entry.content, record.content);
+        assert_eq!(entry.evidence_audit, record.evidence_audit);
+    }
+
+    let other_guard = "b".repeat(64);
+    let other_profile = "c".repeat(64);
+    for (column, other_value) in [
+        "fixture:missing",
+        "mtime_ns=2:size=2",
+        "windows_file_id_change_time_v1",
+        &other_guard,
+        &other_profile,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut different = keys;
+        different[0][column] = other_value;
+        assert!(
+            lookup_snapshot_cache(&connection, &different).is_none(),
+            "key column {column}"
+        );
+    }
+
+    for record in &records {
+        let (stored, outer_digest) = stored_content(record);
+        // Appending whitespace preserves the decoded JSON and invalidates only its outer digest.
+        connection
+            .execute(
+                "UPDATE parse_cache SET content = content || ' ' WHERE file_identity = ?1",
+                [&record.file_identity],
+            )
+            .unwrap();
+        assert!(lookup_snapshot_cache(&connection, &keys).is_none());
+        let invalid_inner = stored.replace(&record.content_sha256, &other_guard);
+        connection
+            .execute(
+                "UPDATE parse_cache SET content = ?1, content_sha256 = ?2 WHERE file_identity = ?3",
+                params![
+                    invalid_inner,
+                    sha256_hex(invalid_inner.as_bytes()),
+                    record.file_identity
+                ],
+            )
+            .unwrap();
+        assert!(lookup_snapshot_cache(&connection, &keys).is_none());
+        connection
+            .execute(
+                "UPDATE parse_cache SET content = ?1, content_sha256 = ?2 WHERE file_identity = ?3",
+                params![stored, outer_digest, record.file_identity],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
 fn versioned_payload_preserves_positions_and_counts_storage_bytes() {
     use ai_daily_worker_contract::{
         AuditTextBuilder, ContentUnitKind, SourceRange, SourceRangeUnit,
@@ -532,6 +632,12 @@ fn versioned_payload_preserves_positions_and_counts_storage_bytes() {
     assert_eq!(decoded.content, text);
     assert_eq!(decoded.content_sha256, sha256_hex(text.as_bytes()));
     assert_eq!(decoded.evidence_audit, Some(audit));
+    let mut damaged_outer = entry.clone();
+    damaged_outer.content.push(' ');
+    assert_eq!(
+        CacheLookup::Fresh(damaged_outer).decode_payload(1),
+        CacheLookup::Miss(CacheMissReason::EntryAbsentOrEvicted)
+    );
     let mut damaged: serde_json::Value = serde_json::from_str(&stored).unwrap();
     damaged.as_object_mut().unwrap().remove("evidence_audit");
     let mut lost_metadata = entry.clone();

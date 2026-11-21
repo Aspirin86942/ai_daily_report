@@ -821,16 +821,39 @@ struct TestCache {
     classification: HashMap<String, ClassificationCacheLookup>,
     existed: HashSet<String>,
     parse_lookups: Arc<Mutex<u64>>,
+    parse_batches: Arc<Mutex<Vec<(u64, usize)>>>,
+    classification_batches: Arc<Mutex<Vec<(u64, usize)>>>,
+    rejected_writes: HashSet<String>,
+    global_write_error: Option<CachePortError>,
+    advance_after_write: Option<(FakeClock, u64)>,
     /// Captured classification-cache writes (verified in tests).
     classification_writes: Arc<Mutex<Vec<ClassificationCacheWriteRecord>>>,
     /// When set, `lookup_classification` returns this error (run-level failure).
     classification_lookup_error: Option<CachePortError>,
     /// When set, the optional cache-access touch returns this bounded failure.
     touch_error: Option<CachePortError>,
-    touch_calls: Arc<Mutex<u64>>,
+    touch_calls: Arc<Mutex<Vec<u64>>>,
 }
 
 impl TestCache {
+    fn check_writes<'a>(
+        &self,
+        mut identities: impl Iterator<Item = &'a String>,
+    ) -> Result<(), CachePortError> {
+        if let Some(error) = &self.global_write_error {
+            return Err(error.clone());
+        }
+        if identities.any(|identity| self.rejected_writes.contains(identity)) {
+            return Err(CachePortError::Record {
+                detail: "one cache record was rejected".to_string(),
+            });
+        }
+        if let Some((clock, ms)) = &self.advance_after_write {
+            clock.advance(*ms);
+        }
+        Ok(())
+    }
+
     fn fresh_parse(_identity: &str, content: &str) -> CacheEntry {
         CacheEntry {
             evidence_audit: None,
@@ -899,19 +922,24 @@ impl CachePort for TestCache {
             )))
     }
 
-    fn write_parse(
-        &self,
-        _now_ms: u64,
-        _records: &[CacheWriteRecord],
-    ) -> Result<(), CachePortError> {
-        Ok(())
+    fn write_parse(&self, now_ms: u64, records: &[CacheWriteRecord]) -> Result<(), CachePortError> {
+        self.parse_batches
+            .lock()
+            .unwrap()
+            .push((now_ms, records.len()));
+        self.check_writes(records.iter().map(|record| &record.file_identity))
     }
 
     fn write_classification(
         &self,
-        _now_ms: u64,
+        now_ms: u64,
         records: &[ClassificationCacheWriteRecord],
     ) -> Result<(), CachePortError> {
+        self.classification_batches
+            .lock()
+            .unwrap()
+            .push((now_ms, records.len()));
+        self.check_writes(records.iter().map(|record| &record.file_identity))?;
         self.classification_writes
             .lock()
             .unwrap()
@@ -921,11 +949,11 @@ impl CachePort for TestCache {
 
     fn touch_access(
         &self,
-        _now_ms: u64,
+        now_ms: u64,
         _parse_hits: &[String],
         _classification_hits: &[String],
     ) -> Result<(), CachePortError> {
-        *self.touch_calls.lock().unwrap() += 1;
+        self.touch_calls.lock().unwrap().push(now_ms);
         match &self.touch_error {
             Some(error) => Err(error.clone()),
             None => Ok(()),
@@ -1026,68 +1054,67 @@ impl PdfClassifierPort for RetryingClassifier {
 // one file at a time.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct ConcurrencyClassifier {
-    active: Arc<std::sync::atomic::AtomicUsize>,
-    max_seen: Arc<std::sync::atomic::AtomicUsize>,
+#[derive(Debug, Default)]
+struct RollingState {
+    active: usize,
+    max_active: usize,
+    started: Vec<u8>,
 }
 
-impl ConcurrencyClassifier {
-    fn new() -> Self {
-        Self {
-            active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            max_seen: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+#[derive(Debug, Clone, Default)]
+struct RollingWork(Arc<(Mutex<RollingState>, std::sync::Condvar)>);
+
+impl RollingWork {
+    fn run(&self, path: &str) {
+        let id = path.rsplit('\\').next().unwrap().as_bytes()[0];
+        let (state, changed) = self.0.as_ref();
+        let mut state = state.lock().unwrap();
+        state.active += 1;
+        state.max_active = state.max_active.max(state.active);
+        state.started.push(id);
+        changed.notify_all();
+        let waiting_for = match id {
+            b'a' => Some(b'c'),
+            b'b' => Some(b'a'),
+            _ => None,
+        };
+        if let Some(other) = waiting_for {
+            let (next, timeout) = changed
+                .wait_timeout_while(state, Duration::from_secs(5), |state| {
+                    !state.started.contains(&other)
+                })
+                .unwrap();
+            state = next;
+            assert!(
+                !timeout.timed_out(),
+                "task {id} did not overlap task {other}"
+            );
         }
+        state.active -= 1;
+    }
+
+    fn assert_rolled(&self) {
+        let state = self.0 .0.lock().unwrap();
+        assert_eq!(state.max_active, 2);
+        assert_eq!(state.started.last(), Some(&b'c'));
+        assert_eq!(state.started.len(), 3);
     }
 }
 
-impl PdfClassifierPort for ConcurrencyClassifier {
+impl PdfClassifierPort for RollingWork {
     fn classify_pdf(
         &self,
         request: &ClassifyOperation,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
-        let now = self
-            .active
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        self.max_seen
-            .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
-        // Give concurrent wave threads time to overlap.
-        std::thread::sleep(Duration::from_millis(30));
-        self.active
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.run(&request.file_path);
         PdfClassifierExecution::test_execution(Ok(no_text_result(&request.file_path)))
     }
 }
 
-#[derive(Debug, Clone)]
-struct ConcurrencyParser {
-    active: Arc<std::sync::atomic::AtomicUsize>,
-    max_seen: Arc<std::sync::atomic::AtomicUsize>,
-}
-
-impl ConcurrencyParser {
-    fn new() -> Self {
-        Self {
-            active: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            max_seen: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-        }
-    }
-}
-
-impl ParserPort for ConcurrencyParser {
+impl ParserPort for RollingWork {
     fn parse(&self, request: &ParseRequest) -> ParseResult {
-        let now = self
-            .active
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1;
-        self.max_seen
-            .fetch_max(now, std::sync::atomic::Ordering::SeqCst);
-        // Give concurrent wave threads time to overlap.
-        std::thread::sleep(Duration::from_millis(30));
-        self.active
-            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        self.run(&request.file.path);
         success_parse(&request.file.file_identity, &request.file.path, "evidence")
     }
 }
@@ -1662,12 +1689,12 @@ fn not_parsed_counts_are_derived_not_error() {
 
 /// Advance simulated time only once both first-wave tasks are in flight.
 #[derive(Debug, Default)]
-struct FirstWave {
+struct FirstPair {
     started: Mutex<usize>,
     changed: std::sync::Condvar,
 }
 
-impl FirstWave {
+impl FirstPair {
     fn wait(&self) {
         let mut started = self.started.lock().unwrap();
         *started += 1;
@@ -1687,7 +1714,7 @@ impl FirstWave {
 /// runtime NotParsed in the scheduler.
 #[derive(Debug, Clone)]
 struct DeadlineParser {
-    first_wave: Arc<FirstWave>,
+    first_pair: Arc<FirstPair>,
     clock: Arc<Mutex<u64>>,
     work_deadline: u64,
     advance_full: bool,
@@ -1696,7 +1723,7 @@ struct DeadlineParser {
 
 impl ParserPort for DeadlineParser {
     fn parse(&self, request: &ParseRequest) -> ParseResult {
-        self.first_wave.wait();
+        self.first_pair.wait();
         let identity = request.file.file_identity.clone();
         let path = request.file.path.clone();
         let advance = if self.advance_full {
@@ -1744,7 +1771,7 @@ impl ParserPort for DeadlineParser {
 }
 
 #[test]
-fn file_guards_cannot_start_a_parse_wave_after_the_deadline() {
+fn file_guards_cannot_start_a_parse_after_the_deadline() {
     struct SlowGuard(FakeClock);
     impl GuardVerifier for SlowGuard {
         fn verify(&self, _: &str, _: &ai_daily_scanner_core::source_guard::SourceGuardV2) -> bool {
@@ -1784,12 +1811,8 @@ fn file_guards_cannot_start_a_parse_wave_after_the_deadline() {
 
 #[test]
 fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
-    // 3 text files; each parse advances the clock 2000ms. With the bounded
-    // parallel executor (max_workers=2) the first wave (a.md, b.md)
-    // completes before the WorkDeadline (3000ms); when the scheduler tries to
-    // start the NEXT batch the deadline has passed -> c.md is queued -> runtime
-    // NotParsed and the run-level trigger is recorded once. Run is Partial,
-    // NEVER snapshot. (P4-T0: the deadline check is per-batch, not per-file.)
+    // Both initial parsers start before the fake clock advances. The first
+    // completion reaches the deadline, so c.md remains queued.
     let mut profile = normalized_settings(ReportMode::Daily);
     profile.total_deadline_ms = 5_000; // work deadline = 3_000
     profile.execution.max_workers = 2;
@@ -1816,11 +1839,11 @@ fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
     )
     .expect("input");
     let parser = DeadlineParser {
-        first_wave: Arc::default(),
+        first_pair: Arc::default(),
         clock: clock.now.clone(),
         work_deadline: input.work_deadline_ms,
         advance_full: false,
-        step_ms: 2_000,
+        step_ms: 3_000,
     };
     let scheduler = BudgetedContextScheduler::new(
         Box::new(TestClassifier {
@@ -1833,6 +1856,8 @@ fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
     );
     let outcome = scheduler.execute(input).expect("deadline outcome");
 
+    assert_eq!(outcome.execution_metrics.parse_attempt_count, 2);
+    assert!(outcome.parse_cache_receipts.is_empty());
     assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
     assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
     let context = outcome.context.expect("partial context");
@@ -1906,7 +1931,7 @@ fn work_deadline_before_any_parse_forms_error_run_without_snapshot() {
     )
     .expect("input");
     let parser = DeadlineParser {
-        first_wave: Arc::default(),
+        first_pair: Arc::default(),
         clock: clock.now.clone(),
         work_deadline: input.work_deadline_ms,
         advance_full: true,
@@ -1966,9 +1991,9 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
     profile.parse.pdf.max_pages = 2;
     profile.execution.max_workers = 2;
     let discovery = vec![
-        discovered("one.pdf", ".pdf", 128),
-        discovered("two.pdf", ".pdf", 128),
-        discovered("three.pdf", ".pdf", 128),
+        discovered("a.pdf", ".pdf", 128),
+        discovered("b.pdf", ".pdf", 128),
+        discovered("c.pdf", ".pdf", 128),
     ];
     let clock = FakeClock::new();
     let input = ScheduledRunInput::new(
@@ -1990,10 +2015,9 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
         &clock,
     )
     .expect("input");
-    // The first classification advances the clock past the WorkDeadline, so the
-    // second and third PDFs' classifiers are never started.
+    // Both initial requests start. The first completion closes the launch budget.
     let classifier = ClockAdvancingClassifier {
-        first_wave: Arc::default(),
+        first_pair: Arc::default(),
         clock: clock.now.clone(),
     };
     let scheduler = BudgetedContextScheduler::new(
@@ -2011,11 +2035,14 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
     assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
     assert_eq!(
         outcome.execution_metrics.classify_attempt_count, 2,
-        "only the first bounded wave was actually started"
+        "only the first two nominal candidates started"
     );
+    assert_eq!(outcome.classifications.len(), 2);
+    assert!(!outcome.classifications.contains_key("fixture:c.pdf"));
+    assert!(outcome.classification_cache_receipts.is_empty());
     // Error run: no context payload, no snapshot.
     assert!(outcome.context.is_none());
-    for rel in ["one.pdf", "two.pdf", "three.pdf"] {
+    for rel in ["a.pdf", "b.pdf", "c.pdf"] {
         let file = outcome
             .file_results
             .iter()
@@ -2264,7 +2291,7 @@ fn classifier_pre_and_post_source_changes_keep_source_changed_semantics() {
 
 #[derive(Debug, Clone)]
 struct ClockAdvancingClassifier {
-    first_wave: Arc<FirstWave>,
+    first_pair: Arc<FirstPair>,
     clock: Arc<Mutex<u64>>,
 }
 
@@ -2274,7 +2301,7 @@ impl PdfClassifierPort for ClockAdvancingClassifier {
         request: &ClassifyOperation,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
-        self.first_wave.wait();
+        self.first_pair.wait();
         let mut now = self.clock.lock().unwrap();
         *now += 4_000;
         drop(now);
@@ -2283,42 +2310,122 @@ impl PdfClassifierPort for ClockAdvancingClassifier {
 }
 
 #[test]
-fn cache_commit_skipped_after_work_deadline() {
-    // A successful parse after the WorkDeadline is not committed to the parse
-    // cache (the receipt is not authoritative), but a completed pre-deadline
-    // result keeps its state and the receipt list only carries pre-deadline
-    // writes. Here every parse completes before the deadline, so the receipt
-    // list is non-empty and the run is Success.
-    let profile = normalized_settings(ReportMode::Daily);
-    let discovery = vec![discovered("notes/a.md", ".md", 64)];
-    let parser = TestParser {
-        results: HashMap::from([(
-            "fixture:notes/a.md".to_string(),
-            success_parse("fixture:notes/a.md", "", "evidence"),
-        )]),
-    };
+fn cache_batches_isolate_record_failures_without_losing_other_receipts() {
     let clock = FakeClock::new();
+    let discovery = vec![
+        discovered("keep.md", ".md", 64),
+        discovered("reject.md", ".md", 64),
+        discovered("keep.pdf", ".pdf", 128),
+        discovered("reject.pdf", ".pdf", 128),
+    ];
+    let cache = TestCache {
+        rejected_writes: HashSet::from(["fixture:reject.md".into(), "fixture:reject.pdf".into()]),
+        ..TestCache::default()
+    };
+    let parse_batches = cache.parse_batches.clone();
+    let classification_batches = cache.classification_batches.clone();
+    let parser = TestParser {
+        results: discovery
+            .iter()
+            .filter(|file| file.extension == ".md")
+            .map(|file| {
+                (
+                    file.file_identity.clone(),
+                    success_parse(&file.file_identity, &file.path, "cached text"),
+                )
+            })
+            .collect(),
+    };
+    let classifier = TestClassifier {
+        results: discovery
+            .iter()
+            .filter(|file| file.extension == ".pdf")
+            .map(|file| (file.path.clone(), no_text_result(&file.path)))
+            .collect(),
+    };
     let outcome = run_scheduler(
         &clock,
-        TestCache::default(),
+        cache,
         parser,
+        classifier,
+        discovery,
+        normalized_settings(ReportMode::Daily),
+    )
+    .unwrap();
+
+    for batches in [parse_batches, classification_batches] {
+        let sizes: Vec<_> = batches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|&(_, count)| count)
+            .collect();
+        assert_eq!(sizes, [2, 1, 1]);
+    }
+    assert_eq!(outcome.parse_cache_receipts.len(), 1);
+    assert_eq!(
+        outcome.parse_cache_receipts[0].file_identity,
+        "fixture:keep.md"
+    );
+    assert_eq!(outcome.classification_cache_receipts.len(), 1);
+    assert_eq!(
+        outcome.classification_cache_receipts[0].file_identity,
+        "fixture:keep.pdf"
+    );
+    let skipped: HashSet<_> = outcome
+        .diagnostics
+        .iter()
+        .filter(|record| record.diagnostic.error_code == ErrorCode::CacheWriteFailed)
+        .filter_map(|record| record.diagnostic.file_path.0.as_deref())
+        .collect();
+    assert_eq!(
+        skipped,
+        HashSet::from([r"C:\corpus\reject.md", r"C:\corpus\reject.pdf"])
+    );
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+    assert_eq!(outcome.context.unwrap().summary.success_count, 4);
+}
+
+#[test]
+fn cache_commit_receipt_survives_crossing_the_work_deadline() {
+    let clock = FakeClock::new();
+    let mut profile = normalized_settings(ReportMode::Daily);
+    profile.total_deadline_ms = 5_000;
+    let file = discovered("committed.md", ".md", 64);
+    let cache = TestCache {
+        advance_after_write: Some((clock.clone(), 3_000)),
+        ..TestCache::default()
+    };
+    let writes = cache.parse_batches.clone();
+    let outcome = run_scheduler(
+        &clock,
+        cache,
+        TestParser {
+            results: HashMap::from([(
+                file.file_identity.clone(),
+                success_parse(&file.file_identity, &file.path, "kept"),
+            )]),
+        },
         TestClassifier {
             results: HashMap::new(),
         },
-        discovery,
+        vec![file],
         profile,
     )
-    .expect("outcome");
-    assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
-    // One successful parse produced exactly one committed receipt.
+    .unwrap();
+
+    assert_eq!(writes.lock().unwrap().len(), 1);
     assert_eq!(outcome.parse_cache_receipts.len(), 1);
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+    assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
 }
 
 #[test]
 fn cache_access_touch_failure_is_audited_instead_of_silently_ignored() {
     let profile = normalized_settings(ReportMode::Daily);
     let discovery = vec![discovered("notes/a.md", ".md", 64)];
-    let touches = Arc::new(Mutex::new(0));
+    let touches = Arc::new(Mutex::new(Vec::new()));
+    let before = ai_daily_scanner_core::store::current_time_millis().unwrap();
     let cache = TestCache {
         parse: HashMap::from([(
             "fixture:notes/a.md".to_string(),
@@ -2345,7 +2452,13 @@ fn cache_access_touch_failure_is_audited_instead_of_silently_ignored() {
     )
     .expect("outcome");
 
-    assert_eq!(*touches.lock().unwrap(), 1);
+    let touches = touches.lock().unwrap();
+    assert_eq!(touches.len(), 1);
+    assert!(
+        (before..=ai_daily_scanner_core::store::current_time_millis().unwrap())
+            .contains(&touches[0])
+    );
+
     assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
     assert!(outcome.diagnostics.iter().any(|record| {
         record.diagnostic.error_code == ErrorCode::CacheWriteFailed
@@ -2648,67 +2761,355 @@ fn classifier_unknown_maps_timeout_vs_crash() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn classification_executes_in_parallel_waves() {
+fn classification_refills_a_free_slot_while_nominal_first_is_running() {
     let mut profile = normalized_settings(ReportMode::Daily);
     profile.execution.max_workers = 2;
     let discovery = vec![
-        discovered("one.pdf", ".pdf", 128),
-        discovered("two.pdf", ".pdf", 128),
-        discovered("three.pdf", ".pdf", 128),
+        discovered("c.pdf", ".pdf", 128),
+        discovered("b.pdf", ".pdf", 128),
+        discovered("a.pdf", ".pdf", 128),
     ];
-    let classifier = ConcurrencyClassifier::new();
-    let max_seen = classifier.max_seen.clone();
     let clock = FakeClock::new();
+    let classifier = RollingWork::default();
+    let cache = TestCache::default();
+    let writes = cache.classification_batches.clone();
+    let before = ai_daily_scanner_core::store::current_time_millis().unwrap();
     let outcome = run_scheduler(
         &clock,
-        TestCache::default(),
+        cache,
         TestParser {
             results: HashMap::new(),
         },
-        classifier,
+        classifier.clone(),
         discovery,
         profile,
     )
-    .expect("outcome");
-    // All PDFs classified no-text -> metadata-only -> Success.
+    .unwrap();
+    classifier.assert_rolled();
     assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
-    assert!(
-        max_seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-        "classification must run in parallel waves (max_workers=2), saw max {}",
-        max_seen.load(std::sync::atomic::Ordering::SeqCst)
+    assert_eq!(outcome.execution_metrics.classify_attempt_count, 3);
+    assert_eq!(
+        outcome
+            .execution_metrics
+            .confirmed_run_inspected_pages_total,
+        6
     );
+    assert_eq!(outcome.execution_metrics.parse_attempt_count, 0);
+    assert_eq!(
+        outcome
+            .classification_cache_receipts
+            .iter()
+            .map(|entry| entry.file_identity.as_str())
+            .collect::<Vec<_>>(),
+        ["fixture:a.pdf", "fixture:b.pdf", "fixture:c.pdf"]
+    );
+    assert_one_cache_batch(&writes, before, 3);
 }
 
 #[test]
-fn parse_executes_in_parallel_waves() {
+fn parsing_refills_a_free_slot_while_nominal_first_is_running() {
     let mut profile = normalized_settings(ReportMode::Daily);
     profile.execution.max_workers = 2;
     let discovery = vec![
-        discovered("notes/a.md", ".md", 64),
-        discovered("notes/b.md", ".md", 64),
-        discovered("notes/c.md", ".md", 64),
-        discovered("notes/d.md", ".md", 64),
+        discovered("c.md", ".md", 64),
+        discovered("b.md", ".md", 64),
+        discovered("a.md", ".md", 64),
     ];
-    let parser = ConcurrencyParser::new();
-    let max_seen = parser.max_seen.clone();
     let clock = FakeClock::new();
+    let parser = RollingWork::default();
+    let cache = TestCache::default();
+    let writes = cache.parse_batches.clone();
+    let before = ai_daily_scanner_core::store::current_time_millis().unwrap();
     let outcome = run_scheduler(
         &clock,
-        TestCache::default(),
-        parser,
+        cache,
+        parser.clone(),
         TestClassifier {
             results: HashMap::new(),
         },
         discovery,
         profile,
     )
-    .expect("outcome");
+    .unwrap();
+    parser.assert_rolled();
     assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
-    assert!(
-        max_seen.load(std::sync::atomic::Ordering::SeqCst) >= 2,
-        "parse must run in parallel waves (max_workers=2), saw max {}",
-        max_seen.load(std::sync::atomic::Ordering::SeqCst)
+    assert_eq!(outcome.execution_metrics.parse_attempt_count, 3);
+    assert_eq!(outcome.context.as_ref().unwrap().summary.success_count, 3);
+    assert_eq!(
+        outcome
+            .parse_cache_receipts
+            .iter()
+            .map(|entry| entry.file_identity.as_str())
+            .collect::<Vec<_>>(),
+        ["fixture:a.md", "fixture:b.md", "fixture:c.md"]
     );
+    assert_one_cache_batch(&writes, before, 3);
+}
+
+fn assert_one_cache_batch(batches: &Mutex<Vec<(u64, usize)>>, before: u64, count: usize) {
+    let batches = batches.lock().unwrap();
+    assert_eq!(batches.len(), 1);
+    let (timestamp, actual_count) = batches[0];
+    assert_eq!(actual_count, count);
+    assert!(
+        (before..=ai_daily_scanner_core::store::current_time_millis().unwrap())
+            .contains(&timestamp)
+    );
+}
+
+#[derive(Clone, Default)]
+struct MixedLaneParser {
+    started: Arc<(Mutex<Vec<u8>>, std::sync::Condvar)>,
+    parallel: bool,
+    expire: Option<(u8, FakeClock)>,
+}
+
+impl ParserPort for MixedLaneParser {
+    fn parse(&self, request: &ParseRequest) -> ParseResult {
+        let id = request.file.path.rsplit('\\').next().unwrap().as_bytes()[0];
+        let (started, changed) = self.started.as_ref();
+        let mut started = started.lock().unwrap();
+        started.push(id);
+        changed.notify_all();
+
+        if self.parallel && id == b'a' {
+            let (next, timeout) = changed
+                .wait_timeout_while(started, Duration::from_secs(5), |started| {
+                    match &self.expire {
+                        Some((_, clock)) => clock.now_ms() < 3_000,
+                        None => !started.contains(&b'c'),
+                    }
+                })
+                .unwrap();
+            started = next;
+            assert!(
+                !timeout.timed_out(),
+                "first Office job never got a second lane"
+            );
+        }
+        let expire = self.expire.as_ref().filter(|(target, _)| *target == id);
+        if self.parallel && (request.route == RouteKind::Pdf || expire.is_some()) {
+            let (next, timeout) = changed
+                .wait_timeout_while(started, Duration::from_secs(5), |started| {
+                    !started.contains(&b'a')
+                })
+                .unwrap();
+            started = next;
+            assert!(!timeout.timed_out(), "first Office job did not start");
+        }
+        if let Some((_, clock)) = expire {
+            clock.advance(3_000);
+            changed.notify_all();
+        }
+        drop(started);
+
+        let mut result = success_parse(&request.file.file_identity, &request.file.path, "evidence");
+        result.parser_backend = request.route.backend().to_string();
+        result.worker_lane = request.route.worker_lane().to_string();
+        if request.route != RouteKind::LightText {
+            result.parse_transport = ParseTransport::Session;
+        }
+        result
+    }
+}
+
+#[test]
+fn mixed_parse_keeps_one_slot_for_each_lane_then_lends_an_idle_slot() {
+    for (workers, expires) in [(1, false), (2, false), (2, true)] {
+        let mut profile = normalized_settings(ReportMode::Daily);
+        profile.execution.max_workers = workers;
+        profile.total_deadline_ms = 5_000;
+        let clock = FakeClock::new();
+        let pdf = discovered("d.pdf", ".pdf", 1024);
+        let parser = MixedLaneParser {
+            parallel: workers == 2,
+            expire: expires.then(|| (b'd', clock.clone())),
+            ..MixedLaneParser::default()
+        };
+        let outcome = run_scheduler(
+            &clock,
+            TestCache::default(),
+            parser.clone(),
+            TestClassifier {
+                results: HashMap::from([(pdf.path.clone(), text_result(&pdf.path))]),
+            },
+            vec![
+                pdf,
+                discovered("e.md", ".md", 64),
+                discovered("c.docx", ".docx", 128),
+                discovered("b.docx", ".docx", 128),
+                discovered("a.docx", ".docx", 128),
+            ],
+            profile,
+        )
+        .unwrap();
+        let started = parser.started.0.lock().unwrap();
+        if workers == 1 {
+            assert_eq!(&started[..], b"abcde");
+        } else {
+            assert!(matches!(&started[..2], b"ad" | b"da"));
+        }
+        let context = outcome.context.as_ref().unwrap();
+        if expires {
+            assert_eq!(started.len(), 2);
+            assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+            assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
+            assert_eq!(outcome.execution_metrics.parse_attempt_count, 2);
+            assert_eq!(outcome.classification_cache_receipts.len(), 1);
+            assert!(outcome.parse_cache_receipts.is_empty());
+            let runtime_omissions: Vec<_> = context
+                .decisions
+                .iter()
+                .filter(|decision| decision.decision.reason == "runtime_deadline_exhausted")
+                .map(|decision| decision.decision.relative_path.as_str())
+                .collect();
+            assert_eq!(runtime_omissions, ["b.docx", "c.docx", "e.md"]);
+        } else {
+            if workers == 2 {
+                // An Office job remains active until the third Office job starts.
+                assert_eq!(&started[2..], b"bce");
+            }
+            assert_eq!(outcome.terminal_intent, TerminalIntent::Success);
+            assert_eq!(outcome.execution_metrics.parse_attempt_count, 5);
+            assert_eq!(
+                outcome
+                    .parse_cache_receipts
+                    .iter()
+                    .map(|entry| entry.file_identity.as_str())
+                    .collect::<Vec<_>>(),
+                [
+                    "fixture:a.docx",
+                    "fixture:b.docx",
+                    "fixture:c.docx",
+                    "fixture:d.pdf",
+                    "fixture:e.md"
+                ]
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_parse_reserves_native_slots_before_long_inline_at_cutoff() {
+    for workers in [1, 2] {
+        let clock = FakeClock::new();
+        let mut profile = normalized_settings(ReportMode::Daily);
+        profile.execution.max_workers = workers;
+        profile.total_deadline_ms = 5_000;
+        // The logs paths share one nominal priority, so the text ticket sits
+        // between Office and PDF before mixed dispatch selects a pair.
+        let pdf = discovered(r"logs\c.pdf", ".pdf", 1024);
+        let parser = MixedLaneParser {
+            parallel: workers == 2,
+            expire: Some((b'b', clock.clone())),
+            ..MixedLaneParser::default()
+        };
+        let outcome = run_scheduler(
+            &clock,
+            TestCache::default(),
+            parser.clone(),
+            TestClassifier {
+                results: HashMap::from([(pdf.path.clone(), text_result(&pdf.path))]),
+            },
+            vec![
+                discovered(r"logs\d.docx", ".docx", 128),
+                pdf,
+                discovered(r"logs\b.md", ".md", 64),
+                discovered(r"logs\a.docx", ".docx", 128),
+            ],
+            profile,
+        )
+        .unwrap();
+
+        let started = parser.started.0.lock().unwrap();
+        let (expected_attempts, expected_omissions): (u64, &[_]) = if workers == 1 {
+            assert_eq!(started.as_slice(), b"ab");
+            (2, &[r"logs\c.pdf", r"logs\d.docx"])
+        } else {
+            assert!(matches!(started.as_slice(), b"acb" | b"cab"), "{started:?}");
+            (3, &[r"logs\d.docx"])
+        };
+        assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+        assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
+        assert_eq!(outcome.execution_metrics.classify_attempt_count, 1);
+        assert_eq!(
+            outcome.execution_metrics.parse_attempt_count,
+            expected_attempts
+        );
+        assert_eq!(outcome.file_results.len(), 4);
+        for row in &outcome.file_results {
+            if expected_omissions.contains(&row.relative_path.as_str()) {
+                assert_eq!(row.parse_status, ParseStatus::NotParsed);
+                assert_eq!(row.parse_attempt_count, 0);
+                assert!(row.error.is_none());
+            } else {
+                assert_eq!(row.parse_status, ParseStatus::Success);
+                assert_eq!(row.parse_attempt_count, 1);
+            }
+        }
+        let context = outcome.context.unwrap();
+        let omissions: Vec<_> = context
+            .decisions
+            .iter()
+            .filter(|decision| decision.decision.reason == "runtime_deadline_exhausted")
+            .map(|decision| decision.decision.relative_path.as_str())
+            .collect();
+        assert_eq!(omissions, expected_omissions);
+        assert_eq!(context.summary.success_count, expected_attempts);
+    }
+}
+
+#[test]
+fn sqlite_busy_skips_each_affected_cache_record_without_retries() {
+    let clock = FakeClock::new();
+    let files = vec![discovered("a.md", ".md", 64), discovered("b.md", ".md", 64)];
+    let parser = TestParser {
+        results: files
+            .iter()
+            .map(|file| {
+                (
+                    file.file_identity.clone(),
+                    success_parse(&file.file_identity, &file.path, "evidence"),
+                )
+            })
+            .collect(),
+    };
+    let cache = TestCache {
+        global_write_error: Some(CachePortError::Store {
+            detail: "database is busy".to_string(),
+        }),
+        ..TestCache::default()
+    };
+    let batches = cache.parse_batches.clone();
+    let outcome = run_scheduler(
+        &clock,
+        cache,
+        parser,
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        files,
+        normalized_settings(ReportMode::Daily),
+    )
+    .unwrap();
+    assert_eq!(
+        batches
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|&(_, n)| n)
+            .collect::<Vec<_>>(),
+        [2]
+    );
+    assert_eq!(outcome.terminal_intent, TerminalIntent::Partial);
+    assert!(outcome.parse_cache_receipts.is_empty());
+    let warnings: Vec<_> = outcome
+        .diagnostics
+        .iter()
+        .filter(|record| record.diagnostic.error_code == ErrorCode::CacheWriteFailed)
+        .filter_map(|record| record.diagnostic.file_path.0.as_deref())
+        .collect();
+    assert_eq!(warnings, [r"C:\corpus\a.md", r"C:\corpus\b.md"]);
 }
 
 #[test]

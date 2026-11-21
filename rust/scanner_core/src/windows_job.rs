@@ -566,23 +566,15 @@ impl Drop for OwnedHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::windows::io::AsRawHandle;
-    use std::path::Path;
+    use std::os::windows::{io::AsRawHandle, process::CommandExt};
     use std::process::{Command, Stdio};
 
     #[test]
     fn assignment_failure_cleanup_proves_uncontained_process_exit() {
-        let python = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join("..")
-            .join(".venv")
-            .join("Scripts")
-            .join("python.exe");
-        if !python.is_file() {
-            return;
-        }
-        let mut child = Command::new(python)
-            .args(["-c", "import time; time.sleep(30)"])
+        // A failed job assignment happens before the worker's first instruction.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--list")
+            .creation_flags(CREATE_SUSPENDED | DETACHED_PROCESS)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

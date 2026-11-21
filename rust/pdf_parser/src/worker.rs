@@ -1,13 +1,49 @@
-use crate::{ocr, PdfError, PdfReader};
+use crate::{excerpt, ocr, page_numbers, PdfError, PdfReader, PdfText};
 use ai_daily_worker_contract::*;
 use pdfium_render::prelude::*;
 use std::{
-    fs::File,
-    io::{Read, Seek, SeekFrom},
+    collections::{BTreeMap, VecDeque},
+    io::{self, Cursor, Read, Seek, SeekFrom},
     path::Path,
-    sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+    time::{Duration, Instant},
 };
+
+mod source;
+use source::{source, OpenSource, SourceStamp};
+
+const MAX_CACHED_DOCUMENTS: usize = 32;
+const MAX_CACHED_SOURCE_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_CACHED_FILE_BYTES: u64 = 1024 * 1024;
+const MAX_CACHED_PAGES: usize = 64;
+const MAX_CACHED_FILE_TEXT_BYTES: usize = 256 * 1024;
+const MAX_CACHED_TEXT_BYTES: usize = 2 * 1024 * 1024;
+
+struct ClassifiedPdf<'a> {
+    path: String,
+    stamp: SourceStamp,
+    document: PdfDocument<'a>,
+    snapshot: PdfSnapshot,
+    pages: BTreeMap<u32, String>,
+    text_bytes: usize,
+}
+
+pub struct PdfSession<'a> {
+    reader: &'a PdfReader,
+    pending: Option<VecDeque<ClassifiedPdf<'a>>>,
+    #[cfg(test)]
+    work: WorkCounts,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WorkCounts {
+    document_opens: usize,
+    page_reads: usize,
+}
 
 pub fn worker_hello() -> WorkerHello {
     WorkerHello {
@@ -27,6 +63,21 @@ pub fn worker_hello() -> WorkerHello {
 }
 
 impl PdfReader {
+    pub fn session(&self) -> PdfSession<'_> {
+        PdfSession::new(self, true)
+    }
+
+    pub fn parse_request(
+        &self,
+        request: &ParseRequest,
+    ) -> Result<ParseResult, Box<WorkerDiagnostic>> {
+        PdfSession::new(self, false).parse_request(request)
+    }
+
+    pub fn classify_request(&self, request: &ClassifyRequest) -> ClassifyResult {
+        PdfSession::new(self, false).classify_request(request)
+    }
+
     pub fn archive_request(
         &self,
         request: &archive::ArchiveRequest,
@@ -103,9 +154,70 @@ impl PdfReader {
         artifact.duration_ms = started.elapsed().as_millis() as u64;
         Ok(artifact)
     }
+}
+
+impl<'a> PdfSession<'a> {
+    fn new(reader: &'a PdfReader, reuse: bool) -> Self {
+        Self {
+            reader,
+            pending: reuse.then(VecDeque::new),
+            #[cfg(test)]
+            work: WorkCounts::default(),
+        }
+    }
+
+    fn take_classified(&mut self, path: &str) -> Option<ClassifiedPdf<'a>> {
+        let pending = self.pending.as_mut()?;
+        let index = pending.iter().position(|entry| entry.path == path)?;
+        pending.remove(index)
+    }
+
+    fn make_snapshot_room(&mut self, bytes: u64) {
+        let pending = self.pending.as_mut().expect("document reuse enabled");
+        let mut source_bytes: u64 = pending.iter().map(|entry| entry.stamp.bytes).sum();
+        let mut text_bytes: usize = pending.iter().map(|entry| entry.text_bytes).sum();
+        while pending.len() >= MAX_CACHED_DOCUMENTS
+            || source_bytes + bytes > MAX_CACHED_SOURCE_BYTES
+            || text_bytes + MAX_CACHED_FILE_TEXT_BYTES > MAX_CACHED_TEXT_BYTES
+        {
+            let evicted = pending.pop_front().expect("over capacity");
+            source_bytes -= evicted.stamp.bytes;
+            text_bytes -= evicted.text_bytes;
+        }
+    }
+
+    fn open_document(
+        &mut self,
+        input: impl Read + Seek + Send + Sync + 'a,
+    ) -> Result<PdfDocument<'a>, PdfiumError> {
+        #[cfg(test)]
+        {
+            self.work.document_opens += 1;
+        }
+        self.reader.pdfium.load_pdf_from_reader(input, None)
+    }
+
+    fn load_page(
+        &mut self,
+        document: &PdfDocument<'a>,
+        number: u32,
+    ) -> Result<PdfPage<'a>, PdfError> {
+        #[cfg(test)]
+        {
+            self.work.page_reads += 1;
+        }
+        Ok(document.pages().get((number - 1) as PdfPageIndex)?)
+    }
+
+    pub fn archive_request(
+        &self,
+        request: &archive::ArchiveRequest,
+    ) -> Result<archive::ArchiveArtifact, Box<WorkerDiagnostic>> {
+        self.reader.archive_request(request)
+    }
 
     pub fn parse_request(
-        &self,
+        &mut self,
         request: &ParseRequest,
     ) -> Result<ParseResult, Box<WorkerDiagnostic>> {
         let started = Instant::now();
@@ -149,17 +261,6 @@ impl PdfReader {
                 ))
             }
         };
-        let before = source(&request.file_path)?;
-        if before.0 != request.expected_source_version {
-            return Err(diagnostic(
-                &request.file_path,
-                "SOURCE_VERSION_CHANGED",
-                false,
-            ));
-        }
-        if before.1 > request.max_file_size_bytes {
-            return Err(diagnostic(&request.file_path, "FILE_TOO_LARGE", false));
-        }
         let pages = selected_pages
             .map(|pages| {
                 pages
@@ -170,24 +271,35 @@ impl PdfReader {
             .transpose()
             .map_err(|_| diagnostic(&request.file_path, "PARSER_INVALID_PAYLOAD", false))?;
         let mut builder = AuditTextBuilder::new(excerpt_max_chars, "pdf");
-        let path = Path::new(&request.file_path);
-        let partial = if image_ocr {
+        let path = &request.file_path;
+        let (partial, observed_source_version) = if image_ocr {
+            let (version, bytes) = source(path)?;
+            check_parse_source(request, &version, bytes)?;
             let pages = pages
                 .as_deref()
-                .ok_or_else(|| parse_error(&request.file_path, &PdfError::OcrLimits))?;
+                .ok_or_else(|| parse_error(path, &PdfError::OcrLimits))?;
             let deadline =
                 started + Duration::from_millis(request.remaining_timeout_ms.min(OCR_TIMEOUT_MS));
-            ocr::extract(self, path, pages, excerpt_max_chars, deadline, &mut builder)
-                .map_err(|error| parse_error(&request.file_path, &error))?
+            let truncated = ocr::extract(
+                self.reader,
+                Path::new(path),
+                pages,
+                excerpt_max_chars,
+                deadline,
+                &mut builder,
+            )
+            .map_err(|error| parse_error(path, &error))?;
+            if source(path)?.0 != version {
+                return Err(diagnostic(path, "SOURCE_VERSION_CHANGED", false));
+            }
+            (truncated, version)
         } else {
-            let parsed = self
-                .read(
-                    path,
-                    pages.as_deref(),
-                    max_pages as u32,
-                    excerpt_max_chars as usize,
-                )
-                .map_err(|error| parse_error(&request.file_path, &error))?;
+            let (parsed, version) = self.parse_text_request(
+                request,
+                pages.as_deref(),
+                max_pages as u32,
+                excerpt_max_chars as usize,
+            )?;
             for page in &parsed.pages {
                 let range = SourceRange::new(
                     SourceRangeUnit::PdfPage,
@@ -200,15 +312,8 @@ impl PdfReader {
                     builder.push(line, ContentUnitKind::Text, vec![range.clone()]);
                 }
             }
-            parsed.truncated
+            (parsed.truncated, version)
         };
-        if source(&request.file_path)?.0 != before.0 {
-            return Err(diagnostic(
-                &request.file_path,
-                "SOURCE_VERSION_CHANGED",
-                false,
-            ));
-        }
         let (content, audit, truncated) = builder.finish();
         Ok(ParseResult {
             file_path: request.file_path.clone(),
@@ -219,11 +324,52 @@ impl PdfReader {
             worker_lane: WorkerLane::RustPdfProcessV3,
             truncated: truncated || partial,
             duration_ms: started.elapsed().as_millis() as u64,
-            observed_source_version: before.0,
+            observed_source_version,
         })
     }
 
-    pub fn classify_request(&self, request: &ClassifyRequest) -> ClassifyResult {
+    fn parse_text_request(
+        &mut self,
+        request: &ParseRequest,
+        selected: Option<&[u32]>,
+        max_pages: u32,
+        max_chars: usize,
+    ) -> Result<(PdfText, String), Box<WorkerDiagnostic>> {
+        let path = &request.file_path;
+        let cached = self.take_classified(path);
+        let OpenSource { mut file, stamp } = OpenSource::open(path)?;
+        check_parse_source(request, &stamp.version, stamp.bytes)?;
+        // Filesystems may report equal timestamps for independent writes of the same length.
+        let cached =
+            cached.filter(|entry| entry.stamp == stamp && entry.snapshot.matches(&mut file));
+        let (document, cached_pages) = match cached {
+            Some(entry) => (Ok(entry.document), entry.pages),
+            None => (self.open_document(file), BTreeMap::new()),
+        };
+        let parsed = self.read_document(document, cached_pages, selected, max_pages, max_chars);
+        stamp.check(path)?;
+        Ok((parsed.map_err(|e| parse_error(path, &e))?, stamp.version))
+    }
+
+    fn read_document(
+        &mut self,
+        document: Result<PdfDocument<'a>, PdfiumError>,
+        mut cached_pages: BTreeMap<u32, String>,
+        selected: Option<&[u32]>,
+        max_pages: u32,
+        max_chars: usize,
+    ) -> Result<PdfText, PdfError> {
+        let document = document?;
+        let (total, pages) = page_numbers(&document, selected, max_pages)?;
+        excerpt::read_pages(total, &pages, max_chars, |number| {
+            if let Some(text) = cached_pages.remove(&number) {
+                return Ok(text);
+            }
+            excerpt::read_page_text(&self.load_page(&document, number)?)
+        })
+    }
+
+    pub fn classify_request(&mut self, request: &ClassifyRequest) -> ClassifyResult {
         match self.classify_inner(request) {
             Ok(value) => value,
             Err(error) => ClassifyResult {
@@ -241,122 +387,181 @@ impl PdfReader {
     }
 
     fn classify_inner(
-        &self,
+        &mut self,
         request: &ClassifyRequest,
     ) -> Result<ClassifyResult, Box<WorkerDiagnostic>> {
+        let path = &request.file_path;
         request
             .validate()
-            .map_err(|_| diagnostic(&request.file_path, "PARSER_INVALID_PAYLOAD", false))?;
-        let (version, bytes) = source(&request.file_path)?;
-        if version != request.source_version {
-            return Err(diagnostic(
-                &request.file_path,
-                "SOURCE_VERSION_CHANGED",
-                false,
-            ));
+            .map_err(|_| diagnostic(path, "PARSER_INVALID_PAYLOAD", false))?;
+        self.take_classified(path);
+        let OpenSource { mut file, stamp } = OpenSource::open(path)?;
+        if stamp.version != request.source_version {
+            return Err(diagnostic(path, "SOURCE_VERSION_CHANGED", false));
         }
-        // PDFium's file callbacks collapse I/O errors into short reads. Only a
-        // native document-open error from successful reads can identify bad content.
-        let file = File::open(&request.file_path).map_err(|error| {
-            parse_error(
-                &request.file_path,
-                &PdfError::Parse(PdfiumError::IoError(error)),
-            )
-        })?;
-        let io_failed = AtomicBool::new(false);
-        let document = self
-            .pdfium
-            .load_pdf_from_reader(
-                ClassifierInput {
-                    file,
-                    io_failed: &io_failed,
-                },
-                None,
-            )
-            .map_err(|error| {
-                let native_cause = match error {
-                    PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::FormatError) => {
-                        Some("FPDF_ERR_FORMAT")
-                    }
-                    PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
-                        Some("FPDF_ERR_PASSWORD")
-                    }
-                    _ => None,
-                };
-                let mut diagnostic = parse_error(&request.file_path, &PdfError::Parse(error));
-                // FPDF_FILEACCESS cannot represent a length above u32::MAX on Windows.
-                if let Some(code) = native_cause
-                    .filter(|_| bytes <= u64::from(u32::MAX) && !io_failed.load(Ordering::Relaxed))
-                {
-                    diagnostic.message = code.into();
-                }
-                diagnostic
-            })?;
-        let count = document.pages().len() as u64;
-        if count == 0 {
-            return Err(diagnostic(&request.file_path, "PARSER_FAILED", false));
-        }
-        let mut audit = PdfPageAudit {
-            policy_version: request.policy_version.clone(),
-            checked_pages: Vec::new(),
-            observations: Some(Vec::new()),
+
+        let eligible = self.pending.is_some()
+            && stamp.reusable()
+            && (1..=MAX_CACHED_FILE_BYTES).contains(&stamp.bytes);
+        let snapshot = if eligible {
+            self.make_snapshot_room(stamp.bytes);
+            PdfSnapshot::read(&mut file, stamp.bytes as usize)
+        } else {
+            None
         };
-        let mut found = false;
-        for number in pdf_sample_pages(count, request.max_pages, &request.policy_version) {
-            let page = document
-                .pages()
-                .get((number - 1) as PdfPageIndex)
-                .map_err(|error| parse_error(&request.file_path, &PdfError::Parse(error)))?;
-            found = page
-                .text()
-                .map_err(|error| parse_error(&request.file_path, &PdfError::Parse(error)))?
-                .all()
-                .chars()
-                .any(is_valid_text_char);
-            let has_image = crate::page_images(&page);
-            audit.checked_pages.push(number);
-            audit
-                .observations
-                .as_mut()
-                .unwrap()
-                .push(PdfPageObservation {
-                    page: number,
-                    has_text: found,
-                    has_image,
-                });
-            if found {
-                break;
+        let retain = snapshot.is_some();
+        let io_failed = Arc::new(AtomicBool::new(false));
+        let opened = match &snapshot {
+            // PDFium owns this reader until it closes the document. The original file can be released.
+            Some(bytes) => {
+                self.open_document(ClassifierInput::new(Cursor::new(bytes.clone()), &io_failed))
             }
+            None => self.open_document(ClassifierInput::new(file, &io_failed)),
+        };
+        let document = match opened {
+            Ok(document) => document,
+            Err(error) => {
+                stamp.check(path)?;
+                return Err(classify_open_error(
+                    path,
+                    stamp.bytes,
+                    error,
+                    (eligible && !retain) || io_failed.load(Ordering::Relaxed),
+                ));
+            }
+        };
+        let mut cached_pages = BTreeMap::new();
+        let mut remaining = MAX_CACHED_FILE_TEXT_BYTES;
+        let classified = (|| {
+            let count = document.pages().len() as u64;
+            if count == 0 {
+                return Err(diagnostic(path, "PARSER_FAILED", false));
+            }
+            let mut audit = PdfPageAudit {
+                policy_version: request.policy_version.clone(),
+                checked_pages: Vec::new(),
+                observations: Some(Vec::new()),
+            };
+            let mut found = false;
+            for number in pdf_sample_pages(count, request.max_pages, &request.policy_version) {
+                let page = self
+                    .load_page(&document, number as u32)
+                    .map_err(|error| parse_error(path, &error))?;
+                let text = page
+                    .text()
+                    .map_err(|error| parse_error(path, &PdfError::Parse(error)))?;
+                let raw = text.all();
+                found = raw.chars().any(is_valid_text_char);
+                let has_image = crate::page_images(&page);
+                if retain && cached_pages.len() < MAX_CACHED_PAGES && raw.len() <= remaining {
+                    let formatted = excerpt::format_page_text(&page, &text, raw);
+                    if formatted.capacity() <= remaining {
+                        remaining -= formatted.capacity();
+                        cached_pages.insert(number as u32, formatted);
+                    }
+                }
+                audit.checked_pages.push(number);
+                audit
+                    .observations
+                    .as_mut()
+                    .unwrap()
+                    .push(PdfPageObservation {
+                        page: number,
+                        has_text: found,
+                        has_image,
+                    });
+                if found {
+                    break;
+                }
+            }
+            Ok(ClassifyResult {
+                status: if found {
+                    ClassifyStatus::TextInParseWindow
+                } else {
+                    ClassifyStatus::NoTextInParseWindow
+                },
+                page_count: Some(count),
+                result_examined_pages: Some(audit.checked_pages.len() as u64),
+                page_audit: Some(audit),
+                diagnostic: None,
+            })
+        })();
+        stamp.check(path)?;
+        let result = classified?;
+        if let Some(snapshot) = snapshot.filter(|_| {
+            result.status == ClassifyStatus::TextInParseWindow && !io_failed.load(Ordering::Relaxed)
+        }) {
+            self.pending
+                .as_mut()
+                .expect("document reuse enabled")
+                .push_back(ClassifiedPdf {
+                    path: path.clone(),
+                    stamp,
+                    document,
+                    snapshot,
+                    pages: cached_pages,
+                    text_bytes: MAX_CACHED_FILE_TEXT_BYTES - remaining,
+                });
         }
-        if source(&request.file_path)?.0 != request.source_version {
-            return Err(diagnostic(
-                &request.file_path,
-                "SOURCE_VERSION_CHANGED",
-                false,
-            ));
-        }
-        Ok(ClassifyResult {
-            status: if found {
-                ClassifyStatus::TextInParseWindow
-            } else {
-                ClassifyStatus::NoTextInParseWindow
-            },
-            page_count: Some(count),
-            result_examined_pages: Some(audit.checked_pages.len() as u64),
-            page_audit: Some(audit),
-            diagnostic: None,
-        })
+        Ok(result)
     }
 }
 
-struct ClassifierInput<'a> {
-    file: File,
-    io_failed: &'a AtomicBool,
+#[derive(Clone)]
+struct PdfSnapshot(Arc<Vec<u8>>);
+
+impl PdfSnapshot {
+    fn read(source: &mut impl Read, len: usize) -> Option<Self> {
+        let mut bytes = vec![0; len];
+        source.read_exact(&mut bytes).ok()?;
+        at_eof(source).then(|| Self(Arc::new(bytes)))
+    }
+
+    fn matches(&self, source: &mut impl Read) -> bool {
+        let mut buffer = [0; 16 * 1024];
+        for chunk in self.as_ref().chunks(buffer.len()) {
+            let current = &mut buffer[..chunk.len()];
+            if source.read_exact(current).is_err() || current != chunk {
+                return false;
+            }
+        }
+        at_eof(source)
+    }
 }
 
-impl Read for ClassifierInput<'_> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let result = self.file.read(buf);
+impl AsRef<[u8]> for PdfSnapshot {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+fn at_eof(source: &mut impl Read) -> bool {
+    loop {
+        match source.read(&mut [0]) {
+            Ok(read) => return read == 0,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => return false,
+        }
+    }
+}
+
+struct ClassifierInput<R> {
+    reader: R,
+    io_failed: Arc<AtomicBool>,
+}
+
+impl<R> ClassifierInput<R> {
+    fn new(reader: R, io_failed: &Arc<AtomicBool>) -> Self {
+        Self {
+            reader,
+            io_failed: Arc::clone(io_failed),
+        }
+    }
+}
+
+impl<R: Read> Read for ClassifierInput<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let result = self.reader.read(buf);
         if !matches!(result, Ok(n) if n == buf.len()) {
             self.io_failed.store(true, Ordering::Relaxed);
         }
@@ -364,26 +569,53 @@ impl Read for ClassifierInput<'_> {
     }
 }
 
-impl Seek for ClassifierInput<'_> {
-    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-        self.file
+impl<R: Seek> Seek for ClassifierInput<R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.reader
             .seek(pos)
             .inspect_err(|_| self.io_failed.store(true, Ordering::Relaxed))
     }
 }
 
-fn source(path: &str) -> Result<(String, u64), Box<WorkerDiagnostic>> {
-    let metadata =
-        std::fs::metadata(path).map_err(|_| diagnostic(path, "PARSER_START_FAILED", true))?;
-    let modified = metadata
-        .modified()
-        .ok()
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .ok_or_else(|| diagnostic(path, "SOURCE_VERSION_CHANGED", false))?;
-    Ok((
-        ai_daily_discovery::build_source_version(modified.as_nanos(), metadata.len()),
-        metadata.len(),
-    ))
+fn check_parse_source(
+    request: &ParseRequest,
+    version: &str,
+    bytes: u64,
+) -> Result<(), Box<WorkerDiagnostic>> {
+    if version != request.expected_source_version {
+        return Err(diagnostic(
+            &request.file_path,
+            "SOURCE_VERSION_CHANGED",
+            false,
+        ));
+    }
+    if bytes > request.max_file_size_bytes {
+        return Err(diagnostic(&request.file_path, "FILE_TOO_LARGE", false));
+    }
+    Ok(())
+}
+
+fn classify_open_error(
+    path: &str,
+    bytes: u64,
+    error: PdfiumError,
+    io_failed: bool,
+) -> Box<WorkerDiagnostic> {
+    let native_cause = match error {
+        PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::FormatError) => {
+            Some("FPDF_ERR_FORMAT")
+        }
+        PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
+            Some("FPDF_ERR_PASSWORD")
+        }
+        _ => None,
+    };
+    let mut failure = parse_error(path, &PdfError::Parse(error));
+    // PDFium collapses callback failures into short reads and uses a 32-bit file length on Windows.
+    if let Some(code) = native_cause.filter(|_| bytes <= u64::from(u32::MAX) && !io_failed) {
+        failure.message = code.into();
+    }
+    failure
 }
 
 fn parse_error(path: &str, error: &PdfError) -> Box<WorkerDiagnostic> {
@@ -430,22 +662,4 @@ pub fn is_valid_text_char(c: char) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classifier_remembers_short_reads_and_failed_seeks() {
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().join("input.pdf");
-        std::fs::write(&path, b"x").unwrap();
-        let io_failed = AtomicBool::new(false);
-        let mut input = ClassifierInput {
-            file: File::open(path).unwrap(),
-            io_failed: &io_failed,
-        };
-        assert_eq!(input.read(&mut [0; 2]).unwrap(), 1);
-        assert!(io_failed.swap(false, Ordering::Relaxed));
-        assert!(input.seek(SeekFrom::Current(-2)).is_err());
-        assert!(io_failed.load(Ordering::Relaxed));
-    }
-}
+mod tests;

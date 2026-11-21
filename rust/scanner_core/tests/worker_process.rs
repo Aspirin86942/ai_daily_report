@@ -2,7 +2,6 @@ use ai_daily_scanner_core::process::{run_process, ProcessError, ProcessSpec, Wor
 use std::{
     ffi::OsString,
     fs,
-    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Barrier,
@@ -10,34 +9,17 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-fn helper() -> PathBuf {
-    let path = std::env::current_exe()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("examples")
-        .join(if cfg!(windows) {
-            "process_fixture.exe"
-        } else {
-            "process_fixture"
-        });
-    assert!(
-        path.is_file(),
-        "Build the Rust process_fixture example before focused process tests"
-    );
-    path
-}
+mod support;
+use support::process_fixture_path;
 fn spec(mode: &str) -> ProcessSpec {
-    let mut value = ProcessSpec::new(helper(), Duration::from_secs(5));
+    let mut value = ProcessSpec::new(process_fixture_path(), Duration::from_secs(5));
     value.args = vec![mode.into()];
     value
 }
 #[test]
 fn missing_worker_is_an_explicit_start_failure() {
     let value = ProcessSpec::new(
-        helper().with_file_name("nonexistent-fixture.exe"),
+        process_fixture_path().with_file_name("nonexistent-fixture.exe"),
         Duration::from_secs(1),
     );
     assert_eq!(run_process(&value).unwrap_err(), ProcessError::StartFailed);
@@ -182,7 +164,7 @@ fn killed_owner_closes_job_and_terminates_grandchild() {
     use std::os::windows::process::CommandExt;
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("child.pid");
-    let mut child = std::process::Command::new(helper())
+    let mut child = std::process::Command::new(process_fixture_path())
         .args(["contain", path.to_str().unwrap()])
         .creation_flags(0x08000000)
         .spawn()

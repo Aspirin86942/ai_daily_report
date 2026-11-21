@@ -99,15 +99,13 @@ impl BudgetedContextScheduler {
         classifier_build: &str,
         existed_before: &HashSet<String>,
         metrics: &mut ExecutionMetrics,
-        executor: &WaveExecutor,
+        executor: &RollingExecutor,
     ) -> Result<ClassificationOutputs, SchedulerFailure> {
         let work_deadline = self.stored_work_deadline;
         let mut results = BTreeMap::new();
         let mut audits = BTreeMap::new();
         let mut runtime_not_parsed = HashSet::new();
         let mut classification_fresh_hits = Vec::new();
-        let mut classification_cache_receipts = Vec::new();
-        let mut classification_cache_write_warnings: Vec<Diagnostic> = Vec::new();
         let mut any_lookup = false;
         let mut any_miss = false;
 
@@ -275,7 +273,6 @@ impl BudgetedContextScheduler {
                         metrics.stage_deadline_exhausted_count = 1;
                         continue;
                     }
-                    let timeout_ms = profile.pdf_classification_timeout_ms.min(remaining);
                     tasks.push(ClassificationTask {
                         file: (*file).clone(),
                         guard,
@@ -288,7 +285,7 @@ impl BudgetedContextScheduler {
                                 policy_version: profile.classifier_policy_version.clone(),
                             },
                         },
-                        own_timeout_ms: timeout_ms,
+                        own_timeout_ms: profile.pdf_classification_timeout_ms,
                         classifier_profile_hash: classifier_profile_hash.to_string(),
                         pdf_open_failure_key,
                         classifier_build: classifier_build.to_string(),
@@ -329,35 +326,38 @@ impl BudgetedContextScheduler {
             );
         }
 
-        // ---- Phase B (bounded waves, spec P4-T0): dispatch a batch only while
-        // `remaining_to_work_deadline > 0`. A batch is at most
-        // `max_workers` invocations; everything not yet dispatched when
-        // the deadline is reached is queued -> runtime NotParsed. Results are
-        // merged back by nominal rank, so completion order cannot change the
-        // plan/outcome. ----
-        let mut index = 0;
-        while index < tasks.len() {
-            if self.clock.now_ms() >= work_deadline {
-                for task in &tasks[index..] {
-                    runtime_not_parsed.insert(task.file.file_identity.clone());
+        let mut cache_batch = CacheBatch::new(self);
+        executor.run(
+            &tasks,
+            self.clock.as_ref(),
+            work_deadline,
+            |_| WorkLane::Pdf,
+            |task| {
+                let remaining = work_deadline.saturating_sub(self.clock.now_ms());
+                (remaining > 0).then(|| {
+                    let timeout = Duration::from_millis(task.own_timeout_ms.min(remaining));
+                    self.classifier.classify_pdf(&task.request, timeout)
+                })
+            },
+            |event| {
+                match event {
+                    DispatchEvent::Completed(index, execution) => self.merge_classification(
+                        index,
+                        &tasks[index],
+                        execution,
+                        &mut results,
+                        &mut audits,
+                        &mut runtime_not_parsed,
+                        metrics,
+                        &mut cache_batch,
+                    ),
+                    DispatchEvent::FlushCache => cache_batch.flush(),
                 }
-                metrics.stage_deadline_exhausted_count = 1;
-                break;
-            }
-            let wave_end = (index + executor.concurrency).min(tasks.len());
-            self.execute_classification_wave(
-                executor,
-                &tasks[index..wave_end],
-                work_deadline,
-                &mut results,
-                &mut audits,
-                &mut runtime_not_parsed,
-                metrics,
-                &mut classification_cache_receipts,
-                &mut classification_cache_write_warnings,
-            );
-            index = wave_end;
-        }
+                cache_batch.flush_at()
+            },
+        )?;
+        let (classification_cache_receipts, classification_cache_write_warnings) =
+            cache_batch.finish(metrics);
 
         if any_lookup {
             metrics.classification_cache_all_hit =
@@ -373,212 +373,172 @@ impl BudgetedContextScheduler {
         ))
     }
 
-    /// Runs one wave of classifier invocations in parallel on the bounded pool
-    /// and merges the typed results back in wave (nominal) order. The per-file
-    /// effective timeout is `min(own, remaining_to_work_deadline)` computed at
-    /// dispatch time (spec Solution / Part 7.3).
-    // Mutable outputs are explicit so wave-order audit updates stay reviewable.
     #[allow(clippy::too_many_arguments)]
-    fn execute_classification_wave(
+    fn merge_classification<'a>(
         &self,
-        executor: &WaveExecutor,
-        wave: &[ClassificationTask],
-        work_deadline: u64,
+        index: usize,
+        task: &'a ClassificationTask,
+        execution: Option<crate::parsers::classifier::PdfClassifierExecution>,
         results: &mut BTreeMap<String, PdfClassificationResult>,
         audits: &mut BTreeMap<String, PdfClassificationAuditV1>,
         runtime_not_parsed: &mut HashSet<String>,
         metrics: &mut ExecutionMetrics,
-        cache_receipts: &mut Vec<ClassificationCacheWriteRecord>,
-        cache_write_warnings: &mut Vec<Diagnostic>,
+        cache_batch: &mut CacheBatch<'a, ClassificationCacheWriteRecord>,
     ) {
-        let outputs = executor.map(wave, |task| {
-            let remaining = work_deadline.saturating_sub(self.clock.now_ms());
-            (remaining > 0).then(|| {
-                let timeout = Duration::from_millis(task.own_timeout_ms.min(remaining));
-                self.classifier.classify_pdf(&task.request, timeout)
-            })
+        let identity = &task.file.file_identity;
+        let Some(execution) = execution else {
+            runtime_not_parsed.insert(identity.clone());
+            metrics.stage_deadline_exhausted_count = 1;
+            return;
+        };
+        metrics.classify_attempt_count = metrics
+            .classify_attempt_count
+            .saturating_add(execution.attempt_count);
+        // spec Part 3.2: carry the typed result's REAL page counts
+        // (page_count / result_examined_pages), and distinguish a classifier
+        // per-file timeout (-> Timeout) from crash / transient I/O /
+        // protocol failure (-> Error, retryable=true).
+        let observed_pages = execution
+            .outcome
+            .as_ref()
+            .ok()
+            .and_then(|result| result.page_audit.clone());
+        let open_failure = execution.outcome.as_ref().ok().and_then(|result| {
+            crate::parsers::classifier::PdfOpenFailure::confirmed(result, &task.file.path)
         });
-        for (task, execution) in wave.iter().zip(outputs) {
-            let identity = &task.file.file_identity;
-            let Some(execution) = execution else {
-                runtime_not_parsed.insert(identity.clone());
-                metrics.stage_deadline_exhausted_count = 1;
-                continue;
-            };
-            metrics.classify_attempt_count = metrics
-                .classify_attempt_count
-                .saturating_add(execution.attempt_count);
-            // spec Part 3.2: carry the typed result's REAL page counts
-            // (page_count / result_examined_pages), and distinguish a classifier
-            // per-file timeout (-> Timeout) from crash / transient I/O /
-            // protocol failure (-> Error, retryable=true).
-            let observed_pages = execution
-                .outcome
-                .as_ref()
-                .ok()
-                .and_then(|result| result.page_audit.clone());
-            let open_failure = execution.outcome.as_ref().ok().and_then(|result| {
-                crate::parsers::classifier::PdfOpenFailure::confirmed(result, &task.file.path)
-            });
-            let classification = match execution.outcome {
-                Ok(result) => {
-                    let status = match result.status {
-                        ai_daily_worker_contract::ClassifyStatus::TextInParseWindow => {
-                            PdfClassificationStatus::TextInParseWindow
-                        }
-                        ai_daily_worker_contract::ClassifyStatus::NoTextInParseWindow => {
-                            PdfClassificationStatus::NoTextInParseWindow
-                        }
-                        ai_daily_worker_contract::ClassifyStatus::Unknown => {
-                            PdfClassificationStatus::Unknown
-                        }
-                        ai_daily_worker_contract::ClassifyStatus::Error => {
-                            PdfClassificationStatus::Error
-                        }
-                    };
-                    let error_code = result.diagnostic.as_ref().map(|diagnostic| match diagnostic
-                        .error_code
-                        .as_str()
-                    {
+        let classification = match execution.outcome {
+            Ok(result) => {
+                let status = match result.status {
+                    ai_daily_worker_contract::ClassifyStatus::TextInParseWindow => {
+                        PdfClassificationStatus::TextInParseWindow
+                    }
+                    ai_daily_worker_contract::ClassifyStatus::NoTextInParseWindow => {
+                        PdfClassificationStatus::NoTextInParseWindow
+                    }
+                    ai_daily_worker_contract::ClassifyStatus::Unknown => {
+                        PdfClassificationStatus::Unknown
+                    }
+                    ai_daily_worker_contract::ClassifyStatus::Error => {
+                        PdfClassificationStatus::Error
+                    }
+                };
+                let error_code = result.diagnostic.as_ref().map(|diagnostic| {
+                    match diagnostic.error_code.as_str() {
                         "SOURCE_VERSION_CHANGED" => "SOURCE_VERSION_CHANGED".to_string(),
                         "PARSER_TIMEOUT" => "PARSER_TIMEOUT".to_string(),
                         "PDF_PROTECTED" => "PDF_PROTECTED".to_string(),
                         _ => "PARSER_FAILED".to_string(),
-                    });
-                    PdfClassificationResult {
-                        file_identity: identity.clone(),
-                        status,
-                        page_count: result.page_count,
-                        result_examined_pages: result.result_examined_pages,
-                        error_code,
                     }
-                }
-                Err(failure) => {
-                    let error_code = match failure.diagnostic.error_code {
-                        ErrorCode::SourceVersionChanged => "SOURCE_VERSION_CHANGED",
-                        ErrorCode::ParserTimeout => "PARSER_TIMEOUT",
-                        _ => "PARSER_FAILED",
-                    };
-                    PdfClassificationResult {
-                        file_identity: identity.clone(),
-                        status: PdfClassificationStatus::Unknown,
-                        page_count: None,
-                        result_examined_pages: None,
-                        error_code: Some(error_code.to_string()),
-                    }
-                }
-            };
-            if classification.error_code.as_deref() == Some("SOURCE_VERSION_CHANGED") {
-                results.insert(
-                    identity.clone(),
-                    source_version_changed_classification(identity),
-                );
-                metrics.unobserved_classification_attempt_count = metrics
-                    .unobserved_classification_attempt_count
-                    .saturating_add(execution.attempt_count);
-                continue;
-            }
-            // A pre-dispatch validation/start failure did not run a classifier.
-            // Keep the final file diagnostic, but do not fabricate the strict
-            // PdfClassificationAuditV1 miss shape (which requires 1..3 attempts).
-            if execution.attempt_count == 0 {
-                results.insert(identity.clone(), classification);
-                continue;
-            }
-            if !self.guard.verify(&task.file.path, &task.guard) {
-                results.insert(
-                    identity.clone(),
-                    source_version_changed_classification(identity),
-                );
-                // spec Part 5.3: a discarded classifier attempt has no confirmed
-                // inspected pages.
-                metrics.unobserved_classification_attempt_count = metrics
-                    .unobserved_classification_attempt_count
-                    .saturating_add(execution.attempt_count);
-                continue;
-            }
-            let status = classification.status;
-            let page_count = classification.page_count;
-            let result_examined_pages = classification.result_examined_pages;
-            // spec Part 5.3: sum confirmed run-inspected pages; any attempt that
-            // cannot report pages is unobserved.
-            let run_inspected_pages = if execution.attempt_count == 1 {
-                result_examined_pages
-            } else {
-                None
-            };
-            match run_inspected_pages {
-                Some(pages) => {
-                    metrics.confirmed_run_inspected_pages_total = metrics
-                        .confirmed_run_inspected_pages_total
-                        .saturating_add(pages)
-                }
-                None => {
-                    let unobserved_attempts = if result_examined_pages.is_some() {
-                        execution.attempt_count.saturating_sub(1)
-                    } else {
-                        execution.attempt_count
-                    };
-                    metrics.unobserved_classification_attempt_count = metrics
-                        .unobserved_classification_attempt_count
-                        .saturating_add(unobserved_attempts)
-                }
-            }
-            audits.insert(
-                identity.clone(),
-                PdfClassificationAuditV1 {
-                    pdf_open_failure_key: open_failure.map(|_| task.pdf_open_failure_key.clone()),
-                    page_audit: observed_pages,
+                });
+                PdfClassificationResult {
+                    file_identity: identity.clone(),
                     status,
-                    page_count: Nullable(page_count),
-                    classification_cache_status: ClassificationCacheStatus::Miss,
-                    classification_cache_miss_reason: task.cache_miss_reason.clone(),
-                    result_examined_pages: Nullable(result_examined_pages),
-                    run_inspected_pages: Nullable(run_inspected_pages),
-                    nominal_charged_pages: task.nominal_charged_pages,
-                    duration_ms: execution.duration_ms,
-                    transport: execution.transport,
-                    attempt_count: execution.attempt_count,
-                    classifier_build: task.classifier_build.clone(),
-                    classifier_profile_hash: task.classifier_profile_hash.clone(),
-                },
-            );
-            results.insert(identity.clone(), classification);
-            // Success-only classification cache write while remaining > 0
-            // (carry): a failed write is a SKIPPED receipt warning like the
-            // parse path, never silently dropped.
-            if self.clock.now_ms() < work_deadline {
-                if let Some(record) = classification_cache_record(
-                    &task.file,
-                    &task.classifier_profile_hash,
-                    &task.classifier_build,
-                    &status,
-                    page_count,
-                    result_examined_pages,
-                ) {
-                    match self
-                        .cache
-                        .write_classification(self.clock.now_ms(), std::slice::from_ref(&record))
-                    {
-                        Ok(()) => cache_receipts.push(record),
-                        Err(CachePortError::DeadlineExhausted { .. }) => {
-                            metrics.stage_deadline_exhausted_count = 1;
-                        }
-                        Err(error) => {
-                            cache_write_warnings.push(Diagnostic {
-                                error_code: ErrorCode::CacheWriteFailed,
-                                message: format!(
-                                    "classification cache write skipped: {}",
-                                    error.diagnostic(DiagnosticStage::Cache).message
-                                ),
-                                retryable: true,
-                                stage: DiagnosticStage::Cache,
-                                file_path: Nullable(Some(task.file.path.clone())),
-                                backend: Nullable(Some("rust_pdfium_v3".to_string())),
-                            });
-                        }
-                    }
+                    page_count: result.page_count,
+                    result_examined_pages: result.result_examined_pages,
+                    error_code,
                 }
+            }
+            Err(failure) => {
+                let error_code = match failure.diagnostic.error_code {
+                    ErrorCode::SourceVersionChanged => "SOURCE_VERSION_CHANGED",
+                    ErrorCode::ParserTimeout => "PARSER_TIMEOUT",
+                    _ => "PARSER_FAILED",
+                };
+                PdfClassificationResult {
+                    file_identity: identity.clone(),
+                    status: PdfClassificationStatus::Unknown,
+                    page_count: None,
+                    result_examined_pages: None,
+                    error_code: Some(error_code.to_string()),
+                }
+            }
+        };
+        if classification.error_code.as_deref() == Some("SOURCE_VERSION_CHANGED") {
+            results.insert(
+                identity.clone(),
+                source_version_changed_classification(identity),
+            );
+            metrics.unobserved_classification_attempt_count = metrics
+                .unobserved_classification_attempt_count
+                .saturating_add(execution.attempt_count);
+            return;
+        }
+        // A pre-dispatch validation/start failure did not run a classifier.
+        // Keep the final file diagnostic, but do not fabricate the strict
+        // PdfClassificationAuditV1 miss shape (which requires 1..3 attempts).
+        if execution.attempt_count == 0 {
+            results.insert(identity.clone(), classification);
+            return;
+        }
+        if !self.guard.verify(&task.file.path, &task.guard) {
+            results.insert(
+                identity.clone(),
+                source_version_changed_classification(identity),
+            );
+            // spec Part 5.3: a discarded classifier attempt has no confirmed
+            // inspected pages.
+            metrics.unobserved_classification_attempt_count = metrics
+                .unobserved_classification_attempt_count
+                .saturating_add(execution.attempt_count);
+            return;
+        }
+        let status = classification.status;
+        let page_count = classification.page_count;
+        let result_examined_pages = classification.result_examined_pages;
+        // spec Part 5.3: sum confirmed run-inspected pages; any attempt that
+        // cannot report pages is unobserved.
+        let run_inspected_pages = if execution.attempt_count == 1 {
+            result_examined_pages
+        } else {
+            None
+        };
+        match run_inspected_pages {
+            Some(pages) => {
+                metrics.confirmed_run_inspected_pages_total = metrics
+                    .confirmed_run_inspected_pages_total
+                    .saturating_add(pages)
+            }
+            None => {
+                let unobserved_attempts = if result_examined_pages.is_some() {
+                    execution.attempt_count.saturating_sub(1)
+                } else {
+                    execution.attempt_count
+                };
+                metrics.unobserved_classification_attempt_count = metrics
+                    .unobserved_classification_attempt_count
+                    .saturating_add(unobserved_attempts)
+            }
+        }
+        audits.insert(
+            identity.clone(),
+            PdfClassificationAuditV1 {
+                pdf_open_failure_key: open_failure.map(|_| task.pdf_open_failure_key.clone()),
+                page_audit: observed_pages,
+                status,
+                page_count: Nullable(page_count),
+                classification_cache_status: ClassificationCacheStatus::Miss,
+                classification_cache_miss_reason: task.cache_miss_reason.clone(),
+                result_examined_pages: Nullable(result_examined_pages),
+                run_inspected_pages: Nullable(run_inspected_pages),
+                nominal_charged_pages: task.nominal_charged_pages,
+                duration_ms: execution.duration_ms,
+                transport: execution.transport,
+                attempt_count: execution.attempt_count,
+                classifier_build: task.classifier_build.clone(),
+                classifier_profile_hash: task.classifier_profile_hash.clone(),
+            },
+        );
+        results.insert(identity.clone(), classification);
+        if self.clock.now_ms() < self.stored_work_deadline {
+            if let Some(record) = classification_cache_record(
+                &task.file,
+                &task.classifier_profile_hash,
+                &task.classifier_build,
+                &status,
+                page_count,
+                result_examined_pages,
+            ) {
+                cache_batch.push(index, &task.file.path, "rust_pdfium_v3", record);
             }
         }
     }

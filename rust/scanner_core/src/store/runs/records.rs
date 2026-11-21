@@ -43,6 +43,15 @@ pub(in crate::store) fn compute_audit_size_with_check(
     ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
 ) -> Result<i64, StoreError> {
     let mut total = batch.envelope_json.len() as i64;
+    if let Some(reasons) = batch
+        .execution_metrics
+        .as_ref()
+        .and_then(|metrics| metrics.session_restart_reasons)
+    {
+        let bytes = serde_json::to_vec(&reasons)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+        total = total.saturating_add(2 * (bytes.len() as i64 + 28));
+    }
     if let Some(refill) = batch
         .execution_metrics
         .as_ref()

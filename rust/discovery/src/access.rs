@@ -11,6 +11,27 @@ pub(crate) enum EntryAccess {
     UnknownReparse,
 }
 
+/// Reuse the directory enumeration. Only a Windows reparse point needs an
+/// exact-name lookup to distinguish a local cloud entry from a link.
+pub(crate) fn inspect_entry(entry: &fs::DirEntry) -> io::Result<(EntryAccess, fs::Metadata)> {
+    let metadata = entry.metadata()?;
+    #[cfg(windows)]
+    let access = {
+        use std::os::windows::fs::MetadataExt;
+        match classify(metadata.file_attributes(), 0) {
+            EntryAccess::UnknownReparse => inspect(&entry.path())?,
+            ordinary => ordinary,
+        }
+    };
+    #[cfg(not(windows))]
+    let access = if metadata.file_type().is_symlink() {
+        EntryAccess::Link
+    } else {
+        EntryAccess::Local
+    };
+    Ok((access, metadata))
+}
+
 #[cfg(any(windows, test))]
 fn classify(attributes: u32, tag: u32) -> EntryAccess {
     const REPARSE: u32 = 0x400;

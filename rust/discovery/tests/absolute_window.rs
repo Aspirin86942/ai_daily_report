@@ -72,6 +72,22 @@ fn utc_start_is_inclusive_end_is_exclusive_even_when_local_dates_differ() {
     assert_eq!(names, ["last.md", "start.md"]);
 }
 
+#[cfg(windows)]
+#[test]
+fn an_update_through_another_hard_link_is_in_the_current_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().join("work");
+    fs::create_dir(&work).unwrap();
+    write_at(dir.path(), "writer.md", "2026-10-09T01:00:00Z");
+    fs::hard_link(dir.path().join("writer.md"), work.join("report.md")).unwrap();
+    // NTFS may keep the old timestamp in the other name's directory entry.
+    write_at(dir.path(), "writer.md", "2026-10-11T01:00:00Z");
+    let report = discover_files_with_diagnostics(&request(&work)).unwrap();
+    assert!(report.issues.is_empty());
+    assert_eq!(report.files.len(), 1);
+    assert!(std::path::Path::new(&report.files[0].path).ends_with("report.md"));
+}
+
 #[test]
 fn ignored_directories_are_excluded_at_every_depth() {
     let dir = tempfile::tempdir().unwrap();

@@ -18,15 +18,6 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
-use ai_daily_discovery::{DiscoveredFileOut, DiscoveryIssue};
-use ai_daily_scanner_contract::{
-    AuditWorkerLane, CacheMissReason, CacheStatus, ClassificationCacheStatus,
-    ClassificationTransport, ContextSummary, Diagnostic, DiagnosticStage, ErrorCode,
-    ExtensionMetric, NormalizedScannerSettings, Nullable, ParseStatus, ParseTransport,
-    PdfClassificationAuditV1, PdfClassificationStatus, RunStatus, StageMetric, StageName,
-};
-use rayon::prelude::*;
-
 use crate::admission::{
     AdmissionDecision, ClassificationPlan, ClassifiedPlan, ContentAdmissionPlan,
     PdfClassificationResult, PlanAction, PlanCandidate, RejectReason,
@@ -45,12 +36,23 @@ use crate::store::{
     ContextDecisionRecord, ContextRunRecord, DiagnosticSeverity, FileResultRecord, InventoryRecord,
     RunDiagnosticRecord,
 };
+use ai_daily_discovery::{DiscoveredFileOut, DiscoveryIssue};
+use ai_daily_scanner_contract::{
+    AuditWorkerLane, CacheMissReason, CacheStatus, ClassificationCacheStatus,
+    ClassificationTransport, ContextSummary, Diagnostic, DiagnosticStage, ErrorCode,
+    ExtensionMetric, NormalizedScannerSettings, Nullable, ParseStatus, ParseTransport,
+    PdfClassificationAuditV1, PdfClassificationStatus, RunStatus, StageMetric, StageName,
+};
 
 pub use crate::deadline::{Clock, RealClock, RunDeadlines, FINALIZATION_RESERVE_MS};
 
+mod cache_batch;
 mod refill;
+mod rolling;
 mod warnings;
 
+use cache_batch::{cache_timestamp_ms, CacheBatch};
+use rolling::{DispatchEvent, RollingExecutor, WorkLane};
 use warnings::project_warnings;
 
 // ---------------------------------------------------------------------------
@@ -97,21 +99,32 @@ impl GuardVerifier for RealGuardVerifier {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CachePortError {
-    Store { detail: String },
-    InvalidKey { detail: String },
-    DeadlineExhausted { detail: String },
+    Store {
+        detail: String,
+    },
+    /// A specific cache row was rejected and the entire transaction rolled back.
+    Record {
+        detail: String,
+    },
+    InvalidKey {
+        detail: String,
+    },
+    DeadlineExhausted {
+        detail: String,
+    },
 }
 
 impl CachePortError {
     pub fn diagnostic(&self, stage: DiagnosticStage) -> Diagnostic {
         Diagnostic {
             error_code: match self {
-                Self::Store { .. } => ErrorCode::CacheWriteFailed,
+                Self::Store { .. } | Self::Record { .. } => ErrorCode::CacheWriteFailed,
                 Self::InvalidKey { .. } => ErrorCode::InvalidRequest,
                 Self::DeadlineExhausted { .. } => ErrorCode::StageDeadlineExhausted,
             },
             message: match self {
                 Self::Store { detail }
+                | Self::Record { detail }
                 | Self::InvalidKey { detail }
                 | Self::DeadlineExhausted { detail } => detail.clone(),
             },
@@ -223,65 +236,11 @@ pub struct WorkerIdentities {
     pub classifier_build: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Bounded parallel wave executor (spec Solution / Part 7.3, P4-T0)
-// ---------------------------------------------------------------------------
-
-/// Bounded rayon pool used to execute classifier/parser invocations in
-/// deterministic waves. The pool holds at most `concurrency` threads; results
-/// come back in the same order as the input, so the scheduler merges them by
-/// nominal rank and completion order can never change the outcome.
-struct WaveExecutor {
-    pool: Option<rayon::ThreadPool>,
-    concurrency: usize,
-}
-
-impl WaveExecutor {
-    fn new(concurrency: usize) -> Result<Self, SchedulerFailure> {
-        let pool = if concurrency > 1 {
-            Some(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(concurrency)
-                    .build()
-                    .map_err(|_| {
-                        SchedulerFailure::new(
-                            ErrorCode::InternalError,
-                            "scheduler worker pool could not be created".to_string(),
-                            true,
-                            DiagnosticStage::Process,
-                        )
-                    })?,
-            )
-        } else {
-            None
-        };
-        Ok(Self { pool, concurrency })
-    }
-
-    /// Runs `f` over `items`. With more than one item and a pool this executes
-    /// on the bounded pool (at most `concurrency` tasks in flight); otherwise it
-    /// runs sequentially. Output order matches the input order.
-    fn map<T, R, F>(&self, items: &[T], f: F) -> Vec<R>
-    where
-        T: Sync,
-        R: Send,
-        F: Fn(&T) -> R + Sync,
-    {
-        match &self.pool {
-            Some(pool) if items.len() > 1 => pool.install(|| items.par_iter().map(&f).collect()),
-            _ => items.iter().map(&f).collect(),
-        }
-    }
-}
-
-/// A PDF whose classification is queued for a parallel wave.
+/// A PDF queued for classification.
 struct ClassificationTask {
     file: DiscoveredFileOut,
     guard: SourceGuardV2,
     request: crate::parsers::classifier::ClassifyOperation,
-    /// The classifier's own per-file timeout (capped by the remaining work
-    /// deadline at admission); the wave dispatch re-caps it by the remaining
-    /// work deadline at dispatch time.
     own_timeout_ms: u64,
     classifier_profile_hash: String,
     pdf_open_failure_key: String,
@@ -290,12 +249,11 @@ struct ClassificationTask {
     nominal_charged_pages: u64,
 }
 
-/// An admitted file queued for a parallel parse wave.
+/// An admitted file queued for parsing.
 struct ParseTask {
     file: DiscoveredFileOut,
     route: RouteKind,
-    /// The route's per-file timeout capped by the remaining work deadline at
-    /// admission; the wave dispatch re-caps it by the remaining work deadline.
+    guard: SourceGuardV2,
     own_timeout_ms: u64,
     profile_hash: String,
 }

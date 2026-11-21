@@ -154,12 +154,15 @@ fn persist_failure_is_reported_and_keeps_previous_file() {
 #[cfg(windows)]
 #[test]
 fn write_report_rejects_redirected_directory() {
+    use std::os::windows::process::CommandExt;
+
     let dir = tempfile::tempdir().unwrap();
     let real = dir.path().join("real");
     fs::create_dir_all(&real).unwrap();
     let link = dir.path().join("link");
     let created = std::process::Command::new("cmd")
-        .args(["/C", "mklink", "/J"])
+        .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+        .args(["/D", "/C", "mklink", "/J"])
         .arg(&link)
         .arg(&real)
         .output()

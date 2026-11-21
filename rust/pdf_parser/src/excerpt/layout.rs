@@ -7,14 +7,16 @@ struct TextRun {
     rect: PdfRect,
 }
 
-pub(super) fn page_text(document: &PdfDocument<'_>, number: u32) -> Result<String, PdfError> {
-    let page = document.pages().get((number - 1) as PdfPageIndex)?;
+pub(crate) fn read_page_text(page: &PdfPage<'_>) -> Result<String, PdfError> {
     let text = page.text()?;
-    let raw = text.all();
+    Ok(format_page_text(page, &text, text.all()))
+}
+
+pub(crate) fn format_page_text(page: &PdfPage<'_>, text: &PdfPageText<'_>, raw: String) -> String {
     if lines(&raw).nth(1).is_none() {
-        return Ok(raw);
+        return raw;
     }
-    Ok(columns(&page, &text, &raw).unwrap_or(raw))
+    columns(page, text, &raw).unwrap_or(raw)
 }
 
 fn columns(page: &PdfPage<'_>, text: &PdfPageText<'_>, raw: &str) -> Option<String> {

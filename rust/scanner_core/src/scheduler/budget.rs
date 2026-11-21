@@ -114,10 +114,7 @@ impl BudgetedContextScheduler {
         let profile = input.profile.clone();
         let mut metrics = source_guard_metrics(&input.discovery);
         apply_observed_source_guard_metrics(&mut metrics, self.guard.as_ref());
-        // Bounded parallel executor for classification/parse waves (spec
-        // Solution / Part 7.3): max_workers threads at most; each
-        // wave is dispatched only while `remaining_to_work_deadline > 0`.
-        let executor = WaveExecutor::new(profile.execution.max_workers.max(1) as usize)?;
+        let executor = RollingExecutor::new(profile.execution.max_workers.max(1) as usize);
 
         // ---- Stage A: freeze ClassificationPlan before any classification I/O ----
         let candidates: Vec<PlanCandidate> = input.discovery.iter().map(plan_candidate).collect();
@@ -331,25 +328,34 @@ impl BudgetedContextScheduler {
         // shared WorkDeadline and must never fail silently. A deadline becomes
         // the normal run-level deadline terminal state; other store failures are
         // projected as a bounded cache-write warning.
-        match self.cache.touch_access(
-            self.clock.now_ms(),
-            &parse_outputs.parse_fresh_hits,
-            &classification_fresh_hits,
-        ) {
-            Ok(()) => {}
-            Err(CachePortError::DeadlineExhausted { .. }) => {
-                metrics.stage_deadline_exhausted_count = 1;
-            }
-            Err(error) => {
-                let diagnostic = error.diagnostic(DiagnosticStage::Cache);
-                parse_outputs.cache_write_warnings.push(Diagnostic {
-                    error_code: ErrorCode::CacheWriteFailed,
-                    message: format!("cache access touch skipped: {}", diagnostic.message),
-                    retryable: true,
-                    stage: DiagnosticStage::Cache,
-                    file_path: Nullable(None),
-                    backend: Nullable(None),
-                });
+        if self.clock.now_ms() >= self.stored_work_deadline {
+            metrics.stage_deadline_exhausted_count = 1;
+        } else if !parse_outputs.parse_fresh_hits.is_empty()
+            || !classification_fresh_hits.is_empty()
+        {
+            let touch = cache_timestamp_ms().and_then(|now_ms| {
+                self.cache.touch_access(
+                    now_ms,
+                    &parse_outputs.parse_fresh_hits,
+                    &classification_fresh_hits,
+                )
+            });
+            match touch {
+                Ok(()) => {}
+                Err(CachePortError::DeadlineExhausted { .. }) => {
+                    metrics.stage_deadline_exhausted_count = 1;
+                }
+                Err(error) => {
+                    let diagnostic = error.diagnostic(DiagnosticStage::Cache);
+                    parse_outputs.cache_write_warnings.push(Diagnostic {
+                        error_code: ErrorCode::CacheWriteFailed,
+                        message: format!("cache access touch skipped: {}", diagnostic.message),
+                        retryable: true,
+                        stage: DiagnosticStage::Cache,
+                        file_path: Nullable(None),
+                        backend: Nullable(None),
+                    });
+                }
             }
         }
 

@@ -231,8 +231,15 @@ pub struct CacheEntry {
     pub worker_build: String,
 }
 
+#[cfg(test)]
+thread_local! {
+    static TEST_OUTER_CACHE_VALIDATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl CacheEntry {
     fn is_valid(&self) -> bool {
+        #[cfg(test)]
+        TEST_OUTER_CACHE_VALIDATIONS.with(|count| count.set(count.get() + 1));
         valid_parse_content(
             &self.content,
             &self.content_sha256,
@@ -271,33 +278,40 @@ impl CacheLookup {
         if version == 0 {
             return self;
         }
-        let Self::Fresh(mut entry) = self else {
+        let Self::Fresh(entry) = self else {
             return self;
         };
         let miss = Self::Miss(CacheMissReason::EntryAbsentOrEvicted);
         if !entry.is_valid() {
             return miss;
         }
-        let Ok(payload) = serde_json::from_str::<ParseCachePayload>(&entry.content) else {
-            return miss;
-        };
+        entry
+            .decode_authenticated_payload(version)
+            .map_or(miss, Self::Fresh)
+    }
+}
+
+impl CacheEntry {
+    // Callers must verify the stored content digest and parser fields first.
+    fn decode_authenticated_payload(mut self, version: u64) -> Option<Self> {
+        let payload: ParseCachePayload = serde_json::from_str(&self.content).ok()?;
         if payload.version != version
             || version != PARSE_CACHE_PAYLOAD_VERSION
             || sha256_hex(payload.text.as_bytes()) != payload.text_sha256
             || payload.evidence_audit.validate(&payload.text).is_err()
-            || (entry.parser_backend == crate::parsers::document::OCR_BACKEND
+            || (self.parser_backend == crate::parsers::document::OCR_BACKEND
                 && !crate::parsers::document::valid_ocr_ranges(
                     &payload.text,
                     &payload.evidence_audit,
                     None,
                 ))
         {
-            return miss;
+            return None;
         }
-        entry.content = payload.text;
-        entry.content_sha256 = payload.text_sha256;
-        entry.evidence_audit = Some(payload.evidence_audit);
-        Self::Fresh(entry)
+        self.content = payload.text;
+        self.content_sha256 = payload.text_sha256;
+        self.evidence_audit = Some(payload.evidence_audit);
+        Some(self)
     }
 }
 
@@ -379,8 +393,7 @@ pub(crate) fn domain_hash(domain: &[u8], bytes: &[u8]) -> String {
     ai_daily_worker_contract::archive::hex(&hasher.finalize())
 }
 
-/// 单 entry 大于载体 cap 时的 skipped 信号，由 Store 层转成 skipped receipt
-/// warning（spec Part 4：单 entry 超 cap → 直接 skipped，不改变 context）。
+#[cfg(test)]
 fn over_cap_error(message: String) -> rusqlite::Error {
     rusqlite::Error::SqliteFailure(
         rusqlite::ffi::Error {
@@ -394,6 +407,7 @@ fn over_cap_error(message: String) -> rusqlite::Error {
 #[derive(Debug)]
 pub(crate) enum CacheMutationError {
     Sqlite(rusqlite::Error),
+    Record(String),
     DeadlineExhausted,
 }
 
@@ -408,6 +422,7 @@ impl CacheMutationError {
     fn into_sqlite(self) -> rusqlite::Error {
         match self {
             Self::Sqlite(error) => error,
+            Self::Record(detail) => over_cap_error(detail),
             Self::DeadlineExhausted => {
                 over_cap_error("cache mutation deadline exhausted".to_string())
             }
@@ -498,6 +513,32 @@ impl CacheTable {
         })
     }
 
+    fn needs_touch(
+        &self,
+        connection: &Connection,
+        identities: &[String],
+        bucket: &str,
+        deadline_open: &dyn Fn() -> bool,
+    ) -> Result<bool, CacheMutationError> {
+        for chunk in identities.chunks(super::CACHE_TRANSACTION_BATCH_SIZE) {
+            ensure_mutation_deadline(deadline_open)?;
+            let table = self.name;
+            let placeholders = super::sql_placeholders(chunk.len());
+            let sql = format!(
+                "SELECT EXISTS(SELECT 1 FROM {table}
+                 WHERE last_accessed_bucket <> ?1 AND file_identity IN ({placeholders}))"
+            );
+            let params = std::iter::once(bucket).chain(chunk.iter().map(String::as_str));
+            let needs_touch = connection
+                .prepare_cached(&sql)?
+                .query_row(rusqlite::params_from_iter(params), |row| row.get(0))?;
+            if needs_touch {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     fn touch(
         &self,
         transaction: &Transaction<'_>,
@@ -559,6 +600,24 @@ impl CacheTable {
     }
 }
 
+pub(super) fn cache_access_needs_touch(
+    connection: &Connection,
+    parse_hits: &[String],
+    classification_hits: &[String],
+    bucket: &str,
+    deadline_open: &dyn Fn() -> bool,
+) -> Result<bool, CacheMutationError> {
+    Ok(
+        parse::TABLE.needs_touch(connection, parse_hits, bucket, deadline_open)?
+            || classification::TABLE.needs_touch(
+                connection,
+                classification_hits,
+                bucket,
+                deadline_open,
+            )?,
+    )
+}
+
 pub(crate) fn touch_parse_cache_access_with_check(
     transaction: &Transaction<'_>,
     identities: &[String],
@@ -584,6 +643,7 @@ mod tests;
 mod parse;
 #[cfg(test)]
 use parse::evict_parse_cache;
+pub(super) use parse::lookup_snapshot_cache;
 pub(crate) use parse::{lookup_cache, write_success_cache_with_check};
 #[cfg(test)]
 pub(crate) use parse::{parse_entry_size_bytes, write_success_cache};

@@ -1229,6 +1229,14 @@ fn snapshot_hit_reuses_artifact_and_current_run_recomputes_timings() {
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .expect("R2 context_runs row");
+    let last_seen: (i64, i64) = connection
+        .query_row(
+            "SELECT last_seen_run_id, last_seen_at_ms FROM file_inventory",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("snapshot run must refresh inventory");
+    assert_eq!(last_seen, (active2.scan_run_id() as i64, 2_010));
     assert_eq!(r2_artifact, artifact_id, "R2 must reference artifact A");
     assert_eq!(r2_snapshot_hit, 1, "R2 must be a snapshot hit");
     assert_eq!(

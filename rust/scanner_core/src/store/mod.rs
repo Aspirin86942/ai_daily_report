@@ -142,19 +142,36 @@ impl ScannerStore {
             return Ok(());
         }
         let bucket = cache::date_bucket_for_ms(now_ms);
-        self.commit_work_batch(deadline, "cache touch", true, |transaction| {
-            let open = || check_work_deadline(deadline).is_ok();
-            cache::touch_parse_cache_access_with_check(transaction, parse_hits, &bucket, &open)
+        let open = || check_work_deadline(deadline).is_ok();
+        self.commit_work_batch(
+            deadline,
+            "cache touch",
+            true,
+            |connection| {
+                let needs_touch = cache::cache_access_needs_touch(
+                    connection,
+                    parse_hits,
+                    classification_hits,
+                    &bucket,
+                    &open,
+                )
                 .map_err(cache_mutation)?;
-            cache::touch_classification_cache_access_with_check(
-                transaction,
-                classification_hits,
-                &bucket,
-                &open,
-            )
-            .map_err(cache_mutation)?;
-            Ok(())
-        })
+                check_work_deadline(deadline)?;
+                Ok(needs_touch)
+            },
+            |transaction| {
+                cache::touch_parse_cache_access_with_check(transaction, parse_hits, &bucket, &open)
+                    .map_err(cache_mutation)?;
+                cache::touch_classification_cache_access_with_check(
+                    transaction,
+                    classification_hits,
+                    &bucket,
+                    &open,
+                )
+                .map_err(cache_mutation)?;
+                Ok(())
+            },
+        )
     }
 
     /// Opportunistic age/orphan row GC (spec Part 4): runs after the terminal
@@ -256,11 +273,13 @@ impl ScannerStore {
         parse_profile_hash: &str,
         inventory_existed_before: bool,
     ) -> Result<CacheLookup, StoreError> {
-        if file_identity.is_empty()
-            || inventory::parse_source_version(source_version).is_err()
-            || !valid_guard_wire(source_guard_kind, source_guard_sha256)
-            || !inventory::is_sha256(parse_profile_hash)
-        {
+        if !valid_parse_lookup_key([
+            file_identity,
+            source_version,
+            source_guard_kind,
+            source_guard_sha256,
+            parse_profile_hash,
+        ]) {
             return Err(StoreError::InvalidRequest(
                 "cache lookup key is invalid".into(),
             ));
@@ -278,11 +297,29 @@ impl ScannerStore {
         reject_corrupt_parse_cache_lookup(lookup)
     }
 
-    /// Upserts the global `file_inventory` in one bounded short transaction and
-    /// returns the set of file_identities that already existed before this round
-    /// (spec Part 4 miss-reason tree step 4). Only a completed receipt opens
-    /// cache lookup; a later terminal `finalize` re-upserts the same rows with
-    /// the active scan_run_id (idempotent ON CONFLICT DO UPDATE).
+    pub(crate) fn lookup_snapshot_cache<'a>(
+        &self,
+        rows: impl Iterator<Item = &'a ArtifactFileRow>,
+    ) -> Option<HashMap<String, CacheEntry>> {
+        let keys: Vec<_> = rows
+            .map(|row| {
+                let key = [
+                    row.file_identity.as_str(),
+                    row.legacy_source_version.as_str(),
+                    row.source_guard_kind.as_deref()?,
+                    row.source_guard_sha256.as_deref()?,
+                    row.parse_profile_hash.as_str(),
+                ];
+                valid_parse_lookup_key(key).then_some(key)
+            })
+            .collect::<Option<_>>()?;
+        cache::lookup_snapshot_cache(&self.connection, &keys)
+    }
+
+    /// Upserts the global `file_inventory` in bounded short transactions and
+    /// returns the file identities that already existed before this round.
+    /// Only a completed receipt opens cache lookup. Terminal finalization
+    /// verifies that these rows still match the discovery inventory.
     pub fn prepare_inventory(
         &mut self,
         records: &[InventoryRecord],
@@ -327,19 +364,21 @@ impl ScannerStore {
         let mut existed = std::collections::HashSet::new();
         for (batch_index, chunk) in records.chunks(CACHE_TRANSACTION_BATCH_SIZE).enumerate() {
             let is_last_batch = (batch_index + 1) * CACHE_TRANSACTION_BATCH_SIZE >= records.len();
-            self.commit_work_batch(deadline, "inventory", is_last_batch, |transaction| {
+            self.commit_work_batch(deadline, "inventory", is_last_batch, |_| Ok(true), |transaction| {
+                let mut identities = Vec::with_capacity(chunk.len());
                 for record in chunk {
                     ensure_work_deadline()?;
-                    let already: bool = transaction
-                        .query_row(
-                            "SELECT EXISTS(SELECT 1 FROM file_inventory WHERE file_identity=?1)",
-                            [&record.file_identity],
-                            |row| row.get(0),
-                        )
-                        .map_err(cache_write)?;
-                    if already {
-                        existed.insert(record.file_identity.clone());
-                    }
+                    identities.push(record.file_identity.as_str());
+                }
+                let placeholders = sql_placeholders(identities.len());
+                let sql =
+                    format!("SELECT file_identity FROM file_inventory WHERE file_identity IN ({placeholders})");
+                let mut statement = transaction.prepare_cached(&sql).map_err(cache_write)?;
+                let rows = statement
+                    .query_map(rusqlite::params_from_iter(identities), |row| row.get(0))
+                    .map_err(cache_write)?;
+                for identity in rows {
+                    existed.insert(identity.map_err(cache_write)?);
                 }
                 inventory::upsert_inventory(
                     transaction,
@@ -493,16 +532,22 @@ impl ScannerStore {
             if index % CACHE_TRANSACTION_BATCH_SIZE == 0 {
                 check_work_deadline(deadline)?;
             }
-            validate(record).map_err(StoreError::InvalidRequest)?;
+            validate(record).map_err(|detail| StoreError::CacheRecord { detail })?;
         }
         for chunk in records.chunks(CACHE_TRANSACTION_BATCH_SIZE) {
-            self.commit_work_batch(deadline, label, true, |transaction| {
-                check_work_deadline(deadline)?;
-                insert(transaction, cached_at, chunk, &|| {
-                    check_work_deadline(deadline).is_ok()
-                })
-                .map_err(cache_mutation)
-            })?;
+            self.commit_work_batch(
+                deadline,
+                label,
+                true,
+                |_| Ok(true),
+                |transaction| {
+                    check_work_deadline(deadline)?;
+                    insert(transaction, cached_at, chunk, &|| {
+                        check_work_deadline(deadline).is_ok()
+                    })
+                    .map_err(cache_mutation)
+                },
+            )?;
         }
         Ok(())
     }
@@ -512,6 +557,7 @@ impl ScannerStore {
         deadline: WorkDeadline<'_>,
         label: &str,
         final_batch: bool,
+        should_write: impl FnOnce(&Connection) -> Result<bool, StoreError>,
         write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), StoreError>,
     ) -> Result<(), StoreError> {
         check_work_deadline(deadline)?;
@@ -525,6 +571,9 @@ impl ScannerStore {
                 .map_err(cache_write)?;
         }
         let committed = (|| {
+            if !should_write(&self.connection)? {
+                return check_work_deadline(deadline);
+            }
             let tx = self
                 .connection
                 .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -593,6 +642,19 @@ fn checked_i64(value: u64, field: &str) -> Result<i64, StoreError> {
 
 /// SourceGuardV2 wire for the parse-cache key: only an available kind with a
 /// 64-char lowercase-hex SHA-256 (unavailable files never reach the cache).
+fn sql_placeholders(count: usize) -> String {
+    std::iter::repeat_n("?", count)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn valid_parse_lookup_key([identity, version, guard_kind, guard_hash, profile]: [&str; 5]) -> bool {
+    !identity.is_empty()
+        && inventory::parse_source_version(version).is_ok()
+        && valid_guard_wire(guard_kind, guard_hash)
+        && inventory::is_sha256(profile)
+}
+
 fn valid_guard_wire(kind: &str, hash: &str) -> bool {
     matches!(
         kind,
@@ -644,6 +706,7 @@ fn cache_write(error: impl ToString) -> StoreError {
 fn cache_mutation(error: cache::CacheMutationError) -> StoreError {
     match error {
         cache::CacheMutationError::Sqlite(error) => cache_write(error),
+        cache::CacheMutationError::Record(detail) => StoreError::CacheRecord { detail },
         cache::CacheMutationError::DeadlineExhausted => StoreError::WorkDeadlineExhausted,
     }
 }

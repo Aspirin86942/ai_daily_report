@@ -194,7 +194,7 @@ impl BudgetedContextScheduler {
         classifier_hash: &str,
         classifier_build: &str,
         metrics: &mut ExecutionMetrics,
-        executor: &WaveExecutor,
+        executor: &RollingExecutor,
     ) -> Result<(), SchedulerFailure> {
         let mut ledger = RefillAudit {
             policy_version: "budget_refill_v3".into(),

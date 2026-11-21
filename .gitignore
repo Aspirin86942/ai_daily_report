@@ -81,6 +81,7 @@ scripts/corpus/
 .artifacts/rich-daily-*/
 .artifacts/kernel-once-*/
 .artifacts/kernel-phase2-*/
+.artifacts/kernel-phase3-*/
 .artifacts/search-acceptance-*/
 .artifacts/worker-concurrency-*/
 .artifacts/daily-scan-*/

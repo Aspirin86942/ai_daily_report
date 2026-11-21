@@ -279,6 +279,12 @@ fn refresh(
         .map_err(index_error)?;
     let mut changed = force || metadata_changed;
     let mut source_rows_read = 0_u64;
+    // SQLite stores BLOB slices in the database encoding. Rust offsets are UTF-8.
+    let utf8 = index
+        .pragma_query_value(None, "encoding", |row| {
+            Ok(row.get_ref(0)?.as_str()? == "UTF-8")
+        })
+        .map_err(index_error)?;
     for table in &state.tables {
         let mut select = reports
             .prepare(&format!(
@@ -314,7 +320,7 @@ fn refresh(
                 params![table.kind,key,sha,fragments.len() as i64],
             ).map_err(index_error)?;
             for fragment in fragments {
-                storage::insert(index, table.kind, &key, fragment).map_err(index_error)?;
+                storage::insert(index, table.kind, &key, fragment, utf8).map_err(index_error)?;
             }
             if !force {
                 storage::sync_report(index, table.kind, &key, false).map_err(index_error)?;
