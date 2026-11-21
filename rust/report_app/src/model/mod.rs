@@ -3,7 +3,6 @@ pub mod contracts;
 pub mod personal;
 pub mod plan;
 pub mod recovery;
-pub mod slicing;
 pub mod transport;
 use crate::{
     config::Llm,

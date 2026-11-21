@@ -6,19 +6,16 @@ pub mod office;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use crate::classifier::ParserRoute;
 use crate::fallback::{FailureClass, ParseFailure};
 use crate::process::{run_process, ProcessError, ProcessSpec, WorkerRssTracker};
+use crate::scanner::next_request_id;
 use ai_daily_scanner_contract::{
     AdapterPaths, Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerSettings, Nullable,
 };
-use ai_daily_worker_contract::{
-    ParseRequest, ParseResult, ParserBackend, ParserLimits, WorkerHello, WorkerKind,
-};
+use ai_daily_worker_contract::{ParseRequest, ParseResult, ParserLimits, WorkerHello, WorkerKind};
 
 pub const WORKER_CONTRACT_VERSION: &str = ai_daily_worker_contract::CONTRACT_VERSION;
 pub const WORKER_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -161,11 +158,24 @@ pub(crate) fn register_worker_pair_observed(
     pdf_command: &WorkerCommand,
     timeout: Duration,
     rss_tracker: &WorkerRssTracker,
+    max_workers: u64,
 ) -> (
     Result<RegisteredWorker, ParseFailure>,
     Result<RegisteredWorker, ParseFailure>,
 ) {
-    register_worker_pair_inner(office_command, pdf_command, timeout, Some(rss_tracker))
+    if max_workers == 1 {
+        let started = std::time::Instant::now();
+        let office = register_worker_inner(office_command, timeout, Some(rss_tracker));
+        let remaining = timeout.saturating_sub(started.elapsed());
+        let pdf = if remaining.is_zero() {
+            Err(process_failure(ProcessError::TimedOut, None, None, true))
+        } else {
+            register_worker_inner(pdf_command, remaining, Some(rss_tracker))
+        };
+        (office, pdf)
+    } else {
+        register_worker_pair_inner(office_command, pdf_command, timeout, Some(rss_tracker))
+    }
 }
 
 fn register_worker_pair_inner(
@@ -339,6 +349,19 @@ pub(crate) fn validate_session_worker_response(
         )
     })?;
     validate_worker_source_after(request, &response)?;
+    if let ParserLimits::PdfImageOcr { selected_pages, .. } = &request.parser_limits {
+        if !response.evidence_audit.as_ref().is_some_and(|audit| {
+            document::valid_ocr_ranges(&response.content, audit, Some(selected_pages))
+        }) {
+            return Err(contract_failure(
+                ErrorCode::ParserInvalidPayload,
+                "OCR response lacks the requested unverified physical page provenance",
+                Some(&request.file_path),
+                Some(request.backend.as_str()),
+                DiagnosticStage::Parse,
+            ));
+        }
+    }
     let content_within_budget =
         response.content.chars().count() as u64 <= worker_response_character_budget(request);
     if response.file_path != request.file_path
@@ -372,6 +395,9 @@ fn worker_response_character_budget(request: &ParseOperation) -> u64 {
             ..
         } => *document_excerpt_max_chars,
         ParserLimits::Pdf {
+            excerpt_max_chars, ..
+        }
+        | ParserLimits::PdfImageOcr {
             excerpt_max_chars, ..
         } => *excerpt_max_chars,
     }
@@ -608,9 +634,12 @@ pub(crate) fn scheduled_request(
     classifications: &std::collections::BTreeMap<String, crate::admission::PdfClassificationResult>,
 ) -> crate::scheduler::ParseRequest {
     crate::scheduler::ParseRequest {
-        selected_pdf_pages: classifications
-            .get(&file.file_identity)
-            .and_then(|result| document::selected_pages(&profile.parse.pdf, result)),
+        selected_pdf_pages: match route {
+            crate::classifier::ParserRoute::Pdf => classifications
+                .get(&file.file_identity)
+                .and_then(|result| document::selected_pages(&profile.parse.pdf, result)),
+            _ => None,
+        },
         file: file.clone(),
         route,
         timeout_ms,
@@ -624,15 +653,14 @@ pub(crate) fn worker_request(
     profile: &NormalizedScannerSettings,
     selected_pdf_pages: Option<&[u64]>,
 ) -> ParseOperation {
-    let backend = match route {
-        ParserRoute::RustOffice => ParserBackend::RustOfficeOxideV2,
-        ParserRoute::RustXlsx => ParserBackend::RustXlsxBoundedV2,
-        ParserRoute::Pdf => ParserBackend::RustPdfiumV3,
-        ParserRoute::RustXls => ParserBackend::RustXlsCalamineV3,
-        ParserRoute::RustLegacyOffice => ParserBackend::RustLegacyOfficeV3,
-        ParserRoute::LightText => unreachable!("light text does not use a worker request"),
-    };
+    let backend = route
+        .worker_backend()
+        .expect("light text does not use a worker request");
     let parser_limits = match route {
+        ParserRoute::PdfImageOcr {
+            page_count,
+            max_pages,
+        } => document::image_ocr_limits(page_count, max_pages, &profile.parse.pdf),
         ParserRoute::Pdf => ParserLimits::Pdf {
             selected_pages: selected_pdf_pages.map(<[u64]>::to_vec),
             max_pages: profile.parse.pdf.max_pages,
@@ -664,36 +692,6 @@ pub(crate) fn worker_request(
             expected_source_version: file.source_version.clone(),
         },
     }
-}
-
-fn next_request_id() -> String {
-    static COUNTER: AtomicU64 = AtomicU64::new(1);
-    let counter = COUNTER.fetch_add(1, Ordering::Relaxed) as u128;
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let mut bytes = (nanos ^ (u128::from(std::process::id()) << 64) ^ counter).to_be_bytes();
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0],
-        bytes[1],
-        bytes[2],
-        bytes[3],
-        bytes[4],
-        bytes[5],
-        bytes[6],
-        bytes[7],
-        bytes[8],
-        bytes[9],
-        bytes[10],
-        bytes[11],
-        bytes[12],
-        bytes[13],
-        bytes[14],
-        bytes[15]
-    )
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

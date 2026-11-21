@@ -1,64 +1,62 @@
-use ai_daily_discovery::DiscoveredFileOut;
-use ai_daily_scanner_contract::NormalizedScannerSettings;
+use ai_daily_scanner_contract::{AuditWorkerLane, NormalizedScannerSettings};
+use ai_daily_worker_contract::{ParserBackend, WorkerLane};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParserRoute {
     LightText,
     RustOffice,
     RustXlsx,
     Pdf,
+    PdfImageOcr { page_count: u64, max_pages: u64 },
     RustXls,
     RustLegacyOffice,
 }
 
 impl ParserRoute {
-    pub fn backend(self) -> &'static str {
+    pub(crate) const fn worker_backend(self) -> Option<ParserBackend> {
         match self {
-            Self::LightText => "light_text_v2",
-            Self::RustOffice => "rust_office_oxide_v2",
-            Self::RustXlsx => "rust_xlsx_bounded_v2",
-            Self::Pdf => "rust_pdfium_v3",
-            Self::RustXls => "rust_xls_calamine_v3",
-            Self::RustLegacyOffice => "rust_legacy_office_v3",
+            Self::LightText => None,
+            Self::RustOffice => Some(ParserBackend::RustOfficeOxideV2),
+            Self::RustXlsx => Some(ParserBackend::RustXlsxBoundedV2),
+            Self::RustXls => Some(ParserBackend::RustXlsCalamineV3),
+            Self::RustLegacyOffice => Some(ParserBackend::RustLegacyOfficeV3),
+            Self::Pdf | Self::PdfImageOcr { .. } => Some(ParserBackend::RustPdfiumV3),
         }
     }
 
-    pub fn worker_lane(self) -> &'static str {
-        match self {
-            Self::LightText => "rust_core",
-            Self::RustOffice | Self::RustXlsx | Self::RustXls | Self::RustLegacyOffice => {
-                "rust_office_process_v3"
-            }
-            Self::Pdf => "rust_pdf_process_v3",
+    pub const fn backend(self) -> &'static str {
+        if matches!(self, Self::PdfImageOcr { .. }) {
+            return crate::parsers::document::OCR_BACKEND;
+        }
+        match self.worker_backend() {
+            Some(backend) => backend.as_str(),
+            None => "light_text_v2",
+        }
+    }
+
+    pub const fn worker_lane(self) -> &'static str {
+        match self.worker_backend() {
+            Some(backend) => match backend.lane() {
+                WorkerLane::RustOfficeProcessV3 => AuditWorkerLane::RustOfficeProcessV3.as_str(),
+                WorkerLane::RustPdfProcessV3 => AuditWorkerLane::RustPdfProcessV3.as_str(),
+            },
+            None => AuditWorkerLane::RustCore.as_str(),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassificationError {
-    FileTooLarge,
     UnsupportedExtension,
     UnsupportedBackend,
     LegacyExtensionDisabled,
 }
 
-pub fn classify_candidate(
-    file: &DiscoveredFileOut,
+pub(crate) fn classify_extension(
+    extension: &str,
     profile: &NormalizedScannerSettings,
 ) -> Result<ParserRoute, ClassificationError> {
-    if file.size_bytes > profile.execution.max_file_size_bytes {
-        return Err(ClassificationError::FileTooLarge);
-    }
-    if !profile
-        .discovery
-        .allowed_extensions
-        .iter()
-        .any(|extension| extension == &file.extension)
-    {
-        return Err(ClassificationError::UnsupportedExtension);
-    }
-
-    match file.extension.as_str() {
+    match extension {
         ".txt" | ".md" | ".csv" | ".json" | ".log" => Ok(ParserRoute::LightText),
         ".xlsx" => {
             classify_modern_office(&profile.parse.office.primary_backend, ParserRoute::RustXlsx)

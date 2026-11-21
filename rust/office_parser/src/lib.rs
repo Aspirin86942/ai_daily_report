@@ -626,11 +626,17 @@ fn parse_request_inner(
     }
 
     let mut detected_request = request.clone();
-    let (format, backend) = legacy::detect_office_format(&path).map_err(|_| {
+    let (format, backend) = legacy::detect_office_format(&path).map_err(|reason| {
+        let message = match reason {
+            legacy::OfficeFormatError::MissingContent => {
+                ai_daily_worker_contract::OFFICE_CONTENT_MISSING_MESSAGE
+            }
+            legacy::OfficeFormatError::Invalid => "Office format is invalid",
+        };
         Box::new(worker_error(
             request,
             "PARSER_FAILED",
-            "Office format is invalid".into(),
+            message.into(),
             false,
         ))
     })?;

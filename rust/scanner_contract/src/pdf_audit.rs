@@ -48,6 +48,19 @@ pub fn pdf_sample_pages(page_count: u64, max_pages: u64, policy: &str) -> Vec<u6
 }
 
 impl PdfPageAudit {
+    pub fn all_pages_are_images(&self, page_count: u64) -> bool {
+        let Some(observations) = &self.observations else {
+            return false;
+        };
+        // A count of distinct pages within 1..=page_count also covers non-sequential sampling.
+        page_count > 0
+            && observations.len() as u64 == page_count
+            && self.validate().is_ok()
+            && observations.iter().all(|page| {
+                page.page <= page_count && !page.has_text && page.has_image == Some(true)
+            })
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if !matches!(
             self.policy_version.as_str(),

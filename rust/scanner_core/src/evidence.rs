@@ -13,34 +13,18 @@ use crate::context_audit::{assemble_execution_metrics_v2, EvidenceSnapshot, File
 pub fn assemble_scanner_evidence(
     request_id: &str,
     scan_run_id: u64,
-    snapshot: &EvidenceSnapshot,
+    mut snapshot: EvidenceSnapshot,
 ) -> Result<ScannerEvidence, String> {
-    if snapshot
-        .files_v2
-        .iter()
-        .any(|row| row.parse_transport.is_none() || row.parse_attempt_count.is_none())
-    {
-        return Err("file execution provenance is unavailable".to_string());
-    }
+    let execution_metrics = snapshot
+        .execution_metrics
+        .take()
+        .unwrap_or_else(|| assemble_execution_metrics_v2(&snapshot));
+    let reuse_kind = determine_reuse_kind(&snapshot, &execution_metrics);
     let files = snapshot
         .files_v2
-        .iter()
+        .into_iter()
         .map(assemble_file_audit_v2)
         .collect::<Result<Vec<_>, _>>()?;
-    for file in &files {
-        file.validate()
-            .map_err(|message| format!("file audit v2 is invalid: {message}"))?;
-    }
-    let execution_metrics = match snapshot.execution_metrics.as_ref() {
-        Some(metrics) => metrics.clone(),
-        // Engine-error runs with no scheduler outcome have no persisted row;
-        // the derive reconstructs the mostly-zero object from the empty rows.
-        None => assemble_execution_metrics_v2(snapshot),
-    };
-    execution_metrics
-        .validate()
-        .map_err(|message| format!("execution metrics are invalid: {message}"))?;
-    let reuse_kind = determine_reuse_kind(snapshot, &execution_metrics);
     let evidence = ScannerEvidence {
         contract: "ai_daily_context".to_string(),
         protocol_version: 1,
@@ -48,12 +32,12 @@ pub fn assemble_scanner_evidence(
         scan_run_id,
         context_run_id: Nullable(snapshot.context_run_id),
         run_status: snapshot.run_status,
-        summary: snapshot.summary.clone(),
-        stage_metrics: snapshot.stage_metrics.clone(),
-        extension_metrics: snapshot.extension_metrics.clone(),
+        summary: snapshot.summary,
+        stage_metrics: snapshot.stage_metrics,
+        extension_metrics: snapshot.extension_metrics,
         files,
-        decisions: snapshot.decisions.clone(),
-        warnings: snapshot.warnings.clone(),
+        decisions: snapshot.decisions,
+        warnings: snapshot.warnings,
         artifact_id: Nullable(snapshot.artifact_id),
         reused_from_context_run_id: Nullable(snapshot.reused_from_context_run_id),
         reuse_kind,
@@ -90,7 +74,7 @@ fn determine_reuse_kind(
 }
 
 /// Assembles one strict `FileAuditV2` from a persisted current-schema row.
-fn assemble_file_audit_v2(row: &FileAuditV2Source) -> Result<FileAuditV2, String> {
+fn assemble_file_audit_v2(row: FileAuditV2Source) -> Result<FileAuditV2, String> {
     let source_guard_kind = match row.source_guard_kind.as_deref() {
         Some(kind) => parse_source_guard_kind(kind)?,
         None => SourceGuardKind::Unavailable,
@@ -114,8 +98,8 @@ fn assemble_file_audit_v2(row: &FileAuditV2Source) -> Result<FileAuditV2, String
     // run must never stamp snapshot identity onto real execution
     // (its run pages/duration are not persisted), so `pdf_classification` is
     // null for miss/not_applicable rows.
-    let pdf_classification = match row.classification_execution.as_ref() {
-        Some(execution) => Some(execution.clone()),
+    let pdf_classification = match row.classification_execution {
+        Some(execution) => Some(execution),
         None => match row.classifier.as_ref() {
             Some(provenance) if row.parse_cache_status.as_deref() == Some("snapshot") => {
                 assemble_snapshot_classification(provenance)
@@ -123,36 +107,28 @@ fn assemble_file_audit_v2(row: &FileAuditV2Source) -> Result<FileAuditV2, String
             _ => None,
         },
     };
-    if let Some(classification) = &pdf_classification {
-        classification
-            .validate()
-            .map_err(|message| format!("pdf classification audit is invalid: {message}"))?;
-    }
-    let file = FileAuditV2 {
-        relative_path: row.relative_path.clone(),
-        file_identity: row.file_identity.clone(),
-        source_version: row.source_version.clone(),
+    Ok(FileAuditV2 {
+        relative_path: row.relative_path,
+        file_identity: row.file_identity,
+        source_version: row.source_version,
         source_guard_kind,
-        source_guard_sha256: Nullable(row.source_guard_sha256.clone()),
+        source_guard_sha256: Nullable(row.source_guard_sha256),
         parse_status: row.parse_status,
-        parser_backend: row.parser_backend.clone(),
+        parser_backend: row.parser_backend,
         worker_lane: row.worker_lane,
         parse_cache_status,
-        cache_miss_reason: row.cache_miss_reason.clone(),
+        cache_miss_reason: row.cache_miss_reason,
         truncated: row.truncated,
-        content_sha256: row.content_sha256.clone(),
+        content_sha256: row.content_sha256,
         parse_duration_ms: row.parse_duration_ms,
-        failure_class: row.failure_class.clone(),
-        fallback_backend: row.fallback_backend.clone(),
-        fallback_reason_code: row.fallback_reason_code.clone(),
+        failure_class: row.failure_class,
+        fallback_backend: row.fallback_backend,
+        fallback_reason_code: row.fallback_reason_code,
         parse_transport,
         parse_attempt_count,
-        final_diagnostic: Nullable(row.final_diagnostic.clone()),
+        final_diagnostic: Nullable(row.final_diagnostic),
         pdf_classification: Nullable(pdf_classification),
-    };
-    file.validate()
-        .map_err(|message| format!("file audit v2 is invalid: {message}"))?;
-    Ok(file)
+    })
 }
 
 /// Rebuilds the snapshot `PdfClassificationAuditV1` from the artifact's

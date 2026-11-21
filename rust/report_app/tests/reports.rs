@@ -1,9 +1,6 @@
 use ai_daily_report::{
     model::contracts::{CitedText, ComposedReport, Fact, Matter, SelectedFact},
-    reports::{
-        data::{CoverageGap, DailyReport, ReportSource},
-        render_daily, DAILY_TEMPLATE_V3,
-    },
+    reports::data::{DailyReport, ReportSource},
     snapshots::digest,
 };
 use chrono::{DateTime, Utc};
@@ -70,60 +67,6 @@ fn report() -> DailyReport {
 }
 
 #[test]
-fn daily_v3_keeps_conditions_status_sources_and_moves_technical_details_to_appendix() {
-    let r = report();
-    let body = render_daily(&r, DAILY_TEMPLATE_V3).unwrap();
-    for required in [
-        "历史补录",
-        "不超过50000元且预算内",
-        "超过50000元或预算外",
-        "财务复核",
-        "2个工作日",
-        "关联交易不适用",
-        "草稿待评审",
-        "生效日期尚未确定",
-        "[S001](#s001)",
-        "<a id=\"s001\"></a>",
-    ] {
-        assert!(body.contains(required), "{required}");
-    }
-    assert_eq!(body.matches("### 采购审批调整").count(), 1);
-    let appendix = body.find("## 来源与覆盖附录").unwrap();
-    assert!(body.find("SHA-256").unwrap() > appendix);
-    assert!(body.find("摘录").unwrap() > appendix);
-    assert!(!body.contains("$serde_json"));
-    assert!(!body.contains('\r'));
-    assert!(body.ends_with('\n'));
-    assert!(!body.ends_with("\n\n"));
-    assert_eq!(body, render_daily(&r, DAILY_TEMPLATE_V3).unwrap());
-}
-
-#[test]
-fn empty_day_and_no_confirmed_fact_do_not_invent_work() {
-    let mut r = report();
-    r.quality = "no_changes".into();
-    r.sources.clear();
-    r.facts.clear();
-    r.content = None;
-    let body = render_daily(&r, DAILY_TEMPLATE_V3).unwrap();
-    assert!(body.contains("未发现修改的文件"));
-    assert!(!body.contains("事项详情"));
-    r = report();
-    r.facts.clear();
-    r.content = None;
-    r.quality = "partial".into();
-    r.gaps.push(CoverageGap::new(
-        "MODEL_NO_FACTS",
-        "model",
-        Some("user_input"),
-        "现有材料未提供可确认的具体事项。",
-    ));
-    let body = render_daily(&r, DAILY_TEMPLATE_V3).unwrap();
-    assert!(body.contains("暂不扩写工作进展"));
-    assert!(body.contains("MODEL_NO_FACTS"));
-}
-
-#[test]
 fn invalid_source_identity_and_window_fail_at_the_report_boundary() {
     let mut r = report();
     r.sources[0].content_sha256 = Some("wrong".into());
@@ -143,15 +86,22 @@ fn invalid_source_identity_and_window_fail_at_the_report_boundary() {
 }
 
 #[test]
-fn source_excerpt_identity_is_checked_before_model_input_is_prepared() {
-    let r = report();
-    let source = &r.sources[0];
-    let text = &r.facts[0].fact.detail;
-    let input = source.input(text).unwrap().unwrap();
-    assert_eq!(input.source_id, "user_input");
-    assert_eq!(input.text, *text);
-    assert_eq!(
-        source.input("修改过的正文").unwrap_err().code,
-        "SOURCE_EXCERPT_HASH_MISMATCH"
-    );
+fn historical_fact_keeps_its_conditions_status_and_evidence() {
+    let original = report();
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let decoded: DailyReport = serde_json::from_slice(&bytes).unwrap();
+    decoded.validate().unwrap();
+    assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+
+    let saved: DailyReport =
+        serde_json::from_str(include_str!("fixtures/readability/v4-input.json")).unwrap();
+    saved.validate().unwrap();
+    let body = include_str!("fixtures/readability/v4-expected.md");
+    for fact in &saved.facts {
+        for reference in &fact.evidence {
+            assert!(body.contains(&reference.quote));
+            assert!(body.contains(&reference.version_id));
+            assert!(body.contains(&reference.quote_sha256));
+        }
+    }
 }

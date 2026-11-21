@@ -41,6 +41,48 @@ impl ScannerStore {
     pub fn load_artifact(&self, artifact_id: i64) -> Result<ArtifactDraft, StoreError> {
         load_artifact_from_connection(&self.connection, artifact_id)
     }
+
+    /// Replay the source run's observed physical pages even after the classifier
+    /// cache entry has expired. Historical envelopes may have only page counts.
+    pub(crate) fn snapshot_page_audits(
+        &self,
+        hit: &SnapshotHit,
+        artifact: &ArtifactDraft,
+    ) -> Result<
+        std::collections::BTreeMap<String, ai_daily_scanner_contract::PdfPageAudit>,
+        StoreError,
+    > {
+        let pages: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT json_extract(s.final_envelope_metadata_json, '$.pdf_page_audits')
+             FROM context_runs c JOIN scan_runs s ON s.scan_run_id=c.scan_run_id
+             WHERE c.context_run_id=?1 AND c.artifact_id=?2",
+                params![hit.source_context_run_id, hit.artifact_id],
+                |row| row.get(0),
+            )
+            .map_err(cache_open)?;
+        let audits: std::collections::BTreeMap<String, ai_daily_scanner_contract::PdfPageAudit> =
+            pages
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(|error| {
+                    StoreError::RunCorrupt(format!("invalid snapshot page audit: {error}"))
+                })?
+                .unwrap_or_default();
+        let matched = artifact
+            .file_rows
+            .iter()
+            .filter(|row| row.classifier.is_some() && audits.contains_key(&row.file_identity))
+            .count();
+        if matched != audits.len() {
+            return Err(StoreError::RunCorrupt(
+                "orphan snapshot PDF page audit".into(),
+            ));
+        }
+        Ok(audits)
+    }
 }
 
 pub fn canonical_envelope_json(envelope: &ContextEnvelope) -> Result<String, StoreError> {
@@ -264,7 +306,7 @@ pub(super) fn insert_artifact(
                         row.source_guard_kind,
                         row.source_guard_sha256,
                         row.parse_profile_hash,
-                        inventory::parse_status_text(row.parse_status),
+                        row.parse_status.as_str(),
                         row.parser_backend,
                         row.worker_lane,
                         i64::from(row.truncated),

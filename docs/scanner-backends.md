@@ -13,7 +13,7 @@ ai-daily-report.exe
        └─ ai-daily-pdf-parser.exe + pdfium.dll
 ~~~
 
-旧 Python 的 NativeScanner 与 PyO3 调用链继续保留用于旧版恢复，其规则见[历史扫描说明](archive/python-scanner-backends-2026-10-17.md)。
+旧 Python 的 NativeScanner 与 PyO3 调用链已随匹配版本归档，恢复规程见[恢复说明](../.artifacts/kernel-once-20261121/legacy/RECOVERY.md)和[历史扫描说明](archive/python-scanner-backends-2026-10-17.md)。
 
 ## 格式与执行通道
 
@@ -26,7 +26,10 @@ parser_backend 表示实际生成内容的解析器；worker_lane 表示执行�
 | XLS | rust_xls_calamine_v3 | rust_office_process_v3 |
 | DOCX、PPTX | rust_office_oxide_v2 | rust_office_process_v3 |
 | 显式启用的 DOC、PPT | rust_legacy_office_v3 | rust_office_process_v3 |
-| PDF | rust_pdfium_v3 | rust_pdf_process_v3 |
+| PDF 文字层 | rust_pdfium_v3 | rust_pdf_process_v3 |
+| 逐页确认的纯图 PDF，显式启用识字 | rust_pdfium_ocr_v1 | rust_pdf_process_v3 |
+
+纯图 PDF 可在同一解析进程内用 RustO 识字。每段识别文字保留原页页码，标记为待核实。文件与页数配额在一次扫描内共享。
 
 按真实格式选择一个 Rust 解析路径。DOC/PPT 默认关闭，需同时启用 legacy_office_enabled 并允许对应扩展名。解析错误和内容限制保留为覆盖缺口；已退休的 Python 回退配置会被拒绝。
 

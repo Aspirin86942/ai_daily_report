@@ -1,9 +1,5 @@
-use crate::{
-    model::{contracts::invalid, plan::StepKind},
-    types::{Period, ReportMode},
-    ReportError,
-};
-use serde_json::{json, Value};
+use crate::{model::contracts::invalid, types::Period, ReportError};
+use serde_json::Value;
 
 const WEEK_FIELDS: &[&str] = &[
     "week_label",
@@ -23,63 +19,37 @@ const MONTH_FIELDS: &[&str] = &[
     "work_summary",
     "next_plan",
 ];
-pub const WEEK_TEMPLATE: &str = include_str!("../../../../templates/weekly_template.md");
-pub const MONTH_TEMPLATE: &str = include_str!("../../../../templates/monthly_template.md");
 
-pub fn fields(kind: StepKind) -> &'static [&'static str] {
-    if kind == StepKind::Weekly {
-        WEEK_FIELDS
-    } else {
-        MONTH_FIELDS
+pub(crate) fn fields(kind: &str) -> Result<&'static [&'static str], ReportError> {
+    match kind {
+        "weekly" => Ok(WEEK_FIELDS),
+        "monthly" => Ok(MONTH_FIELDS),
+        _ => Err(invalid()),
     }
 }
 
-pub fn kind(period: &Period) -> StepKind {
-    if period.mode == ReportMode::Weekly {
-        StepKind::Weekly
-    } else {
-        StepKind::Monthly
-    }
-}
-pub fn validate(kind: StepKind, value: &Value, target: &Value) -> Result<(), ReportError> {
+pub fn validate_identity(kind: &str, value: &Value) -> Result<String, ReportError> {
+    let fields = fields(kind)?;
     let object = value.as_object().ok_or_else(invalid)?;
-    if !matches!(kind, StepKind::Weekly | StepKind::Monthly)
-        || object.len() != fields(kind).len()
-        || fields(kind).iter().any(|field| {
+    if object.len() != fields.len()
+        || fields.iter().any(|field| {
             object
                 .get(*field)
                 .and_then(Value::as_str)
-                .is_none_or(|s| s.chars().count() > 20000)
+                .is_none_or(|s| s.chars().count() > 20_000)
         })
     {
         return Err(invalid());
     }
-    if kind == StepKind::Weekly {
-        if value["week_label"] != target["week_label"]
-            || value["date_range"] != target["date_range"]
-        {
+    let label = value[fields[0]].as_str().ok_or_else(invalid)?;
+    let period = if kind == "weekly" {
+        let week = Period::weekly(label)?;
+        if value["date_range"] != format!("{} ~ {}", week.start, week.end) {
             return Err(invalid());
         }
-    } else if value["year_month"] != target["year_month"] {
-        return Err(invalid());
-    }
-    Ok(())
-}
-pub fn validate_identity(kind: &str, value: &Value) -> Result<String, ReportError> {
-    let period = match kind {
-        "weekly" => Period::weekly(
-            crate::types::parse_date("2026-01-01")?,
-            value["week_label"].as_str(),
-            crate::types::ReportSource::Db,
-        )?,
-        "monthly" => Period::monthly(
-            crate::types::parse_date("2026-01-01")?,
-            value["year_month"].as_str(),
-            crate::types::ReportSource::Db,
-        )?,
-        _ => return Err(invalid()),
+        week
+    } else {
+        Period::monthly(label)?
     };
-    let target = json!({"week_label":period.label,"year_month":period.label,"date_range":format!("{} ~ {}",period.start,period.end)});
-    validate(self::kind(&period), value, &target)?;
     Ok(period.label)
 }

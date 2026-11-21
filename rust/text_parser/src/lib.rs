@@ -10,7 +10,9 @@ use std::path::Path;
 use thiserror::Error;
 
 mod daily_csv;
+mod daily_text;
 use daily_csv::audited_csv;
+use daily_text::audited_text;
 
 const TEXT_FILE_TYPES: &[&str] = &[".txt", ".md", ".csv", ".json", ".log"];
 const LEGACY_CSV_FIELD_SIZE_LIMIT: usize = 131_072;
@@ -252,6 +254,8 @@ struct RawExcerpt {
     truncated: bool,
     byte_start: u64,
     byte_end: u64,
+    /// Absolute byte offset of the first decoded character (after boundary alignment).
+    text_byte_start: u64,
 }
 
 pub fn parse_light_text(
@@ -275,22 +279,29 @@ pub fn parse_light_text(
         return Err(LightTextError::FileTooLarge);
     }
 
-    let raw = if normalized_type == ".log" {
-        read_tail(&mut file, metadata.len(), profile.read_tail_bytes)?
-    } else {
-        read_head(
+    let windows = match normalized_type.as_str() {
+        ".txt" | ".md" => {
+            daily_text::read_windows(&mut file, metadata.len(), profile.read_head_bytes)?
+        }
+        ".log" => vec![read_tail(
+            &mut file,
+            metadata.len(),
+            profile.read_tail_bytes,
+        )?],
+        _ => vec![read_head(
             &mut file,
             metadata.len(),
             profile.read_head_bytes,
             (normalized_type == ".csv").then_some(profile.csv_encodings.as_slice()),
-        )?
+        )?],
     };
+    let raw = &windows[0];
     let max_output_chars = profile.max_chars.min(profile.excerpt_max_chars);
     let (content, truncated, warning, evidence_audit) = match normalized_type.as_str() {
         ".json" => {
-            let (content, truncated, warning) = build_json_content(&raw, max_output_chars);
+            let (content, truncated, warning) = build_json_content(raw, max_output_chars);
             let audit = ParsedContentAudit {
-                read_ranges: Some(byte_ranges(&raw)),
+                read_ranges: Some(byte_ranges(raw)),
                 usable_chars: Some(if raw.text.trim().is_empty() {
                     0
                 } else {
@@ -300,8 +311,8 @@ pub fn parse_light_text(
             };
             (content, truncated, warning, audit)
         }
-        ".csv" => audited_csv(&raw, max_output_chars),
-        _ => audited_text(&raw, max_output_chars, normalized_type == ".log", None),
+        ".csv" => audited_csv(raw, max_output_chars),
+        _ => audited_text(&windows, max_output_chars, normalized_type == ".log", None),
     };
     Ok(ParsedLightText {
         content,
@@ -335,6 +346,7 @@ fn read_head(
         truncated,
         byte_start: 0,
         byte_end: raw.len() as u64,
+        text_byte_start: 0,
     })
 }
 
@@ -353,14 +365,33 @@ fn byte_ranges(raw: &RawExcerpt) -> Vec<SourceRange> {
 /// The same complete lines and sentences are used by both daily parsing and excerpt allocation.
 /// A table line and a decimal value stay intact. Returned slices retain their original offsets.
 pub fn text_segments(text: &str, include_final_fragment: bool) -> impl Iterator<Item = &str> {
-    text.split_inclusive('\n').flat_map(move |line| {
-        let table_line = line.trim_start().starts_with('|');
+    let mut lines = text.split_inclusive('\n').peekable();
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        let first = lines.next()?;
+        let trimmed = first.trim_start();
+        let atomic = trimmed.starts_with('#')
+            || first.contains(['|', '\t'])
+            || daily_text::label_value(trimmed, &["页眉", "页脚", "header", "footer"]).is_some();
+        let mut end = start + first.len();
+        if !atomic && !trimmed.is_empty() {
+            while let Some(next) = lines.next_if(|next| {
+                !next.contains(['|', '\t']) && qualifying_continuation(next.trim_start())
+            }) {
+                end += next.len();
+            }
+        }
+        let line = &text[start..end];
+        start = end;
+        Some((line, atomic))
+    })
+    .flat_map(move |(line, atomic_line)| {
         let mut rest = line;
         std::iter::from_fn(move || {
             if rest.is_empty() {
                 return None;
             }
-            if !table_line {
+            if !atomic_line {
                 for (byte, ch) in rest.char_indices() {
                     let after = &rest[byte + ch.len_utf8()..];
                     let end = match ch {
@@ -384,6 +415,9 @@ pub fn text_segments(text: &str, include_final_fragment: bool) -> impl Iterator<
                     if end {
                         let next =
                             after.trim_start_matches(['。', '！', '？', '”', '’', '」', '』']);
+                        if qualifying_continuation(next.trim_start()) {
+                            continue;
+                        }
                         let (part, tail) = rest.split_at(rest.len() - next.len());
                         rest = tail;
                         return Some(part);
@@ -396,9 +430,23 @@ pub fn text_segments(text: &str, include_final_fragment: bool) -> impl Iterator<
     })
 }
 
+fn qualifying_continuation(text: &str) -> bool {
+    ["但", "否则", "除非", "仅当", "例外", "除外", "前提是"]
+        .iter()
+        .any(|s| text.starts_with(s))
+        || ["unless ", "except ", "but ", "only if "].iter().any(|s| {
+            text.get(..s.len())
+                .is_some_and(|start| start.eq_ignore_ascii_case(s))
+        })
+}
+
 /// Signals on the actual fact, independent of row numbers, dates or column headings.
 pub fn is_attention_fact(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
+    let lower = if text.bytes().any(|b| b.is_ascii_uppercase()) {
+        Cow::Owned(text.to_ascii_lowercase())
+    } else {
+        Cow::Borrowed(text)
+    };
     [
         "异常",
         "失败",
@@ -429,224 +477,8 @@ pub fn is_attention_fact(text: &str) -> bool {
         })
 }
 
-fn audited_text(
-    raw: &RawExcerpt,
-    max_chars: u64,
-    tail: bool,
-    warning: Option<LightTextWarning>,
-) -> (String, bool, Option<LightTextWarning>, ParsedContentAudit) {
-    let title = if tail {
-        "Log tail preview"
-    } else {
-        "Text preview"
-    };
-    let mut builder = AuditTextBuilder::new(max_chars, "text");
-    for range in byte_ranges(raw) {
-        builder.read(range);
-    }
-    let mut metadata = vec![
-        title.to_string(),
-        format!("excerpt_source: {}", raw.source),
-        format!("read_window_truncated: {}", raw.truncated),
-    ];
-    if let Some(warning) = warning {
-        metadata.push(format!("warning: {}", warning.code()));
-    }
-    let metadata = metadata.join("\n");
-    let meta_written = builder.push(&metadata, ContentUnitKind::Heading, vec![]);
-    let available = if meta_written {
-        max_chars - metadata.chars().count() as u64
-    } else {
-        max_chars.saturating_add(1)
-    };
-    let mut pieces = Vec::new();
-    let mut previous_chars = 0;
-    for text in text_segments(&raw.text, !raw.truncated || tail) {
-        let trimmed = text.trim();
-        let leading = text.chars().take_while(|c| c.is_whitespace()).count() as u64;
-        let ranges = if !tail && !trimmed.is_empty() {
-            vec![SourceRange::new(
-                SourceRangeUnit::TextChar,
-                previous_chars + leading,
-                previous_chars + leading + trimmed.chars().count() as u64,
-                None,
-            )]
-        } else {
-            vec![]
-        };
-        previous_chars += text.chars().count() as u64;
-        if !trimmed.is_empty() || !tail {
-            pieces.push((trimmed, ranges));
-        }
-    }
-    let mut selection_bounded = false;
-    if tail {
-        // Select complete latest lines, then restore their original order.
-        let mut remaining = available;
-        let mut selected = Vec::new();
-        for (text, ranges) in pieces.into_iter().rev() {
-            let size = text.chars().count() as u64 + 1;
-            if size <= remaining && selected.len() < 512 - usize::from(meta_written) {
-                remaining -= size;
-                selected.push((text, ranges));
-            } else {
-                selection_bounded = true;
-            }
-        }
-        selected.reverse();
-        for (text, ranges) in selected {
-            builder.push(text, ContentUnitKind::Text, ranges);
-        }
-    } else {
-        // All candidates refer to the lines in the read window. A table's wide
-        // header is materialized only for a group that will actually be emitted.
-        struct Candidate {
-            header: std::ops::Range<usize>,
-            rows: std::ops::Range<usize>,
-            kind: ContentUnitKind,
-            cost: u64,
-            attention: bool,
-        }
-        let mut units = Vec::new();
-        let mut index = 0;
-        while index < pieces.len() {
-            let text = pieces[index].0;
-            if text.starts_with('|')
-                && text.ends_with('|')
-                && pieces
-                    .get(index + 1)
-                    .is_some_and(|(separator, _)| markdown_separator(separator))
-            {
-                let end = (index + 2..pieces.len())
-                    .find(|next| {
-                        !pieces[*next].0.starts_with('|') || !pieces[*next].0.ends_with('|')
-                    })
-                    .unwrap_or(pieces.len());
-                if end > index + 2 {
-                    let header = index..index + 2;
-                    let header_chars = pieces[header.clone()]
-                        .iter()
-                        .map(|(line, _)| line.chars().count() + 1)
-                        .sum::<usize>();
-                    if header_chars as u64 >= available {
-                        selection_bounded = true;
-                        index = end;
-                        continue;
-                    }
-                    let header_attention = pieces[header.clone()]
-                        .iter()
-                        .any(|(line, _)| is_attention_fact(line));
-                    let mut cursor = index + 2;
-                    while cursor < end {
-                        let mut size = header_chars;
-                        let first = cursor;
-                        let attention = is_attention_fact(pieces[first].0);
-                        while cursor < end {
-                            let cost = pieces[cursor].0.chars().count() + 1;
-                            if cursor > first
-                                && (size + cost > 512
-                                    || 2 + cursor - first == 128
-                                    || size + cost > available as usize
-                                    || is_attention_fact(pieces[cursor].0) != attention)
-                            {
-                                break;
-                            }
-                            size += cost;
-                            cursor += 1;
-                        }
-                        units.push(Candidate {
-                            header: header.clone(),
-                            rows: first..cursor,
-                            kind: ContentUnitKind::TableRow,
-                            cost: size as u64,
-                            attention: header_attention || attention,
-                        });
-                    }
-                    index = end;
-                    continue;
-                }
-            }
-            let kind = if text.starts_with('#') {
-                ContentUnitKind::Heading
-            } else {
-                ContentUnitKind::Text
-            };
-            if !text.is_empty() {
-                units.push(Candidate {
-                    header: 0..0,
-                    rows: index..index + 1,
-                    kind,
-                    cost: text.chars().count() as u64 + 1,
-                    attention: is_attention_fact(text),
-                });
-            }
-            index += 1;
-        }
-        let limit = 512 - usize::from(meta_written);
-        let mut selected = vec![true; units.len()];
-        if units.iter().map(|unit| unit.cost).sum::<u64>() > available || units.len() > limit {
-            selected.fill(false);
-            let mut heading = None;
-            let mut order = Vec::new();
-            for (i, unit) in units.iter().enumerate() {
-                if unit.kind == ContentUnitKind::Heading {
-                    heading = Some(i);
-                } else {
-                    order.push((!unit.attention, i, heading));
-                }
-            }
-            order.sort_unstable();
-            let mut remaining = available;
-            let mut slots = limit;
-            for (_, i, heading) in order {
-                let required = heading.filter(|&h| !selected[h]);
-                let size = units[i].cost + required.map_or(0, |h| units[h].cost);
-                let count = 1 + usize::from(required.is_some());
-                if size <= remaining && count <= slots {
-                    selected[i] = true;
-                    if let Some(h) = required {
-                        selected[h] = true;
-                    }
-                    remaining -= size;
-                    slots -= count;
-                }
-            }
-            selection_bounded |= selected.contains(&false);
-        }
-        for (unit, keep) in units.into_iter().zip(selected) {
-            if !keep {
-                continue;
-            }
-            if unit.header.is_empty() {
-                let (line, ranges) = &pieces[unit.rows.start];
-                builder.push(line, unit.kind, ranges.clone());
-            } else {
-                let lines = unit.header.chain(unit.rows).map(|i| &pieces[i]);
-                let text = lines
-                    .clone()
-                    .map(|(line, _)| *line)
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let ranges = lines
-                    .flat_map(|(_, ranges)| ranges.iter().cloned())
-                    .collect();
-                builder.push(&text, unit.kind, ranges);
-            }
-        }
-    }
-    let (content, mut audit, bounded) = builder.finish();
-    audit.encoding = Some(raw.encoding.into());
-    (
-        content,
-        raw.truncated || bounded || selection_bounded,
-        warning,
-        audit,
-    )
-}
-
 fn markdown_separator(text: &str) -> bool {
-    text.starts_with('|')
-        && text.ends_with('|')
+    text.contains('|')
         && text.trim_matches('|').split('|').all(|cell| {
             let value = cell.trim();
             value.chars().filter(|ch| *ch == '-').count() >= 3
@@ -676,13 +508,15 @@ fn read_tail(
     let (leading_context, raw) = context_and_raw.split_at(leading_length);
     let truncated = start_offset > 0;
     let text = decode_tail(raw, leading_context, truncated)?;
+    let byte_end = context_offset + context_and_raw.len() as u64;
     Ok(RawExcerpt {
+        text_byte_start: byte_end - text.len() as u64,
         text,
         encoding: "utf-8",
         source: "tail",
         truncated,
         byte_start: context_offset,
-        byte_end: context_offset + context_and_raw.len() as u64,
+        byte_end,
     })
 }
 
@@ -831,9 +665,7 @@ fn build_json_content(
                 Value::Bool(_) => lines.push("top_level_type: bool".to_string()),
                 Value::Null => lines.push("top_level_type: NoneType".to_string()),
             }
-            lines.push(String::new());
-            lines.push(raw.text.clone());
-            lines.join("\n")
+            preview_body(lines, &raw.text)
         },
         raw.truncated,
         max_chars,
@@ -853,9 +685,7 @@ fn build_text_content(
             if let Some(warning) = warning {
                 lines.push(format!("warning: {}", warning.code()));
             }
-            lines.push(String::new());
-            lines.push(raw.text.clone());
-            lines.join("\n")
+            preview_body(lines, &raw.text)
         },
         raw.truncated,
         max_chars,
@@ -947,28 +777,36 @@ fn metadata_lines(title: &str, excerpt_source: &str, truncated: bool) -> Vec<Str
     ]
 }
 
+fn preview_body(lines: Vec<String>, text: &str) -> String {
+    let mut body = lines.join("\n");
+    body.push_str("\n\n");
+    body.push_str(text);
+    body
+}
+
 fn finalize_content<F>(builder: F, read_truncated: bool, max_chars: u64) -> (String, bool)
 where
     F: Fn(bool) -> String,
 {
     let content = builder(read_truncated);
-    let (limited, output_truncated) = limit_chars(&content, max_chars);
+    let (limited, output_truncated) = limit_chars(content, max_chars);
     let final_truncated = read_truncated || output_truncated;
     if final_truncated != read_truncated {
         let rebuilt = builder(final_truncated);
-        let (limited, rebuilt_truncated) = limit_chars(&rebuilt, max_chars);
+        let (limited, rebuilt_truncated) = limit_chars(rebuilt, max_chars);
         return (limited, read_truncated || rebuilt_truncated);
     }
     (limited, final_truncated)
 }
 
-fn limit_chars(content: &str, max_chars: u64) -> (String, bool) {
+fn limit_chars(mut content: String, max_chars: u64) -> (String, bool) {
     let max_chars = usize::try_from(max_chars).unwrap_or(usize::MAX);
     let mut boundaries = content.char_indices();
     let Some((cutoff, _)) = boundaries.nth(max_chars) else {
-        return (content.to_string(), false);
+        return (content, false);
     };
-    (content[..cutoff].to_string(), true)
+    content.truncate(cutoff);
+    (content, true)
 }
 
 fn format_csv_row(row: &[String]) -> String {
@@ -1102,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn text_excerpt_keeps_the_head_for_regular_files() {
+    fn bounded_text_excerpt_keeps_both_ends_of_a_regular_file() {
         let directory = tempdir().expect("temporary root should exist");
         let path = directory.path().join("notes.md");
         let lines: Vec<String> = (0..500)
@@ -1122,7 +960,7 @@ mod tests {
 
         assert!(parsed.truncated);
         assert!(parsed.content.contains("2026-08-11 0000 日志行"));
-        assert!(!parsed.content.contains("0499"));
+        assert!(parsed.content.contains("2026-08-11 0499 日志行"));
         assert!(parsed.content.chars().count() <= 1_000);
     }
 

@@ -35,6 +35,7 @@ use crate::budget_model::{count_chars, ContextBudgetModel, RouteKind};
 use crate::compressor::{build_context, fixed_context_sections, ContextBuildOutput};
 use crate::decision::ContextFileEvidence;
 use crate::parsers::classifier::PdfClassifierPort;
+use crate::scanner::next_request_id;
 use crate::source_guard::{
     source_guard_kind_from_text, SourceGuardKind, SourceGuardObservationMetrics,
     SourceGuardObserver, SourceGuardV2,
@@ -48,6 +49,9 @@ use crate::store::{
 pub use crate::deadline::{Clock, RealClock, RunDeadlines, FINALIZATION_RESERVE_MS};
 
 mod refill;
+mod warnings;
+
+use warnings::project_warnings;
 
 // ---------------------------------------------------------------------------
 // Clock / guard / ports
@@ -850,6 +854,31 @@ impl BudgetedContextScheduler {
                 &executor,
             )?;
         }
+        if profile.parse.pdf.image_ocr.is_some() {
+            let image_ocr = ContentAdmissionPlan::admit_image_ocr(
+                &mut admission,
+                &profile,
+                &model,
+                &classification_audits,
+            );
+            metrics.admitted_file_count = admission
+                .iter()
+                .filter(|decision| matches!(decision.action, PlanAction::Admit { .. }))
+                .count() as u64;
+            if !image_ocr.is_empty() {
+                let outputs = self.run_parses(
+                    &image_ocr,
+                    &snapshot,
+                    &classifications,
+                    &profile,
+                    &existed_before,
+                    &runtime_classification,
+                    &mut metrics,
+                    &executor,
+                )?;
+                refill::merge_parses(&mut parse_outputs, outputs);
+            }
+        }
         for file in &input.discovery {
             if self.guard.is_tainted(&file.path) {
                 parse_outputs
@@ -1302,42 +1331,31 @@ fn classification_cache_record(
 
 fn route_timeout_ms(route: RouteKind, profile: &NormalizedScannerSettings) -> u64 {
     let extension = match route {
-        RouteKind::Pdf => ".pdf",
+        RouteKind::Pdf | RouteKind::PdfImageOcr { .. } => ".pdf",
         RouteKind::RustXls => ".xls",
         RouteKind::RustXlsx => ".xlsx",
         _ => return profile.execution.file_timeout_ms,
     };
-    profile
+    let timeout_ms = profile
         .execution
         .file_timeout_by_extension_ms
         .get(extension)
         .copied()
-        .unwrap_or(profile.execution.file_timeout_ms)
+        .unwrap_or(profile.execution.file_timeout_ms);
+    if matches!(route, RouteKind::PdfImageOcr { .. }) {
+        timeout_ms.min(ai_daily_worker_contract::OCR_TIMEOUT_MS)
+    } else {
+        timeout_ms
+    }
 }
 
-fn parse_worker_lane(lane: &str) -> AuditWorkerLane {
+pub(crate) fn parse_worker_lane(lane: &str) -> AuditWorkerLane {
     match lane {
         "rust_core" => AuditWorkerLane::RustCore,
         "rust_office_process_v3" => AuditWorkerLane::RustOfficeProcessV3,
         "rust_pdf_process_v3" => AuditWorkerLane::RustPdfProcessV3,
         _ => AuditWorkerLane::NotParsed,
     }
-}
-
-fn next_request_id() -> String {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
-    let counter = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as u128;
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
-    let mut bytes = (nanos ^ (u128::from(std::process::id()) << 64) ^ counter).to_be_bytes();
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-        bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]
-    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1568,6 +1586,7 @@ impl BudgetedContextScheduler {
                 work_deadline,
                 &mut results,
                 &mut audits,
+                &mut runtime_not_parsed,
                 metrics,
                 &mut classification_cache_receipts,
                 &mut classification_cache_write_warnings,
@@ -1602,17 +1621,25 @@ impl BudgetedContextScheduler {
         work_deadline: u64,
         results: &mut BTreeMap<String, PdfClassificationResult>,
         audits: &mut BTreeMap<String, PdfClassificationAuditV1>,
+        runtime_not_parsed: &mut HashSet<String>,
         metrics: &mut ExecutionMetrics,
         cache_receipts: &mut Vec<ClassificationCacheWriteRecord>,
         cache_write_warnings: &mut Vec<Diagnostic>,
     ) {
-        let remaining = work_deadline.saturating_sub(self.clock.now_ms());
         let outputs = executor.map(wave, |task| {
-            let timeout = Duration::from_millis(task.own_timeout_ms.min(remaining));
-            let execution = self.classifier.classify_pdf(&task.request, timeout);
-            (task.file.file_identity.clone(), execution)
+            let remaining = work_deadline.saturating_sub(self.clock.now_ms());
+            (remaining > 0).then(|| {
+                let timeout = Duration::from_millis(task.own_timeout_ms.min(remaining));
+                self.classifier.classify_pdf(&task.request, timeout)
+            })
         });
-        for (task, (identity, execution)) in wave.iter().zip(outputs) {
+        for (task, execution) in wave.iter().zip(outputs) {
+            let identity = &task.file.file_identity;
+            let Some(execution) = execution else {
+                runtime_not_parsed.insert(identity.clone());
+                metrics.stage_deadline_exhausted_count = 1;
+                continue;
+            };
             metrics.classify_attempt_count = metrics
                 .classify_attempt_count
                 .saturating_add(execution.attempt_count);
@@ -1676,7 +1703,7 @@ impl BudgetedContextScheduler {
             if classification.error_code.as_deref() == Some("SOURCE_VERSION_CHANGED") {
                 results.insert(
                     identity.clone(),
-                    source_version_changed_classification(&identity),
+                    source_version_changed_classification(identity),
                 );
                 metrics.unobserved_classification_attempt_count = metrics
                     .unobserved_classification_attempt_count
@@ -1693,7 +1720,7 @@ impl BudgetedContextScheduler {
             if !self.guard.verify(&task.file.path, &task.guard) {
                 results.insert(
                     identity.clone(),
-                    source_version_changed_classification(&identity),
+                    source_version_changed_classification(identity),
                 );
                 // spec Part 5.3: a discarded classifier attempt has no confirmed
                 // inspected pages.
@@ -1811,7 +1838,7 @@ impl BudgetedContextScheduler {
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
             ),
-            RouteKind::Pdf => (
+            RouteKind::Pdf | RouteKind::PdfImageOcr { .. } => (
                 self.stored_workers
                     .pdf_contract
                     .clone()
@@ -1984,10 +2011,7 @@ impl BudgetedContextScheduler {
                 break;
             }
             let wave_end = (index + executor.concurrency).min(admitted.len());
-            let remaining = work_deadline.saturating_sub(self.clock.now_ms());
-            let mut requests: Vec<ParseRequest> = Vec::new();
-            let mut wave_meta: Vec<(DiscoveredFileOut, SourceGuardV2, RouteKind, String)> =
-                Vec::new();
+            let mut wave = Vec::new();
             for task in &admitted[index..wave_end] {
                 let Some(guard) = expected_guard(&task.file) else {
                     continue;
@@ -2001,26 +2025,31 @@ impl BudgetedContextScheduler {
                         .insert(task.file.file_identity.clone(), task.profile_hash.clone());
                     continue;
                 }
-                requests.push(crate::parsers::scheduled_request(
-                    &task.file,
-                    task.route,
-                    task.own_timeout_ms.min(remaining),
-                    profile,
-                    classifications,
-                ));
-                wave_meta.push((
-                    task.file.clone(),
-                    guard,
-                    task.route,
-                    task.profile_hash.clone(),
-                ));
+                wave.push((task, guard));
             }
-            let outputs = executor.map(&requests, |request| self.parser.parse(request));
-            for ((file, guard, route, profile_hash), result) in wave_meta.into_iter().zip(outputs) {
+            let outputs = executor.map(&wave, |(task, _)| {
+                let remaining = work_deadline.saturating_sub(self.clock.now_ms());
+                (remaining > 0).then(|| {
+                    self.parser.parse(&crate::parsers::scheduled_request(
+                        &task.file,
+                        task.route,
+                        task.own_timeout_ms.min(remaining),
+                        profile,
+                        classifications,
+                    ))
+                })
+            });
+            for ((task, guard), result) in wave.into_iter().zip(outputs) {
+                let file = &task.file;
+                let Some(result) = result else {
+                    runtime_not_parsed.insert(file.file_identity.clone());
+                    metrics.stage_deadline_exhausted_count = 1;
+                    continue;
+                };
                 metrics.parse_attempt_count = metrics
                     .parse_attempt_count
                     .saturating_add(result.parse_attempt_count);
-                if route == RouteKind::Pdf {
+                if matches!(task.route, RouteKind::Pdf | RouteKind::PdfImageOcr { .. }) {
                     metrics.pdfplumber_invocations = metrics
                         .pdfplumber_invocations
                         .saturating_add(result.parse_attempt_count);
@@ -2030,14 +2059,15 @@ impl BudgetedContextScheduler {
                     if !self.guard.verify(&file.path, &guard) {
                         results.insert(
                             file.file_identity.clone(),
-                            source_version_changed_after_parse(&file, result),
+                            source_version_changed_after_parse(file, result),
                         );
-                        parse_profile_hashes.insert(file.file_identity.clone(), profile_hash);
+                        parse_profile_hashes
+                            .insert(file.file_identity.clone(), task.profile_hash.clone());
                         continue;
                     }
                     if self.clock.now_ms() < work_deadline {
                         let (worker_contract, worker_version, worker_build) =
-                            self.worker_identity_for(route);
+                            self.worker_identity_for(task.route);
                         let record = CacheWriteRecord {
                             file_identity: file.file_identity.clone(),
                             source_version: file.source_version.clone(),
@@ -2046,7 +2076,7 @@ impl BudgetedContextScheduler {
                             )
                             .to_string(),
                             source_guard_sha256: guard.guard_sha256.clone().unwrap_or_default(),
-                            parse_profile_hash: profile_hash.clone(),
+                            parse_profile_hash: task.profile_hash.clone(),
                             content: result.content.clone(),
                             content_sha256: result.content_sha256.clone(),
                             evidence_audit: result.evidence_audit.clone(),
@@ -2077,13 +2107,13 @@ impl BudgetedContextScheduler {
                                 retryable: true,
                                 stage: DiagnosticStage::Cache,
                                 file_path: Nullable(Some(file.path.clone())),
-                                backend: Nullable(Some(route.backend().to_string())),
+                                backend: Nullable(Some(task.route.backend().to_string())),
                             }),
                         }
                     }
                 }
                 results.insert(file.file_identity.clone(), result);
-                parse_profile_hashes.insert(file.file_identity.clone(), profile_hash);
+                parse_profile_hashes.insert(file.file_identity.clone(), task.profile_hash.clone());
             }
             index = wave_end;
         }
@@ -2091,7 +2121,6 @@ impl BudgetedContextScheduler {
             metrics.parse_cache_all_hit =
                 Some(metrics.parse_cache_all_hit.unwrap_or(true) && !any_miss);
         }
-        let _ = existed_before;
         Ok(ParseOutputs {
             results,
             runtime_not_parsed,
@@ -2361,7 +2390,7 @@ fn file_evidence(
                 reason: Some("parse_error".to_string()),
             }
         }
-        PlanAction::Admit { .. } => {
+        PlanAction::Admit { route } => {
             if runtime_classification.contains(&file.file_identity)
                 || parse_outputs
                     .runtime_not_parsed
@@ -2399,10 +2428,13 @@ fn file_evidence(
                     parse_status: result.parse_status,
                     truncated: result.truncated,
                     error: result.error.clone(),
-                    reason: if result.parse_status == ParseStatus::Success {
-                        None
-                    } else {
-                        Some("parse_error".to_string())
+                    reason: match (result.parse_status, route) {
+                        (ParseStatus::Success, _) => None,
+                        (ParseStatus::Timeout, RouteKind::PdfImageOcr { .. }) => {
+                            Some("pdf_image_ocr_timeout".into())
+                        }
+                        (_, RouteKind::PdfImageOcr { .. }) => Some("pdf_image_ocr_failed".into()),
+                        _ => Some("parse_error".into()),
                     },
                 }
             } else {
@@ -2561,74 +2593,6 @@ fn terminal_state(
         }
     }
     (intent, diagnostics)
-}
-
-/// spec Part 2.2 bounded warning projection: run-level warnings first, then up
-/// to 256 detail rows, then a single `DIAGNOSTICS_AGGREGATED` row
-/// (`stage=internal`, `retryable=any folded true`, `file_path/backend=null`).
-/// Error-severity diagnostics pass through untouched (the envelope error).
-fn project_warnings(diagnostics: Vec<RunDiagnosticRecord>) -> Vec<RunDiagnosticRecord> {
-    let mut errors = Vec::new();
-    let mut warnings = Vec::new();
-    for record in diagnostics {
-        if record.severity == DiagnosticSeverity::Error {
-            errors.push(record);
-        } else {
-            warnings.push(record);
-        }
-    }
-    if warnings.len() <= 256 {
-        warnings.extend(errors);
-        return warnings;
-    }
-    let tail = warnings.split_off(256);
-    warnings.push(aggregate_warning(&tail));
-    warnings.extend(errors);
-    warnings
-}
-
-fn aggregate_warning(folded: &[RunDiagnosticRecord]) -> RunDiagnosticRecord {
-    let mut groups: BTreeMap<(String, String, bool), u64> = BTreeMap::new();
-    let mut any_retryable = false;
-    for record in folded {
-        let key = (
-            crate::store::inventory::enum_text(&record.diagnostic.stage),
-            crate::store::inventory::enum_text(&record.diagnostic.error_code),
-            record.diagnostic.retryable,
-        );
-        *groups.entry(key).or_insert(0) += 1;
-        any_retryable |= record.diagnostic.retryable;
-    }
-    let mut parts: Vec<String> = Vec::new();
-    let mut other_count = 0_u64;
-    for ((stage, code, retryable), count) in groups {
-        let part = format!("{stage}:{code}:retryable={retryable}:{count}");
-        let projected = parts.iter().map(|p| p.len() + 1).sum::<usize>() + part.len();
-        if projected <= 4_096 {
-            parts.push(part);
-        } else {
-            other_count = other_count.saturating_add(count);
-        }
-    }
-    if other_count > 0 {
-        parts.push(format!("other:{other_count}"));
-    }
-    let message = format!(
-        "aggregated {} diagnostics: {}",
-        folded.len(),
-        parts.join(",")
-    );
-    RunDiagnosticRecord {
-        severity: DiagnosticSeverity::Warning,
-        diagnostic: Diagnostic {
-            error_code: ErrorCode::DiagnosticsAggregated,
-            message: message.chars().take(4_096).collect(),
-            retryable: any_retryable,
-            stage: DiagnosticStage::Internal,
-            file_path: Nullable(None),
-            backend: Nullable(None),
-        },
-    }
 }
 
 /// Defines a minimal Error outcome for defined internal terminal states
@@ -2987,95 +2951,4 @@ pub(crate) fn zero_stage_metrics() -> Vec<StageMetric> {
             duration_ms: 0,
         },
     ]
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn warning(error_code: ErrorCode, retryable: bool) -> RunDiagnosticRecord {
-        RunDiagnosticRecord {
-            severity: DiagnosticSeverity::Warning,
-            diagnostic: Diagnostic {
-                error_code,
-                message: "synthetic".to_string(),
-                retryable,
-                stage: DiagnosticStage::Parse,
-                file_path: Nullable(Some("C:\\f\\a.md".to_string())),
-                backend: Nullable(None),
-            },
-        }
-    }
-
-    #[test]
-    fn project_warnings_folds_overflow_into_one_aggregate() {
-        let mut diagnostics: Vec<RunDiagnosticRecord> = (0..300)
-            .map(|index| {
-                warning(
-                    if index % 2 == 0 {
-                        ErrorCode::ParserFailed
-                    } else {
-                        ErrorCode::ParserTimeout
-                    },
-                    index % 3 == 0,
-                )
-            })
-            .collect();
-        // Keep one Error diagnostic to assert it passes through untouched.
-        diagnostics.push(RunDiagnosticRecord {
-            severity: DiagnosticSeverity::Error,
-            diagnostic: Diagnostic {
-                error_code: ErrorCode::InternalError,
-                message: "primary".to_string(),
-                retryable: false,
-                stage: DiagnosticStage::Internal,
-                file_path: Nullable(None),
-                backend: Nullable(None),
-            },
-        });
-
-        let projected = project_warnings(diagnostics);
-        let warnings: Vec<_> = projected
-            .iter()
-            .filter(|record| record.severity == DiagnosticSeverity::Warning)
-            .collect();
-        let errors: Vec<_> = projected
-            .iter()
-            .filter(|record| record.severity == DiagnosticSeverity::Error)
-            .collect();
-        // 256 detail + 1 DIAGNOSTICS_AGGREGATED.
-        assert_eq!(warnings.len(), 257);
-        assert_eq!(
-            warnings
-                .iter()
-                .filter(|record| record.diagnostic.error_code == ErrorCode::DiagnosticsAggregated)
-                .count(),
-            1
-        );
-        let aggregate = warnings
-            .iter()
-            .find(|record| record.diagnostic.error_code == ErrorCode::DiagnosticsAggregated)
-            .expect("aggregate");
-        assert_eq!(aggregate.diagnostic.stage, DiagnosticStage::Internal);
-        assert!(
-            aggregate.diagnostic.retryable,
-            "any folded retryable => true"
-        );
-        assert!(aggregate.diagnostic.file_path.0.is_none());
-        assert!(aggregate.diagnostic.backend.0.is_none());
-        assert_eq!(errors.len(), 1, "error diagnostics pass through untouched");
-    }
-
-    #[test]
-    fn project_warnings_passes_through_few_warnings() {
-        let diagnostics = vec![
-            warning(ErrorCode::ParserFailed, false),
-            warning(ErrorCode::ParserTimeout, true),
-        ];
-        let projected = project_warnings(diagnostics);
-        assert_eq!(projected.len(), 2);
-        assert!(!projected
-            .iter()
-            .any(|record| record.diagnostic.error_code == ErrorCode::DiagnosticsAggregated));
-    }
 }

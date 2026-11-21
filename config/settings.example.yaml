@@ -97,9 +97,12 @@ scanner:
   # 每种真实格式固定一个 Rust 解析器。
   # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.
   legacy_office_enabled: false
-  max_workers: 4
+  # 个人日报可使用 1 或 2 个解析任务，Office 与 PDF 共用同一上限。
+  max_workers: 2
   excel_max_rows: 500
   pdf_max_pages: 50
+  # 只有全部已核实为纯图的 PDF 可进入本机识字。额度按一次扫描合计。
+  # pdf_image_ocr: {enabled: true, max_files: 1, max_pages: 3}
   text_max_chars: 60000
   csv_encodings: [utf-8, utf-8-sig, gb18030]
   summary_excel_max_rows: 10

@@ -124,6 +124,16 @@ function Test-RustReleaseBundle([string]$BundleDirectory) {
         }
     }
     $inputs = Get-Content -LiteralPath (Join-Path $root 'build-inputs.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($inputs.PSObject.Properties['image_ocr']) {
+        foreach ($notice in @('licenses/ocr-models/LICENSE', 'licenses/ocr-models/NOTICE')) {
+            if (-not $hashes.ContainsKey($notice)) { throw "Manifest omits OCR license file: $notice" }
+        }
+        foreach ($model in $inputs.image_ocr.files) {
+            $relative = "ocr-models/$($model.name)"
+            if (-not $hashes.ContainsKey($relative)) { throw "Manifest omits required file: $relative" }
+            if ($hashes[$relative] -cne $model.sha256) { throw "Pinned OCR model hash mismatch: $($model.name)" }
+        }
+    }
     $build = Get-Content -LiteralPath (Join-Path $root 'parser-build.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     $parser = Get-Content -LiteralPath (Join-Path $root 'parser-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     if ($manifest.target -cne $inputs.target -or $manifest.worker_protocol -ne 4 -or

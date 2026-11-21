@@ -132,9 +132,11 @@ pub struct SearchArgs {
         long,
         required_unless_present = "reindex",
         conflicts_with = "reindex",
-        help = "检索关键词"
+        help = "检索报告与已发布依据附件，空格分词且须全部命中，按相关程度排序"
     )]
     pub query: Option<String>,
+    #[arg(long, requires = "query", help = "按连续短语匹配，保留词序和空格")]
+    pub phrase: bool,
     #[arg(long, value_parser = types::parse_date, help = "日报起始日期（含当天）；排除周月报")]
     pub from: Option<NaiveDate>,
     #[arg(long, value_parser = types::parse_date, help = "日报结束日期（含当天）；排除周月报")]

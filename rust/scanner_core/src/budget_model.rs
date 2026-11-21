@@ -102,39 +102,9 @@ pub fn budget_model_mismatch(context: &str) -> String {
     format!("{BUDGET_MODEL_MISMATCH_CODE}: {context}")
 }
 
-/// A parser route with the section-size caps the budget model prices.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RouteKind {
-    LightText,
-    RustOffice,
-    RustXlsx,
-    Pdf,
-    RustXls,
-    RustLegacyOffice,
-}
+pub use crate::classifier::ParserRoute as RouteKind;
 
 impl RouteKind {
-    pub const fn backend(self) -> &'static str {
-        match self {
-            Self::LightText => "light_text_v2",
-            Self::RustOffice => "rust_office_oxide_v2",
-            Self::RustXlsx => "rust_xlsx_bounded_v2",
-            Self::Pdf => "rust_pdfium_v3",
-            Self::RustXls => "rust_xls_calamine_v3",
-            Self::RustLegacyOffice => "rust_legacy_office_v3",
-        }
-    }
-
-    pub const fn worker_lane(self) -> &'static str {
-        match self {
-            Self::LightText => "rust_core",
-            Self::RustOffice | Self::RustXlsx | Self::RustXls | Self::RustLegacyOffice => {
-                "rust_office_process_v3"
-            }
-            Self::Pdf => "rust_pdf_process_v3",
-        }
-    }
-
     /// Maximum content a route can produce under the normalized parser limits.
     pub fn max_excerpt_chars(self, profile: &NormalizedScannerSettings) -> u64 {
         match self {
@@ -147,6 +117,11 @@ impl RouteKind {
                 profile.parse.office.document_excerpt_max_chars
             }
             Self::Pdf => profile.parse.pdf.excerpt_max_chars,
+            Self::PdfImageOcr { .. } => profile
+                .parse
+                .pdf
+                .excerpt_max_chars
+                .min(ai_daily_worker_contract::OCR_CHARS_PER_FILE),
         }
     }
 }

@@ -44,7 +44,6 @@ impl BudgetProfile for ContextProfile {
 const OFFICE_OR_PDF_EXTENSIONS: &[&str] = &[
     ".doc", ".docx", ".pdf", ".ppt", ".pptx", ".xls", ".xlsm", ".xlsx",
 ];
-const TEXT_KEEP_EXTENSIONS: &[&str] = &[".md", ".txt"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContextFileEvidence {
@@ -268,8 +267,3 @@ fn is_extension(value: &str) -> bool {
             !character.is_ascii_uppercase() && !matches!(character, '\\' | '/' | ':' | '\0')
         })
 }
-
-// Keep TEXT_KEEP_EXTENSIONS referenced so the module documents the same route
-// table as `nominal.rs`; it is intentionally not a second ordering implementation.
-#[allow(dead_code)]
-const _TEXT_KEEP_EXTENSIONS_USED: &[&str] = TEXT_KEEP_EXTENSIONS;

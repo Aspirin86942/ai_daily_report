@@ -1,14 +1,23 @@
 use super::*;
 use calamine::{open_workbook, Reader, Xls};
 
+/// Diagnostics sent to the scanner contain no document text.
+pub(super) enum OfficeFormatError {
+    Invalid,
+    MissingContent,
+}
+
 /// Inspect container identities before selecting exactly one content parser.
-pub fn detect_office_format(path: &PathBuf) -> Result<(&'static str, ParserBackend), String> {
-    let mut file = File::open(path).map_err(|e| e.to_string())?;
+pub(super) fn detect_office_format(
+    path: &std::path::Path,
+) -> Result<(&'static str, ParserBackend), OfficeFormatError> {
+    let mut file = File::open(path).map_err(|_| OfficeFormatError::Invalid)?;
     let mut signature = [0; 8];
-    file.read_exact(&mut signature).map_err(|e| e.to_string())?;
-    file.rewind().map_err(|e| e.to_string())?;
+    file.read_exact(&mut signature)
+        .map_err(|_| OfficeFormatError::Invalid)?;
+    file.rewind().map_err(|_| OfficeFormatError::Invalid)?;
     if signature.starts_with(b"PK") {
-        let zip = ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let zip = ZipArchive::new(file).map_err(|_| OfficeFormatError::Invalid)?;
         let mut formats = Vec::new();
         for (entry, kind, backend) in [
             (
@@ -30,8 +39,19 @@ pub fn detect_office_format(path: &PathBuf) -> Result<(&'static str, ParserBacke
         if formats.len() == 1 {
             return Ok(formats[0]);
         }
+        if zip.index_for_name("[Content_Types].xml").is_some()
+            && zip.file_names().all(|name| {
+                name == "[Content_Types].xml"
+                    || name.ends_with('/')
+                    || name.starts_with("_rels/")
+                    || name.starts_with("docProps/")
+            })
+        {
+            return Err(OfficeFormatError::MissingContent);
+        }
     } else if signature == [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1] {
-        let cfb = office_oxide::cfb::CfbReader::new(file).map_err(|e| e.to_string())?;
+        let cfb =
+            office_oxide::cfb::CfbReader::new(file).map_err(|_| OfficeFormatError::Invalid)?;
         let mut formats = Vec::new();
         if cfb.has_stream("WordDocument") {
             formats.push((".doc", ParserBackend::RustLegacyOfficeV3));
@@ -46,7 +66,7 @@ pub fn detect_office_format(path: &PathBuf) -> Result<(&'static str, ParserBacke
             return Ok(formats[0]);
         }
     }
-    Err("Office container does not identify one supported format".into())
+    Err(OfficeFormatError::Invalid)
 }
 
 fn xls_text(cell: &calamine::Data) -> String {

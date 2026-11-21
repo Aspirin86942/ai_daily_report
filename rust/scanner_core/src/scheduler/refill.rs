@@ -87,7 +87,7 @@ fn consumed(
     ))
 }
 
-fn merge_parses(current: &mut ParseOutputs, next: ParseOutputs) {
+pub(super) fn merge_parses(current: &mut ParseOutputs, next: ParseOutputs) {
     current.results.extend(next.results);
     current.runtime_not_parsed.extend(next.runtime_not_parsed);
     current

@@ -20,7 +20,7 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 use crate::evidence::assemble_scanner_evidence;
 use crate::parsers::{RegisteredWorker, WorkerCommand};
 use crate::run::{build_context_command, doctor_command, EngineShellError};
-use crate::session::{SessionParams, WorkerPool};
+use crate::session::{SessionParams, SessionSlots, WorkerPool};
 use crate::store::ScannerStore;
 
 /// One context build and the complete evidence committed for that run.
@@ -112,39 +112,34 @@ impl ScannerWorkerPools {
     ) -> (Arc<WorkerPool>, Arc<WorkerPool>) {
         let office_hello = crate::parsers::worker_hello_from_registered(&office_worker);
         let pdf_hello = crate::parsers::worker_hello_from_registered(&pdf_worker);
-        let office = resolve_pool(
-            &mut self.office,
+        if let (Some(office), Some(pdf)) = (&self.office, &self.pdf) {
+            if office.matches(&office_command, &office_hello, &office_worker, params)
+                && pdf.matches(&pdf_command, &pdf_hello, &pdf_worker, params)
+            {
+                return (office.clone(), pdf.clone());
+            }
+        }
+        let slots = SessionSlots::new(params.concurrency);
+        let office = WorkerPool::with_slots(
             office_command,
             office_hello,
             office_worker,
             params,
+            Default::default(),
+            slots.clone(),
         );
-        let pdf = resolve_pool(&mut self.pdf, pdf_command, pdf_hello, pdf_worker, params);
+        let pdf = WorkerPool::with_slots(
+            pdf_command,
+            pdf_hello,
+            pdf_worker,
+            params,
+            Default::default(),
+            slots,
+        );
+        self.office = Some(office.clone());
+        self.pdf = Some(pdf.clone());
         (office, pdf)
     }
-}
-
-fn resolve_pool(
-    slot: &mut Option<Arc<WorkerPool>>,
-    command: WorkerCommand,
-    hello: ai_daily_worker_contract::WorkerHello,
-    worker: RegisteredWorker,
-    params: SessionParams,
-) -> Arc<WorkerPool> {
-    if let Some(pool) = slot {
-        if pool.matches(&command, &hello, &worker, params) {
-            return Arc::clone(pool);
-        }
-    }
-    let pool = WorkerPool::new(
-        command,
-        hello,
-        worker,
-        params,
-        crate::process::WorkerRssTracker::default(),
-    );
-    *slot = Some(Arc::clone(&pool));
-    pool
 }
 
 impl Scanner {
@@ -167,7 +162,7 @@ impl Scanner {
         &self,
         request: &ScanRequest,
     ) -> Result<ScannerOperation<ContextResult>, ScannerError> {
-        self.build_context_with_request_id(request, new_request_id())
+        self.build_context_with_request_id(request, next_request_id())
     }
 
     pub fn build_context_with_request_id(
@@ -201,7 +196,7 @@ impl Scanner {
     }
 
     pub fn doctor(&self) -> Result<ScannerOperation<DoctorResponse>, ScannerError> {
-        self.doctor_with_request_id(new_request_id())
+        self.doctor_with_request_id(next_request_id())
     }
 
     pub fn doctor_with_request_id(
@@ -291,7 +286,7 @@ fn validate_config(config: &ScannerConfig) -> Result<(), ScannerError> {
     Ok(())
 }
 
-fn new_request_id() -> String {
+pub(crate) fn next_request_id() -> String {
     let time = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
@@ -321,6 +316,6 @@ fn load_run_evidence(
     let snapshot = store
         .load_evidence(scan_run_id)
         .map_err(|error| EngineShellError::Evidence(error.error.to_string()))?;
-    assemble_scanner_evidence(&request.request_id, scan_run_id, &snapshot)
+    assemble_scanner_evidence(&request.request_id, scan_run_id, snapshot)
         .map_err(EngineShellError::Evidence)
 }

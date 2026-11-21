@@ -1,6 +1,6 @@
 //! One-pass deterministic per-file and global context budgeting pipeline.
 
-use std::collections::BTreeMap;
+use std::{borrow::Cow, collections::BTreeMap};
 
 use ai_daily_scanner_contract::{ContextAction, ContextDecision, ParseStatus, ReportMode};
 
@@ -120,6 +120,8 @@ pub fn build_context(
         })
         .collect();
     let omitted_plan = OmittedSummaryPlan::build(&omitted_candidates, profile.global_max_chars());
+    let mut prefix = section_prefix_chars(&sections);
+    let footer = count_chars(PARSE_FOOTER) + SECTION_SEPARATOR_CHARS + 1;
 
     for item in decided {
         let DecidedFile {
@@ -172,7 +174,8 @@ pub fn build_context(
 
         let candidate = render_file_section(&evidence, &mut decision, profile);
         let candidate_chars = count_chars(&candidate);
-        if can_append_with_footer(&sections, &candidate, profile.global_max_chars()) {
+        if prefix + candidate_chars + footer <= profile.global_max_chars() {
+            prefix += candidate_chars + SECTION_SEPARATOR_CHARS;
             sections.push(candidate);
             included_file_count += 1;
             match decision.action {
@@ -211,7 +214,8 @@ pub fn build_context(
     append_parse_issues(&mut sections, &parse_issues, profile.global_max_chars());
 
     let content = join_sections(&sections);
-    if count_chars(&content) > profile.global_max_chars() {
+    let output_chars = count_chars(&content);
+    if output_chars > profile.global_max_chars() {
         return Err(budget_model_mismatch(
             "rendered context exceeds the global budget",
         ));
@@ -219,7 +223,6 @@ pub fn build_context(
     if content.is_empty() {
         return Err("context budget produced an empty result".to_string());
     }
-    let output_chars = count_chars(&content);
     let truncated_file_count = decisions
         .iter()
         .filter(|record| record.decision.truncated)
@@ -288,27 +291,40 @@ fn render_file_section(
             decision.relative_path,
             decision.reason,
             evidence.parser_backend,
-            enum_text(&evidence.worker_lane),
+            evidence.worker_lane.as_str(),
             evidence.extension,
             evidence.size_bytes.unwrap_or(0),
             decision.input_chars,
         );
     }
 
-    let input_count = count_chars(&evidence.content);
+    let input_count = decision.input_chars;
     let limit = profile.per_file_max_chars();
-    let body = if input_count > limit {
+    let body: Cow<'_, str> = if input_count > limit {
         decision.action = ContextAction::Compress;
         decision.truncated = true;
-        if evidence.extension == ".log" {
-            take_log_tail(&evidence.content, limit as usize)
+        let excerpt = if evidence
+            .evidence_audit
+            .as_ref()
+            .is_some_and(|a| a.content_units.is_some())
+            && evidence.extension != ".log"
+        {
+            // The modern renderer gets the same complete evidence units as the report.
+            crate::source_allocation::allocate_excerpts(&[evidence], limit as usize)
+                .pop()
+                .expect("one excerpt per source")
+                .text
+        } else if evidence.extension == ".log" {
+            take_log_tail(&evidence.content, limit as usize, input_count as usize)
         } else {
-            take_head_and_tail(&evidence.content, limit as usize)
-        }
+            take_head_and_tail(&evidence.content, limit as usize, input_count as usize)
+        };
+        decision.output_chars = count_chars(&excerpt);
+        Cow::Owned(excerpt)
     } else {
-        evidence.content.clone()
+        decision.output_chars = input_count;
+        Cow::Borrowed(&evidence.content)
     };
-    decision.output_chars = count_chars(&body);
     let truncated_note = if decision.truncated {
         "\n- 内容已按单文件预算或解析预算截断"
     } else {
@@ -320,7 +336,7 @@ fn render_file_section(
         enum_text(&decision.action),
         decision.reason,
         evidence.parser_backend,
-        enum_text(&evidence.worker_lane),
+        evidence.worker_lane.as_str(),
         decision.input_chars,
         decision.output_chars,
         truncated_note,
@@ -420,36 +436,35 @@ fn append_parse_issues(sections: &mut Vec<String>, issues: &[String], global_bud
 }
 
 fn append_if_fits(sections: &mut Vec<String>, candidate: String, global_budget: u64) {
-    let projected = join_sections(
-        &sections
-            .iter()
-            .cloned()
-            .chain(std::iter::once(candidate.clone()))
-            .collect::<Vec<_>>(),
-    );
-    if count_chars(&projected) <= global_budget {
+    if section_prefix_chars(sections) + count_chars(candidate.trim_end()) < global_budget {
         sections.push(candidate);
     }
 }
 
 fn can_append_with_footer(sections: &[String], candidate: &str, global_budget: u64) -> bool {
-    let projected = join_sections(
-        &sections
-            .iter()
-            .cloned()
-            .chain([candidate.to_string(), PARSE_FOOTER.to_string()])
-            .collect::<Vec<_>>(),
-    );
-    count_chars(&projected) <= global_budget
+    section_prefix_chars(sections)
+        + count_chars(candidate.trim_end())
+        + SECTION_SEPARATOR_CHARS
+        + count_chars(PARSE_FOOTER)
+        < global_budget
+}
+
+fn section_prefix_chars(sections: &[String]) -> u64 {
+    sections
+        .iter()
+        .map(|s| count_chars(s.trim_end()) + SECTION_SEPARATOR_CHARS)
+        .sum()
 }
 
 fn join_sections(sections: &[String]) -> String {
-    let body = sections
+    let mut body = sections
         .iter()
         .map(|section| section.trim_end())
         .collect::<Vec<_>>()
         .join("\n\n");
-    format!("{}\n", body.trim_end())
+    body.truncate(body.trim_end().len());
+    body.push('\n');
+    body
 }
 
 const OMITTED_MARKER_RESERVE: usize = 64;
@@ -485,33 +500,32 @@ fn newline_boundary_at_or_after(content: &str, position: usize) -> usize {
 /// 头+尾逐字保留：头 40% + 尾 60%，切点回退/前进到行边界（区域内无换行时
 /// 按字符截断），中缝插入省略标记。边界移动只会缩短头/尾，因此
 /// `count_chars(body) <= limit` 结构性成立（marker ≤ 64 预留）。
-fn take_head_and_tail(content: &str, limit: usize) -> String {
+fn take_head_and_tail(content: &str, limit: usize, total: usize) -> String {
     if limit < OMITTED_MARKER_RESERVE {
         return content.chars().take(limit).collect();
     }
-    let total = count_chars(content);
     let available = limit.saturating_sub(OMITTED_MARKER_RESERVE).max(1);
     let head_budget = available * HEAD_RATIO_PER_MILLE / 1000;
     let tail_budget = available - head_budget;
     let head_end = newline_boundary_at_or_before(content, head_budget);
-    let tail_start = newline_boundary_at_or_after(content, total as usize - tail_budget);
+    let tail_start = newline_boundary_at_or_after(content, total - tail_budget);
     let head = content.chars().take(head_end).collect::<String>();
     let tail = content.chars().skip(tail_start).collect::<String>();
-    let omitted = total - count_chars(&head) - count_chars(&tail);
-    format!("{head}{}{tail}", omitted_marker("中部", omitted))
+    format!(
+        "{head}{}{tail}",
+        omitted_marker("中部", (tail_start - head_end) as u64)
+    )
 }
 
 /// `.log` 尾部优先：保留最后 `limit - 64` 字符（逐字后缀），前缀头部省略标记。
-fn take_log_tail(content: &str, limit: usize) -> String {
+fn take_log_tail(content: &str, limit: usize, total: usize) -> String {
     if limit < OMITTED_MARKER_RESERVE {
         return content.chars().take(limit).collect();
     }
-    let total = count_chars(content);
     let available = limit.saturating_sub(OMITTED_MARKER_RESERVE).max(1);
-    let tail_start = (total as usize).saturating_sub(available);
+    let tail_start = total.saturating_sub(available);
     let tail = content.chars().skip(tail_start).collect::<String>();
-    let omitted = total - count_chars(&tail);
-    format!("{}{tail}", omitted_marker("头部", omitted))
+    format!("{}{tail}", omitted_marker("头部", tail_start as u64))
 }
 
 fn report_mode_text(report_mode: ReportMode) -> &'static str {
@@ -587,7 +601,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         let limit = 300_usize;
-        let body = take_head_and_tail(&content, limit);
+        let body = take_head_and_tail(&content, limit, 407);
 
         assert!(count_chars(&body) <= limit as u64);
         // head = 第0行(50) + '\n' = 51 字符；tail = 第6行(50)+'\n'+第7行(50) = 101 字符
@@ -604,7 +618,7 @@ mod tests {
     fn head_tail_keeps_partial_first_line_when_no_boundary_in_head_budget() {
         let content = format!("{}尾行", "字".repeat(300)); // 302 字符，第一行无换行
         let limit = 200_usize;
-        let body = take_head_and_tail(&content, limit);
+        let body = take_head_and_tail(&content, limit, 302);
         assert!(count_chars(&body) <= limit as u64);
         assert!(body.starts_with(&"字".repeat(54))); // head_budget = (200-64)*40% = 54
         assert!(body.ends_with("尾行"));
@@ -614,7 +628,7 @@ mod tests {
     fn log_tail_keeps_recent_content_with_head_marker() {
         let content = format!("{}{}RECENT_TAIL", "old-".repeat(199), "old"); // 810 字符（头部 799 + RECENT_TAIL 11）
         let limit = 300_usize;
-        let body = take_log_tail(&content, limit);
+        let body = take_log_tail(&content, limit, 810);
         assert!(count_chars(&body) <= limit as u64);
         assert!(body.ends_with("RECENT_TAIL"));
         assert!(body.contains("省略头部约 574 字符")); // 810 - 236 = 574
@@ -627,8 +641,8 @@ mod tests {
         // 退化为纯字符截断，不插入标记，count_chars(body) <= limit 仍成立。
         let content = "字".repeat(50);
         for body in [
-            take_head_and_tail(&content, 20),
-            take_log_tail(&content, 20),
+            take_head_and_tail(&content, 20, 50),
+            take_log_tail(&content, 20, 50),
         ] {
             assert!(count_chars(&body) <= 20);
             assert!(!body.contains("省略"));

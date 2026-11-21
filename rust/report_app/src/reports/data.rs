@@ -1,17 +1,14 @@
 use crate::{
-    model::{
-        contracts::{ComposedReport, SelectedFact},
-        slicing::{InputUnit, SourceInput},
-    },
+    model::contracts::{ComposedReport, SelectedFact},
     snapshots::digest,
-    types::{parse_date, shanghai, utc_window},
+    types::{parse_date, utc_window},
     ReportError,
 };
 use ai_daily_scanner_core::sources::ScanSource;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -58,10 +55,8 @@ impl ReportSource {
             excerpt_chars: source.excerpt.chars().count(),
             model_chars: 0,
             parser_backend: Some(source.parser_backend.clone()),
-            worker_lane: Some(serde_json::from_value(serde_json::to_value(
-                source.worker_lane,
-            )?)?),
-            parse_status: serde_json::from_value(serde_json::to_value(source.parse_status)?)?,
+            worker_lane: Some(source.worker_lane.as_str().into()),
+            parse_status: source.parse_status.as_str().into(),
             parse_truncated: source.parse_truncated,
             excerpt_truncated: source.excerpt_truncated,
             model_truncated: false,
@@ -137,49 +132,6 @@ impl ReportSource {
             ));
         }
         Ok(())
-    }
-    pub fn input(&self, text: &str) -> Result<Option<SourceInput>, ReportError> {
-        if !self.usable() {
-            return Ok(None);
-        }
-        if text.chars().count() != self.excerpt_chars
-            || digest(text.as_bytes()) != self.excerpt_sha256
-        {
-            return Err(ReportError::new(
-                "SOURCE_EXCERPT_HASH_MISMATCH",
-                "摘录正文与来源哈希不一致",
-            ));
-        }
-        let mut units = Vec::new();
-        if let Some(declared) = self.coverage_limits["evidence_audit"]["content_units"].as_array() {
-            for unit in declared {
-                units.push(InputUnit {
-                    start: usize::try_from(unit["text_start"].as_u64().ok_or_else(invalid)?)
-                        .map_err(|_| invalid())?,
-                    end: usize::try_from(unit["text_end"].as_u64().ok_or_else(invalid)?)
-                        .map_err(|_| invalid())?,
-                    kind: unit["kind"].as_str().ok_or_else(invalid)?.into(),
-                    ranges: unit["ranges"].as_array().ok_or_else(invalid)?.clone(),
-                });
-            }
-        }
-        let history = &self.coverage_limits["history"];
-        Ok(Some(SourceInput {
-            source_id: self.source_id.clone(),
-            source_kind: self
-                .extension
-                .clone()
-                .unwrap_or_else(|| self.source_kind.clone()),
-            path: self
-                .relative_path
-                .clone()
-                .unwrap_or_else(|| "用户补充".into()),
-            text: text.into(),
-            units,
-            history_priority: history["excerpt_priority"] == true
-                && history["prior_content_sha256"].as_str() == self.content_sha256.as_deref(),
-            text_unverified: self.unverified(),
-        }))
     }
 }
 
@@ -343,19 +295,5 @@ impl DailyReport {
             _ => return Err(invalid()),
         }
         Ok(())
-    }
-    pub fn source_labels(&self) -> BTreeMap<String, String> {
-        self.sources
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (s.source_id.clone(), format!("S{:03}", i + 1)))
-            .collect()
-    }
-    pub fn is_historical(&self) -> Result<bool, ReportError> {
-        let generated = DateTime::parse_from_rfc3339(&self.generated_at)
-            .map_err(|_| invalid())?
-            .with_timezone(&shanghai())
-            .date_naive();
-        Ok(generated > parse_date(&self.date)? + chrono::Duration::days(1))
     }
 }

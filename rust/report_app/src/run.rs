@@ -10,7 +10,7 @@ use crate::{
     types::{ReportOutcome, ReportRequest, RunPhase},
     ReportError,
 };
-use ai_daily_scanner_contract::{AdapterPaths, ReportMode as ScanMode};
+use ai_daily_scanner_contract::{AdapterPaths, ReportMode};
 use ai_daily_scanner_core::{ContextResult, ScanRequest, Scanner, ScannerConfig};
 use chrono::{DateTime, Utc};
 use std::{
@@ -130,13 +130,12 @@ impl App {
         }
         let (start, _) = crate::types::utc_window(request.period.start)?;
         let (_, end) = crate::types::utc_window(request.period.end)?;
-        let mode = ScanMode::Daily;
         let result = self
             .scanner
             .get()
             .unwrap()
             .build_context(&ScanRequest {
-                report_mode: mode,
+                report_mode: ReportMode::Daily,
                 start_date: request.period.start.to_string(),
                 end_date: request.period.end.to_string(),
                 window_start_utc: Some(start.to_rfc3339()),
@@ -155,7 +154,7 @@ fn path_text(path: &Path) -> Result<String, ReportError> {
         .ok_or_else(|| ReportError::new("PATH_INVALID", "路径不是有效文字"))
 }
 pub fn run_report(request: ReportRequest, app: &App) -> Result<ReportOutcome, ReportError> {
-    if request.period.mode != crate::types::ReportMode::Daily
+    if request.period.mode != ReportMode::Daily
         || app.config.report.profile != crate::config::ReportProfile::Personal
     {
         return Err(ReportError::new(

@@ -6,7 +6,8 @@ param(
     [string]$TargetDirectory = '',
     [string]$PdfiumDirectory = '',
     [string]$GitCommit = '',
-    [string]$Harness = ''
+    [string]$Harness = '',
+    [string]$OcrModelDirectory = ''
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
@@ -28,6 +29,28 @@ if (-not $PdfiumDirectory) {
     & (Join-Path $PSScriptRoot 'prepare_rust_dependencies.ps1') -Destination $PdfiumDirectory | Out-Null
 }
 $inputs = Get-Content -LiteralPath (Join-Path $repoRoot 'rust/build-inputs.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not $OcrModelDirectory) {
+    $OcrModelDirectory = Join-Path $buildPath 'inputs/ppocrv6-tiny'
+    [IO.Directory]::CreateDirectory($OcrModelDirectory) | Out-Null
+    foreach ($model in $inputs.image_ocr.files) {
+        $cached = Join-Path $OcrModelDirectory $model.name
+        if (Test-Path -LiteralPath $cached -PathType Leaf) { continue }
+        $download = Join-Path $OcrModelDirectory ([guid]::NewGuid().ToString('N') + '.download')
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri ($inputs.image_ocr.source + '/' + $model.name) -OutFile $download
+            if ((Get-FileHash -LiteralPath $download).Hash.ToLowerInvariant() -cne $model.sha256) { throw "OCR download hash mismatch: $($model.name)" }
+            if (-not (Test-Path -LiteralPath $cached)) { [IO.File]::Move($download, $cached) }
+        } finally {
+            if (Test-Path -LiteralPath $download -PathType Leaf) { [IO.File]::Delete($download) }
+        }
+    }
+}
+foreach ($model in $inputs.image_ocr.files) {
+    $file = Get-Item -LiteralPath (Join-Path $OcrModelDirectory $model.name) -ErrorAction Stop
+    if ($file.Length -ne $model.size -or (Get-FileHash -LiteralPath $file.FullName).Hash.ToLowerInvariant() -cne $model.sha256) {
+        throw "OCR model differs from pinned build input: $($model.name)"
+    }
+}
 $dll = Join-Path $PdfiumDirectory 'bin/pdfium.dll'
 if ((Get-FileHash -LiteralPath $dll -Algorithm SHA256).Hash.ToLowerInvariant() -cne $inputs.pdfium.dll_sha256) { throw 'PDFium DLL does not match pinned build input' }
 & $Cargo build --manifest-path (Join-Path $repoRoot 'rust/Cargo.toml') -p ai-daily-report -p ai-daily-office-parser -p ai-daily-pdf-parser --release --locked --target x86_64-pc-windows-msvc --target-dir $buildPath --config 'target.x86_64-pc-windows-msvc.rustflags=["-C","target-feature=+crt-static"]'
@@ -53,6 +76,9 @@ New-Item -ItemType Directory -Path $outputPath -ErrorAction Stop | Out-Null
 foreach ($name in @('ai-daily-report.exe', 'ai-daily-office-parser.exe', 'ai-daily-pdf-parser.exe')) { Copy-Item -LiteralPath (Join-Path $buildPath "x86_64-pc-windows-msvc/release/$name") -Destination (Join-Path $outputPath $name) }
 Copy-Item -LiteralPath $dll -Destination (Join-Path $outputPath 'pdfium.dll')
 foreach ($folder in @('templates', 'config', 'scripts', 'docs', 'licenses/pdfium', 'licenses/rust')) { [IO.Directory]::CreateDirectory((Join-Path $outputPath $folder)) | Out-Null }
+[IO.Directory]::CreateDirectory((Join-Path $outputPath 'ocr-models')) | Out-Null
+foreach ($model in $inputs.image_ocr.files) { Copy-Item -LiteralPath (Join-Path $OcrModelDirectory $model.name) -Destination (Join-Path $outputPath "ocr-models/$($model.name)") }
+Copy-Item -LiteralPath (Join-Path $repoRoot 'rust/pdf_parser/licenses/ocr-models') -Destination (Join-Path $outputPath 'licenses/ocr-models') -Recurse
 foreach ($template in $ReleaseTemplates) { Copy-Item -LiteralPath (Join-Path $repoRoot "templates/$template") -Destination (Join-Path $outputPath 'templates') }
 Copy-Item -LiteralPath (Join-Path $repoRoot 'config/settings.example.yaml') -Destination (Join-Path $outputPath 'config/settings.example.yaml')
 Copy-Item -LiteralPath (Join-Path $repoRoot 'scripts/model-services.example.json') -Destination (Join-Path $outputPath 'config/model-services.example.json')
@@ -83,6 +109,9 @@ $dependencies = foreach ($package in $metadata.packages | Sort-Object name, vers
         $directory = Split-Path -Parent $package.manifest_path
         $licenseFiles = @(Get-ChildItem -LiteralPath $directory -File | Where-Object { $_.Name -match '^(LICENSE|COPYING|NOTICE)([-._].*)?$' })
         if ($package.license_file) { $licenseFiles += Get-Item -LiteralPath (Join-Path $directory $package.license_file) }
+        if ($package.name -in 'rusto-core', 'rusto-nn' -and -not $licenseFiles.Count) {
+            $licenseFiles += Get-Item -LiteralPath (Join-Path $repoRoot 'rust/pdf_parser/licenses/RustO-LICENSE')
+        }
         $licenseFiles = @($licenseFiles | Sort-Object FullName -Unique)
         foreach ($file in $licenseFiles) {
             $relative = "licenses/rust/$($package.name)-$($package.version)/$($file.Name)"

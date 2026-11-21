@@ -56,16 +56,14 @@ fn dispatch() -> i32 {
                             .map(|a| serde_json::to_value(a).unwrap())
                     })
             }
-            WorkerOperation::PdfParse => {
-                serde_json::from_value::<ParseRequest>(request.payload.clone())
-                    .ok()
-                    .filter(|value| value.validate().is_ok())
-                    .map(|value| {
-                        reader
-                            .parse_request(&value)
-                            .map(|value| serde_json::to_value(value).expect("typed result"))
-                    })
-            }
+            WorkerOperation::PdfParse => serde_json::from_value::<ParseRequest>(request.payload)
+                .ok()
+                .filter(|value| value.validate().is_ok())
+                .map(|value| {
+                    reader
+                        .parse_request(&value)
+                        .map(|value| serde_json::to_value(value).expect("typed result"))
+                }),
             WorkerOperation::PdfClassify => {
                 serde_json::from_value::<ClassifyRequest>(request.payload.clone())
                     .ok()

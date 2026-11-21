@@ -173,7 +173,7 @@ pub(super) fn audited_csv(
     };
     let Ok(rows) = parse_csv(input) else {
         return audited_text(
-            raw,
+            std::slice::from_ref(raw),
             max_chars,
             false,
             Some(LightTextWarning::CsvPreviewFallback),

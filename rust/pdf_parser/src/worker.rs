@@ -1,9 +1,9 @@
-use crate::{PdfError, PdfReader};
+use crate::{ocr, PdfError, PdfReader};
 use ai_daily_worker_contract::*;
 use pdfium_render::prelude::*;
 use std::{
     path::Path,
-    time::{Instant, UNIX_EPOCH},
+    time::{Duration, Instant, UNIX_EPOCH},
 };
 
 pub fn worker_hello() -> WorkerHello {
@@ -30,6 +30,12 @@ impl PdfReader {
     ) -> Result<archive::ArchiveArtifact, Box<WorkerDiagnostic>> {
         let started = Instant::now();
         let path = &request.source.file_path;
+        if matches!(
+            request.source.parser_limits,
+            ParserLimits::PdfImageOcr { .. }
+        ) {
+            return Err(diagnostic(path, "PARSER_INVALID_PAYLOAD", false));
+        }
         request
             .validate()
             .map_err(|_| diagnostic(path, "PARSER_INVALID_PAYLOAD", false))?;
@@ -110,17 +116,35 @@ impl PdfReader {
                 false,
             ));
         }
-        let ParserLimits::Pdf {
-            max_pages,
-            excerpt_max_chars,
-            selected_pages,
-        } = &request.parser_limits
-        else {
-            return Err(diagnostic(
-                &request.file_path,
-                "PARSER_INVALID_PAYLOAD",
+        let (max_pages, excerpt_max_chars, selected_pages, image_ocr) = match &request.parser_limits
+        {
+            ParserLimits::Pdf {
+                max_pages,
+                excerpt_max_chars,
+                selected_pages,
+            } => (
+                *max_pages,
+                *excerpt_max_chars,
+                selected_pages.as_deref(),
                 false,
-            ));
+            ),
+            ParserLimits::PdfImageOcr {
+                max_pages,
+                excerpt_max_chars,
+                selected_pages,
+            } => (
+                *max_pages,
+                *excerpt_max_chars,
+                Some(selected_pages.as_slice()),
+                true,
+            ),
+            _ => {
+                return Err(diagnostic(
+                    &request.file_path,
+                    "PARSER_INVALID_PAYLOAD",
+                    false,
+                ))
+            }
         };
         let before = source(&request.file_path)?;
         if before.0 != request.expected_source_version {
@@ -134,7 +158,6 @@ impl PdfReader {
             return Err(diagnostic(&request.file_path, "FILE_TOO_LARGE", false));
         }
         let pages = selected_pages
-            .as_ref()
             .map(|pages| {
                 pages
                     .iter()
@@ -143,27 +166,39 @@ impl PdfReader {
             })
             .transpose()
             .map_err(|_| diagnostic(&request.file_path, "PARSER_INVALID_PAYLOAD", false))?;
-        let parsed = self
-            .read(
-                Path::new(&request.file_path),
-                pages.as_deref(),
-                *max_pages as u32,
-                *excerpt_max_chars as usize,
-            )
-            .map_err(|error| parse_error(&request.file_path, &error))?;
-        let mut builder = AuditTextBuilder::new(*excerpt_max_chars, "pdf");
-        for page in &parsed.pages {
-            let range = SourceRange::new(
-                SourceRangeUnit::PdfPage,
-                u64::from(page.page),
-                u64::from(page.page) + 1,
-                None,
-            );
-            builder.read(range.clone());
-            for line in page.text.lines() {
-                builder.push(line, ContentUnitKind::Text, vec![range.clone()]);
+        let mut builder = AuditTextBuilder::new(excerpt_max_chars, "pdf");
+        let path = Path::new(&request.file_path);
+        let partial = if image_ocr {
+            let pages = pages
+                .as_deref()
+                .ok_or_else(|| parse_error(&request.file_path, &PdfError::OcrLimits))?;
+            let deadline =
+                started + Duration::from_millis(request.remaining_timeout_ms.min(OCR_TIMEOUT_MS));
+            ocr::extract(self, path, pages, excerpt_max_chars, deadline, &mut builder)
+                .map_err(|error| parse_error(&request.file_path, &error))?
+        } else {
+            let parsed = self
+                .read(
+                    path,
+                    pages.as_deref(),
+                    max_pages as u32,
+                    excerpt_max_chars as usize,
+                )
+                .map_err(|error| parse_error(&request.file_path, &error))?;
+            for page in &parsed.pages {
+                let range = SourceRange::new(
+                    SourceRangeUnit::PdfPage,
+                    u64::from(page.page),
+                    u64::from(page.page) + 1,
+                    None,
+                );
+                builder.read(range.clone());
+                for line in page.text.lines() {
+                    builder.push(line, ContentUnitKind::Text, vec![range.clone()]);
+                }
             }
-        }
+            parsed.truncated
+        };
         if source(&request.file_path)?.0 != before.0 {
             return Err(diagnostic(
                 &request.file_path,
@@ -179,7 +214,7 @@ impl PdfReader {
             evidence_audit: Some(audit),
             parser_backend: ParserBackend::RustPdfiumV3,
             worker_lane: WorkerLane::RustPdfProcessV3,
-            truncated: truncated || parsed.truncated,
+            truncated: truncated || partial,
             duration_ms: started.elapsed().as_millis() as u64,
             observed_source_version: before.0,
         })
@@ -292,21 +327,21 @@ fn source(path: &str) -> Result<(String, u64), Box<WorkerDiagnostic>> {
 }
 
 fn parse_error(path: &str, error: &PdfError) -> Box<WorkerDiagnostic> {
-    let protected = matches!(
-        error,
+    let code = match error {
         PdfError::Parse(PdfiumError::PdfiumLibraryInternalError(
-            PdfiumInternalError::PasswordError
-        ))
-    );
-    diagnostic(
-        path,
-        if protected {
-            "PDF_PROTECTED"
-        } else {
-            "PARSER_FAILED"
-        },
-        false,
-    )
+            PdfiumInternalError::PasswordError,
+        )) => return diagnostic(path, "PDF_PROTECTED", false),
+        PdfError::OcrLimits | PdfError::OcrIneligible => "PARSER_INVALID_PAYLOAD",
+        PdfError::OcrTimeout => "PARSER_TIMEOUT",
+        PdfError::OcrUnavailable
+        | PdfError::OcrModelMissing
+        | PdfError::OcrModelMismatch
+        | PdfError::OcrFailed => "PARSER_FAILED",
+        _ => return diagnostic(path, "PARSER_FAILED", false),
+    };
+    let mut failure = diagnostic(path, code, false);
+    failure.message = error.to_string();
+    failure
 }
 
 fn diagnostic(path: &str, code: &str, retryable: bool) -> Box<WorkerDiagnostic> {

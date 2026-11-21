@@ -26,6 +26,19 @@ use std::{
 
 pub const SCHEMA: &str = include_str!("schema-v1.sql");
 
+// A random revision also distinguishes divergent writes to two copies of the same backup.
+pub(crate) fn search_revision_triggers() -> impl Iterator<Item = (String, String)> {
+    ["daily_reports", "weekly_reports", "monthly_reports"]
+        .into_iter()
+        .flat_map(|table| {
+            ["INSERT", "UPDATE", "DELETE"].into_iter().map(move |event| {
+                let name = format!("search_revision_{table}_{}", event.to_ascii_lowercase());
+                let sql = format!("CREATE TRIGGER {name} AFTER {event} ON {table} BEGIN UPDATE report_metadata SET value=lower(hex(randomblob(16))) WHERE key='search_revision_v1'; END");
+                (name, sql)
+            })
+        })
+}
+
 impl From<rusqlite::Error> for ReportError {
     fn from(_error: rusqlite::Error) -> Self {
         Self::new("REPORT_DATABASE_FAILED", "报告数据库操作失败")
@@ -140,6 +153,10 @@ fn schema_shape(conn: &Connection) -> Result<Value, ReportError> {
             json!({"columns":query(conn, &format!("PRAGMA table_info({name})"), [])?, "foreign_keys":query(conn, &format!("PRAGMA foreign_key_list({name})"), [])?})
         } else if object["type"] == "index" {
             json!({"index":query(conn, &format!("PRAGMA index_info({name})"), [])?})
+        } else if object["type"] == "trigger"
+            && search_revision_triggers().any(|(_, sql)| object["sql"].as_str() == Some(&sql))
+        {
+            Value::Null // The SQL completely describes one of our revision triggers.
         } else {
             return Err(ReportError::new(
                 "REPORT_SCHEMA_UNSUPPORTED",
@@ -193,7 +210,18 @@ impl Store {
         }
         let expected = Connection::open_in_memory()?;
         expected.execute_batch(SCHEMA)?;
-        if schema_shape(&transaction)? != schema_shape(&expected)? {
+        let shape = schema_shape(&transaction)?;
+        let mut tracks_search = count == 0;
+        let mut missing_triggers = Vec::new();
+        for (name, sql) in search_revision_triggers() {
+            if shape.get(&name).is_some() {
+                tracks_search = true;
+                expected.execute_batch(&sql)?;
+            } else {
+                missing_triggers.push(sql);
+            }
+        }
+        if shape != schema_shape(&expected)? {
             return Err(ReportError::new(
                 "REPORT_SCHEMA_UNSUPPORTED",
                 "报告库结构不符合当前版本，未自动改表",
@@ -224,6 +252,25 @@ impl Store {
                     "报告库业务范围不一致",
                 ));
             }
+        }
+        // Retained releases require the exact old schema. Opening an unmarked historical
+        // database must not install triggers that would prevent those releases reopening it.
+        if tracks_search || transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM report_metadata WHERE key IN ('search_database_id_v1','search_revision_v1'))",
+            [], |r| r.get::<_, bool>(0),
+        )? {
+            if !missing_triggers.is_empty() {
+                for sql in missing_triggers {
+                    transaction.execute_batch(&sql)?;
+                }
+                // Rows may have changed while one or more triggers were absent.
+                transaction.execute("DELETE FROM report_metadata WHERE key='search_revision_v1'", [])?;
+            }
+            transaction.execute_batch(
+                "INSERT OR IGNORE INTO report_metadata(key,value) VALUES
+                 ('search_database_id_v1',lower(hex(randomblob(16)))),
+                 ('search_revision_v1',lower(hex(randomblob(16))));",
+            )?;
         }
         transaction.commit()?;
         Ok(store)

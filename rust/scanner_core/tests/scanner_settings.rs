@@ -8,7 +8,7 @@ fn empty_settings_receive_frozen_current_defaults() {
 
     assert_eq!(normalized.execution.max_workers, 4);
     assert_eq!(normalized.parse.text.backend, "light_text_v2");
-    assert_eq!(normalized.parse.excerpt_policy_version, "fair_semantic_v9");
+    assert_eq!(normalized.parse.excerpt_policy_version, "fair_semantic_v10");
     assert_eq!(
         normalized.parse.office.primary_backend,
         "rust_office_oxide_v2"

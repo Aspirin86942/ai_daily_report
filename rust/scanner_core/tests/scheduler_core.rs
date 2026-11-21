@@ -1659,6 +1659,26 @@ fn not_parsed_counts_are_derived_not_error() {
 // WorkDeadline terminal states (spec Part 2.3)
 // ---------------------------------------------------------------------------
 
+/// Advance simulated time only once both first-wave tasks are in flight.
+#[derive(Debug, Default)]
+struct FirstWave {
+    started: Mutex<usize>,
+    changed: std::sync::Condvar,
+}
+
+impl FirstWave {
+    fn wait(&self) {
+        let mut started = self.started.lock().unwrap();
+        *started += 1;
+        self.changed.notify_all();
+        let (started, _) = self
+            .changed
+            .wait_timeout_while(started, Duration::from_secs(5), |count| *count < 2)
+            .unwrap();
+        assert_eq!(*started, 2);
+    }
+}
+
 /// Parser that advances the fake clock while "parsing". When `advance_full`
 /// is true it consumes the whole effective timeout (so an in-flight parse that
 /// runs into the deadline becomes Timeout); otherwise it returns Success after
@@ -1666,6 +1686,7 @@ fn not_parsed_counts_are_derived_not_error() {
 /// runtime NotParsed in the scheduler.
 #[derive(Debug, Clone)]
 struct DeadlineParser {
+    first_wave: Arc<FirstWave>,
     clock: Arc<Mutex<u64>>,
     work_deadline: u64,
     advance_full: bool,
@@ -1674,6 +1695,7 @@ struct DeadlineParser {
 
 impl ParserPort for DeadlineParser {
     fn parse(&self, request: &ParseRequest) -> ParseResult {
+        self.first_wave.wait();
         let identity = request.file.file_identity.clone();
         let path = request.file.path.clone();
         let advance = if self.advance_full {
@@ -1721,6 +1743,45 @@ impl ParserPort for DeadlineParser {
 }
 
 #[test]
+fn file_guards_cannot_start_a_parse_wave_after_the_deadline() {
+    struct SlowGuard(FakeClock);
+    impl GuardVerifier for SlowGuard {
+        fn verify(&self, _: &str, _: &ai_daily_scanner_core::source_guard::SourceGuardV2) -> bool {
+            self.0.advance(3_000);
+            true
+        }
+    }
+    let clock = FakeClock::new();
+    let mut profile = normalized_settings(ReportMode::Daily);
+    profile.total_deadline_ms = 5_000;
+    profile.execution.max_workers = 2;
+    let outcome = run_scheduler_with_guard(
+        &clock,
+        TestCache::default(),
+        TestParser {
+            results: HashMap::new(),
+        },
+        TestClassifier {
+            results: HashMap::new(),
+        },
+        vec![
+            discovered("one.md", ".md", 64),
+            discovered("two.md", ".md", 64),
+        ],
+        profile,
+        SlowGuard(clock.clone()),
+    )
+    .unwrap();
+    assert_eq!(outcome.execution_metrics.parse_attempt_count, 0);
+    assert_eq!(outcome.execution_metrics.stage_deadline_exhausted_count, 1);
+    assert_eq!(outcome.file_results.len(), 2);
+    assert!(outcome
+        .file_results
+        .iter()
+        .all(|f| f.parse_status == ParseStatus::NotParsed));
+}
+
+#[test]
 fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
     // 3 text files; each parse advances the clock 2000ms. With the bounded
     // parallel executor (max_workers=2) the first wave (a.md, b.md)
@@ -1754,6 +1815,7 @@ fn work_deadline_stops_new_work_and_marks_queued_runtime_not_parsed() {
     )
     .expect("input");
     let parser = DeadlineParser {
+        first_wave: Arc::default(),
         clock: clock.now.clone(),
         work_deadline: input.work_deadline_ms,
         advance_full: false,
@@ -1843,6 +1905,7 @@ fn work_deadline_before_any_parse_forms_error_run_without_snapshot() {
     )
     .expect("input");
     let parser = DeadlineParser {
+        first_wave: Arc::default(),
         clock: clock.now.clone(),
         work_deadline: input.work_deadline_ms,
         advance_full: true,
@@ -1929,6 +1992,7 @@ fn work_deadline_before_classifier_start_is_runtime_not_parsed() {
     // The first classification advances the clock past the WorkDeadline, so the
     // second and third PDFs' classifiers are never started.
     let classifier = ClockAdvancingClassifier {
+        first_wave: Arc::default(),
         clock: clock.now.clone(),
     };
     let scheduler = BudgetedContextScheduler::new(
@@ -2199,6 +2263,7 @@ fn classifier_pre_and_post_source_changes_keep_source_changed_semantics() {
 
 #[derive(Debug, Clone)]
 struct ClockAdvancingClassifier {
+    first_wave: Arc<FirstWave>,
     clock: Arc<Mutex<u64>>,
 }
 
@@ -2208,6 +2273,7 @@ impl PdfClassifierPort for ClockAdvancingClassifier {
         request: &ClassifyOperation,
         _timeout: Duration,
     ) -> PdfClassifierExecution {
+        self.first_wave.wait();
         let mut now = self.clock.lock().unwrap();
         *now += 4_000;
         drop(now);

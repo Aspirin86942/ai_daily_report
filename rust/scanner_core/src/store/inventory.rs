@@ -2,7 +2,7 @@
 
 use ai_daily_discovery::DiscoveredFileOut;
 use ai_daily_scanner_contract::{
-    validate_v2_parse_provenance, AuditWorkerLane, CacheMissReason, CacheStatus, Diagnostic,
+    validate_file_parse_provenance, AuditWorkerLane, CacheMissReason, CacheStatus, Diagnostic,
     FileAudit, ParseCacheStatus, ParseStatus, ParseTransport, PdfClassificationAuditV1, Validate,
 };
 use rusqlite::{params, Transaction};
@@ -199,14 +199,14 @@ impl FileResultRecord {
                 _ => return Err("invalid scan file result".to_string()),
             }
         };
-        let provenance_consistent = validate_v2_parse_provenance(
+        let provenance_consistent = validate_file_parse_provenance(
             self.parse_status,
             &self.parser_backend,
             self.worker_lane,
             parse_cache_status,
-            self.pdf_classification
-                .as_ref()
-                .map(|classification| classification.status),
+            self.parse_transport,
+            self.parse_attempt_count,
+            self.pdf_classification.as_ref(),
         )
         .is_ok();
         let audit = FileAudit {
@@ -422,9 +422,9 @@ pub(crate) fn insert_file_results(
             record.parse_profile_hash,
             cache_status_text(record.cache_status),
             cache_miss_reason,
-            parse_status_text(record.parse_status),
+            record.parse_status.as_str(),
             record.parser_backend,
-            worker_lane_text(record.worker_lane),
+            record.worker_lane.as_str(),
             i64::from(record.truncated),
             record.content_sha256,
             record.primary_duration_ms as i64,
@@ -611,25 +611,6 @@ pub(crate) fn cache_miss_reason_text(value: CacheMissReason) -> &'static str {
         CacheMissReason::ParserProfileChanged => "parser_profile_changed",
         CacheMissReason::ParserIdentityChanged => "parser_identity_changed",
         CacheMissReason::EntryAbsentOrEvicted => "entry_absent_or_evicted",
-    }
-}
-
-pub(crate) fn parse_status_text(value: ParseStatus) -> &'static str {
-    match value {
-        ParseStatus::Success => "success",
-        ParseStatus::Error => "error",
-        ParseStatus::Timeout => "timeout",
-        ParseStatus::NotParsed => "not_parsed",
-    }
-}
-
-pub(crate) fn worker_lane_text(value: AuditWorkerLane) -> &'static str {
-    match value {
-        AuditWorkerLane::RustCore => "rust_core",
-        AuditWorkerLane::RustOfficeProcessV3 => "rust_office_process_v3",
-        AuditWorkerLane::RustPdfProcessV3 => "rust_pdf_process_v3",
-        AuditWorkerLane::LocalOcrPreflight => "local_ocr_preflight",
-        AuditWorkerLane::NotParsed => "not_parsed",
     }
 }
 

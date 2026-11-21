@@ -29,6 +29,8 @@ pub fn reasons(report: &Value) -> Vec<String> {
                 "PERSONAL_SUMMARY_UNAVAILABLE"
                     | "PERSONAL_CALL_LIMIT"
                     | "PARSE_UNAVAILABLE"
+                    | "FILE_SIZE_LIMIT"
+                    | "OFFICE_CONTENT_MISSING"
                     | "ARCHIVE_INPUT_PENDING"
                     | "MEMORY_RESERVE"
                     | "PROCESSING_CACHE_FULL"

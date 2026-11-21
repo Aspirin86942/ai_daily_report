@@ -14,6 +14,7 @@ D:/DailyReport/
     ai-daily-office-parser.exe
     ai-daily-pdf-parser.exe
     pdfium.dll
+    ocr-models/
     templates/  config/settings.example.yaml  scripts/  licenses/
     manifest.json
   shared/
@@ -28,6 +29,8 @@ D:/DailyReport/
 从包内示例生成新的 Rust 配置。旧配置中的 Python 路径、`fallback_after_timeout` 等废弃项会被拒绝，需要在准备阶段移除。保留业务模型、工作根目录、预算开关和扫描限制，扫描库使用独立的 `scan_index_rust_v3.sqlite3`。凭据继续使用当前用户环境变量，配置与凭据不进入发布包。
 
 ## 包校验与自检
+
+候选包携带已固定哈希的 PP-OCRv6 Tiny 检测、识别权重和中文词表，运行时从本地读取。离线构建可给 `scripts/build_windows_release.ps1` 传入 `-OcrModelDirectory <已备好模型的目录>`。包校验同时检查模型哈希和许可证。
 
 ```powershell
 ./scripts/verify_windows_release.ps1 -BundleDirectory D:/DailyReport/releases/<version>

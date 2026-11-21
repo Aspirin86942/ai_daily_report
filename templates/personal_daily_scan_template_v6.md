@@ -37,7 +37,7 @@
 {% if items %}
 ## 今日概览
 {% for item in overview %}
-- [{{ item.title | report_inline }}](#detail-{{ item.number }})
+- [{{ item.title | report_inline }}](#detail-{{ item.number }}){% if item.statement_kind == "uncertain" %} · 待确认{% elif item.statement_kind == "suggestion" %} · 建议{% endif %}
 {%- endfor %}
 
 ## 事项详述

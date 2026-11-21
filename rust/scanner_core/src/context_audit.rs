@@ -462,7 +462,7 @@ pub(crate) fn load_evidence_snapshot(
     // spec Part 5.1: the full ContextEnvelope is REBUILT from the body-free
     // final_envelope_metadata_json + summary + artifact (never from a
     // body-carrying scan_runs JSON).
-    let envelope = match (run_status, envelope_metadata_json) {
+    let envelope = match (run_status, envelope_metadata_json.as_deref()) {
         (RunStatus::Running | RunStatus::Abandoned, None) => None,
         (RunStatus::Running | RunStatus::Abandoned, Some(_)) => {
             return Err(EvidenceLoadError::after_status(
@@ -482,7 +482,7 @@ pub(crate) fn load_evidence_snapshot(
             let rebuilt = crate::store::rebuild_envelope_from_metadata(
                 transaction,
                 scan_run_id,
-                &metadata_json,
+                metadata_json,
             )
             .map_err(|error| {
                 EvidenceLoadError::after_status(
@@ -648,8 +648,13 @@ pub(crate) fn load_evidence_snapshot(
             })?),
             None => None,
         };
-        load_file_audits_v2(transaction, scan_run_id, artifact_id)
-            .map_err(|error| EvidenceLoadError::after_status(error, run_status))?
+        load_file_audits_v2(
+            transaction,
+            scan_run_id,
+            artifact_id,
+            envelope_metadata_json.as_deref(),
+        )
+        .map_err(|error| EvidenceLoadError::after_status(error, run_status))?
     } else {
         Vec::new()
     };
@@ -960,29 +965,19 @@ fn load_file_audits_v2(
     transaction: &Transaction<'_>,
     scan_run_id: i64,
     artifact_id: Option<i64>,
+    metadata_json: Option<&str>,
 ) -> Result<Vec<FileAuditV2Source>, EvidenceAuditError> {
-    let metadata_json: Option<String> = transaction
-        .query_row(
-            "SELECT final_envelope_metadata_json FROM scan_runs WHERE scan_run_id=?1",
-            [scan_run_id],
-            |row| row.get(0),
-        )
-        .map_err(|error| EvidenceAuditError::RunCorrupt(error.to_string()))?;
-    let mut page_audits: std::collections::BTreeMap<
-        String,
-        ai_daily_scanner_contract::PdfPageAudit,
-    > = match metadata_json {
-        Some(json) => {
-            let value: serde_json::Value = serde_json::from_str(&json)
-                .map_err(|error| EvidenceAuditError::RunCorrupt(error.to_string()))?;
-            match value.get("pdf_page_audits") {
-                Some(value) => serde_json::from_value(value.clone())
-                    .map_err(|error| EvidenceAuditError::RunCorrupt(error.to_string()))?,
-                None => std::collections::BTreeMap::new(),
-            }
-        }
-        None => std::collections::BTreeMap::new(),
-    };
+    #[derive(Default, serde::Deserialize)]
+    struct PageAudits {
+        #[serde(default)]
+        pdf_page_audits: BTreeMap<String, ai_daily_scanner_contract::PdfPageAudit>,
+    }
+    let mut page_audits = metadata_json
+        .map(serde_json::from_str::<PageAudits>)
+        .transpose()
+        .map_err(|error| EvidenceAuditError::RunCorrupt(error.to_string()))?
+        .unwrap_or_default()
+        .pdf_page_audits;
     #[allow(clippy::type_complexity)]
     let mut statement = transaction
         .prepare(
@@ -1146,7 +1141,7 @@ fn load_file_audits_v2(
                 ));
             }
         };
-        let mut classification_execution = match (
+        let classification_execution = match (
             row.32.as_deref(),
             row.33,
             row.34.as_deref(),
@@ -1175,7 +1170,7 @@ fn load_file_audits_v2(
                 Some(profile),
             ) => {
                 let audit = PdfClassificationAuditV1 {
-                    page_audit: None,
+                    page_audit: page_audits.remove(&row.1),
                     status: parse_enum(status, "classification execution status")?,
                     page_count: Nullable(to_positive_u64(
                         page_count,
@@ -1227,12 +1222,15 @@ fn load_file_audits_v2(
                 ));
             }
         };
-        if let Some(pages) = page_audits.remove(&row.1) {
-            let audit = classification_execution.as_mut().ok_or_else(|| {
-                EvidenceAuditError::RunCorrupt("PDF page audit has no execution provenance".into())
-            })?;
-            audit.page_audit = Some(pages);
-            audit.validate().map_err(EvidenceAuditError::RunCorrupt)?;
+        if row.8 == crate::parsers::document::OCR_BACKEND
+            && classification_execution
+                .as_ref()
+                .and_then(PdfClassificationAuditV1::image_only_page_count)
+                .is_none()
+        {
+            return Err(EvidenceAuditError::RunCorrupt(
+                "PDF OCR is missing full-document image observations".into(),
+            ));
         }
         rows.push(FileAuditV2Source {
             relative_path: row.0,
@@ -1559,9 +1557,9 @@ fn load_file_audits(
             // `entry_absent_or_evicted` projects as `new_file` and the caller
             // adds the `CACHE_MISS_REASON_PROJECTED_AS_NEW_FILE` warning).
             let miss_reason = match row.7.as_str() {
-                "parser_identity_changed" => "parser_profile_changed".to_string(),
-                "entry_absent_or_evicted" => "new_file".to_string(),
-                other => other.to_string(),
+                "parser_identity_changed" => "parser_profile_changed",
+                "entry_absent_or_evicted" => "new_file",
+                other => other,
             };
             let file = FileAudit {
                 relative_path: row.0,
@@ -1571,7 +1569,7 @@ fn load_file_audits(
                 parser_backend: row.4,
                 worker_lane: parse_enum(&row.5, "file worker_lane")?,
                 cache_status: parse_enum(&row.6, "file cache_status")?,
-                cache_miss_reason: parse_enum(&miss_reason, "file cache_miss_reason")?,
+                cache_miss_reason: parse_enum(miss_reason, "file cache_miss_reason")?,
                 truncated: parse_bool(row.8, "file truncated")?,
                 content_sha256: row.9,
                 parse_duration_ms: to_u64(row.10, "file parse_duration_ms")?,
@@ -1869,8 +1867,10 @@ fn parse_enum<T: serde::de::DeserializeOwned>(
     value: &str,
     field: &str,
 ) -> Result<T, EvidenceAuditError> {
-    serde_json::from_value(serde_json::Value::String(value.to_string()))
-        .map_err(|_| EvidenceAuditError::RunCorrupt(format!("persisted {field} is invalid")))
+    T::deserialize(serde::de::value::BorrowedStrDeserializer::<
+        serde::de::value::Error,
+    >::new(value))
+    .map_err(|_| EvidenceAuditError::RunCorrupt(format!("persisted {field} is invalid")))
 }
 
 fn parse_bool(value: i64, field: &str) -> Result<bool, EvidenceAuditError> {

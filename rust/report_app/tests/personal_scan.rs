@@ -73,7 +73,7 @@ impl Fixture {
             "recovery":{"enforce_model_budgets":false}
         }).to_string()).unwrap();
         let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
-        assert_eq!(config.scanner.max_workers, Some(1));
+        assert_eq!(config.scanner.max_workers, Some(2));
         assert_eq!(config.scanner.total_max_chars, Some(MAX_FILE_CHARS as u64));
         assert_eq!(config.scanner.total_deadline_ms, Some(120_000));
         let mut app = App::open(config, Utc::now()).unwrap();
@@ -439,6 +439,44 @@ fn scan_dry_run_keeps_budgets_and_reports_unread_ranges_without_model_calls() {
 struct Interrupted;
 
 #[test]
+fn size_policy_and_metadata_only_office_have_distinct_gaps() {
+    let mut f = Fixture::new();
+    f.app.config.scanner.max_file_size_mb = Some(1);
+    let work = &f.app.config.paths.work_dir;
+    let empty = work.join("empty.pptx");
+    fs::write(&empty, include_bytes!("fixtures/office-metadata-only.pptx")).unwrap();
+    let large = work.join("large.xlsx");
+    File::create_new(&large)
+        .unwrap()
+        .set_len(1_048_577)
+        .unwrap();
+    let modified =
+        UNIX_EPOCH + Duration::from_secs(utc_window(f.day).unwrap().0.timestamp() as u64);
+    for path in [&empty, &large] {
+        File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(modified))
+            .unwrap();
+    }
+    let mut request = f.request();
+    request.dry_run = true;
+    let result = run_daily(request, &f.app).unwrap();
+    let selection: Value = serde_json::from_str(&result.markdown).unwrap();
+    let omissions = &selection["summary"]["omissions"];
+    assert_eq!(omissions["file_size_policy"], 1);
+    assert_eq!(omissions["office_content_missing"], 1);
+    let gaps = selection["gaps"].as_array().unwrap();
+    assert!(gaps
+        .iter()
+        .any(|gap| gap["code"] == "OFFICE_CONTENT_MISSING"));
+    assert!(gaps.iter().any(|gap| gap["code"] == "FILE_SIZE_LIMIT"
+        && gap["message"].as_str().unwrap().contains("1048576")));
+    assert!(f.sent.lock().unwrap().is_empty());
+}
+
+#[test]
 fn staged_first_publication_rechecks_permissions_but_published_byte_repair_is_historical() {
     use ai_daily_report::{publish::Publisher, snapshots::SnapshotRef, store::StagedReport};
     let f = Fixture::new();
@@ -705,6 +743,7 @@ fn legacy_scan_cap_resumes_saved_response_with_same_yaml_and_rejects_other_chang
         let yaml = fs::read(&settings_path).unwrap();
         f.app.config = AppConfig::load_with_env(f._dir.path(), None, &BTreeMap::new()).unwrap();
         f.app.config.scanner.total_max_chars = Some(18_000);
+        f.app.config.scanner.max_workers = Some(1);
         let original = "金额 120 元。满足条件后生效；责任人与截止日期待确认。";
         f.file("work.md", original, utc_window(f.day).unwrap().0);
         f.app.transport = Box::new(Interrupted);

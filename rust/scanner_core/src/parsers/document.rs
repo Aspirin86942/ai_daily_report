@@ -1,8 +1,51 @@
 use super::WorkerCommand;
 use crate::admission::PdfClassificationResult;
 use ai_daily_scanner_contract::{pdf_sample_pages, AdapterPaths, PdfParseProfile};
-use ai_daily_worker_contract::WorkerKind;
+use ai_daily_worker_contract::{ParserLimits, WorkerKind, OCR_CHARS_PER_FILE};
 use std::path::PathBuf;
+
+pub(crate) use ai_daily_scanner_contract::{OCR_BACKEND, OCR_RANGE_LABEL};
+
+pub(crate) fn valid_ocr_ranges(
+    content: &str,
+    audit: &ai_daily_worker_contract::ParsedContentAudit,
+    requested: Option<&[u64]>,
+) -> bool {
+    let (Some(read), Some(units)) = (&audit.read_ranges, &audit.content_units) else {
+        return false;
+    };
+    read.len() as u64 <= ai_daily_worker_contract::OCR_PAGES_PER_FILE
+        && read.iter().all(|range| {
+            range.unit == ai_daily_worker_contract::SourceRangeUnit::PdfPage
+                && range.label.as_deref() == Some(OCR_RANGE_LABEL)
+                && requested.is_none_or(|pages| pages.contains(&range.start))
+                && range.start.checked_add(1) == Some(range.end)
+        })
+        && (content.is_empty() || !units.is_empty())
+        && units.iter().all(|unit| {
+            !unit.ranges.is_empty() && unit.ranges.iter().all(|range| read.contains(range))
+        })
+}
+
+/// The cache and the worker serialize these same limits. Spread a small OCR
+/// allowance over physical pages, independent of the native text sampling order.
+pub(crate) fn image_ocr_limits(
+    page_count: u64,
+    max_pages: u64,
+    profile: &PdfParseProfile,
+) -> ParserLimits {
+    let selected_pages = match max_pages {
+        1 => vec![1],
+        2 => vec![1, page_count],
+        3 => vec![1, page_count.div_ceil(2), page_count],
+        _ => Vec::new(),
+    };
+    ParserLimits::PdfImageOcr {
+        max_pages,
+        excerpt_max_chars: profile.excerpt_max_chars.min(OCR_CHARS_PER_FILE),
+        selected_pages,
+    }
+}
 
 pub(super) fn selected_pages(
     profile: &PdfParseProfile,
@@ -46,6 +89,7 @@ mod tests {
     #[test]
     fn pdf_request_keeps_confirmed_text_and_last_page_with_two_slots() {
         let mut profile = PdfParseProfile {
+            image_ocr: None,
             backend: "rust_pdfium_v3".into(),
             max_pages: 2,
             excerpt_max_chars: 300,

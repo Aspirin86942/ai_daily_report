@@ -1,6 +1,6 @@
 //! Long-lived streaming worker pool for crash-isolated parsers.
 //!
-//! `ai_daily_worker_v3` 是 Office/PDF worker 共用的 NDJSON 流式契约：首帧
+//! Office/PDF worker 共用 NDJSON 流式契约：首帧
 //! hello，每行一个 request/response envelope，
 //! 单 in-flight、逐请求 deadline。每个 session child 拥有独立 Windows Job
 //! Object（见 [`crate::windows_job::SessionJob`]），杀一个超时请求不会连带
@@ -9,7 +9,7 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
@@ -58,7 +58,7 @@ pub struct SessionParams {
 impl Default for SessionParams {
     fn default() -> Self {
         Self {
-            concurrency: 4,
+            concurrency: 2,
             max_requests_per_session: 128,
             idle_ttl: Duration::from_secs(30),
             rss_limit_bytes: 512 * 1024 * 1024,
@@ -70,19 +70,17 @@ impl SessionParams {
     /// Worker pool concurrency is derived from the single max_workers setting.
     pub fn with_default_concurrency(max_workers: u64) -> Self {
         Self {
-            concurrency: usize::try_from(max_workers.min(4)).unwrap_or(4).max(1),
+            concurrency: max_workers.clamp(1, 2) as usize,
             ..Self::default()
         }
     }
 
     pub fn from_settings(profile: &NormalizedScannerSettings) -> Self {
         Self {
-            concurrency: usize::try_from(profile.execution.max_workers.min(4))
-                .unwrap_or(Self::default().concurrency)
-                .clamp(1, 8),
             max_requests_per_session: profile.worker_max_requests,
             idle_ttl: Duration::from_millis(profile.worker_idle_ttl_ms),
             rss_limit_bytes: profile.worker_rss_limit_bytes,
+            ..Self::with_default_concurrency(profile.execution.max_workers)
         }
     }
 }
@@ -168,6 +166,8 @@ impl SessionError {
                         ai_daily_scanner_contract::ErrorCode::ParserStartFailed
                     }
                     "PARSER_TIMEOUT" => ai_daily_scanner_contract::ErrorCode::ParserTimeout,
+                    "FILE_TOO_LARGE" => ai_daily_scanner_contract::ErrorCode::FileTooLarge,
+                    "PDF_PROTECTED" => ai_daily_scanner_contract::ErrorCode::PdfProtected,
                     "PARSER_INVALID_PAYLOAD" => {
                         ai_daily_scanner_contract::ErrorCode::ParserInvalidPayload
                     }
@@ -191,8 +191,13 @@ impl SessionError {
                 false,
             ),
         };
+        let document_error = matches!(self, Self::Rejected(error)
+            if matches!(error.error_code.as_str(), "FILE_TOO_LARGE" | "PDF_PROTECTED")
+                || error.message == ai_daily_worker_contract::OFFICE_CONTENT_MISSING_MESSAGE);
         crate::fallback::ParseFailure {
-            class: if retryable {
+            class: if document_error {
+                crate::fallback::FailureClass::Deterministic
+            } else if retryable {
                 crate::fallback::FailureClass::RecoverableParserFailure
             } else {
                 crate::fallback::FailureClass::ContractFailure
@@ -201,7 +206,11 @@ impl SessionError {
                 error_code: code,
                 message,
                 retryable,
-                stage: ai_daily_scanner_contract::DiagnosticStage::Process,
+                stage: if document_error {
+                    ai_daily_scanner_contract::DiagnosticStage::Parse
+                } else {
+                    ai_daily_scanner_contract::DiagnosticStage::Process
+                },
                 file_path: ai_daily_scanner_contract::Nullable(file_path.map(str::to_string)),
                 backend: ai_daily_scanner_contract::Nullable(None),
             },
@@ -226,7 +235,6 @@ pub fn retry_action(error: &SessionError, session_attempt: u32) -> RetryAction {
         }
         SessionError::Rejected(diagnostic) if !diagnostic.retryable => RetryAction::GiveUp,
         _ if session_attempt == 0 => RetryAction::RetrySession,
-        _ if error.is_retryable_transport() => RetryAction::GiveUp,
         _ => RetryAction::GiveUp,
     }
 }
@@ -241,12 +249,8 @@ enum LineEvent {
 /// 持续排空的 stderr reader。
 struct SessionChild {
     child: Child,
-    stdin: ChildStdin,
+    requests: Sender<Vec<u8>>,
     lines: Receiver<LineEvent>,
-    #[allow(dead_code)]
-    stdout_thread: Option<thread::JoinHandle<()>>,
-    #[allow(dead_code)]
-    stderr_thread: Option<thread::JoinHandle<()>>,
     stderr_budget: Arc<StderrBudget>,
     rss_tracker: WorkerRssTracker,
     #[cfg(windows)]
@@ -271,10 +275,8 @@ impl SessionChild {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
-            // Reuse an existing console; GUI/scheduled callers must not allocate one.
-            if unsafe { windows_sys::Win32::System::Console::GetConsoleWindow() }.is_null() {
-                builder.creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW);
-            }
+            // The protocol uses redirected pipes. A detached worker needs no console host.
+            builder.creation_flags(windows_sys::Win32::System::Threading::DETACHED_PROCESS);
         }
         if let Some(directory) = &command.current_dir {
             builder.current_dir(directory);
@@ -293,22 +295,31 @@ impl SessionChild {
                 }
             }
         };
-        let stdin = child.stdin.take().ok_or(SessionError::IoFailed)?;
+        let mut stdin = child.stdin.take().ok_or(SessionError::IoFailed)?;
         let stdout = child.stdout.take().ok_or(SessionError::IoFailed)?;
         let stderr = child.stderr.take().ok_or(SessionError::IoFailed)?;
         let (sender, receiver) = mpsc::channel();
+        // Pipe writes can block if a worker stops reading. The caller waits on
+        // the response/error channel under the same deadline as the write.
+        let (requests, frames) = mpsc::channel::<Vec<u8>>();
+        let write_errors = sender.clone();
+        thread::spawn(move || {
+            for frame in frames {
+                if stdin.write_all(&frame).and_then(|_| stdin.flush()).is_err() {
+                    let _ = write_errors.send(LineEvent::Error(SessionError::Eof));
+                    break;
+                }
+            }
+        });
         let stdout_sender = sender.clone();
-        let stdout_thread = thread::spawn(move || read_stdout_lines(stdout, stdout_sender));
+        thread::spawn(move || read_stdout_lines(stdout, stdout_sender));
         let stderr_budget = Arc::new(StderrBudget::default());
         let stderr_reader_budget = stderr_budget.clone();
-        let stderr_thread =
-            thread::spawn(move || drain_stderr(stderr, sender, stderr_reader_budget));
+        thread::spawn(move || drain_stderr(stderr, sender, stderr_reader_budget));
         Ok(Self {
             child,
-            stdin,
+            requests,
             lines: receiver,
-            stdout_thread: Some(stdout_thread),
-            stderr_thread: Some(stderr_thread),
             stderr_budget,
             rss_tracker: rss_tracker.clone(),
             #[cfg(windows)]
@@ -318,6 +329,9 @@ impl SessionChild {
     }
 
     fn read_line(&self, timeout: Duration) -> Result<Vec<u8>, SessionError> {
+        if timeout.is_zero() {
+            return Err(SessionError::Timeout);
+        }
         if self.stderr_budget.overflowed() {
             return Err(stderr_limit_error());
         }
@@ -331,13 +345,12 @@ impl SessionChild {
         }
     }
 
-    fn write_line(&mut self, frame: &[u8]) -> Result<(), SessionError> {
+    fn write_line(&mut self, mut frame: Vec<u8>) -> Result<(), SessionError> {
         // stderr accounting is per in-flight request. Hello uses the initial
         // zeroed budget; every subsequent request starts a fresh 1 MiB window.
         self.stderr_budget.reset();
-        self.stdin.write_all(frame).map_err(|_| SessionError::Eof)?;
-        self.stdin.write_all(b"\n").map_err(|_| SessionError::Eof)?;
-        self.stdin.flush().map_err(|_| SessionError::Eof)
+        frame.push(b'\n');
+        self.requests.send(frame).map_err(|_| SessionError::Eof)
     }
 
     fn recycle_due(&self, params: &SessionParams) -> bool {
@@ -363,16 +376,6 @@ impl SessionChild {
 
     fn touch_activity(&mut self) {
         self.last_activity = Instant::now();
-    }
-
-    /// 优雅重建前的收割：杀 Job Object 并等进程树清空。
-    fn reap(mut self) {
-        #[cfg(windows)]
-        if let Some(job) = self.job.as_ref() {
-            let _ = job.terminate(124);
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -560,6 +563,7 @@ impl WorkerSession {
         payload: serde_json::Value,
         timeout: Duration,
     ) -> Result<ai_daily_worker_contract::archive::ArchiveArtifact, SessionError> {
+        let started = Instant::now();
         let envelope = WorkerRequest {
             contract: CONTRACT.into(),
             protocol_version: SESSION_PROTOCOL_VERSION,
@@ -570,12 +574,12 @@ impl WorkerSession {
         envelope
             .validate()
             .map_err(SessionError::ProtocolCorruption)?;
-        self.write_request(&serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?)?;
+        self.write_request(serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?)?;
         let line = self
             .child
             .as_ref()
             .ok_or(SessionError::Eof)?
-            .read_line(timeout)?;
+            .read_line(timeout.saturating_sub(started.elapsed()))?;
         if line.len() > 1024 * 1024 {
             return Err(SessionError::FrameTooLarge);
         }
@@ -620,6 +624,7 @@ impl WorkerSession {
         rss_tracker: &WorkerRssTracker,
         timeout: Duration,
     ) -> Result<Self, SessionError> {
+        let started = Instant::now();
         let child = SessionChild::spawn(command, rss_tracker)?;
         let mut session = Self {
             child: Some(child),
@@ -627,7 +632,7 @@ impl WorkerSession {
             identity: expected.clone(),
             requests_served: 0,
         };
-        let hello = session.read_hello(timeout)?;
+        let hello = session.read_hello(timeout.saturating_sub(started.elapsed()))?;
         if hello != *expected {
             session.kill();
             return Err(SessionError::BuildMismatch);
@@ -693,9 +698,7 @@ impl WorkerSession {
 
     /// 杀当前 child 的 Job Object 并等待进程树清空；不重建。
     pub fn kill(&mut self) {
-        if let Some(child) = self.child.take() {
-            child.reap();
-        }
+        drop(self.child.take());
     }
 
     fn dispatch_classify(
@@ -703,6 +706,7 @@ impl WorkerSession {
         request: &ClassifyOperation,
         timeout: Duration,
     ) -> Result<ClassifyResult, SessionError> {
+        let started = Instant::now();
         request.validate().map_err(|message| {
             SessionError::ProtocolCorruption(format!(
                 "classify request violates the strict contract: {message}"
@@ -716,9 +720,9 @@ impl WorkerSession {
             payload: serde_json::to_value(&request.payload).map_err(|_| SessionError::IoFailed)?,
         };
         let frame = serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?;
-        self.write_request(&frame)?;
+        self.write_request(frame)?;
         let child = self.child.as_ref().ok_or(SessionError::Eof)?;
-        let line = child.read_line(timeout)?;
+        let line = child.read_line(timeout.saturating_sub(started.elapsed()))?;
         if line.len() > SESSION_CLASSIFY_FRAME_LIMIT {
             return Err(SessionError::FrameTooLarge);
         }
@@ -761,6 +765,7 @@ impl WorkerSession {
         request: &ParseOperation,
         timeout: Duration,
     ) -> Result<ParseResult, SessionError> {
+        let started = Instant::now();
         request.validate().map_err(|message| {
             SessionError::ProtocolCorruption(format!(
                 "parse request violates the strict contract: {message}"
@@ -774,11 +779,11 @@ impl WorkerSession {
             payload: serde_json::to_value(&request.payload).map_err(|_| SessionError::IoFailed)?,
         };
         let frame = serde_json::to_vec(&envelope).map_err(|_| SessionError::IoFailed)?;
-        self.write_request(&frame)?;
+        self.write_request(frame)?;
         let capture_limit = crate::parsers::worker_response_capture_limit(request)
             .map_err(|_| SessionError::IoFailed)?;
         let child = self.child.as_ref().ok_or(SessionError::Eof)?;
-        let line = child.read_line(timeout)?;
+        let line = child.read_line(timeout.saturating_sub(started.elapsed()))?;
         if line.len() > capture_limit {
             return Err(SessionError::FrameTooLarge);
         }
@@ -815,7 +820,7 @@ impl WorkerSession {
     }
 
     /// 写请求帧；写失败视为会话死亡（EOF/协议损坏）。
-    fn write_request(&mut self, frame: &[u8]) -> Result<(), SessionError> {
+    fn write_request(&mut self, frame: Vec<u8>) -> Result<(), SessionError> {
         if frame.len() > SESSION_REQUEST_FRAME_LIMIT {
             return Err(SessionError::FrameTooLarge);
         }
@@ -908,7 +913,7 @@ pub struct SessionOperationFailure {
     pub duration_ms: u64,
 }
 
-/// Run-level lifecycle counters owned by the shared Python session pool.
+/// Lifecycle counters for the worker sessions.
 /// Operation attempts stay on each outcome/failure so scheduler metrics and
 /// per-file provenance share one exact source.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -934,43 +939,6 @@ impl SessionPoolStats {
 }
 
 #[derive(Default)]
-struct PoolCounters {
-    session_restart_count: AtomicU64,
-    peak_worker_rss_bytes: AtomicU64,
-    rss_observation_attempted: AtomicBool,
-    rss_observation_failed: AtomicBool,
-}
-
-impl PoolCounters {
-    fn observe_rss(&self, value: Option<u64>) {
-        self.rss_observation_attempted
-            .store(true, Ordering::Relaxed);
-        match value {
-            Some(value) => {
-                self.peak_worker_rss_bytes
-                    .fetch_max(value, Ordering::Relaxed);
-            }
-            None => self.rss_observation_failed.store(true, Ordering::Relaxed),
-        }
-    }
-
-    fn snapshot(&self) -> SessionPoolStats {
-        let attempted = self.rss_observation_attempted.load(Ordering::Relaxed);
-        let failed = self.rss_observation_failed.load(Ordering::Relaxed);
-        SessionPoolStats {
-            session_restart_count: self.session_restart_count.load(Ordering::Relaxed),
-            peak_worker_rss_bytes: if failed {
-                None
-            } else if attempted {
-                Some(self.peak_worker_rss_bytes.load(Ordering::Relaxed))
-            } else {
-                Some(0)
-            },
-        }
-    }
-}
-
-#[derive(Default)]
 struct SessionSlot {
     session: Option<WorkerSession>,
     /// A prior generation was retired or failed and the next successful start
@@ -978,19 +946,65 @@ struct SessionSlot {
     replacement_pending: bool,
 }
 
-/// Shared, bounded pool used by both PDF classification and PDF body parsing.
-/// A slot is checked out for one complete logical operation, preserving the
-/// frozen single-in-flight session contract while classifier/parser waves may
-/// run concurrently across different slots.
+/// A slot owns at most one live process, including between requests. Both
+/// worker kinds draw from the same slots for a scan.
+pub(crate) struct SessionSlots {
+    idle: Mutex<Vec<SessionSlot>>,
+    changed: Condvar,
+}
+
+impl SessionSlots {
+    pub(crate) fn new(concurrency: usize) -> Arc<Self> {
+        Arc::new(Self {
+            idle: Mutex::new(
+                (0..concurrency.clamp(1, 2))
+                    .map(|_| SessionSlot::default())
+                    .collect(),
+            ),
+            changed: Condvar::new(),
+        })
+    }
+
+    fn checkout(
+        &self,
+        expected: &WorkerHello,
+        started: Instant,
+        timeout: Duration,
+    ) -> Option<SlotPermit<'_>> {
+        let mut idle = lock_unpoison(&self.idle);
+        loop {
+            let remaining = timeout
+                .checked_sub(started.elapsed())
+                .filter(|t| !t.is_zero())?;
+            if !idle.is_empty() {
+                // Reuse a matching process first, then an empty slot. Only a
+                // full pool needs to retire a process belonging to the other lane.
+                let index = idle
+                    .iter()
+                    .rposition(|s| s.session.as_ref().is_some_and(|s| s.identity() == expected))
+                    .or_else(|| idle.iter().rposition(|s| s.session.is_none()))
+                    .unwrap_or(0);
+                return Some(SlotPermit {
+                    slots: self,
+                    slot: idle.swap_remove(index),
+                });
+            }
+            (idle, _) = self
+                .changed
+                .wait_timeout(idle, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+}
+
 pub struct WorkerPool {
     command: WorkerCommand,
     expected: WorkerHello,
     worker: RegisteredWorker,
     params: SessionParams,
-    slots: Vec<Mutex<SessionSlot>>,
-    available: Mutex<Vec<usize>>,
-    available_changed: Condvar,
-    counters: PoolCounters,
+    slots: Arc<SessionSlots>,
+    session_restart_count: AtomicU64,
+    pool_rss: WorkerRssTracker,
     rss_tracker: WorkerRssTracker,
 }
 
@@ -1002,29 +1016,50 @@ impl WorkerPool {
         params: SessionParams,
         rss_tracker: WorkerRssTracker,
     ) -> Arc<Self> {
-        let concurrency = params.concurrency.max(1);
+        Self::with_slots(
+            command,
+            expected,
+            worker,
+            params,
+            rss_tracker,
+            SessionSlots::new(params.concurrency),
+        )
+    }
+
+    pub(crate) fn with_slots(
+        command: WorkerCommand,
+        expected: WorkerHello,
+        worker: RegisteredWorker,
+        params: SessionParams,
+        rss_tracker: WorkerRssTracker,
+        slots: Arc<SessionSlots>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             command,
             expected,
             worker,
             params,
-            slots: (0..concurrency)
-                .map(|_| Mutex::new(SessionSlot::default()))
-                .collect(),
-            available: Mutex::new((0..concurrency).rev().collect()),
-            available_changed: Condvar::new(),
-            counters: PoolCounters::default(),
+            slots,
+            session_restart_count: AtomicU64::new(0),
+            pool_rss: WorkerRssTracker::default(),
             rss_tracker,
         })
     }
 
     pub fn stats(&self) -> SessionPoolStats {
-        for slot in &self.slots {
-            if let Some(session) = lock_unpoison(slot).session.as_ref() {
+        for slot in lock_unpoison(&self.slots.idle).iter() {
+            if let Some(session) = slot
+                .session
+                .as_ref()
+                .filter(|s| s.identity() == &self.expected)
+            {
                 self.observe_rss(session.peak_rss_bytes());
             }
         }
-        self.counters.snapshot()
+        SessionPoolStats {
+            session_restart_count: self.session_restart_count.load(Ordering::Relaxed),
+            peak_worker_rss_bytes: self.pool_rss.peak_worker_rss_bytes(),
+        }
     }
 
     pub(crate) fn matches(
@@ -1045,7 +1080,7 @@ impl WorkerPool {
     }
 
     fn observe_rss(&self, value: Option<u64>) {
-        self.counters.observe_rss(value);
+        self.pool_rss.observe_started_child(value);
         self.rss_tracker.observe_started_child(value);
     }
 
@@ -1054,6 +1089,7 @@ impl WorkerPool {
         request: &ClassifyOperation,
         timeout: Duration,
     ) -> Result<SessionOperationOutcome<ClassifyResult>, SessionOperationFailure> {
+        let started = Instant::now();
         if let Err(failure) = crate::parsers::classifier::validate_classifier_source_before(request)
         {
             return Err(SessionOperationFailure {
@@ -1063,10 +1099,11 @@ impl WorkerPool {
                 duration_ms: 0,
             });
         }
-        let result =
-            self.execute_operation(&request.file_path, timeout, |session, remaining| {
-                session_classify(session, request, remaining)
-            })?;
+        let result = self.execute_operation(
+            &request.file_path,
+            timeout.saturating_sub(started.elapsed()),
+            |session, remaining| session_classify(session, request, remaining),
+        )?;
         if let Err(failure) = crate::parsers::classifier::validate_classifier_source_after(request)
         {
             return Err(SessionOperationFailure {
@@ -1084,36 +1121,7 @@ impl WorkerPool {
         request: &ParseOperation,
         timeout: Duration,
     ) -> Result<SessionOperationOutcome<ParseResult>, SessionOperationFailure> {
-        if let Err(failure) = crate::parsers::validate_worker_request(&self.worker, request) {
-            return Err(SessionOperationFailure {
-                failure,
-                transport: WorkerTransport::NotApplicable,
-                attempt_count: 0,
-                duration_ms: 0,
-            });
-        }
-        let response =
-            self.execute_operation(&request.file_path, timeout, |session, remaining| {
-                let mut attempt_request = request.clone();
-                attempt_request.remaining_timeout_ms = duration_ms(remaining);
-                session_parse(session, &attempt_request, remaining)
-            })?;
-        let value = match crate::parsers::validate_session_worker_response(
-            &self.worker,
-            request,
-            response.value,
-        ) {
-            Ok(value) => value,
-            Err(failure) => {
-                return Err(SessionOperationFailure {
-                    failure,
-                    transport: response.transport,
-                    attempt_count: response.attempt_count,
-                    duration_ms: response.duration_ms,
-                });
-            }
-        };
-        Ok(SessionOperationOutcome { value, ..response })
+        self.parse_worker(request, timeout)
     }
 
     pub fn parse_worker(
@@ -1121,6 +1129,19 @@ impl WorkerPool {
         request: &ParseOperation,
         timeout: Duration,
     ) -> Result<SessionOperationOutcome<ParseResult>, SessionOperationFailure> {
+        let started = Instant::now();
+        let timeout = if matches!(
+            request.parser_limits,
+            ai_daily_worker_contract::ParserLimits::PdfImageOcr { .. }
+        ) {
+            timeout.min(Duration::from_millis(
+                request
+                    .remaining_timeout_ms
+                    .min(ai_daily_worker_contract::OCR_TIMEOUT_MS),
+            ))
+        } else {
+            timeout
+        };
         if let Err(failure) = crate::parsers::validate_worker_request(&self.worker, request) {
             return Err(SessionOperationFailure {
                 failure,
@@ -1129,12 +1150,15 @@ impl WorkerPool {
                 duration_ms: 0,
             });
         }
-        let response =
-            self.execute_operation(&request.file_path, timeout, |session, remaining| {
+        let response = self.execute_operation(
+            &request.file_path,
+            timeout.saturating_sub(started.elapsed()),
+            |session, remaining| {
                 let mut attempt_request = request.clone();
                 attempt_request.remaining_timeout_ms = duration_ms(remaining);
                 session_parse(session, &attempt_request, remaining)
-            })?;
+            },
+        )?;
         let value =
             crate::parsers::validate_session_worker_response(&self.worker, request, response.value)
                 .map_err(|failure| SessionOperationFailure {
@@ -1156,38 +1180,36 @@ impl WorkerPool {
         SessionCall: FnMut(&mut WorkerSession, Duration) -> Result<T, SessionError>,
     {
         let deadline_origin = Instant::now();
-        let permit = self.checkout();
-        let mut slot = lock_unpoison(&self.slots[permit.index]);
+        let timeout_failure = |attempts, duration| {
+            operation_failure(
+                SessionError::Timeout.diagnostic(Some(file_path)),
+                transport_for_attempts(attempts),
+                attempts,
+                duration,
+            )
+        };
+        let remaining = |attempts, duration| {
+            timeout
+                .checked_sub(deadline_origin.elapsed())
+                .filter(|left| !left.is_zero())
+                .ok_or_else(|| timeout_failure(attempts, duration))
+        };
+        let mut permit = self
+            .slots
+            .checkout(&self.expected, deadline_origin, timeout)
+            .ok_or_else(|| timeout_failure(0, 0))?;
+        let slot = &mut permit.slot;
         let mut transport_failure_index = 0_u32;
         let mut session_attempt_count = 0_u64;
         let mut session_duration_ms = 0_u64;
 
         loop {
-            let remaining = timeout.saturating_sub(deadline_origin.elapsed());
-            if remaining.is_zero() {
-                if let Some(session) = slot.session.as_mut() {
-                    self.observe_rss(session.peak_rss_bytes());
-                    session.kill();
-                    slot.replacement_pending = true;
-                }
-                return Err(operation_failure(
-                    SessionError::Timeout.diagnostic(Some(file_path)),
-                    transport_for_attempts(session_attempt_count, 0),
-                    session_attempt_count,
-                    session_duration_ms,
-                ));
-            }
-
             if slot
                 .session
                 .as_ref()
-                .is_some_and(WorkerSession::recycle_due)
+                .is_some_and(|s| s.identity() != &self.expected || s.recycle_due())
             {
-                if let Some(session) = slot.session.as_mut() {
-                    self.observe_rss(session.peak_rss_bytes());
-                    session.kill();
-                }
-                slot.session = None;
+                drop(slot.session.take());
                 slot.replacement_pending = true;
             }
 
@@ -1197,14 +1219,12 @@ impl WorkerPool {
                     &self.expected,
                     self.params,
                     &self.rss_tracker,
-                    remaining,
+                    remaining(session_attempt_count, session_duration_ms)?,
                 ) {
                     Ok(session) => {
                         self.observe_rss(session.peak_rss_bytes());
                         if slot.replacement_pending {
-                            self.counters
-                                .session_restart_count
-                                .fetch_add(1, Ordering::Relaxed);
+                            self.session_restart_count.fetch_add(1, Ordering::Relaxed);
                         }
                         slot.replacement_pending = false;
                         slot.session = Some(session);
@@ -1222,7 +1242,7 @@ impl WorkerPool {
                             RetryAction::GiveUp => {
                                 return Err(operation_failure(
                                     error.diagnostic(Some(file_path)),
-                                    transport_for_attempts(session_attempt_count, 0),
+                                    transport_for_attempts(session_attempt_count),
                                     session_attempt_count,
                                     session_duration_ms,
                                 ));
@@ -1232,25 +1252,17 @@ impl WorkerPool {
                 }
             }
 
-            let remaining = timeout.saturating_sub(deadline_origin.elapsed());
-            if remaining.is_zero() {
-                if let Some(session) = slot.session.as_mut() {
-                    self.observe_rss(session.peak_rss_bytes());
-                    session.kill();
-                    slot.replacement_pending = true;
-                }
-                return Err(operation_failure(
-                    SessionError::Timeout.diagnostic(Some(file_path)),
-                    transport_for_attempts(session_attempt_count, 0),
-                    session_attempt_count,
-                    session_duration_ms,
-                ));
-            }
+            let time_left = remaining(session_attempt_count, session_duration_ms)?;
             let attempt_started = Instant::now();
             let outcome = session_call(
                 slot.session.as_mut().expect("session was started above"),
-                remaining,
+                time_left,
             );
+            let outcome = if deadline_origin.elapsed() >= timeout {
+                Err(SessionError::Timeout)
+            } else {
+                outcome
+            };
             session_attempt_count = session_attempt_count.saturating_add(1);
             session_duration_ms =
                 session_duration_ms.saturating_add(observed_duration_ms(attempt_started.elapsed()));
@@ -1290,19 +1302,6 @@ impl WorkerPool {
             }
         }
     }
-
-    fn checkout(&self) -> SlotPermit<'_> {
-        let mut available = lock_unpoison(&self.available);
-        loop {
-            if let Some(index) = available.pop() {
-                return SlotPermit { pool: self, index };
-            }
-            available = self
-                .available_changed
-                .wait(available)
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-        }
-    }
 }
 
 fn operation_failure(
@@ -1319,10 +1318,7 @@ fn operation_failure(
     }
 }
 
-fn transport_for_attempts(
-    session_attempt_count: u64,
-    _legacy_attempt_count: u64,
-) -> WorkerTransport {
+fn transport_for_attempts(session_attempt_count: u64) -> WorkerTransport {
     if session_attempt_count > 0 {
         WorkerTransport::Session
     } else {
@@ -1335,15 +1331,14 @@ fn observed_duration_ms(duration: Duration) -> u64 {
 }
 
 struct SlotPermit<'a> {
-    pool: &'a WorkerPool,
-    index: usize,
+    slots: &'a SessionSlots,
+    slot: SessionSlot,
 }
 
 impl Drop for SlotPermit<'_> {
     fn drop(&mut self) {
-        let mut available = lock_unpoison(&self.pool.available);
-        available.push(self.index);
-        self.pool.available_changed.notify_one();
+        lock_unpoison(&self.slots.idle).push(std::mem::take(&mut self.slot));
+        self.slots.changed.notify_one();
     }
 }
 
@@ -1372,5 +1367,143 @@ pub fn build_classify_request(
             max_pages,
             policy_version: "pdf_text_presence_v1".to_string(),
         },
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+    use crate::parsers::{document, office, register_worker};
+    use ai_daily_scanner_contract::AdapterPaths;
+
+    #[test]
+    #[ignore = "measures the full 15-second OCR queue deadline with a real worker registration"]
+    fn image_ocr_queue_obeys_the_parent_deadline() {
+        let dir = std::env::var_os("AI_DAILY_TEST_WORKER_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug"));
+        let command = document::worker_command(&AdapterPaths {
+            pdf_worker_path: dir
+                .join("ai-daily-pdf-parser.exe")
+                .to_string_lossy()
+                .into_owned(),
+            office_worker_path: String::new(),
+        });
+        let timeout = Duration::from_secs(30);
+        let worker = register_worker(&command, timeout).unwrap();
+        let pool = WorkerPool::new(
+            command,
+            worker.identity.clone(),
+            worker,
+            SessionParams::with_default_concurrency(1),
+            WorkerRssTracker::default(),
+        );
+        let _held_slot = pool
+            .slots
+            .checkout(&pool.expected, Instant::now(), timeout)
+            .unwrap();
+        let file = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../pdf_parser/tests/fixtures/ocr-image-pages.pdf");
+        let file_path = file.to_str().unwrap();
+        let request = ParseOperation {
+            request_id: crate::scanner::next_request_id(),
+            payload: ai_daily_worker_contract::ParseRequest {
+                file_path: file_path.to_owned(),
+                file_type: ".pdf".into(),
+                backend: ParserBackend::RustPdfiumV3,
+                remaining_timeout_ms: 30_000,
+                max_file_size_bytes: 10_000_000,
+                parser_limits: ai_daily_worker_contract::ParserLimits::PdfImageOcr {
+                    max_pages: 1,
+                    excerpt_max_chars: 512,
+                    selected_pages: vec![1],
+                },
+                expected_source_version: crate::parsers::current_source(file_path).unwrap().0,
+            },
+        };
+        let started = Instant::now();
+        let failure = pool.parse_worker(&request, timeout).unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(failure.failure.is_timeout());
+        assert_eq!(failure.attempt_count, 0);
+        assert!(
+            (Duration::from_secs(14)..Duration::from_secs(19)).contains(&elapsed),
+            "{elapsed:?}"
+        );
+        println!("OCR queue timed out after {elapsed:?}");
+    }
+
+    #[test]
+    fn occupied_slots_respect_deadline_and_timeout_replaces_only_one_process() {
+        let directory = std::env::var_os("AI_DAILY_TEST_WORKER_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug"));
+        let paths = AdapterPaths {
+            office_worker_path: directory
+                .join("ai-daily-office-parser.exe")
+                .to_string_lossy()
+                .into_owned(),
+            pdf_worker_path: directory
+                .join("ai-daily-pdf-parser.exe")
+                .to_string_lossy()
+                .into_owned(),
+        };
+        let timeout = Duration::from_secs(10);
+        let slots = SessionSlots::new(64);
+        let pool = |command| {
+            let worker = register_worker(&command, timeout).unwrap();
+            WorkerPool::with_slots(
+                command,
+                worker.identity.clone(),
+                worker,
+                SessionParams::default(),
+                WorkerRssTracker::default(),
+                slots.clone(),
+            )
+        };
+        let office = pool(office::worker_command(&paths));
+        let pdf = pool(document::worker_command(&paths));
+        let pid = |session: &mut WorkerSession, _: Duration| {
+            Ok(session.child.as_ref().unwrap().child.id())
+        };
+        office.execute_operation("fixture", timeout, pid).unwrap();
+        let pdf_pid = pdf
+            .execute_operation("fixture", timeout, pid)
+            .unwrap()
+            .value;
+        let pdf_busy = slots
+            .checkout(&pdf.expected, Instant::now(), timeout)
+            .unwrap();
+        let office_busy = slots
+            .checkout(&office.expected, Instant::now(), timeout)
+            .unwrap();
+        let short = Duration::from_millis(30);
+        let started = Instant::now();
+        let waiting = office.execute_operation("fixture", short, pid).unwrap_err();
+        assert!(waiting.failure.is_timeout());
+        assert_eq!(waiting.attempt_count, 0);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        drop(office_busy);
+
+        // No request was sent. This live Office child waits for input until its
+        // response deadline expires. The checked-out PDF child stays usable.
+        let expired = office
+            .execute_operation("fixture", short, |session, remaining| {
+                session.child.as_ref().unwrap().read_line(remaining)
+            })
+            .unwrap_err();
+        assert!(expired.failure.is_timeout());
+        assert_eq!(expired.attempt_count, 1);
+        office.execute_operation("fixture", timeout, pid).unwrap();
+        assert_eq!(office.stats().session_restart_count, 1);
+        drop(pdf_busy);
+        assert_eq!(
+            pdf.execute_operation("fixture", timeout, pid)
+                .unwrap()
+                .value,
+            pdf_pid
+        );
+        assert_eq!(pdf.stats().session_restart_count, 0);
+        assert_eq!(lock_unpoison(&slots.idle).len(), 2);
     }
 }

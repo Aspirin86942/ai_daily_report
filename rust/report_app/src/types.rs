@@ -1,4 +1,5 @@
 use crate::ReportError;
+pub use ai_daily_scanner_contract::ReportMode;
 use chrono::{
     DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc, Weekday,
 };
@@ -85,14 +86,6 @@ pub enum ReportSource {
     Archive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReportMode {
-    Daily,
-    Weekly,
-    Monthly,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RunContext {
@@ -158,15 +151,7 @@ pub struct Period {
 }
 
 impl Period {
-    pub fn weekly(
-        today: NaiveDate,
-        label: Option<&str>,
-        source: ReportSource,
-    ) -> Result<Self, ReportError> {
-        let week = today.iso_week();
-        let label = label
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("{}-W{:02}", week.year(), week.week()));
+    pub fn weekly(label: &str) -> Result<Self, ReportError> {
         let invalid = || ReportError::new("WEEK_INVALID", "周须为有效的 YYYY-Wnn");
         if label.len() != 8 || !label.is_ascii() || &label[4..6] != "-W" {
             return Err(invalid());
@@ -176,21 +161,14 @@ impl Period {
         let start = NaiveDate::from_isoywd_opt(year, number, Weekday::Mon).ok_or_else(invalid)?;
         Ok(Self {
             mode: ReportMode::Weekly,
-            source,
+            source: ReportSource::Db,
             start,
             end: start + Duration::days(6),
-            label,
+            label: label.to_owned(),
         })
     }
 
-    pub fn monthly(
-        today: NaiveDate,
-        label: Option<&str>,
-        source: ReportSource,
-    ) -> Result<Self, ReportError> {
-        let label = label
-            .map(str::to_owned)
-            .unwrap_or_else(|| today.format("%Y-%m").to_string());
+    pub fn monthly(label: &str) -> Result<Self, ReportError> {
         if label.len() != 7 {
             return Err(ReportError::new("MONTH_INVALID", "月份须为 YYYY-MM"));
         }
@@ -204,10 +182,10 @@ impl Period {
             .ok_or_else(|| ReportError::new("MONTH_INVALID", "月份超出范围"))?;
         Ok(Self {
             mode: ReportMode::Monthly,
-            source,
+            source: ReportSource::Db,
             start,
             end: next - Duration::days(1),
-            label,
+            label: label.to_owned(),
         })
     }
 }

@@ -14,7 +14,6 @@ use ai_daily_scanner_contract::{
 };
 
 use crate::budget_model::RouteKind;
-use crate::classifier::ParserRoute;
 use crate::parsers::light_text;
 use crate::scheduler::{
     CachePort, CachePortError, ParseLookupOutcome, ParseRequest, ParseResult, ParserPort,
@@ -113,13 +112,30 @@ impl CachePort for StoreCachePort {
         route: RouteKind,
         inventory_existed_before: bool,
     ) -> Result<ParseLookupOutcome, CachePortError> {
-        let parser_route = parser_route(route);
-        let profile_hash = crate::store::cache::parse_profile_hash(
+        let base_hash = crate::store::cache::parse_profile_hash(
             1,
-            self.route_stacks.for_route(parser_route),
+            self.route_stacks.for_route(route),
             &self.settings,
         )
         .map_err(|message| CachePortError::InvalidKey { detail: message })?;
+        let profile_hash = match route {
+            RouteKind::PdfImageOcr {
+                page_count,
+                max_pages,
+            } => {
+                let pdf = &self.settings.parse.pdf;
+                let limits = crate::parsers::document::image_ocr_limits(page_count, max_pages, pdf);
+                // base_hash covers the OCR implementation and pinned model hashes
+                // via PARSER_CONTENT_IDENTITY. Bind the admitted request as well.
+                let key = serde_json::to_vec(&(base_hash, limits)).map_err(|error| {
+                    CachePortError::InvalidKey {
+                        detail: error.to_string(),
+                    }
+                })?;
+                crate::store::cache::domain_hash(b"pdf-image-ocr-v1\0", &key)
+            }
+            _ => base_hash,
+        };
         let guard_kind =
             file.source_guard_kind
                 .as_deref()
@@ -168,7 +184,7 @@ impl CachePort for StoreCachePort {
                 .ok_or_else(|| CachePortError::InvalidKey {
                     detail: "source guard sha256 is missing".to_string(),
                 })?;
-        self.with_store(|store| {
+        let lookup = self.with_store(|store| {
             store.lookup_classification_cache(
                 &file.file_identity,
                 &file.source_version,
@@ -178,7 +194,21 @@ impl CachePort for StoreCachePort {
                 classifier_build,
                 inventory_existed_before,
             )
-        })
+        })?;
+        // Partial runs have no artifact-file rows. Their successful classification
+        // cache may retain counts without observations. Re-probe eligible-length
+        // documents so a repaired model can be used on the next run.
+        if self.settings.parse.pdf.image_ocr.is_some()
+            && matches!(&lookup, ClassificationCacheLookup::Fresh(entry)
+                if entry.status == "no_text_in_parse_window"
+                    && entry.page_count == entry.result_examined_pages
+                    && entry.page_audit.as_ref().and_then(|audit| audit.observations.as_ref()).is_none())
+        {
+            return Ok(ClassificationCacheLookup::Miss(
+                crate::store::ClassificationCacheMissReason::EntryAbsentOrEvicted,
+            ));
+        }
+        Ok(lookup)
     }
 
     fn write_parse(&self, now_ms: u64, records: &[CacheWriteRecord]) -> Result<(), CachePortError> {
@@ -256,7 +286,7 @@ impl ProductionParser {
     ) -> ParseResult {
         let worker_request = crate::parsers::worker_request(
             &request.file,
-            parser_route(request.route),
+            request.route,
             request.timeout_ms,
             &self.profile,
             request.selected_pdf_pages.as_deref(),
@@ -270,7 +300,12 @@ impl ProductionParser {
                     evidence_audit: response.evidence_audit,
                     file_identity: request.file.file_identity.clone(),
                     content: response.content,
-                    parser_backend: response.parser_backend.as_str().to_string(),
+                    parser_backend: if matches!(request.route, RouteKind::PdfImageOcr { .. }) {
+                        request.route.backend()
+                    } else {
+                        response.parser_backend.as_str()
+                    }
+                    .to_string(),
                     worker_lane: request.route.worker_lane().to_string(),
                     truncated: response.truncated,
                     content_sha256,
@@ -353,7 +388,9 @@ impl ParserPort for ProductionParser {
     fn parse(&self, request: &ParseRequest) -> ParseResult {
         match request.route {
             RouteKind::LightText => self.parse_light_text(request),
-            RouteKind::Pdf => self.parse_with_worker_pool(request, &self.pdf_pool),
+            RouteKind::Pdf | RouteKind::PdfImageOcr { .. } => {
+                self.parse_with_worker_pool(request, &self.pdf_pool)
+            }
             _ => self.parse_with_worker_pool(request, &self.office_pool),
         }
     }
@@ -388,6 +425,16 @@ impl ProductionParser {
                 );
             }
         };
+        if elapsed_ms(started) >= request.timeout_ms {
+            return light_text_error(
+                request,
+                ErrorCode::ParserTimeout,
+                "light text deadline exhausted before reading",
+                false,
+                0,
+                0,
+            );
+        }
         let parsed = match light_text::parse_light_text(
             &path,
             &request.file.extension,
@@ -432,8 +479,18 @@ impl ProductionParser {
                 duration_ms,
             );
         }
-        let duration_ms = elapsed_ms(started);
         let content_sha256 = crate::store::sha256_hex(parsed.content.as_bytes());
+        let duration_ms = elapsed_ms(started);
+        if duration_ms >= request.timeout_ms {
+            return light_text_error(
+                request,
+                ErrorCode::ParserTimeout,
+                "light text exceeded its deadline",
+                false,
+                1,
+                duration_ms,
+            );
+        }
         ParseResult {
             evidence_audit: Some(parsed.evidence_audit),
             file_identity: request.file.file_identity.clone(),
@@ -481,7 +538,11 @@ fn light_text_error(
         },
         truncated: false,
         content_sha256: crate::store::sha256_hex(b""),
-        parse_status: ParseStatus::Error,
+        parse_status: if error_code == ErrorCode::ParserTimeout {
+            ParseStatus::Timeout
+        } else {
+            ParseStatus::Error
+        },
         error: Some(Diagnostic {
             error_code,
             message: message.to_string(),
@@ -512,17 +573,6 @@ fn light_text_error(
 
 fn elapsed_ms(started: std::time::Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-fn parser_route(route: RouteKind) -> ParserRoute {
-    match route {
-        RouteKind::LightText => ParserRoute::LightText,
-        RouteKind::RustOffice => ParserRoute::RustOffice,
-        RouteKind::RustXlsx => ParserRoute::RustXlsx,
-        RouteKind::Pdf => ParserRoute::Pdf,
-        RouteKind::RustXls => ParserRoute::RustXls,
-        RouteKind::RustLegacyOffice => ParserRoute::RustLegacyOffice,
-    }
 }
 
 #[cfg(test)]
@@ -575,6 +625,44 @@ mod tests {
             result.lookup,
             CacheLookup::Miss(CacheMissReason::NewFile)
         ));
+    }
+
+    #[test]
+    fn image_ocr_cache_binds_the_effective_pages_and_preserves_native_keys() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("scan_index_rust_v3.sqlite3");
+        drop(ScannerStore::open(&path).unwrap());
+        let mut port = cache_port(&path);
+        let hash = |port: &StoreCachePort, route| {
+            port.lookup_parse(&file(), route, false)
+                .unwrap()
+                .parse_profile_hash
+        };
+        let native_pdf = hash(&port, RouteKind::Pdf);
+        let native_office = hash(&port, RouteKind::RustOffice);
+        port.settings.parse.pdf.image_ocr = Some(ai_daily_scanner_contract::PdfImageOcrSettings {
+            enabled: true,
+            max_files: 1,
+            max_pages: 3,
+        });
+        let selection = |page_count, max_pages| RouteKind::PdfImageOcr {
+            page_count,
+            max_pages,
+        };
+        let three = hash(&port, selection(4, 3));
+        assert_ne!(native_pdf, three);
+        assert_ne!(three, hash(&port, selection(4, 2)));
+        assert_ne!(three, hash(&port, selection(5, 3)));
+        port.settings
+            .parse
+            .pdf
+            .image_ocr
+            .as_mut()
+            .unwrap()
+            .max_files = 2;
+        assert_eq!(three, hash(&port, selection(4, 3)));
+        assert_eq!(native_pdf, hash(&port, RouteKind::Pdf));
+        assert_eq!(native_office, hash(&port, RouteKind::RustOffice));
     }
 
     #[test]

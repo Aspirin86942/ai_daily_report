@@ -1,4 +1,4 @@
-//! Strict, versioned DTOs shared by the scanner core and its Python caller.
+//! Versioned data and validation shared by the scanner, report application and workers.
 
 use serde::de::{self, DeserializeOwned};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -6,6 +6,9 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 mod pdf_audit;
 pub use pdf_audit::{pdf_sample_pages, PdfPageAudit, PdfPageObservation};
+
+pub const OCR_BACKEND: &str = "rust_pdfium_ocr_v1";
+pub const OCR_RANGE_LABEL: &str = "offline_ocr_unverified";
 
 pub trait Validate {
     fn validate(&self) -> Result<(), String>;
@@ -237,6 +240,28 @@ pub enum CompressionProfile {
     MonthlyBalancedV1,
 }
 
+impl ReportMode {
+    pub const fn compression_profile(self) -> CompressionProfile {
+        match self {
+            Self::Daily => CompressionProfile::DailyBalancedV1,
+            Self::Weekly => CompressionProfile::WeeklyBalancedV1,
+            Self::Monthly => CompressionProfile::MonthlyBalancedV1,
+        }
+    }
+}
+
+impl CompressionProfile {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DailyBalancedV1 => "daily_balanced_v1",
+            Self::WeeklyBalancedV1 => "weekly_balanced_v1",
+            Self::MonthlyBalancedV1 => "monthly_balanced_v1",
+        }
+    }
+}
+
+pub const CONTEXT_PER_FILE_MAX_CHARS: u64 = 100_000;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterPaths {
@@ -279,6 +304,12 @@ pub fn quota_defaults(mode: ReportMode) -> (u64, u64, u64, u64) {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ScannerSettings {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub pdf_image_ocr: Option<PdfImageOcrSettings>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -583,6 +614,9 @@ pub struct ScannerSettings {
 
 impl Validate for ScannerSettings {
     fn validate(&self) -> Result<(), String> {
+        if let Some(ocr) = &self.pdf_image_ocr {
+            ocr.validate()?;
+        }
         if let Some(paths) = &self.excerpt_priority_paths {
             validate_excerpt_priority_paths(paths)?;
         }
@@ -883,6 +917,12 @@ impl Validate for OfficeParseProfile {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PdfParseProfile {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_optional_non_null"
+    )]
+    pub image_ocr: Option<PdfImageOcrSettings>,
     #[serde(default = "legacy_pdf_selection_policy")]
     pub selection_policy_version: String,
     pub backend: String,
@@ -892,6 +932,12 @@ pub struct PdfParseProfile {
 
 impl Validate for PdfParseProfile {
     fn validate(&self) -> Result<(), String> {
+        if let Some(ocr) = &self.image_ocr {
+            if !ocr.enabled {
+                return Err("disabled OCR must be omitted from a normalized PDF profile".into());
+            }
+            ocr.validate()?;
+        }
         if !matches!(
             self.selection_policy_version.as_str(),
             "pdf_text_presence_v1" | "pdf_text_presence_v2"
@@ -911,6 +957,32 @@ impl Validate for PdfParseProfile {
 
 fn legacy_pdf_selection_policy() -> String {
     "pdf_text_presence_v1".into()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PdfImageOcrSettings {
+    pub enabled: bool,
+    /// Scan-wide quota, shared by admission and refill waves.
+    pub max_files: u64,
+    pub max_pages: u64,
+}
+
+impl Default for PdfImageOcrSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_files: 1,
+            max_pages: 3,
+        }
+    }
+}
+
+impl Validate for PdfImageOcrSettings {
+    fn validate(&self) -> Result<(), String> {
+        require_range(self.max_files, 1, 32, "pdf_image_ocr.max_files")?;
+        require_range(self.max_pages, 1, 96, "pdf_image_ocr.max_pages")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -959,6 +1031,7 @@ impl Validate for ParseProfile {
                     | "fair_semantic_v7"
                     | "fair_semantic_v8"
                     | "fair_semantic_v9"
+                    | "fair_semantic_v10"
             )
         {
             return Err("parse evidence policies are unsupported".into());
@@ -1041,11 +1114,10 @@ impl Validate for NormalizedScannerSettings {
         self.execution.validate()?;
         self.parse.validate()?;
         self.context.validate()?;
-        let expected = match self.report_mode {
-            ReportMode::Daily => ("daily_balanced_v1", 100_000),
-            ReportMode::Weekly => ("weekly_balanced_v1", 100_000),
-            ReportMode::Monthly => ("monthly_balanced_v1", 100_000),
-        };
+        let expected = (
+            self.report_mode.compression_profile().as_str(),
+            CONTEXT_PER_FILE_MAX_CHARS,
+        );
         let actual = (
             self.context.profile_name.as_str(),
             self.context.per_file_max_chars,
@@ -1153,20 +1225,11 @@ impl Validate for BuildContextRequest {
         if self.start_date > self.end_date {
             return Err("start_date must not be after end_date".to_string());
         }
-        let compression_matches = matches!(
-            (self.report_mode, self.compression_profile.0),
-            (_, None)
-                | (ReportMode::Daily, Some(CompressionProfile::DailyBalancedV1))
-                | (
-                    ReportMode::Weekly,
-                    Some(CompressionProfile::WeeklyBalancedV1)
-                )
-                | (
-                    ReportMode::Monthly,
-                    Some(CompressionProfile::MonthlyBalancedV1)
-                )
-        );
-        if !compression_matches {
+        if self
+            .compression_profile
+            .0
+            .is_some_and(|p| p != self.report_mode.compression_profile())
+        {
             return Err("compression profile does not match report mode".to_string());
         }
         require_absolute_path(&self.scan_db_path, "scan_db_path")?;
@@ -1533,6 +1596,29 @@ pub enum AuditWorkerLane {
     NotParsed,
 }
 
+impl ParseStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Error => "error",
+            Self::Timeout => "timeout",
+            Self::NotParsed => "not_parsed",
+        }
+    }
+}
+
+impl AuditWorkerLane {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RustCore => "rust_core",
+            Self::RustOfficeProcessV3 => "rust_office_process_v3",
+            Self::RustPdfProcessV3 => "rust_pdf_process_v3",
+            Self::LocalOcrPreflight => "local_ocr_preflight",
+            Self::NotParsed => "not_parsed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheStatus {
@@ -1788,6 +1874,16 @@ pub struct PdfClassificationAuditV1 {
     pub classifier_profile_hash: String,
 }
 
+impl PdfClassificationAuditV1 {
+    pub fn image_only_page_count(&self) -> Option<u64> {
+        let page_count = self.page_count.0?;
+        (self.status == PdfClassificationStatus::NoTextInParseWindow
+            && self.result_examined_pages.0 == Some(page_count)
+            && self.page_audit.as_ref()?.all_pages_are_images(page_count))
+        .then_some(page_count)
+    }
+}
+
 impl Validate for PdfClassificationAuditV1 {
     fn validate(&self) -> Result<(), String> {
         if let Some(audit) = &self.page_audit {
@@ -1980,9 +2076,46 @@ impl Validate for PdfClassificationAuditV1 {
     }
 }
 
-/// Shared full-v2 parser provenance matrix used by the wire validator and the
-/// store's pre-persistence seam. Keeping it here prevents the two gates from
-/// accepting different backend/lane combinations.
+/// Validate the route and its physical-page evidence at the wire and storage boundaries.
+pub fn validate_file_parse_provenance(
+    status: ParseStatus,
+    backend: &str,
+    lane: AuditWorkerLane,
+    cache: ParseCacheStatus,
+    transport: ParseTransport,
+    attempts: u64,
+    classification: Option<&PdfClassificationAuditV1>,
+) -> Result<(), String> {
+    let image_only = || {
+        classification
+            .and_then(PdfClassificationAuditV1::image_only_page_count)
+            .is_some()
+    };
+    if backend == OCR_BACKEND && (!image_only() || transport == ParseTransport::RustInProcess) {
+        return Err("image OCR requires fully observed image-only pages and a PDF worker".into());
+    }
+    // The shared worker slot can expire before a request is sent. Keep the previous
+    // classifier evidence and the diagnostic, without inventing a parser invocation.
+    if matches!(status, ParseStatus::Error | ParseStatus::Timeout)
+        && backend == "not_parsed"
+        && lane == AuditWorkerLane::NotParsed
+        && cache == ParseCacheStatus::NotApplicable
+        && transport == ParseTransport::NotApplicable
+        && attempts == 0
+        && image_only()
+    {
+        return Ok(());
+    }
+    validate_v2_parse_provenance(
+        status,
+        backend,
+        lane,
+        cache,
+        classification.map(|audit| audit.status),
+    )
+}
+
+/// Validate the status-only v2 route, also used by retained callers without physical-page evidence.
 pub fn validate_v2_parse_provenance(
     parse_status: ParseStatus,
     parser_backend: &str,
@@ -1992,29 +2125,48 @@ pub fn validate_v2_parse_provenance(
 ) -> Result<(), String> {
     let metadata = parser_backend == "pdf_metadata_v2" && worker_lane == AuditWorkerLane::RustCore;
     let not_parsed = parser_backend == "not_parsed" && worker_lane == AuditWorkerLane::NotParsed;
-    let body_parser = matches!(
-        (parser_backend, worker_lane),
-        ("light_text_v2", AuditWorkerLane::RustCore)
-            | ("rust_office_oxide_v2", AuditWorkerLane::RustOfficeProcessV3)
-            | ("rust_xlsx_bounded_v2", AuditWorkerLane::RustOfficeProcessV3)
-            | ("rust_pdfium_v3", AuditWorkerLane::RustPdfProcessV3)
-            | ("rust_xls_calamine_v3", AuditWorkerLane::RustOfficeProcessV3)
-            | (
-                "rust_legacy_office_v3",
-                AuditWorkerLane::RustOfficeProcessV3
+    let ocr = parser_backend == OCR_BACKEND
+        && worker_lane == AuditWorkerLane::RustPdfProcessV3
+        && classification_status == Some(PdfClassificationStatus::NoTextInParseWindow);
+    if ocr
+        && !matches!(
+            (parse_status, parse_cache_status),
+            (
+                ParseStatus::Success,
+                ParseCacheStatus::Fresh | ParseCacheStatus::Miss | ParseCacheStatus::Snapshot
+            ) | (
+                ParseStatus::Error | ParseStatus::Timeout,
+                ParseCacheStatus::Miss
             )
-    );
+        )
+    {
+        return Err("image OCR has inconsistent parse or cache status".into());
+    }
+    let body_parser = ocr
+        || matches!(
+            (parser_backend, worker_lane),
+            ("light_text_v2", AuditWorkerLane::RustCore)
+                | ("rust_office_oxide_v2", AuditWorkerLane::RustOfficeProcessV3)
+                | ("rust_xlsx_bounded_v2", AuditWorkerLane::RustOfficeProcessV3)
+                | ("rust_pdfium_v3", AuditWorkerLane::RustPdfProcessV3)
+                | ("rust_xls_calamine_v3", AuditWorkerLane::RustOfficeProcessV3)
+                | (
+                    "rust_legacy_office_v3",
+                    AuditWorkerLane::RustOfficeProcessV3
+                )
+        );
     if !(metadata || not_parsed || body_parser) {
         return Err("parser backend and worker lane are not a frozen v2 route".to_string());
     }
 
     match classification_status {
         Some(PdfClassificationStatus::NoTextInParseWindow)
-            if !((parse_status == ParseStatus::Success && metadata)
+            if !(ocr
+                || (parse_status == ParseStatus::Success && metadata)
                 || (parse_status == ParseStatus::NotParsed && not_parsed)) =>
         {
             return Err(
-                "no-text classification requires metadata-only success or budget-omitted provenance"
+                "no-text classification requires metadata, image OCR or budget-omitted provenance"
                     .to_string(),
             );
         }
@@ -2206,15 +2358,14 @@ impl Validate for FileAuditV2 {
         if let Some(classification) = &self.pdf_classification.0 {
             classification.validate()?;
         }
-        validate_v2_parse_provenance(
+        validate_file_parse_provenance(
             self.parse_status,
             &self.parser_backend,
             self.worker_lane,
             self.parse_cache_status,
-            self.pdf_classification
-                .0
-                .as_ref()
-                .map(|classification| classification.status),
+            self.parse_transport,
+            self.parse_attempt_count,
+            self.pdf_classification.0.as_ref(),
         )?;
         Ok(())
     }
@@ -2645,6 +2796,80 @@ mod tests {
             let result =
                 validate_contract_payload(&case.schema, &case.payload, &case.related_payloads);
             assert!(result.is_err(), "{} unexpectedly passed", case.name);
+        }
+    }
+
+    #[test]
+    fn image_only_worker_queue_failure_preserves_zero_attempts_and_page_proof() {
+        let mut audit = PdfClassificationAuditV1 {
+            page_audit: Some(PdfPageAudit {
+                policy_version: "pdf_text_presence_v2".into(),
+                checked_pages: vec![1],
+                observations: Some(vec![PdfPageObservation {
+                    page: 1,
+                    has_text: false,
+                    has_image: Some(true),
+                }]),
+            }),
+            status: PdfClassificationStatus::NoTextInParseWindow,
+            page_count: Nullable(Some(1)),
+            classification_cache_status: ClassificationCacheStatus::Fresh,
+            classification_cache_miss_reason: String::new(),
+            result_examined_pages: Nullable(Some(1)),
+            run_inspected_pages: Nullable(Some(0)),
+            nominal_charged_pages: 1,
+            duration_ms: 0,
+            transport: ClassificationTransport::NotApplicable,
+            attempt_count: 0,
+            classifier_build: "a".repeat(64),
+            classifier_profile_hash: "b".repeat(64),
+        };
+        audit.validate().unwrap();
+        let check = |status, attempts, audit: &PdfClassificationAuditV1| {
+            validate_file_parse_provenance(
+                status,
+                "not_parsed",
+                AuditWorkerLane::NotParsed,
+                ParseCacheStatus::NotApplicable,
+                ParseTransport::NotApplicable,
+                attempts,
+                Some(audit),
+            )
+        };
+        for status in [ParseStatus::Timeout, ParseStatus::Error] {
+            check(status, 0, &audit).unwrap();
+            assert!(check(status, 1, &audit).is_err());
+        }
+        audit.page_audit = None;
+        assert!(check(ParseStatus::Timeout, 0, &audit).is_err());
+    }
+
+    #[test]
+    fn ocr_provenance_requires_a_no_text_classification_and_pdf_process() {
+        use AuditWorkerLane::{RustCore, RustPdfProcessV3};
+        use ParseCacheStatus::{Fresh, Miss, NotApplicable, Snapshot};
+        use ParseStatus::{Error, NotParsed, Success, Timeout};
+        use PdfClassificationStatus::{NoTextInParseWindow, TextInParseWindow};
+        let check = |status, lane, cache, classification| {
+            validate_v2_parse_provenance(status, OCR_BACKEND, lane, cache, classification).is_ok()
+        };
+        let image = Some(NoTextInParseWindow);
+        for cache in [Fresh, Miss, Snapshot] {
+            assert!(check(Success, RustPdfProcessV3, cache, image));
+        }
+        for status in [Error, Timeout] {
+            assert!(check(status, RustPdfProcessV3, Miss, image));
+            assert!(!check(status, RustPdfProcessV3, Fresh, image));
+        }
+        assert!(!check(Success, RustCore, Miss, image));
+        assert!(!check(NotParsed, RustPdfProcessV3, Miss, image));
+        assert!(!check(Success, RustPdfProcessV3, NotApplicable, image));
+        for classification in [
+            None,
+            Some(TextInParseWindow),
+            Some(PdfClassificationStatus::Unknown),
+        ] {
+            assert!(!check(Success, RustPdfProcessV3, Miss, classification));
         }
     }
 

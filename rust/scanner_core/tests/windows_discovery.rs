@@ -1,11 +1,14 @@
+use ai_daily_scanner_contract::SourceGuardKind;
 use ai_daily_scanner_contract::{NormalizedScannerSettings, ReportMode, ScannerSettings};
-use ai_daily_scanner_core::classifier::{classify_candidate, ClassificationError, ParserRoute};
+use ai_daily_scanner_core::admission::{
+    ClassificationPlan, NotParsedReason, PlanAction, PlanCandidate,
+};
+use ai_daily_scanner_core::classifier::ParserRoute;
 use ai_daily_scanner_core::config::normalize_scanner_settings;
 use ai_daily_scanner_core::discovery::{
     bootstrap_file_identity, discover_files_with_diagnostics, normalize_contract_path_text,
-    DiscoveredFileOut, DiscoveryIssueKind, DiscoveryRequest,
+    DiscoveryIssueKind, DiscoveryRequest,
 };
-use ai_daily_scanner_core::planner::{plan_candidates, PlanAction};
 use chrono::Local;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -217,20 +220,25 @@ fn planner_is_deterministic_and_rejects_large_files_before_parsing() {
         ),
     ];
 
-    let plans = plan_candidates(files, &profile);
-
-    assert!(plans
-        .windows(2)
-        .all(|pair| pair[0].file.path <= pair[1].file.path));
-    assert_eq!(plans[0].action, PlanAction::Parse(ParserRoute::LightText));
-    assert_eq!(plans[1].action, PlanAction::Parse(ParserRoute::RustXls));
-    assert_eq!(plans[2].action, PlanAction::Parse(ParserRoute::Pdf));
+    let mut reversed = files.clone();
+    reversed.reverse();
+    let plans = ClassificationPlan::build(files, &profile, 100);
+    assert_eq!(plans, ClassificationPlan::build(reversed, &profile, 100));
+    let action = |ext: &str| &plans.iter().find(|p| p.extension == ext).unwrap().action;
+    for (ext, route) in [
+        (".txt", ParserRoute::LightText),
+        (".xls", ParserRoute::RustXls),
+        (".pdf", ParserRoute::Pdf),
+        (".xlsx", ParserRoute::RustXlsx),
+    ] {
+        assert_eq!(action(ext), &PlanAction::Admit { route });
+    }
     assert_eq!(
-        plans[3].action,
-        PlanAction::Reject(ClassificationError::FileTooLarge)
+        action(".md"),
+        &PlanAction::NotParsed {
+            reason: NotParsedReason::FileSizePolicy
+        }
     );
-    assert_eq!(plans[4].action, PlanAction::Parse(ParserRoute::RustXlsx));
-    assert_eq!(plans[1].timeout_ms, 60_000);
 }
 
 #[test]
@@ -247,12 +255,16 @@ fn legacy_doc_and_ppt_routes_require_the_explicit_profile_switch() {
     let file = synthetic_file("C:\\scan\\legacy.doc", ".doc", 100);
 
     assert_eq!(
-        classify_candidate(&file, &disabled),
-        Err(ClassificationError::LegacyExtensionDisabled)
+        ClassificationPlan::build(vec![file.clone()], &disabled, 0)[0].action,
+        PlanAction::NotParsed {
+            reason: NotParsedReason::LegacyExtensionDisabled
+        }
     );
     assert_eq!(
-        classify_candidate(&file, &enabled),
-        Ok(ParserRoute::RustLegacyOffice)
+        ClassificationPlan::build(vec![file], &enabled, 0)[0].action,
+        PlanAction::Admit {
+            route: ParserRoute::RustLegacyOffice
+        }
     );
 }
 
@@ -308,16 +320,13 @@ fn windows_long_path_discovery_returns_paths_without_verbatim_prefix() {
     fs::remove_dir_all(&verbatim_root).expect("verified long-path fixture should be removed");
 }
 
-fn synthetic_file(path: &str, extension: &str, size_bytes: u64) -> DiscoveredFileOut {
-    DiscoveredFileOut {
+fn synthetic_file(path: &str, extension: &str, size_bytes: u64) -> PlanCandidate {
+    PlanCandidate {
         file_identity: format!("bootstrap:{}", path.to_lowercase()),
-        path: path.to_string(),
-        extension: extension.to_string(),
-        modified_at: "2026-07-15T12:00:00.000000".to_string(),
+        relative_path: path.into(),
+        extension: extension.into(),
         size_bytes,
-        source_version: format!("mtime_ns=1:size={size_bytes}"),
-        source_guard_kind: None,
-        source_guard_sha256: None,
+        source_guard_kind: SourceGuardKind::ContentSha256V1,
     }
 }
 

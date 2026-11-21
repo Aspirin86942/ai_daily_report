@@ -1,9 +1,6 @@
 use super::runs::compute_audit_size;
 use super::*;
-use crate::classifier::{ClassificationError, ParserRoute};
 use crate::config::normalize_scanner_settings;
-use crate::planner::{PlanAction, PlannedFile};
-use ai_daily_discovery::DiscoveredFileOut;
 use ai_daily_scanner_contract::{
     AdapterPaths, AuditWorkerLane, CacheMissReason, CacheStatus, ClassificationCacheStatus,
     ClassificationTransport, ContextAction, ContextDecision, DiagnosticStage, ParseStatus,
@@ -666,63 +663,6 @@ fn worker_count_does_not_change_parse_profile_hash() {
     changed.execution.max_workers = 1;
     let changed = parse_profile_hash(1, &route, &changed).unwrap();
     assert_eq!(original, changed);
-}
-
-#[test]
-fn cache_aware_plan_consumes_pure_planner_output_without_reclassification() {
-    let harness = harness("00000000-0000-4000-8000-000000000019");
-    let file = DiscoveredFileOut {
-        file_identity: "file-a".to_string(),
-        path: "C:\\fixture\\evidence.txt".to_string(),
-        extension: ".txt".to_string(),
-        modified_at: "2026-07-16T00:00:00+08:00".to_string(),
-        size_bytes: 5,
-        source_version: "mtime_ns=100:size=5".to_string(),
-        source_guard_kind: None,
-        source_guard_sha256: None,
-    };
-    let stacks = RouteStackFingerprints {
-        text_like: RouteStackFingerprint::text("engine-build").unwrap(),
-        modern_office: RouteStackFingerprint::modern_office(
-            "engine-build",
-            "ai_daily_worker_v3",
-            "office-build",
-        )
-        .unwrap(),
-        pdf: RouteStackFingerprint::pdf("engine-build", "ai_daily_worker_v3", "python-build")
-            .unwrap(),
-    };
-    let entries = harness
-        .store
-        .attach_cache_evidence(
-            vec![
-                PlannedFile {
-                    file: file.clone(),
-                    action: PlanAction::Parse(ParserRoute::LightText),
-                    timeout_ms: 30_000,
-                },
-                PlannedFile {
-                    file,
-                    action: PlanAction::Reject(ClassificationError::FileTooLarge),
-                    timeout_ms: 30_000,
-                },
-            ],
-            &harness.profile,
-            &stacks,
-        )
-        .unwrap();
-
-    assert!(entries[0].parse_profile_hash.is_some());
-    assert_eq!(
-        entries[0].cache_lookup,
-        Some(CacheLookup::Miss(CacheMissReason::NewFile))
-    );
-    assert_eq!(
-        entries[1].planned.action,
-        PlanAction::Reject(ClassificationError::FileTooLarge)
-    );
-    assert!(entries[1].parse_profile_hash.is_none());
-    assert!(entries[1].cache_lookup.is_none());
 }
 
 #[test]
@@ -1417,7 +1357,7 @@ fn error_run_with_file_rows_produces_complete_evidence() {
     let evidence = crate::evidence::assemble_scanner_evidence(
         active.request_id(),
         active.scan_run_id(),
-        &snapshot,
+        snapshot,
     )
     .expect("scanner evidence must assemble");
     assert_eq!(evidence.artifact_id.0, None, "error run has no artifact");
@@ -1478,7 +1418,7 @@ fn error_run_with_file_rows_produces_complete_evidence() {
         crate::evidence::assemble_scanner_evidence(
             active.request_id(),
             active.scan_run_id(),
-            &historical,
+            historical,
         )
         .is_err(),
         "current evidence must fail closed when provenance is unavailable"
@@ -1647,7 +1587,7 @@ fn zero_file_error_run_produces_complete_evidence() {
     let evidence = crate::evidence::assemble_scanner_evidence(
         active.request_id(),
         active.scan_run_id(),
-        &snapshot,
+        snapshot,
     )
     .expect("scanner evidence must assemble");
     assert_eq!(
@@ -1774,7 +1714,7 @@ fn cache_miss_hit_source_profile_and_build_invalidation_are_explicit() {
 }
 
 #[test]
-fn batch_cache_lookup_matches_scalar_across_chunk_boundary_and_rejects_corruption() {
+fn cache_lookup_distinguishes_miss_reasons_and_corrupt_rows() {
     let mut harness = harness("00000000-0000-4000-8000-000000000030");
     let source = "mtime_ns=100:size=5";
     let changed_source = "mtime_ns=101:size=5";
@@ -1828,98 +1768,58 @@ fn batch_cache_lookup_matches_scalar_across_chunk_boundary_and_rejects_corruptio
         )
         .unwrap();
 
-    let mut cases = (0..cache::CACHE_LOOKUP_BATCH_SIZE)
-        .map(|index| {
-            (
-                format!("file-new-{index}"),
-                source.to_string(),
-                profile_hash.clone(),
-                false,
+    let lookup = |name, version, profile: &str, existed| {
+        harness
+            .store
+            .lookup_cache(
+                name,
+                version,
+                "content_sha256_v1",
+                &zero_guard,
+                profile,
+                existed,
             )
-        })
-        .collect::<Vec<_>>();
-    let special_start = cases.len();
-    cases.extend([
+            .unwrap()
+    };
+    assert!(matches!(
+        lookup("file-fresh", source, &profile_hash, false),
+        CacheLookup::Fresh(_)
+    ));
+    for (name, version, profile, existed, reason) in [
         (
-            "file-fresh".to_string(),
-            source.to_string(),
-            profile_hash.clone(),
+            "file-profile",
+            source,
+            &changed_profile_hash,
             false,
+            CacheMissReason::ParserIdentityChanged,
         ),
         (
-            "file-profile".to_string(),
-            source.to_string(),
-            changed_profile_hash,
+            "file-source",
+            changed_source,
+            &profile_hash,
             false,
+            CacheMissReason::SourceVersionChanged,
         ),
         (
-            "file-source".to_string(),
-            changed_source.to_string(),
-            profile_hash.clone(),
-            false,
-        ),
-        (
-            "file-evicted".to_string(),
-            source.to_string(),
-            profile_hash.clone(),
+            "file-evicted",
+            source,
+            &profile_hash,
             true,
+            CacheMissReason::EntryAbsentOrEvicted,
         ),
         (
-            "file-new".to_string(),
-            source.to_string(),
-            profile_hash,
+            "file-new",
+            source,
+            &profile_hash,
             false,
+            CacheMissReason::NewFile,
         ),
-    ]);
-    let keys = cases
-        .iter()
-        .map(
-            |(file_identity, source_version, parse_profile_hash, existed)| cache::CacheLookupKey {
-                file_identity,
-                source_version,
-                source_guard_kind: "content_sha256_v1",
-                source_guard_sha256: &zero_guard,
-                parse_profile_hash,
-                inventory_existed_before: *existed,
-            },
-        )
-        .collect::<Vec<_>>();
-
-    let scalar = keys
-        .iter()
-        .map(|key| {
-            harness.store.lookup_cache(
-                key.file_identity,
-                key.source_version,
-                key.source_guard_kind,
-                key.source_guard_sha256,
-                key.parse_profile_hash,
-                key.inventory_existed_before,
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let batch = harness.store.lookup_cache_batch(&keys).unwrap();
-
-    assert_eq!(batch, scalar);
-    assert!(matches!(batch[special_start], CacheLookup::Fresh(_)));
-    assert_eq!(
-        batch[special_start + 1],
-        CacheLookup::Miss(CacheMissReason::ParserIdentityChanged)
-    );
-    assert_eq!(
-        batch[special_start + 2],
-        CacheLookup::Miss(CacheMissReason::SourceVersionChanged)
-    );
-    assert_eq!(
-        batch[special_start + 3],
-        CacheLookup::Miss(CacheMissReason::EntryAbsentOrEvicted)
-    );
-    assert_eq!(
-        batch[special_start + 4],
-        CacheLookup::Miss(CacheMissReason::NewFile)
-    );
-
+    ] {
+        assert_eq!(
+            lookup(name, version, profile, existed),
+            CacheLookup::Miss(reason)
+        );
+    }
     let scalar_error = harness
         .store
         .lookup_cache(
@@ -1932,21 +1832,6 @@ fn batch_cache_lookup_matches_scalar_across_chunk_boundary_and_rejects_corruptio
         )
         .expect_err("a corrupt exact row must fail the run-level lookup");
     assert!(matches!(scalar_error, StoreError::RunCorrupt(_)));
-
-    let corrupt_profile_hash = "a".repeat(64);
-    let corrupt_key = cache::CacheLookupKey {
-        file_identity: "file-error",
-        source_version: source,
-        source_guard_kind: "content_sha256_v1",
-        source_guard_sha256: &zero_guard,
-        parse_profile_hash: &corrupt_profile_hash,
-        inventory_existed_before: false,
-    };
-    let batch_error = harness
-        .store
-        .lookup_cache_batch(&[corrupt_key])
-        .expect_err("batch lookup must not downgrade exact-row corruption to a miss");
-    assert!(matches!(batch_error, StoreError::RunCorrupt(_)));
 
     harness
         .store

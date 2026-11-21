@@ -66,6 +66,9 @@ impl SelectionSummary {
             || [
                 "budget",
                 "read_failed",
+                "office_content_missing",
+                "ocr_budget",
+                "file_size_policy",
                 "comparison_unavailable",
                 "no_usable_text",
             ]
@@ -737,7 +740,7 @@ impl PersonalReport {
             for (index, item) in self.items.iter().enumerate() {
                 let chars = item.title.chars().count();
                 if chars <= remaining {
-                    overview.push(json!({"number":index + 1, "title":item.title}));
+                    overview.push(json!({"number":index + 1, "title":item.title, "statement_kind":item.statement_kind}));
                     remaining -= chars;
                     if remaining == 0 || overview.len() == 3 {
                         break;

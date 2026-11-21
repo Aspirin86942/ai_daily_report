@@ -79,6 +79,9 @@ scripts/corpus/
 .artifacts/model-quota-removal-*/
 .artifacts/material-range-*/
 .artifacts/rich-daily-*/
+.artifacts/kernel-once-*/
+.artifacts/search-acceptance-*/
+.artifacts/worker-concurrency-*/
 .artifacts/daily-scan-*/
 .artifacts/project-space-cleanup-*/
 .releases/

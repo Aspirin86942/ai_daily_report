@@ -30,6 +30,91 @@ mod windows {
         Some((python, office, fixture))
     }
 
+    /// Run once per fresh database. The external sampler compares the same
+    /// synthetic work directory across processes and records peak working sets.
+    #[test]
+    #[ignore = "requires an isolated synthetic worker benchmark directory"]
+    fn cold_worker_scan() {
+        let root = PathBuf::from(std::env::var_os("AI_DAILY_BENCH_ROOT").unwrap())
+            .canonicalize()
+            .unwrap();
+        let run = PathBuf::from(std::env::var_os("AI_DAILY_BENCH_RUN").unwrap())
+            .canonicalize()
+            .unwrap();
+        assert!(run.starts_with(&root) && run != root);
+        let db = run.join("scan_index_rust_v3.sqlite3");
+        assert!(!db.exists());
+        let workers: u64 = std::env::var("AI_DAILY_BENCH_WORKERS")
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(matches!(workers, 1 | 2));
+        let (pdf, office, _) = local_runtime(&repository_root()).unwrap();
+        let mut config = json!({
+            "contract": "ai_daily_context", "protocol_version": 1,
+            "request_id": "71616161-7161-4161-8161-716161616161",
+            "work_dir": root.join("corpus"), "scan_db_path": db,
+            "start_date": "2026-11-20", "end_date": "2026-11-20", "report_mode": "daily",
+            "compression_profile": null,
+            "scanner_settings": {"max_workers": workers, "total_deadline_ms": 120000,
+                "text_max_chars": 60000, "document_excerpt_max_chars": 60000,
+                "total_max_chars": 180000, "context_max_chars": 5000000,
+                "excel_max_rows": 500, "pdf_max_pages": 50,
+                "max_candidate_files": 96, "max_total_pdf_classification_pages": 600,
+                "max_pdf_text_extractions": 12},
+            "adapters": {"office_worker_path": office, "pdf_worker_path": pdf}
+        });
+        if std::env::var_os("AI_DAILY_BENCH_LIGHT").is_some() {
+            config["scanner_settings"]["direct_text_max_bytes"] = json!(8 * 1024 * 1024);
+            config["scanner_settings"]["text_max_chars"] = json!(2000);
+        }
+        let request: BuildContextRequest = serde_json::from_value(config).unwrap();
+        let started = std::time::Instant::now();
+        let scanner = Scanner::open(ScannerConfig::from_build_request(&request)).unwrap();
+        let scan = scanner
+            .build_context(&ScanRequest::from_build_request(&request))
+            .unwrap();
+        let elapsed = started.elapsed().as_millis();
+        assert_eq!(
+            scan.exit_code,
+            0,
+            "scan diagnostic {:?}",
+            scan.value.envelope.error.0.as_ref().map(|d| d.error_code)
+        );
+        let evidence = scan.value.evidence.unwrap();
+        assert!(!evidence.execution_metrics.snapshot_hit);
+        assert_eq!(evidence.execution_metrics.stage_deadline_exhausted_count, 0);
+        let mut chars = 0;
+        let mut sources = Vec::new();
+        let mut budget_limited_files = 0;
+        for source in &scan.value.sources {
+            chars += source.excerpt.chars().count();
+            budget_limited_files += usize::from(source.excerpt_truncated);
+            assert!(!source.excerpt.is_empty() && source.content_sha256.is_some());
+            sources.push((
+                &source.relative_path,
+                &source.content_sha256,
+                &source.excerpt_sha256,
+                source.parse_status,
+                source.worker_lane,
+                &source.parser_backend,
+                &source.coverage_limits,
+            ));
+        }
+        assert!(!sources.is_empty() && chars <= 180_000);
+        let semantics = serde_json::to_vec(&(
+            sources,
+            evidence.decisions,
+            &scan.value.envelope.file_context,
+        ))
+        .unwrap();
+        println!(
+            "WORKER_BENCH {}",
+            json!({"elapsed_ms": elapsed, "source_count": scan.value.sources.len(), "budget_limited_files": budget_limited_files,
+            "excerpt_chars": chars, "semantics_sha256": ai_daily_scanner_core::store::sha256_hex(&semantics)})
+        );
+    }
+
     #[test]
     fn build_context_uses_recyclable_native_session_for_pdf_work() {
         let root = repository_root();

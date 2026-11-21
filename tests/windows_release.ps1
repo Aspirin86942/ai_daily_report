@@ -39,7 +39,10 @@ function Update-TestManifest([string]$RelativePath) {
 }
 
 # Both the manifest and directory omit the file: the verifier must know it is required.
-foreach ($relative in @('scripts/health_notify.ps1', 'parser-build.json', 'templates/personal_daily_scan_template_v6.md')) {
+$required = @('scripts/health_notify.ps1', 'parser-build.json', 'templates/personal_daily_scan_template_v6.md')
+$hasOcrModels = Test-Path -LiteralPath (Join-Path $candidate 'ocr-models')
+if ($hasOcrModels) { $required += 'ocr-models/rec.mnn' }
+foreach ($relative in $required) {
     $manifest = $manifestText | ConvertFrom-Json
     $manifest.files = @($manifest.files | Where-Object path -cne $relative)
     [IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 30), $utf8)
@@ -50,6 +53,14 @@ foreach ($relative in @('scripts/health_notify.ps1', 'parser-build.json', 'templ
 }
 
 # Rehash each changed payload to exercise identity checks beyond the file manifest.
+if ($hasOcrModels) {
+    $relative = 'ocr-models/dict.txt'
+    $file = Join-Path $candidate $relative
+    [IO.File]::AppendAllText($file, 'changed', $utf8)
+    Update-TestManifest $relative
+    Assert-Rejected { Test-RustReleaseBundle $candidate } 'Pinned OCR model hash mismatch: dict.txt'
+    [IO.File]::Copy((Join-Path $source $relative), $file, $true)
+}
 $relative = 'parser-manifest.json'
 $file = Join-Path $candidate $relative
 $parser = [IO.File]::ReadAllText($file) | ConvertFrom-Json

@@ -86,17 +86,18 @@ fn native_parse_preserves_page_ranges_and_character_limits() {
     );
 }
 
+fn pdfium_dir() -> PathBuf {
+    std::env::var_os("AI_DAILY_TEST_PDFIUM_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/pdfium/bin"))
+}
+
 fn reader() -> MutexGuard<'static, PdfReader> {
     static READER: OnceLock<Mutex<PdfReader>> = OnceLock::new();
     READER
         .get_or_init(|| {
-            let path = std::env::var_os("AI_DAILY_TEST_PDFIUM_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../target/pdfium/bin")
-                });
             Mutex::new(
-                PdfReader::open(&path)
+                PdfReader::open(&pdfium_dir())
                     .expect("prepare pinned PDFium using scripts/prepare_rust_dependencies.ps1"),
             )
         })
@@ -407,6 +408,63 @@ fn image_only_pages_have_observed_ranges_and_zero_text() {
     assert_eq!(audit.usable_chars, Some(0));
     assert!(audit.content_units.unwrap().is_empty());
     assert_eq!(audit.read_ranges.unwrap()[0].start, 1);
+}
+
+#[test]
+fn offline_ocr_worker_reads_bilingual_image_and_labels_the_original_page() {
+    use ai_daily_worker_contract::ParseRequest;
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr-image-pages.pdf");
+    let request = |kind: &str| {
+        serde_json::from_value::<ParseRequest>(serde_json::json!({
+        "file_path":path,"file_type":".pdf","backend":"rust_pdfium_v3",
+        "expected_source_version":source(&path),"remaining_timeout_ms":15_000,"max_file_size_bytes":1_000_000,
+        "parser_limits":{"kind":kind,"max_pages":1,"selected_pages":[2],"excerpt_max_chars":256}
+    })).unwrap()
+    };
+    let reader = reader();
+    assert!(reader
+        .parse_request(&request("pdf"))
+        .unwrap()
+        .content
+        .is_empty());
+    let result = reader.parse_request(&request("pdf_image_ocr"));
+    if ["det.mnn", "rec.mnn", "dict.txt"]
+        .iter()
+        .any(|name| !pdfium_dir().join("ocr-models").join(name).is_file())
+    {
+        let error = result.unwrap_err();
+        assert_eq!(error.error_code, "PARSER_FAILED");
+        assert_eq!(error.message, "PDF_OCR_MODEL_MISSING");
+        return;
+    }
+    let parsed = result.unwrap();
+    parsed.validate().unwrap();
+    assert!(parsed.truncated && parsed.content.chars().count() <= 256);
+    let text: String = parsed.content.split_whitespace().collect();
+    for expected in ["验收", "1936", "YEAR", "2064"] {
+        assert!(
+            text.to_uppercase().contains(expected),
+            "missing synthetic anchor {expected}"
+        );
+    }
+    let audit = parsed.evidence_audit.unwrap();
+    let ranges = audit.read_ranges.unwrap();
+    assert_eq!(ranges.len(), 1);
+    assert_eq!((ranges[0].start, ranges[0].end), (2, 3));
+    assert_eq!(
+        ranges[0].label.as_deref(),
+        Some(ai_daily_pdf_parser::OCR_RANGE_LABEL)
+    );
+    for unit in audit.content_units.unwrap() {
+        assert_eq!(unit.ranges, ranges);
+        let line: String = parsed
+            .content
+            .chars()
+            .skip(unit.text_start as usize)
+            .take((unit.text_end - unit.text_start) as usize)
+            .collect();
+        assert!(line.starts_with("【离线 OCR，第 2 页，待核对原文】"));
+    }
 }
 
 #[test]

@@ -3,12 +3,13 @@ use ai_daily_report::{
     cli::{Cli, Command, SearchArgs, SearchKind},
     config::AppConfig,
     search,
+    store::Store,
 };
 use clap::{CommandFactory, Parser};
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, fs, process};
+use std::{collections::BTreeMap, fs, process, time::Instant};
 
 fn configuration() -> (tempfile::TempDir, AppConfig) {
     let directory = tempfile::tempdir().unwrap();
@@ -114,6 +115,25 @@ impl Fixture {
         fixture
     }
 
+    fn managed() -> Self {
+        let (directory, config) = configuration();
+        fs::create_dir_all(&config.paths.db_dir).unwrap();
+        Store::open(
+            &config.paths.db_dir.join("reports.sqlite3"),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        Self { directory, config }
+    }
+
+    fn managed_daily(db: &Connection, key: &str, text: &str) {
+        db.execute(
+            "INSERT INTO daily_reports(date,completed_work,work_summary,next_plan,raw_json,updated_at)
+             VALUES (?1,'','','',?2,'fixed') ON CONFLICT(date) DO UPDATE SET raw_json=excluded.raw_json",
+            params![key, json!({"work_summary":text}).to_string()],
+        ).unwrap();
+    }
+
     fn database(&self) -> Connection {
         Connection::open(self.config.paths.db_dir.join("reports.sqlite3")).unwrap()
     }
@@ -160,9 +180,10 @@ impl Fixture {
 
     fn cli(&self, arguments: &[&str]) -> process::Output {
         let mut command = process::Command::new(env!("CARGO_BIN_EXE_ai-daily-report"));
-        for (name, _) in std::env::vars_os() {
-            if name.to_string_lossy().starts_with("DAILY_REPORT_") {
-                command.env_remove(name);
+        command.current_dir(self.directory.path()).env_clear();
+        for key in ["SystemRoot", "PATH", "TEMP", "TMP", "TMPDIR"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
             }
         }
         command
@@ -173,11 +194,22 @@ impl Fixture {
             .output()
             .unwrap()
     }
+
+    fn cli_query(&self, query: &str) -> Value {
+        let output = self.cli(&["--query", query, "--format", "json"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).unwrap()
+    }
 }
 
 fn arguments(query: &str) -> SearchArgs {
     SearchArgs {
         query: Some(query.into()),
+        phrase: false,
         from: None,
         to: None,
         kind: SearchKind::All,
@@ -269,8 +301,7 @@ fn ordering_limit_and_json_and_text_shapes_are_stable() {
     let result = fixture.execute(&args);
     assert_eq!(result["total"], 7);
     assert_eq!(result["results"].as_array().unwrap().len(), 2);
-    assert_eq!(result["results"][0]["report_date"], "2026-10-17");
-    assert_eq!(result["results"][1]["title"], "采购审批方案");
+    assert_eq!(result["results"][0]["title"], "采购审批方案");
     for field in ["query", "total", "index_rebuilt", "results"] {
         assert!(result.get(field).is_some());
     }
@@ -292,21 +323,19 @@ fn ordering_limit_and_json_and_text_shapes_are_stable() {
         result
     );
     let text = search::render(&result, Format::Text);
-    assert!(text.contains("2026-10-17 · 日报 · 概览"));
+    assert!(text.contains("2026-10-16 · 日报 · 采购审批方案"));
     assert!(text.contains("[审批]"));
     assert!(text.contains("来源：S001"));
     let all = fixture.execute(&arguments("审批"));
     let hits = all["results"].as_array().unwrap();
-    assert_eq!(hits[1]["title"], "采购审批方案");
-    assert_eq!(hits[2]["title"], "供应商资料核对");
-    assert_eq!(hits[3]["title"], "待确认");
-    assert_eq!(hits[5]["kind"], "weekly");
-    assert_eq!(hits[6]["kind"], "monthly");
+    assert_eq!(&hits[..2], result["results"].as_array().unwrap());
+    assert!(hits.iter().any(|hit| hit["kind"] == "weekly"));
+    assert!(hits.iter().any(|hit| hit["kind"] == "monthly"));
     fixture.put("weekly", "2026-W41", json!({"completed_work": "审批事项"}));
     args.kind = SearchKind::Weekly;
     let weekly = fixture.execute(&args);
-    assert_eq!(weekly["results"][0]["report_label"], "2026-W42");
-    assert_eq!(weekly["results"][1]["report_label"], "2026-W41");
+    assert_eq!(weekly["results"][0]["report_label"], "2026-W41");
+    assert_eq!(weekly["results"][1]["report_label"], "2026-W42");
     let empty = fixture.execute(&arguments("从未出现的关键词"));
     assert_eq!(empty["total"], 0);
     assert_eq!(empty["results"], json!([]));
@@ -324,7 +353,7 @@ fn reindex_updates_metadata_and_deleted_index_is_recoverable() {
     assert!(result.get("results").is_none());
     assert!(search::render(&result, Format::Text).contains("建立 9 个片段"));
     let meta = fixture.meta();
-    assert_eq!(meta["schema_version"], "3");
+    assert_eq!(meta["schema_version"], "5");
     assert_eq!(meta["source_count"], "5");
     assert_eq!(meta["source_max_updated_at"], "2026-10-17T10:00:00Z");
     assert_eq!(meta["indexed_fragments"], "9");
@@ -337,7 +366,7 @@ fn reindex_updates_metadata_and_deleted_index_is_recoverable() {
         )
         .unwrap();
     assert_eq!(fixture.execute(&arguments("审批"))["index_rebuilt"], true);
-    assert_eq!(fixture.meta()["schema_version"], "3");
+    assert_eq!(fixture.meta()["schema_version"], "5");
     assert_eq!(fixture.execute(&reindex())["index_rebuilt"], true);
     assert_eq!(fixture.execute(&arguments("审批"))["index_rebuilt"], false);
     let index = fixture.config.paths.db_dir.join("report_search.sqlite3");
@@ -630,6 +659,91 @@ fn literal_fts_phrases_and_like_wildcards_are_escaped() {
 }
 
 #[test]
+fn explicit_phrase_preserves_token_order_and_separators() {
+    let fixture = Fixture::new();
+    fixture.put(
+        "daily",
+        "2026-10-16",
+        json!({"work_summary": "原记录写有预算 审批。"}),
+    );
+    fixture.put(
+        "daily",
+        "2026-10-17",
+        json!({"work_summary": "审批后复核预算。"}),
+    );
+    assert_eq!(fixture.execute(&arguments("预算 审批"))["total"], 2);
+    let mut phrase = arguments("预算 审批");
+    phrase.phrase = true;
+    let exact = fixture.execute(&phrase);
+    assert_eq!(exact["total"], 1);
+    assert_eq!(exact["results"][0]["report_date"], "2026-10-16");
+}
+
+#[test]
+fn cli_phrase_requires_original_whitespace_and_one_contiguous_source_string() {
+    let fixture = Fixture::new();
+    for (day, separator) in [(1, " "), (2, "  "), (3, "　"), (4, "\t"), (5, "\n")] {
+        fixture.put(
+            "daily",
+            &format!("2026-10-{day:02}"),
+            json!({"work_summary":format!("原文预算{separator}审批。")}),
+        );
+    }
+    fixture.put(
+        "daily",
+        "2026-10-06",
+        json!({"content":{"matters":[{
+            "background":{"text":"原文预算"},"details":[{"text":"审批。"}]
+        }]}}),
+    );
+    fixture.put("daily", "2026-10-07", json!({"work_summary":"另有金额　"}));
+    let phrase = |q: &str| {
+        let output = fixture.cli(&["--query", q, "--phrase", "--format", "json"]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    assert_eq!(fixture.cli_query("预算　 审批")["total"], 6);
+    fixture
+        .index()
+        .execute_batch(
+            "DROP TABLE report_phrases; UPDATE index_meta SET value='4' WHERE key='schema_version'",
+        )
+        .unwrap();
+    for (day, separator) in [(1, " "), (2, "  "), (3, "　"), (4, "\t"), (5, "\n")] {
+        let literal = format!("预算{separator}审批");
+        let hits = phrase(&literal);
+        assert_eq!(hits["total"], 1, "{separator:?}");
+        assert_eq!(
+            hits["results"][0]["report_label"],
+            format!("2026-10-{day:02}")
+        );
+        assert!(hits["results"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("[{literal}]")));
+        if day == 1 {
+            assert_eq!(hits["index_rebuilt"], true);
+            assert_eq!(fixture.meta()["schema_version"], "5");
+        }
+    }
+    assert_eq!(phrase("预算\n\n审批")["total"], 0);
+    assert_eq!(phrase(" 金额　")["total"], 0);
+    let trailing = phrase("额　");
+    assert_eq!(trailing["query"], "额　");
+    assert_eq!(trailing["total"], 1);
+    assert_eq!(fixture.cli_query("审批 预算")["total"], 6);
+    fixture
+        .database()
+        .execute("DELETE FROM daily_reports WHERE date='2026-10-02'", [])
+        .unwrap();
+    assert_eq!(phrase("预算  审批")["total"], 0);
+}
+
+#[test]
 fn like_snippets_use_unicode_context_and_fragments_are_bounded() {
     let fixture = Fixture::new();
     fixture.put(
@@ -772,6 +886,7 @@ fn cli_search_outputs_text_json_and_reindex_without_opening_app() {
         vec!["--config-dir=search", "daily", "--regenerate"],
     ] {
         let output = process::Command::new(env!("CARGO_BIN_EXE_ai-daily-report"))
+            .current_dir(fixture.directory.path())
             .args(&arguments)
             .output()
             .unwrap();
@@ -801,4 +916,493 @@ fn cli_search_outputs_text_json_and_reindex_without_opening_app() {
     );
     assert!(!fixture.config.paths.db_dir.join("runs.sqlite3").exists());
     assert!(!fixture.config.paths.db_dir.join("scanner.sqlite3").exists());
+}
+
+#[test]
+fn independent_cli_processes_reuse_a_read_only_snapshot() {
+    let fixture = Fixture::managed();
+    let mut db = fixture.database();
+    let tx = db.transaction().unwrap();
+    let first = chrono::NaiveDate::from_ymd_opt(2025, 1, 1).unwrap();
+    for i in 0..240 {
+        let date = first + chrono::Duration::days(i);
+        Fixture::managed_daily(
+            &tx,
+            &date.to_string(),
+            &format!("合成样本{}核查", "独立记录".repeat(512)),
+        );
+    }
+    tx.commit().unwrap();
+    drop(db);
+    let path = fixture.config.paths.db_dir.join("reports.sqlite3");
+    let original = fs::metadata(&path).unwrap().permissions();
+    let mut ro = original.clone();
+    ro.set_readonly(true);
+    fs::set_permissions(&path, ro).unwrap();
+    let cold = fixture.cli_query("核查");
+    assert_eq!(cold["source_rows_read"], 240);
+    for _ in 0..3 {
+        let started = Instant::now();
+        let warm = fixture.cli_query("核查");
+        let ms = started.elapsed().as_secs_f64() * 1000.0;
+        assert_eq!(warm["total"], 240);
+        assert_eq!(warm["source_rows_read"], 0);
+        assert_eq!(warm["index_rebuilt"], false);
+        eprintln!("search warm CLI: 240 synthetic reports, 0 source rows read, {ms:.3} ms");
+    }
+    fs::set_permissions(path, original).unwrap();
+}
+
+#[test]
+fn wal_revisions_follow_commits_rollbacks_all_tables_and_trigger_loss() {
+    let fixture = Fixture::managed();
+    let mut db = fixture.database();
+    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+        .unwrap();
+    Fixture::managed_daily(&db, "2026-10-10", "原有材料");
+    assert_eq!(fixture.cli_query("原有")["total"], 1);
+    let tx = db.transaction().unwrap();
+    Fixture::managed_daily(&tx, "2026-10-10", "替换材料");
+    assert_eq!(fixture.cli_query("替换")["total"], 0);
+    tx.rollback().unwrap();
+    assert_eq!(fixture.cli_query("原有")["source_rows_read"], 0);
+    Fixture::managed_daily(&db, "2026-10-10", "替换材料");
+    assert_eq!(fixture.cli_query("替换")["total"], 1);
+    db.execute_batch(
+        "INSERT INTO weekly_reports(week_label,date_range,completed_work,self_growth,improvement_actions,work_summary,next_plan,support_needed,other_notes,raw_json)
+         VALUES ('2026-W41','','','','','','','','','{\"work_summary\":\"替换材料\"}');
+         INSERT INTO monthly_reports(year_month,overview,completed_work,work_summary,next_plan,raw_json)
+         VALUES ('2026-10','','','','','{\"work_summary\":\"替换材料\"}');",
+    ).unwrap();
+    assert_eq!(fixture.cli_query("替换")["total"], 3);
+    db.execute_batch(
+        "DELETE FROM weekly_reports; DELETE FROM monthly_reports; DELETE FROM daily_reports;",
+    )
+    .unwrap();
+    assert_eq!(fixture.cli_query("替换")["total"], 0);
+    Fixture::managed_daily(&db, "2026-10-10", "待核记录");
+    fixture.cli_query("待核");
+    let trigger: String = db
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='search_revision_daily_reports_update'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    db.execute_batch("DROP TRIGGER search_revision_daily_reports_update")
+        .unwrap();
+    Fixture::managed_daily(&db, "2026-10-10", "人工改写");
+    db.execute_batch(&trigger).unwrap();
+    assert_eq!(fixture.cli_query("人工改写")["total"], 1);
+    db.execute_batch("DROP TRIGGER search_revision_daily_reports_update")
+        .unwrap();
+    let legacy = fixture.cli_query("人工改写");
+    assert_eq!(legacy["source_rows_read"], 1);
+    assert_eq!(fixture.cli_query("人工改写")["source_rows_read"], 1);
+}
+
+#[test]
+fn divergent_database_copies_and_concurrent_cli_rebuilds_use_one_snapshot() {
+    let fixture = Fixture::managed();
+    let db_path = fixture.config.paths.db_dir.join("reports.sqlite3");
+    let fork_path = fixture.config.paths.db_dir.join("fork.sqlite3");
+    Fixture::managed_daily(&fixture.database(), "2026-10-10", "根本");
+    fs::copy(&db_path, &fork_path).unwrap();
+    Fixture::managed_daily(&fixture.database(), "2026-10-10", "甲稿");
+    Fixture::managed_daily(&Connection::open(&fork_path).unwrap(), "2026-10-10", "乙稿");
+    assert_eq!(fixture.cli_query("甲稿")["total"], 1);
+    fs::rename(fork_path, &db_path).unwrap();
+    let barrier = std::sync::Barrier::new(4);
+    std::thread::scope(|scope| {
+        let mut jobs = Vec::new();
+        for _ in 0..3 {
+            jobs.push(scope.spawn(|| {
+                barrier.wait();
+                let result = fixture.cli_query("乙稿");
+                assert_eq!(result["total"], 1);
+            }));
+        }
+        barrier.wait();
+        let output = fixture.cli(&["--reindex", "--format", "json"]);
+        assert!(output.status.success());
+        for job in jobs {
+            job.join().unwrap();
+        }
+    });
+    let current = fixture.cli_query("甲稿");
+    assert_eq!(current["total"], 0);
+    assert_eq!(current["source_rows_read"], 0);
+    let mut index = fixture.index();
+    let pending = index
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .unwrap();
+    pending
+        .execute("DELETE FROM index_meta WHERE key='source_revision'", [])
+        .unwrap();
+    let concurrent_reader = fixture.cli_query("乙稿");
+    assert_eq!(concurrent_reader["source_rows_read"], 0);
+    assert_eq!(concurrent_reader["total"], 1);
+    pending.rollback().unwrap();
+}
+
+#[test]
+fn short_and_spaced_literal_phrases_rank_by_bm25_before_date_and_limit() {
+    let fixture = Fixture::new();
+    for (date, text) in [
+        ("2026-10-10", "核查金额。核查金额。核查金额。核查金额。"),
+        ("2026-10-11", "核查原始凭证。金额需要再次整理并且等待复核。"),
+        ("2026-10-12", "核查缺项，另行补齐。"),
+    ] {
+        fixture.put("daily", date, json!({"work_summary":text}));
+    }
+    for (q, count) in [
+        ("额", 2),
+        ("核查", 3),
+        ("核查　 金额", 2),
+        ("核查 金", 2),
+        ("核查金额", 1),
+    ] {
+        let mut args = arguments(q);
+        args.limit = 1;
+        let result = fixture.execute(&args);
+        assert_eq!(result["total"], count, "{q}");
+        assert_eq!(result["results"][0]["report_label"], "2026-10-10", "{q}");
+        assert!(result["results"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains('['));
+    }
+    fixture.put(
+        "daily",
+        "2026-10-13",
+        json!({"completed_work":"分隔\u{1f}%_\u{1e}文\u{0000}尾"}),
+    );
+    for q in ["\u{1f}", "\u{1e}文", "文\u{0000}尾", "%_"] {
+        assert_eq!(fixture.execute(&arguments(q))["total"], 1, "{q:?}");
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn read_only_legacy_header_is_bound_to_the_open_windows_file_identity() {
+    let fixture = Fixture::new();
+    let source = fixture.config.paths.db_dir.join("reports.sqlite3");
+    let fork = fixture.config.paths.db_dir.join("replacement.sqlite3");
+    fixture.put("daily", "2026-10-10", json!({"work_summary":"样本甲"}));
+    fs::copy(&source, &fork).unwrap();
+    let replace = "UPDATE daily_reports SET raw_json=? WHERE date='2026-10-10'";
+    fixture
+        .database()
+        .execute(replace, [json!({"work_summary":"样本乙"}).to_string()])
+        .unwrap();
+    Connection::open(&fork)
+        .unwrap()
+        .execute(replace, [json!({"work_summary":"样本丙"}).to_string()])
+        .unwrap();
+    let fixed = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    for p in [&source, &fork] {
+        fs::File::options()
+            .write(true)
+            .open(p)
+            .unwrap()
+            .set_modified(fixed)
+            .unwrap();
+    }
+    let before = fs::read(&source).unwrap();
+    let other = fs::read(&fork).unwrap();
+    assert_eq!(&before[..100], &other[..100]);
+    assert_eq!(before.len(), other.len());
+    assert_eq!(fixture.cli_query("样本乙")["source_rows_read"], 1);
+    assert_eq!(fixture.cli_query("样本乙")["source_rows_read"], 0);
+    fs::rename(&fork, &source).unwrap();
+    assert_eq!(fixture.cli_query("样本丙")["total"], 1);
+    assert_eq!(fixture.cli_query("样本乙")["total"], 0);
+    assert_eq!(fs::read(source).unwrap(), other);
+}
+
+#[test]
+fn failed_v3_index_upgrade_preserves_the_old_schema_and_all_data() {
+    let fixture = Fixture::sample();
+    let index = fixture.index();
+    index
+        .execute_batch(
+            "CREATE TABLE index_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+         INSERT INTO index_meta VALUES ('schema_version','3');
+         CREATE VIRTUAL TABLE report_search USING fts5(
+           report_key UNINDEXED,kind UNINDEXED,report_label UNINDEXED,report_date UNINDEXED,
+           title,body,sources UNINDEXED,tokenize='trigram');
+         INSERT INTO report_search(body) VALUES ('旧索引片段');
+         CREATE TRIGGER fail_upgrade BEFORE INSERT ON index_meta
+         BEGIN SELECT RAISE(ABORT,'fixture failure'); END;",
+        )
+        .unwrap();
+    assert_eq!(
+        search::execute(&fixture.config, &arguments("流程"))
+            .unwrap_err()
+            .code,
+        "SEARCH_INDEX_ERROR"
+    );
+    let old: String = index
+        .query_row(
+            "SELECT body FROM report_search WHERE report_search MATCH '旧索引'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(old, "旧索引片段");
+    assert_eq!(fixture.meta()["schema_version"], "3");
+    index.execute_batch("DROP TRIGGER fail_upgrade").unwrap();
+    assert_eq!(fixture.execute(&arguments("采购审批"))["total"], 1);
+    assert_eq!(fixture.meta()["schema_version"], "5");
+}
+
+#[test]
+fn reopening_a_retained_unmarked_store_preserves_its_v1_schema_and_bytes() {
+    let (directory, config) = configuration();
+    fs::create_dir_all(&config.paths.db_dir).unwrap();
+    let path = config.paths.db_dir.join("reports.sqlite3");
+    let legacy = Connection::open(&path).unwrap();
+    legacy
+        .execute_batch(ai_daily_report::store::SCHEMA)
+        .unwrap();
+    legacy.execute_batch(
+        "INSERT INTO report_schema_migrations VALUES (1,'fixture');
+         INSERT INTO report_metadata VALUES ('scope_id','personal_work'),('timezone','Asia/Shanghai');",
+    ).unwrap();
+    Fixture::managed_daily(&legacy, "2026-10-10", "保留旧库");
+    drop(legacy);
+    let before = fs::read(&path).unwrap();
+    Store::open(&path, chrono::Utc::now()).unwrap();
+    let fixture = Fixture { directory, config };
+    assert_eq!(fixture.cli_query("保留旧库")["total"], 1);
+    assert_eq!(before, fs::read(path).unwrap());
+}
+
+fn attachment_report(
+    quote: &str,
+) -> (
+    ai_daily_report::reports::personal::PersonalReport,
+    ai_daily_worker_contract::SourceRange,
+) {
+    use ai_daily_report::{
+        evidence::EvidenceRef,
+        reports::{
+            data::ReportSource,
+            personal::{Material, PersonalReport, Selection},
+        },
+        snapshots::digest,
+        types::{new_run_id, RunContext},
+    };
+    use ai_daily_worker_contract::{SourceRange, SourceRangeUnit};
+
+    let context = RunContext::new(
+        new_run_id(),
+        chrono::Utc::now(),
+        "2026-10-10".parse().unwrap(),
+        "isolated".into(),
+    )
+    .unwrap();
+    let mut source = ReportSource::user(quote, context.started_at);
+    source.source_kind = "file".into();
+    source.source_id = format!("src_{}", digest(b"test-block"));
+    source.relative_path = Some("样本/合成表.xlsx".into());
+    source.extension = Some(".xlsx".into());
+    let mut range = SourceRange::new(SourceRangeUnit::SheetRow, 12, 14, Some("汇总".into()));
+    range.column_start = Some(2);
+    range.column_end = Some(4);
+    let reference = EvidenceRef {
+        source_id: source.source_id.clone(),
+        version_id: "test-version".into(),
+        extraction_id: "test-extraction".into(),
+        unit_id: "sample-12".into(),
+        side: "current".into(),
+        raw_sha256: source.content_sha256.clone().unwrap(),
+        unit_sha256: source.excerpt_sha256.clone(),
+        quote_sha256: source.excerpt_sha256.clone(),
+        quote: quote.into(),
+        unit_char_start: 0,
+        input_start: 0,
+        input_end: quote.chars().count(),
+        ranges: vec![range.clone()],
+    };
+    let mut selection = Selection::default();
+    selection.summary.selected_chars = source.excerpt_chars;
+    selection.summary.observed_files = 1;
+    selection.summary.inspected_files = 1;
+    selection.summary.selected_files = 1;
+    selection.materials.push(Material {
+        source,
+        text: quote.into(),
+        evidence: vec![reference],
+        priority: 1,
+    });
+    selection.validate().unwrap();
+    (
+        PersonalReport::from_selection(&context, "work", &selection),
+        range,
+    )
+}
+
+#[test]
+fn cli_finds_shared_heading_at_current_source_range_and_only_lends_its_own_text() {
+    use ai_daily_report::{reports::personal::DETAILED_SCAN_TEMPLATE, snapshots::digest};
+    let fixture = Fixture::new();
+    let heading = "双人复核后才可付款";
+    let cli = |q: &str, label: &str| {
+        let output = fixture.cli(&[
+            "--query", q, "--phrase", "--source", label, "--format", "json",
+        ]);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    for first_quote in [
+        "只在首份出现的余行",
+        "双人复核后才可付款\n只在首份出现的余行",
+    ] {
+        let (mut report, first_range) = attachment_report(first_quote);
+        let (mut second_report, mut second_range) = attachment_report("第二份的记录");
+        report.schema_version = 6;
+        report.sources[0].coverage_limits["personal"] =
+            json!({"context":[{"text":heading,"ranges":[first_range]}]});
+        let mut second = second_report.sources.remove(0);
+        let mut refs = second_report.evidence.remove(&second.source_id).unwrap();
+        second.source_id = format!("src_{}", digest(b"second-heading-source"));
+        refs[0].source_id.clone_from(&second.source_id);
+        refs[0].ranges[0].start = 22;
+        refs[0].ranges[0].end = 24;
+        second_range.start = 20;
+        second_range.end = 21;
+        second.coverage_limits["personal"] =
+            json!({"context":[{"text":heading,"ranges":[second_range]}]});
+        report.evidence.insert(second.source_id.clone(), refs);
+        report.sources.push(second);
+        report
+            .render_detailed_output(DETAILED_SCAN_TEMPLATE)
+            .unwrap();
+        fixture.put("daily", &report.date, json!(report));
+        let s1 = cli(heading, "S001");
+        assert_eq!(s1["total"], 1);
+        assert_eq!(
+            s1["results"][0]["location"]["source_ranges"],
+            json!([first_range])
+        );
+        let s2 = cli(heading, "S002");
+        assert_eq!(s2["total"], 1);
+        let loc = &s2["results"][0]["location"];
+        assert_eq!(loc["anchor"], "s002");
+        assert_eq!(loc["source_id"], report.sources[1].source_id);
+        assert_eq!(loc["source_ranges"], json!([second_range]));
+        assert!(loc["range"].as_str().unwrap().contains("第 20 行"));
+        assert!(loc["original_link"].as_str().unwrap().ends_with("#s001-p1"));
+        let attachment = report.evidence_attachment.as_mut().unwrap();
+        let start = loc["line_start"].as_u64().unwrap() as usize;
+        let end = loc["line_end"].as_u64().unwrap() as usize;
+        assert!(attachment
+            .markdown
+            .lines()
+            .skip(start - 1)
+            .take(end - start + 1)
+            .any(|s| s.contains("](#s001-p1)")));
+        assert_eq!(cli("只在首份出现的余行", "S002")["total"], 0);
+        assert!(attachment.markdown.contains("第 20 行"));
+        attachment.markdown = attachment.markdown.replace("第 20 行", "第 99 行");
+        attachment.sha256 = digest(attachment.markdown.as_bytes());
+        fixture.put("daily", &report.date, json!(report));
+        assert_eq!(cli(heading, "S002")["total"], 0);
+    }
+}
+
+#[test]
+fn only_published_attachment_text_is_searchable_with_its_path_anchor_and_range() {
+    use ai_daily_report::{
+        reports::personal::{DETAILED_SCAN_TEMPLATE, SCAN_TEMPLATE},
+        snapshots::digest,
+    };
+    let fixture = Fixture::new();
+    let quote = format!("{}<凭据>_尾部核差\n合成附注", "前置资料".repeat(1100));
+    let (mut report, range) = attachment_report(&quote);
+    let mut args = arguments("<凭据>_尾部核差");
+    args.source = Some("s001".into());
+    for (version, template, id) in [
+        (5, SCAN_TEMPLATE, "s001"),
+        (6, DETAILED_SCAN_TEMPLATE, "s001-p1"),
+    ] {
+        report.schema_version = version;
+        report.evidence_attachment = None;
+        report.evidence_attachment = report.render_attachment(template).unwrap();
+        let attachment = report.evidence_attachment.as_ref().unwrap();
+        fixture.put("daily", &report.date, json!(report));
+        let result = fixture.execute(&args);
+        assert_eq!(result["total"], 1, "v{version}");
+        let hit = &result["results"][0];
+        assert_eq!(hit["sources"], json!(["S001"]));
+        let loc = &hit["location"];
+        assert_eq!(loc["relative_path"], "样本/合成表.xlsx");
+        assert_eq!(loc["source_ranges"], json!([range]));
+        assert!(loc["range"].as_str().unwrap().contains("汇总"));
+        assert_eq!(
+            loc["link"],
+            format!("{}#{id}", attachment.link(&report.date))
+        );
+        let start = loc["line_start"].as_u64().unwrap() as usize;
+        let end = loc["line_end"].as_u64().unwrap() as usize;
+        assert!(attachment
+            .markdown
+            .lines()
+            .skip(start - 1)
+            .take(end - start + 1)
+            .any(|line| line.contains("尾部核差")));
+        assert!(search::render(&result, Format::Text).contains(loc["link"].as_str().unwrap()));
+    }
+    let mut repeated = report.clone();
+    let mut second = repeated.sources[0].clone();
+    let mut second_refs = repeated.evidence[&second.source_id].clone();
+    second.source_id = format!("src_{}", digest(b"second-test-block"));
+    second_refs[0].source_id.clone_from(&second.source_id);
+    second_refs[0].ranges[0].start = 22;
+    second_refs[0].ranges[0].end = 24;
+    repeated
+        .evidence
+        .insert(second.source_id.clone(), second_refs);
+    repeated.sources.push(second);
+    repeated.evidence_attachment = None;
+    repeated
+        .render_detailed_output(DETAILED_SCAN_TEMPLATE)
+        .unwrap();
+    fixture.put("daily", &repeated.date, json!(repeated));
+    let mut alias_args = arguments("尾部核差");
+    alias_args.source = Some("S002".into());
+    let result = fixture.execute(&alias_args);
+    assert_eq!(result["total"], 1);
+    let alias = &result["results"][0]["location"];
+    assert_eq!(alias["anchor"], "s002");
+    assert_eq!(alias["source_ranges"][0]["start"], 22);
+    assert!(alias["original_link"]
+        .as_str()
+        .unwrap()
+        .ends_with("#s001-p1"));
+
+    // A frozen custom attachment omitted the source but the validated quote still exists
+    // in report.evidence. Only the bytes actually published under this new hash may match.
+    let attachment = report.evidence_attachment.as_mut().unwrap();
+    attachment.markdown = "冻结的独立说明\n另附定位文字\n".into();
+    attachment.sha256 = digest(attachment.markdown.as_bytes());
+    fixture.put("daily", &report.date, json!(report));
+    assert_eq!(fixture.execute(&args)["total"], 0);
+    let result = fixture.execute(&arguments("定位文字"));
+    assert_eq!(result["total"], 1);
+    assert_eq!(result["results"][0]["sources"], json!([]));
+    assert_eq!(result["results"][0]["location"]["line_end"], 2);
+    report
+        .evidence_attachment
+        .as_mut()
+        .unwrap()
+        .markdown
+        .push('坏');
+    fixture.put("daily", &report.date, json!(report));
+    assert_eq!(fixture.execute(&arguments("定位文字"))["total"], 0);
 }

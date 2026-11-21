@@ -34,7 +34,7 @@
   },
   "parse": {
     "cache_payload_version": 1,
-    "excerpt_policy_version": "fair_semantic_v9",
+    "excerpt_policy_version": "fair_semantic_v10",
     "aggregate_max_chars": 500000,
     "text": {
       "csv_encodings": [

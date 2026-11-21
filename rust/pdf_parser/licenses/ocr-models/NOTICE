@@ -1,0 +1,6 @@
+PP-OCRv6 Tiny FP32 text detection and recognition weights and Chinese dictionary
+Upstream project: PaddleOCR, https://github.com/PaddlePaddle/PaddleOCR
+Model conversion and distribution: RustO, https://github.com/byrizki/rusto-rs
+Distribution source: https://huggingface.co/byrizki/rusto-models/tree/34812c324fa258436fbcf1959eaf4ace7af6e5d4/ppocrv6-tiny
+License: Apache License, Version 2.0 (see LICENSE)
+The packaged weights and dictionary are unmodified from this distribution.

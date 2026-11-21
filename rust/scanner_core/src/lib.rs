@@ -15,7 +15,6 @@ mod identity;
 pub mod metrics;
 pub mod nominal;
 pub mod parsers;
-pub mod planner;
 pub mod process;
 mod run;
 mod scanner;

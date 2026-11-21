@@ -10,23 +10,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::classifier::ParserRoute;
-use crate::planner::PlannedFile;
 
 pub const PARSE_PROFILE_HASH_ALGORITHM: &str = "sha256-parse-profile-v1";
 pub const PARSE_CACHE_PAYLOAD_VERSION: u64 = 1;
 pub const CLASSIFIER_PROFILE_HASH_ALGORITHM: &str = "sha256-classifier-profile-v1";
-pub(crate) const CACHE_LOOKUP_BATCH_SIZE: usize = 256;
 const CLASSIFIER_DOMAIN: &[u8] = b"classifier-profile-v1\0";
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CacheLookupKey<'a> {
-    pub file_identity: &'a str,
-    pub source_version: &'a str,
-    pub source_guard_kind: &'a str,
-    pub source_guard_sha256: &'a str,
-    pub parse_profile_hash: &'a str,
-    pub inventory_existed_before: bool,
-}
 
 // ---------------------------------------------------------------------------
 // cache_retention_v1 固定硬上限（spec Part 4 表）。这些常量由
@@ -142,7 +130,7 @@ impl RouteStackFingerprints {
             | ParserRoute::RustXlsx
             | ParserRoute::RustXls
             | ParserRoute::RustLegacyOffice => &self.modern_office,
-            ParserRoute::Pdf => &self.pdf,
+            ParserRoute::Pdf | ParserRoute::PdfImageOcr { .. } => &self.pdf,
         }
     }
 }
@@ -301,6 +289,15 @@ impl CacheLookup {
                 .evidence_audit
                 .validate(&payload.text)
                 .map_err(|_| "invalid cached positions".to_string())?;
+            if entry.parser_backend == crate::parsers::document::OCR_BACKEND
+                && !crate::parsers::document::valid_ocr_ranges(
+                    &payload.text,
+                    &payload.evidence_audit,
+                    None,
+                )
+            {
+                return Err("cached OCR lacks unverified physical page ranges".into());
+            }
             Ok(payload)
         })();
         match decoded {
@@ -328,13 +325,6 @@ fn stored_content(record: &CacheWriteRecord) -> (String, String) {
     .expect("serializable parse cache payload");
     let hash = sha256_hex(content.as_bytes());
     (content, hash)
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CacheAwarePlanEntry {
-    pub planned: PlannedFile,
-    pub parse_profile_hash: Option<String>,
-    pub cache_lookup: Option<CacheLookup>,
 }
 
 #[derive(Serialize)]
@@ -368,6 +358,15 @@ fn parse_profile_fingerprint_json(
     route_stack: &RouteStackFingerprint,
     profile: &NormalizedScannerSettings,
 ) -> Result<Vec<u8>, String> {
+    // Native text extraction is independent of the optional image OCR policy.
+    let mut native;
+    let parse = if profile.parse.pdf.image_ocr.is_some() {
+        native = profile.parse.clone();
+        native.pdf.image_ocr = None;
+        &native
+    } else {
+        &profile.parse
+    };
     let input = ParseProfileFingerprint {
         cache_payload_version: PARSE_CACHE_PAYLOAD_VERSION,
         excerpt_policy_version: crate::source_allocation::EXCERPT_POLICY_VERSION,
@@ -377,7 +376,7 @@ fn parse_profile_fingerprint_json(
         max_file_size_bytes: profile.execution.max_file_size_bytes,
         default_timeout_ms: profile.execution.file_timeout_ms,
         timeout_by_extension_ms: &profile.execution.file_timeout_by_extension_ms,
-        parse: &profile.parse,
+        parse,
     };
     serde_json::to_vec(&input).map_err(|error| error.to_string())
 }
@@ -492,119 +491,6 @@ pub(crate) fn lookup_cache(
     ))
 }
 
-pub(crate) fn lookup_cache_batch(
-    connection: &Connection,
-    keys: &[CacheLookupKey<'_>],
-) -> rusqlite::Result<Vec<CacheLookup>> {
-    if keys.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    // Only fixed-size lookup keys enter the TEMP table. Non-exact rows are
-    // tested with EXISTS, so their cached content never crosses the SQL seam.
-    connection.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS temp_parse_cache_lookup_v1 (
-            ordinal INTEGER PRIMARY KEY,
-            file_identity TEXT NOT NULL,
-            source_version TEXT NOT NULL,
-            source_guard_kind TEXT NOT NULL,
-            source_guard_sha256 TEXT NOT NULL,
-            parse_profile_hash TEXT NOT NULL,
-            inventory_existed_before INTEGER NOT NULL CHECK (inventory_existed_before IN (0, 1))
-         ) STRICT;",
-    )?;
-
-    let mut output = Vec::with_capacity(keys.len());
-    for chunk in keys.chunks(CACHE_LOOKUP_BATCH_SIZE) {
-        connection.execute("DELETE FROM temp_parse_cache_lookup_v1", [])?;
-        {
-            let mut insert = connection.prepare_cached(
-                "INSERT INTO temp_parse_cache_lookup_v1 (
-                    ordinal, file_identity, source_version, source_guard_kind,
-                    source_guard_sha256, parse_profile_hash, inventory_existed_before
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )?;
-            for (ordinal, key) in chunk.iter().enumerate() {
-                insert.execute(params![
-                    ordinal as i64,
-                    key.file_identity,
-                    key.source_version,
-                    key.source_guard_kind,
-                    key.source_guard_sha256,
-                    key.parse_profile_hash,
-                    if key.inventory_existed_before {
-                        1_i64
-                    } else {
-                        0_i64
-                    },
-                ])?;
-            }
-        }
-
-        let mut statement = connection.prepare_cached(
-            "SELECT input.ordinal,
-                    exact.content, exact.content_sha256, exact.parser_backend,
-                    exact.worker_lane, exact.truncated,
-                    exact.worker_contract_version, exact.worker_version, exact.worker_build,
-                    EXISTS(
-                        SELECT 1 FROM parse_cache AS same_source
-                        WHERE same_source.file_identity=input.file_identity
-                          AND same_source.source_version=input.source_version
-                          AND same_source.source_guard_kind=input.source_guard_kind
-                          AND same_source.source_guard_sha256=input.source_guard_sha256
-                    ),
-                    EXISTS(
-                        SELECT 1 FROM parse_cache AS same_identity
-                        WHERE same_identity.file_identity=input.file_identity
-                    ),
-                    input.inventory_existed_before
-             FROM temp_parse_cache_lookup_v1 AS input
-             LEFT JOIN parse_cache AS exact
-               ON exact.file_identity=input.file_identity
-              AND exact.source_version=input.source_version
-              AND exact.source_guard_kind=input.source_guard_kind
-              AND exact.source_guard_sha256=input.source_guard_sha256
-              AND exact.parse_profile_hash=input.parse_profile_hash
-             ORDER BY input.ordinal",
-        )?;
-        let mut rows = statement.query([])?;
-        let mut expected_ordinal = 0_usize;
-        while let Some(row) = rows.next()? {
-            let ordinal = usize::try_from(row.get::<_, i64>(0)?)
-                .map_err(|_| rusqlite::Error::InvalidQuery)?;
-            if ordinal != expected_ordinal {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
-            let exact = match row.get::<_, Option<String>>(1)? {
-                Some(content) => Some(CacheEntry {
-                    evidence_audit: None,
-                    content,
-                    content_sha256: row.get(2)?,
-                    parser_backend: row.get(3)?,
-                    worker_lane: row.get(4)?,
-                    truncated: row.get::<_, i64>(5)? != 0,
-                    worker_contract_version: row.get(6)?,
-                    worker_version: row.get(7)?,
-                    worker_build: row.get(8)?,
-                }),
-                None => None,
-            };
-            output.push(resolve_cache_lookup(
-                exact,
-                row.get(9)?,
-                row.get(10)?,
-                row.get::<_, i64>(11)? != 0,
-            ));
-            expected_ordinal += 1;
-        }
-        if expected_ordinal != chunk.len() {
-            return Err(rusqlite::Error::InvalidQuery);
-        }
-    }
-    connection.execute("DELETE FROM temp_parse_cache_lookup_v1", [])?;
-    Ok(output)
-}
-
 fn resolve_cache_lookup(
     exact: Option<CacheEntry>,
     same_source_and_guard: bool,
@@ -645,7 +531,7 @@ pub(crate) fn recompute_rank(parser_backend: &str) -> Option<i64> {
         "rust_office_oxide_v2" => Some(2),
         "rust_legacy_office_v3" => Some(3),
         "rust_xls_calamine_v3" => Some(4),
-        "rust_pdfium_v3" => Some(10),
+        "rust_pdfium_v3" | crate::parsers::document::OCR_BACKEND => Some(10),
         _ => None,
     }
 }
@@ -834,6 +720,7 @@ fn evict_parse_cache_with_check(
                               WHEN 'rust_legacy_office_v3' THEN 3
                               WHEN 'rust_xls_calamine_v3' THEN 4
                               WHEN 'rust_pdfium_v3' THEN 10
+                              WHEN ?1 THEN 10
                               ELSE 99
                           END ASC,
                           last_accessed_bucket ASC,
@@ -842,7 +729,7 @@ fn evict_parse_cache_with_check(
                            length(source_guard_kind) + length(source_guard_sha256) +
                            length(parse_profile_hash)) ASC
                  LIMIT 1",
-                [],
+                [crate::parsers::document::OCR_BACKEND],
                 |row| {
                     Ok((
                         row.get(0)?,

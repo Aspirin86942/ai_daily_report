@@ -4,9 +4,8 @@ use ai_daily_worker_contract::{
     ContentUnit, ContentUnitKind, ParsedContentAudit, SourceRange, SourceRangeUnit,
 };
 use std::collections::{BTreeMap, HashSet, VecDeque};
-use std::rc::Rc;
 
-pub const EXCERPT_POLICY_VERSION: &str = "fair_semantic_v9";
+pub const EXCERPT_POLICY_VERSION: &str = "fair_semantic_v10";
 const ROUND_TARGET: usize = 512;
 const FIRST_TARGET: usize = 256;
 
@@ -18,18 +17,97 @@ pub struct AllocatedExcerpt {
     pub block_context: Vec<Vec<usize>>,
     pub audit: Option<ParsedContentAudit>,
     pub ranges: Option<Vec<SourceRange>>,
+    /// Unread bytes and bounded text outside the emitted source ranges.
+    pub omitted_ranges: Vec<SourceRange>,
     pub truncated: bool,
 }
 
+fn omitted_text_ranges(
+    item: &ContextFileEvidence,
+    truncated: bool,
+    emitted: Option<&[SourceRange]>,
+) -> Vec<SourceRange> {
+    let mut gaps = Vec::new();
+    if !(truncated || item.truncated) || !matches!(item.extension.as_str(), ".txt" | ".md") {
+        return gaps;
+    }
+    let Some(read) = item
+        .evidence_audit
+        .as_ref()
+        .and_then(|a| a.read_ranges.as_deref())
+    else {
+        return gaps;
+    };
+    let mut bytes: Vec<_> = read
+        .iter()
+        .filter(|r| r.unit == SourceRangeUnit::Byte)
+        .collect();
+    bytes.sort_unstable_by_key(|r| r.start);
+    if let Some(size) = item.size_bytes.filter(|_| !bytes.is_empty()) {
+        range_gaps(0, size, SourceRangeUnit::Byte, "unread", &bytes, &mut gaps);
+    }
+    if let Some(emitted) = emitted {
+        let chars = read.iter().find(|r| r.unit == SourceRangeUnit::TextChar);
+        let unit = if chars.is_some() {
+            SourceRangeUnit::TextChar
+        } else {
+            SourceRangeUnit::Byte
+        };
+        let mut spans: Vec<_> = emitted.iter().filter(|r| r.unit == unit).collect();
+        spans.sort_unstable_by_key(|r| (r.start, r.end));
+        // Earlier parser audits may not have character extents. Their text
+        // coordinates cannot be translated to bytes without the original.
+        if !spans.is_empty() || emitted.is_empty() {
+            for window in chars
+                .into_iter()
+                .chain(bytes.into_iter().filter(|_| unit == SourceRangeUnit::Byte))
+            {
+                range_gaps(
+                    window.start,
+                    window.end,
+                    unit,
+                    "not_excerpted",
+                    &spans,
+                    &mut gaps,
+                );
+            }
+        }
+    }
+    gaps
+}
+
+fn range_gaps(
+    start: u64,
+    end: u64,
+    unit: SourceRangeUnit,
+    label: &str,
+    covered: &[&SourceRange],
+    gaps: &mut Vec<SourceRange>,
+) {
+    let mut at = start;
+    for range in covered {
+        if range.start >= end {
+            break;
+        }
+        if at < range.start {
+            gaps.push(SourceRange::new(unit, at, range.start, Some(label.into())));
+        }
+        at = at.max(range.end);
+    }
+    if at < end {
+        gaps.push(SourceRange::new(unit, at, end, Some(label.into())));
+    }
+}
+
 #[derive(Clone)]
-struct Piece {
+struct Piece<'a> {
     source_index: usize,
-    text: Rc<str>,
+    text: &'a str,
     chars: usize,
     kind: ContentUnitKind,
     ranges: Vec<SourceRange>,
 }
-impl Piece {
+impl Piece<'_> {
     fn mapped(&self, number: usize, start: u64) -> ContentUnit {
         ContentUnit {
             unit_id: format!("e{number}"),
@@ -79,7 +157,7 @@ fn part_ranges(unit: &ContentUnit, start: u64, end: u64) -> Vec<SourceRange> {
     ranges
 }
 
-fn pieces(item: &ContextFileEvidence, constrained: bool) -> Vec<Piece> {
+fn pieces(item: &ContextFileEvidence, constrained: bool) -> Vec<Piece<'_>> {
     if item
         .evidence_audit
         .as_ref()
@@ -87,59 +165,76 @@ fn pieces(item: &ContextFileEvidence, constrained: bool) -> Vec<Piece> {
     {
         return vec![];
     }
-    let chars: Vec<char> = item.content.chars().collect();
-    let units = item
+    let unknown;
+    let units = if let Some(units) = item
         .evidence_audit
         .as_ref()
-        .and_then(|a| a.content_units.clone())
-        .unwrap_or_else(|| {
-            if chars.is_empty() {
-                vec![]
-            } else {
-                vec![ContentUnit {
-                    unit_id: "unknown".into(),
-                    kind: ContentUnitKind::Text,
-                    text_start: 0,
-                    text_end: chars.len() as u64,
-                    ranges: vec![],
-                }]
-            }
-        });
+        .and_then(|a| a.content_units.as_deref())
+    {
+        units
+    } else {
+        unknown = ContentUnit {
+            unit_id: String::new(),
+            kind: ContentUnitKind::Text,
+            text_start: 0,
+            text_end: item.content.chars().count() as u64,
+            ranges: vec![],
+        };
+        std::slice::from_ref(&unknown)
+    };
     let mut output = Vec::new();
-    for (source_index, unit) in units.into_iter().enumerate() {
-        if unit.text_end as usize > chars.len() || unit.text_start >= unit.text_end {
+    let mut rest = item.content.as_str();
+    let mut position = 0;
+    for (source_index, unit) in units.iter().enumerate() {
+        if unit.text_start >= unit.text_end || unit.text_end > item.content.len() as u64 {
             continue;
         }
-        let text: String = chars[unit.text_start as usize..unit.text_end as usize]
-            .iter()
-            .collect();
-        let split =
-            constrained && !item.extension.eq_ignore_ascii_case(".csv") && splittable_prose(&unit);
+        if unit.text_start < position {
+            rest = &item.content;
+            position = 0;
+        }
+        // Audit offsets are Unicode scalars in source order. Walk the backing
+        // string once and borrow each slice, including across multibyte text.
+        let mut offsets = rest.char_indices().map(|(i, _)| i).chain([rest.len()]);
+        let Some(start) = offsets.nth((unit.text_start - position) as usize) else {
+            continue;
+        };
+        let Some(end) = offsets.nth((unit.text_end - unit.text_start - 1) as usize) else {
+            continue;
+        };
+        let text = &rest[start..end];
+        rest = &rest[end..];
+        position = unit.text_end;
+        let split = constrained
+            && !item.extension.eq_ignore_ascii_case(".csv")
+            && splittable_prose(unit)
+            && !(matches!(item.extension.as_str(), ".md" | ".txt") && text.contains('\t'));
         if split {
             let mut offset = 0;
-            for part in ai_daily_text_parser::text_segments(&text, true) {
-                let trimmed = part.trim();
+            for part in ai_daily_text_parser::text_segments(text, true) {
+                let unindented = part.trim_start();
+                let trimmed = unindented.trim_end();
+                offset += part[..part.len() - unindented.len()].chars().count() as u64;
                 if !trimmed.is_empty() {
                     let chars = trimmed.chars().count();
-                    let leading = part.chars().take_while(|c| c.is_whitespace()).count() as u64;
-                    let start = offset + leading;
                     output.push(Piece {
                         source_index,
-                        text: trimmed.into(),
+                        text: trimmed,
                         chars,
                         kind: unit.kind,
-                        ranges: part_ranges(&unit, start, start + chars as u64),
+                        ranges: part_ranges(unit, offset, offset + chars as u64),
                     });
+                    offset += chars as u64;
                 }
-                offset += part.chars().count() as u64;
+                offset += unindented[trimmed.len()..].chars().count() as u64;
             }
         } else {
             output.push(Piece {
                 source_index,
                 chars: (unit.text_end - unit.text_start) as usize,
-                text: text.into(),
+                text,
                 kind: unit.kind,
-                ranges: unit.ranges,
+                ranges: unit.ranges.clone(),
             });
         }
     }
@@ -150,7 +245,7 @@ fn priority(piece: &Piece) -> u8 {
     if piece.kind == ContentUnitKind::Total {
         return 0;
     }
-    if ai_daily_text_parser::is_attention_fact(&piece.text) {
+    if ai_daily_text_parser::is_attention_fact(piece.text) {
         return 1;
     }
     // Complete table rows carry the relationship between fields and values.
@@ -161,6 +256,11 @@ fn priority(piece: &Piece) -> u8 {
     }
     const QUALIFIERS: &[&str] = &[
         "不得",
+        "除非",
+        "仅当",
+        "如果",
+        "否则",
+        "尚未",
         "不能",
         "不代表",
         "不等于",
@@ -241,15 +341,34 @@ fn priority(piece: &Piece) -> u8 {
     }
 }
 
-struct Block {
-    context: Vec<Piece>,
-    facts: Vec<Piece>,
+struct Block<'a> {
+    context: Vec<Piece<'a>>,
+    facts: Vec<Piece<'a>>,
     rank: u8,
 }
 
-fn bundles(item: &ContextFileEvidence, constrained: bool) -> VecDeque<Block> {
+fn bundles(item: &ContextFileEvidence, constrained: bool) -> VecDeque<Block<'_>> {
     let pieces = pieces(item, constrained);
     let last_fact = pieces.iter().rposition(|p| useful(p.kind));
+    let ordinary = matches!(item.extension.as_str(), ".txt" | ".md");
+    let first_fact = pieces.iter().position(|p| useful(p.kind));
+    let middle_section = pieces
+        .windows(2)
+        .enumerate()
+        .filter(|(_, pair)| {
+            pair[0].kind == ContentUnitKind::Heading
+                && !pair[0].ranges.is_empty()
+                && useful(pair[1].kind)
+        })
+        .map(|(i, _)| i + 1)
+        .min_by_key(|&i| i.abs_diff(pieces.len() / 2));
+    let windows = item
+        .evidence_audit
+        .as_ref()
+        .and_then(|a| a.read_ranges.as_deref())
+        .unwrap_or_default();
+    let sampled = ordinary && windows.iter().any(|r| r.label.as_deref() == Some("tail"));
+    let mut previous_window = None;
     let mut blocks: Vec<Block> = Vec::new();
     let mut context: Vec<Piece> = Vec::new();
     let mut size = 0;
@@ -258,16 +377,51 @@ fn bundles(item: &ContextFileEvidence, constrained: bool) -> VecDeque<Block> {
     let mut new_headers = false;
     let mut new_units = false;
     for (i, piece) in pieces.into_iter().enumerate() {
+        if sampled {
+            if let Some(range) = piece.ranges.first() {
+                let window = windows.iter().position(|r| {
+                    r.unit == SourceRangeUnit::Byte
+                        && matches!(r.label.as_deref(), Some("head" | "middle" | "tail"))
+                        && r.start <= range.start
+                        && range.end <= r.end
+                });
+                if window != previous_window {
+                    context.clear();
+                    section_rank = 6;
+                    new_context = true;
+                    new_units = false;
+                    new_headers = false;
+                    previous_window = window;
+                }
+            }
+        }
         if !useful(piece.kind) {
             if piece.kind == ContentUnitKind::Placeholder {
                 continue;
             }
             if piece.kind == ContentUnitKind::Heading {
-                context.clear();
+                let level = |p: &Piece| {
+                    p.text
+                        .bytes()
+                        .take_while(|&b| b == b'#')
+                        .count()
+                        .clamp(1, 6)
+                };
+                context.retain(|p| {
+                    ordinary
+                        && p.kind == ContentUnitKind::Heading
+                        && !preview_heading(p)
+                        && level(p) < level(&piece)
+                });
                 new_headers = false;
                 new_units = false;
                 // A qualification in a section heading applies to its facts.
-                section_rank = if priority(&piece) == 4 { 4 } else { 6 };
+                section_rank = if priority(&piece) == 4 || context.iter().any(|p| priority(p) == 4)
+                {
+                    4
+                } else {
+                    6
+                };
             } else if !new_headers && piece.kind == ContentUnitKind::TableHeader {
                 context.retain(|p| {
                     p.kind == ContentUnitKind::Heading
@@ -293,7 +447,10 @@ fn bundles(item: &ContextFileEvidence, constrained: bool) -> VecDeque<Block> {
         new_headers = false;
         new_units = false;
         let mut rank = priority(&piece).min(section_rank);
-        if constrained && Some(i) == last_fact {
+        if constrained
+            && (Some(i) == last_fact
+                || ordinary && (Some(i) == first_fact || Some(i) == middle_section))
+        {
             rank = rank.min(2);
         }
         let cost = piece.chars + 1;
@@ -302,7 +459,11 @@ fn bundles(item: &ContextFileEvidence, constrained: bool) -> VecDeque<Block> {
         } else {
             ROUND_TARGET
         };
+        // Text-parser table groups already include their own exact unit and columns.
+        // Keep each independently citable when a following page changes the scale.
+        let plain_table = ordinary && piece.kind == ContentUnitKind::TableRow;
         if new_context
+            || plain_table
             || size + cost > target
             || blocks.last().is_none_or(|block| block.rank != rank)
         {
@@ -312,8 +473,8 @@ fn bundles(item: &ContextFileEvidence, constrained: bool) -> VecDeque<Block> {
                 facts: vec![],
                 rank,
             });
-            new_context = false;
         }
+        new_context = plain_table;
         size += cost;
         blocks.last_mut().unwrap().facts.push(piece);
     }
@@ -337,8 +498,8 @@ fn bundles(item: &ContextFileEvidence, constrained: bool) -> VecDeque<Block> {
 }
 
 #[derive(Default)]
-struct Selection {
-    pieces: Vec<Piece>,
+struct Selection<'a> {
+    pieces: Vec<Piece<'a>>,
     context: Vec<usize>,
     ends: Vec<usize>,
     reused: Vec<Vec<usize>>,
@@ -360,15 +521,27 @@ fn charged(pieces: &[Piece]) -> usize {
     pieces.iter().map(|p| p.chars + 1).sum()
 }
 
-impl Selection {
+fn mapped_audit(
+    original: &ParsedContentAudit,
+    units: Vec<ContentUnit>,
+    usable: u64,
+) -> ParsedContentAudit {
+    ParsedContentAudit {
+        version: original.version,
+        archive: original.archive.clone(),
+        encoding: original.encoding.clone(),
+        detected_format: original.detected_format.clone(),
+        read_ranges: original.read_ranges.clone(),
+        content_units: original.content_units.as_ref().map(|_| units),
+        usable_chars: Some(usable),
+    }
+}
+
+impl<'a> Selection<'a> {
     fn new(item: &ContextFileEvidence) -> Self {
         let audit_bytes = item.evidence_audit.as_ref().and_then(|original| {
             original.content_units.as_ref()?;
-            let audit = ParsedContentAudit {
-                content_units: Some(vec![]),
-                usable_chars: Some(0),
-                ..original.clone()
-            };
+            let audit = mapped_audit(original, vec![], 0);
             Some(
                 serde_json::to_vec(&audit)
                     .expect("serializable audit")
@@ -418,7 +591,12 @@ impl Selection {
 
     // Unaffordable atomic facts never block later candidates. A first-round reservation
     // is temporary, so defer its rejected facts for a later unrestricted round.
-    fn take(&mut self, pending: &mut VecDeque<Block>, budget: usize, defer: bool) -> Option<usize> {
+    fn take(
+        &mut self,
+        pending: &mut VecDeque<Block<'a>>,
+        budget: usize,
+        defer: bool,
+    ) -> Option<usize> {
         let mut skipped = VecDeque::new();
         let mut used = None;
         while let Some(mut block) = pending.pop_front() {
@@ -617,8 +795,10 @@ fn full_excerpt(item: &ContextFileEvidence) -> AllocatedExcerpt {
         }
         item.content.clone()
     };
+    let truncated = text.len() < item.content.len();
     AllocatedExcerpt {
-        truncated: text.len() < item.content.len(),
+        truncated,
+        omitted_ranges: omitted_text_ranges(item, truncated, ranges.as_deref()),
         text,
         audit,
         ranges,
@@ -639,11 +819,11 @@ pub fn allocate_excerpts_with_priority(
     budget: usize,
     priority_paths: &[String],
 ) -> Vec<AllocatedExcerpt> {
-    let total = evidence
+    let input_chars: Vec<_> = evidence
         .iter()
         .map(|item| item.content.chars().count())
-        .sum::<usize>();
-    if total <= budget {
+        .collect();
+    if input_chars.iter().sum::<usize>() <= budget {
         return evidence.iter().map(|item| full_excerpt(item)).collect();
     }
     let mut units: Vec<_> = evidence.iter().map(|item| bundles(item, true)).collect();
@@ -755,7 +935,7 @@ pub fn allocate_excerpts_with_priority(
                     chars += 1;
                 }
                 let start = chars;
-                text.push_str(&piece.text);
+                text.push_str(piece.text);
                 chars += piece.chars as u64;
                 if useful(piece.kind) {
                     usable += chars - start;
@@ -767,17 +947,17 @@ pub fn allocate_excerpts_with_priority(
                 }
                 mapped.push(piece.mapped(mapped.len() + 1, start));
             }
-            let audit = item.evidence_audit.clone().map(|mut audit| {
-                if audit.content_units.is_some() {
-                    audit.content_units = Some(mapped);
-                }
-                audit.usable_chars = Some(usable);
-                audit
-            });
+            let audit = item
+                .evidence_audit
+                .as_ref()
+                .map(|audit| mapped_audit(audit, mapped, usable));
             let known = item
                 .evidence_audit
                 .as_ref()
                 .is_some_and(|a| a.content_units.is_some());
+            let truncated = selected[index].omitted
+                || !units[index].is_empty()
+                || chars < input_chars[index] as u64;
             AllocatedExcerpt {
                 block_ends: if known {
                     std::mem::take(&mut selected[index].ends)
@@ -789,9 +969,12 @@ pub fn allocate_excerpts_with_priority(
                 } else {
                     vec![]
                 },
-                truncated: selected[index].omitted
-                    || !units[index].is_empty()
-                    || text.chars().count() < item.content.chars().count(),
+                truncated,
+                omitted_ranges: omitted_text_ranges(
+                    item,
+                    truncated,
+                    known.then_some(ranges.as_slice()),
+                ),
                 text,
                 audit,
                 ranges: known.then_some(ranges),

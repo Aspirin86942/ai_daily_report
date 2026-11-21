@@ -531,26 +531,26 @@ impl AppConfig {
             config.recovery.run_budget_seconds = 300;
             config.recovery.lock_wait_seconds = config.recovery.lock_wait_seconds.min(5.0);
             config.recovery.model_workers = 1;
-            if config.personal_scan() {
-                // Leave room for user notes and model execution within the daily budget.
-                config.scanner.max_workers = Some(1);
-                config.scanner.total_max_chars = Some(
-                    config
-                        .scanner
-                        .total_max_chars
-                        .unwrap_or(MAX_FILE_CHARS as u64)
-                        .min(MAX_FILE_CHARS as u64),
-                );
-                config.scanner.total_deadline_ms = Some(
-                    config
-                        .scanner
-                        .total_deadline_ms
-                        .unwrap_or(120_000)
-                        .min(120_000),
-                );
-            }
+            // Leave room for user notes and model execution within the daily budget.
+            config.scanner.max_workers = Some(config.scanner.max_workers.unwrap_or(2).min(2));
+            config.scanner.total_max_chars = Some(
+                config
+                    .scanner
+                    .total_max_chars
+                    .unwrap_or(MAX_FILE_CHARS as u64)
+                    .min(MAX_FILE_CHARS as u64),
+            );
+            config.scanner.total_deadline_ms = Some(
+                config
+                    .scanner
+                    .total_deadline_ms
+                    .unwrap_or(120_000)
+                    .min(120_000),
+            );
         }
         config.validate()?;
+        // Explicitly disabling the optional parser preserves frozen configuration identities.
+        config.scanner.pdf_image_ocr = config.scanner.pdf_image_ocr.filter(|ocr| ocr.enabled);
         config.archive.validate()?;
         Ok(config)
     }
@@ -586,6 +586,20 @@ impl AppConfig {
         expected: &str,
         recovery: bool,
     ) -> Result<bool, ReportError> {
+        if self.matches_personal_budget(expected, recovery)? {
+            return Ok(true);
+        }
+        if self.personal_scan() && self.scanner.max_workers == Some(2) {
+            // The same YAML used one worker before bounded parallel parsing was introduced.
+            // This check only resumes a frozen request. Its file list and request bytes are fixed.
+            let mut single = self.clone();
+            single.scanner.max_workers = Some(1);
+            return single.matches_personal_budget(expected, recovery);
+        }
+        Ok(false)
+    }
+
+    fn matches_personal_budget(&self, expected: &str, recovery: bool) -> Result<bool, ReportError> {
         if self.fingerprint(recovery)? == expected {
             return Ok(true);
         }

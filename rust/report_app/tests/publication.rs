@@ -37,9 +37,9 @@ impl Fixture {
         self.stage_value(id, text, &report);
     }
     fn stage_value(&self, id: &str, text: &str, report: &Value) {
-        let mut context: RunContext =
-            serde_json::from_str(include_str!("fixtures/context-v2.json")).unwrap();
-        context.run_id = id.into();
+        let date = report["date"].as_str().unwrap();
+        let context =
+            RunContext::new(id.into(), now(), date.parse().unwrap(), "test".into()).unwrap();
         self.store
             .create(&context, "report", id, None, now())
             .unwrap();
@@ -50,7 +50,7 @@ impl Fixture {
         self.store
             .prepare(id, &snapshot, &snapshot.sha256, &[], now())
             .unwrap();
-        let path = self.publisher().output_path("2026-10-11").unwrap();
+        let path = self.publisher().output_path(date).unwrap();
         self.store
             .stage_report(
                 id,
@@ -63,6 +63,31 @@ impl Fixture {
                 now(),
             )
             .unwrap();
+    }
+}
+
+#[test]
+fn historical_daily_repair_restores_original_fixture_bytes() {
+    for (data, body) in [
+        (
+            include_str!("fixtures/daily-v2.json"),
+            include_str!("fixtures/daily-v2.md"),
+        ),
+        (
+            include_str!("fixtures/readability/v4-input.json"),
+            include_str!("fixtures/readability/v4-expected.md"),
+        ),
+    ] {
+        let fixture = Fixture::new();
+        let id = "a".repeat(32);
+        let report = serde_json::from_str(data).unwrap();
+        fixture.stage_value(&id, body, &report);
+        let publisher = fixture.publisher();
+        let path = publisher.publish(&id, now()).unwrap();
+        fs::remove_file(&path).unwrap();
+        publisher.publish(&id, now()).unwrap();
+        assert_eq!(fs::read(path).unwrap(), body.as_bytes());
+        assert!(fixture.store.calls(&id).unwrap().is_empty());
     }
 }
 

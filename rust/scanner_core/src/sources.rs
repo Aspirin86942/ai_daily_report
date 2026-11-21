@@ -52,13 +52,28 @@ pub(crate) fn collect_sources(
         .map(|f| (f.file_identity.as_str(), f))
         .collect();
     let mut ordered: Vec<_> = evidence.iter().collect();
-    ordered.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-    let allocated = crate::source_allocation::allocate_excerpts_with_priority(
-        &ordered,
-        profile.parse.aggregate_max_chars as usize,
-        &profile.parse.excerpt_priority_paths,
-    );
-    ordered
+    let is_ocr =
+        |item: &ContextFileEvidence| item.parser_backend == crate::parsers::document::OCR_BACKEND;
+    ordered.sort_by(|a, b| (is_ocr(a), &a.relative_path).cmp(&(is_ocr(b), &b.relative_path)));
+    let native = ordered.partition_point(|item| !is_ocr(item));
+    let allocate = |items: &[&ContextFileEvidence], cap| {
+        crate::source_allocation::allocate_excerpts_with_priority(
+            items,
+            cap,
+            &profile.parse.excerpt_priority_paths,
+        )
+    };
+    let budget = profile.parse.aggregate_max_chars as usize;
+    let mut allocated = allocate(&ordered[..native], budget);
+    if native < ordered.len() {
+        // Optional OCR may use only the excerpt budget left by ordinary reading.
+        let used = allocated
+            .iter()
+            .map(|excerpt| excerpt.text.chars().count())
+            .sum::<usize>();
+        allocated.extend(allocate(&ordered[native..], budget.saturating_sub(used)));
+    }
+    let mut sources: Vec<_> = ordered
         .into_iter()
         .zip(allocated)
         .filter_map(|(item, selected)| {
@@ -100,7 +115,34 @@ pub(crate) fn collect_sources(
                 "usable_excerpt"
             };
             audit["primary_status"] = serde_json::json!(status);
+            if selected.ranges.iter().flatten().any(|range| {
+                range.unit == ai_daily_worker_contract::SourceRangeUnit::PdfPage
+                    && range.label.as_deref() == Some(crate::parsers::document::OCR_RANGE_LABEL)
+            }) {
+                audit["text_unverified"] = true.into();
+            }
+            if let Some(
+                reason @ ("pdf_image_ocr_file_quota_exhausted"
+                | "pdf_image_ocr_page_quota_exhausted"
+                | "pdf_image_ocr_timeout"
+                | "pdf_image_ocr_failed"),
+            ) = reason.as_deref()
+            {
+                audit["primary_reason"] = reason.into();
+                audit["secondary_tags"] = serde_json::json!([reason.to_ascii_uppercase()]);
+            }
+            if reason.as_deref() == Some("file_size_policy") {
+                audit["primary_reason"] = serde_json::json!("file_size_policy");
+                audit["max_file_size_bytes"] = profile.execution.max_file_size_bytes.into();
+            } else if item.error.as_ref().is_some_and(|error| {
+                error.message == ai_daily_worker_contract::OFFICE_CONTENT_MISSING_MESSAGE
+            }) {
+                audit["primary_reason"] = serde_json::json!("office_content_missing");
+            }
             audit["excerpt_ranges"] = serde_json::to_value(selected.ranges).unwrap();
+            if !selected.omitted_ranges.is_empty() {
+                audit["omitted_ranges"] = serde_json::json!(selected.omitted_ranges);
+            }
             if audit["content_units"].is_array() {
                 audit["excerpt_block_ends"] = serde_json::json!(selected.block_ends);
                 audit["excerpt_block_context"] = serde_json::json!(selected.block_context);
@@ -115,7 +157,19 @@ pub(crate) fn collect_sources(
                 && !item.truncated
                 && item.evidence_audit.is_some()
             {
-                audit["primary_reason"] = serde_json::json!("empty_document");
+                audit["primary_reason"] =
+                    if item.parser_backend == crate::parsers::document::OCR_BACKEND {
+                        "pdf_image_ocr_empty"
+                    } else {
+                        "empty_document"
+                    }
+                    .into();
+            }
+            if is_ocr(item) {
+                audit["algorithm_versions"]["pdf_image_ocr"] =
+                    crate::parsers::document::OCR_BACKEND.into();
+                audit["algorithm_versions"]["parser_content_identity"] =
+                    crate::PARSER_CONTENT_IDENTITY.into();
             }
             limits["evidence_audit"] = audit;
             Some(ScanSource {
@@ -146,7 +200,11 @@ pub(crate) fn collect_sources(
                     }),
             })
         })
-        .collect()
+        .collect();
+    if native < evidence.len() {
+        sources.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
+    }
+    sources
 }
 
 /// Snapshot reuse is allowed only while its structured parse entries survive.
@@ -154,6 +212,7 @@ pub(crate) fn collect_sources(
 pub(crate) fn snapshot_sources(
     store: &ScannerStore,
     artifact: &ArtifactDraft,
+    page_audits: &std::collections::BTreeMap<String, ai_daily_scanner_contract::PdfPageAudit>,
     discovery: &[DiscoveredFileOut],
     profile: &NormalizedScannerSettings,
 ) -> Option<Vec<ScanSource>> {
@@ -164,6 +223,19 @@ pub(crate) fn snapshot_sources(
     let mut evidence = Vec::new();
     for row in &artifact.file_rows {
         let file = files.get(row.file_identity.as_str())?;
+        if row.parser_backend == crate::parsers::document::OCR_BACKEND {
+            // Reclassify if retention removed the proof needed to replay this OCR result.
+            let classifier = row.classifier.as_ref()?;
+            if classifier.status
+                != ai_daily_scanner_contract::PdfClassificationStatus::NoTextInParseWindow
+                || classifier.page_count != classifier.result_examined_pages
+                || !page_audits
+                    .get(&row.file_identity)?
+                    .all_pages_are_images(classifier.page_count?)
+            {
+                return None;
+            }
+        }
         let (content, evidence_audit) = if row.parser_backend == "pdf_metadata_v2" {
             (String::new(), None)
         } else if row.parse_status == ParseStatus::Success {
@@ -179,7 +251,11 @@ pub(crate) fn snapshot_sources(
                 .ok()?
                 .decode_payload(crate::store::cache::PARSE_CACHE_PAYLOAD_VERSION)
             {
-                CacheLookup::Fresh(entry) if entry.content_sha256 == row.content_sha256 => {
+                CacheLookup::Fresh(entry)
+                    if entry.content_sha256 == row.content_sha256
+                        && entry.parser_backend == row.parser_backend
+                        && entry.worker_lane == row.worker_lane =>
+                {
                     (entry.content, entry.evidence_audit)
                 }
                 _ => return None,
@@ -243,6 +319,9 @@ pub(crate) fn fingerprint_sources(
                 audit["usable_chars"] = serde_json::json!(0);
                 audit["content_units"] = serde_json::json!([]);
                 audit["excerpt_ranges"] = serde_json::json!([]);
+                if let Some(fields) = audit.as_object_mut() {
+                    fields.remove("omitted_ranges");
+                }
                 audit["excerpt_block_ends"] = serde_json::json!([]);
                 audit["excerpt_block_context"] = serde_json::json!([]);
                 audit["primary_status"] = serde_json::json!("parse_failed");
@@ -302,4 +381,51 @@ fn bounded_content_hash(
             .map(|byte| format!("{byte:02x}"))
             .collect(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn short_text_audit_drops_omitted_ranges_when_source_verification_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = ScanSource {
+            source_id: "synthetic".into(),
+            relative_path: "note.md".into(),
+            extension: ".md".into(),
+            size_bytes: 24,
+            modified_at_utc: Utc::now().to_rfc3339(),
+            observed_at_utc: Utc::now().to_rfc3339(),
+            content_sha256: None,
+            excerpt_sha256: crate::store::sha256_hex(b"fact"),
+            excerpt: "fact".into(),
+            parser_backend: "light_text_v2".into(),
+            worker_lane: AuditWorkerLane::RustCore,
+            parse_status: ParseStatus::Success,
+            parse_truncated: true,
+            excerpt_truncated: false,
+            coverage_limits: json!({"evidence_audit":{"omitted_ranges":[
+                {"unit":"byte","start":4,"end":24,"label":"unread"}]}}),
+            reason: None,
+            absolute_path: dir.path().join("note.md").to_string_lossy().into_owned(),
+            guard: None,
+        };
+        fingerprint_sources(
+            std::slice::from_mut(&mut source),
+            dir.path(),
+            &SourceGuardObserver::default(),
+            100,
+            Instant::now(),
+        );
+        assert_eq!(source.parse_status, ParseStatus::Error);
+        assert_eq!(
+            source.coverage_limits["evidence_audit"]["primary_status"],
+            "parse_failed"
+        );
+        assert!(source.coverage_limits["evidence_audit"]
+            .get("omitted_ranges")
+            .is_none());
+    }
 }

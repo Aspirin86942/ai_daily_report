@@ -164,8 +164,28 @@ fn personal_scan_configuration_expands_file_budget_and_keeps_scan_deadline() {
         fs::write(&path, settings.to_string()).unwrap();
         let config = AppConfig::load_with_env(dir.path(), None, &BTreeMap::new()).unwrap();
         assert_eq!(config.scanner.total_max_chars, Some(expected));
-        assert_eq!(config.scanner.max_workers, Some(1));
+        assert_eq!(config.scanner.max_workers, Some(2));
         assert_eq!(config.scanner.total_deadline_ms, Some(120_000));
+    }
+}
+
+#[test]
+fn personal_scan_respects_one_or_two_workers_and_a_shorter_deadline() {
+    let (dir, _) = setup();
+    for (workers, expected) in [(1, 1), (2, 2), (9, 2)] {
+        let env = BTreeMap::from([
+            (
+                "DAILY_REPORT_SCANNER__MAX_WORKERS".into(),
+                workers.to_string(),
+            ),
+            (
+                "DAILY_REPORT_SCANNER__TOTAL_DEADLINE_MS".into(),
+                "30000".into(),
+            ),
+        ]);
+        let config = AppConfig::load_with_env(dir.path(), None, &env).unwrap();
+        assert_eq!(config.scanner.max_workers, Some(expected));
+        assert_eq!(config.scanner.total_deadline_ms, Some(30_000));
     }
 }
 

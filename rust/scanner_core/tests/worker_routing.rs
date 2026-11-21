@@ -1,14 +1,15 @@
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::Duration;
 
+use ai_daily_scanner_contract::SourceGuardKind;
 use ai_daily_scanner_contract::{ErrorCode, ReportMode, ScannerSettings};
+use ai_daily_scanner_core::admission::{ClassificationPlan, PlanAction, PlanCandidate};
 use ai_daily_scanner_core::classifier::ParserRoute;
 use ai_daily_scanner_core::config::normalize_scanner_settings;
 use ai_daily_scanner_core::fallback::FailureClass;
 use ai_daily_scanner_core::parsers::{register_worker, register_worker_pair, WorkerCommand};
-use ai_daily_scanner_core::planner::{plan_candidates, PlanAction};
 use ai_daily_worker_contract::WorkerKind;
 
 #[test]
@@ -52,40 +53,22 @@ fn office_and_pdf_worker_handshakes_overlap() {
 
 #[test]
 fn explicitly_enabled_legacy_office_routes_are_planned_for_office_worker() {
-    let Some(python) = pdf_worker_path() else {
-        return;
-    };
-    let project_root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .canonicalize()
-        .expect("project root should exist");
-    let _ = python;
     let profile = legacy_office_profile();
-    let fixtures = project_root.join("tests/fixtures/worker_documents");
-    let candidates = [
-        ("legacy_sample.xls", ".xls", "rust_xls_calamine_v3"),
-        ("legacy_sample.doc", ".doc", "rust_legacy_office_v3"),
-        ("legacy_sample.ppt", ".ppt", "rust_legacy_office_v3"),
-    ]
-    .into_iter()
-    .map(|(name, extension, _)| discovered_file_with_extension(&fixtures.join(name), extension))
-    .collect::<Vec<_>>();
-    let planned = plan_candidates(candidates, &profile);
-    assert_eq!(planned.len(), 3);
-    let action_by_extension = planned
-        .iter()
-        .map(|planned| (planned.file.extension.as_str(), &planned.action))
-        .collect::<std::collections::HashMap<_, _>>();
-    assert!(matches!(
-        action_by_extension[".xls"],
-        PlanAction::Parse(ParserRoute::RustXls)
-    ));
-    for extension in [".doc", ".ppt"] {
-        assert!(matches!(
-            action_by_extension[extension],
-            PlanAction::Parse(ParserRoute::RustLegacyOffice)
-        ));
+    for (extension, expected) in [
+        (".xls", ParserRoute::RustXls),
+        (".doc", ParserRoute::RustLegacyOffice),
+        (".ppt", ParserRoute::RustLegacyOffice),
+    ] {
+        let name = format!("legacy_sample{extension}");
+        let file = PlanCandidate {
+            file_identity: name.clone(),
+            relative_path: name,
+            extension: extension.into(),
+            size_bytes: 10,
+            source_guard_kind: SourceGuardKind::ContentSha256V1,
+        };
+        let plans = ClassificationPlan::build(vec![file], &profile, 0);
+        assert_eq!(plans[0].action, PlanAction::Admit { route: expected });
     }
 }
 
@@ -158,33 +141,6 @@ fn legacy_office_profile() -> ai_daily_scanner_contract::NormalizedScannerSettin
     }))
     .expect("legacy profile should decode");
     normalize_scanner_settings(&raw, ReportMode::Daily).expect("legacy profile should normalize")
-}
-
-fn discovered_file_with_extension(
-    path: &Path,
-    extension: &str,
-) -> ai_daily_scanner_core::discovery::DiscoveredFileOut {
-    let metadata = fs::metadata(path).expect("fixture metadata should exist");
-    ai_daily_scanner_core::discovery::DiscoveredFileOut {
-        file_identity: path.to_string_lossy().into_owned(),
-        path: path.to_string_lossy().into_owned(),
-        extension: extension.to_string(),
-        modified_at: "2026-07-16T00:00:00+08:00".to_string(),
-        size_bytes: metadata.len(),
-        source_version: source_version(path),
-        source_guard_kind: None,
-        source_guard_sha256: None,
-    }
-}
-
-fn source_version(path: &Path) -> String {
-    let metadata = fs::metadata(path).expect("fixture metadata should exist");
-    let modified = metadata
-        .modified()
-        .expect("modified time should exist")
-        .duration_since(UNIX_EPOCH)
-        .expect("modified time should follow epoch");
-    ai_daily_scanner_core::discovery::build_source_version(modified.as_nanos(), metadata.len())
 }
 
 fn pdf_worker_path() -> Option<PathBuf> {

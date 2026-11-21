@@ -15,8 +15,9 @@
 
 use crate::budget_model::{ContextBudgetModel, RouteHint, RouteKind};
 use ai_daily_scanner_contract::{
-    NormalizedScannerSettings, PdfClassificationStatus, SourceGuardKind,
+    NormalizedScannerSettings, PdfClassificationAuditV1, PdfClassificationStatus, SourceGuardKind,
 };
+use ai_daily_worker_contract::OCR_PAGES_PER_FILE;
 use std::collections::BTreeMap;
 
 /// Frozen semantic/policy NotParsed reasons (spec Part 2.1). Omit action, no
@@ -26,6 +27,8 @@ pub enum NotParsedReason {
     SemanticFileQuotaExhausted,
     PdfClassificationPageQuotaExhausted,
     PdfTextExtractionQuotaExhausted,
+    PdfImageOcrFileQuotaExhausted,
+    PdfImageOcrPageQuotaExhausted,
     GlobalContextBudgetExceeded,
     FileSizePolicy,
     LegacyExtensionDisabled,
@@ -37,6 +40,8 @@ impl NotParsedReason {
             Self::SemanticFileQuotaExhausted => "semantic_file_quota_exhausted",
             Self::PdfClassificationPageQuotaExhausted => "pdf_classification_page_quota_exhausted",
             Self::PdfTextExtractionQuotaExhausted => "pdf_text_extraction_quota_exhausted",
+            Self::PdfImageOcrFileQuotaExhausted => "pdf_image_ocr_file_quota_exhausted",
+            Self::PdfImageOcrPageQuotaExhausted => "pdf_image_ocr_page_quota_exhausted",
             Self::GlobalContextBudgetExceeded => "global_context_budget_exceeded",
             Self::FileSizePolicy => "file_size_policy",
             Self::LegacyExtensionDisabled => "legacy_extension_disabled",
@@ -332,7 +337,7 @@ impl ContentAdmissionPlan {
         for plan in classified {
             let (action, reserved) = match &plan.action {
                 PlanAction::Admit { route } => {
-                    let hint = route_hint(plan, *route, profile);
+                    let hint = route_hint(&plan.relative_path, &plan.extension, *route, profile);
                     let delta = model.reserved_delta(&hint, None);
                     let outcome = match plan.pdf_classification {
                         PdfClassificationPlan::NotPdf => {
@@ -375,6 +380,73 @@ impl ContentAdmissionPlan {
             });
         }
         decisions
+    }
+
+    /// After ordinary parses and refill, upgrade only admitted metadata drafts.
+    /// All OCR reservations are made before cache lookup or worker dispatch.
+    pub(crate) fn admit_image_ocr(
+        admission: &mut [AdmissionDecision],
+        profile: &NormalizedScannerSettings,
+        model: &ContextBudgetModel,
+        audits: &BTreeMap<String, PdfClassificationAuditV1>,
+    ) -> Vec<AdmissionDecision> {
+        let Some(settings) = profile
+            .parse
+            .pdf
+            .image_ocr
+            .filter(|settings| settings.enabled)
+        else {
+            return Vec::new();
+        };
+        let mut files_left = settings.max_files;
+        let mut pages_left = settings.max_pages;
+        let mut reserved: u64 = admission
+            .iter()
+            .map(|decision| decision.reserved_chars)
+            .sum();
+        let mut selected = Vec::new();
+        for decision in admission {
+            if !matches!(
+                decision.action,
+                PlanAction::Admit {
+                    route: RouteKind::Pdf
+                }
+            ) {
+                continue;
+            }
+            let Some(page_count) = audits
+                .get(&decision.file_identity)
+                .and_then(PdfClassificationAuditV1::image_only_page_count)
+            else {
+                continue;
+            };
+            let max_pages = pages_left.min(OCR_PAGES_PER_FILE).min(page_count);
+            let route = RouteKind::PdfImageOcr {
+                page_count,
+                max_pages,
+            };
+            let hint = route_hint(&decision.relative_path, &decision.extension, route, profile);
+            let delta = model.reserved_delta(&hint, None);
+            reserved -= decision.reserved_chars;
+            let reason = if files_left == 0 {
+                NotParsedReason::PdfImageOcrFileQuotaExhausted
+            } else if max_pages == 0 {
+                NotParsedReason::PdfImageOcrPageQuotaExhausted
+            } else if !model.admits(reserved, delta) {
+                NotParsedReason::GlobalContextBudgetExceeded
+            } else {
+                files_left -= 1;
+                pages_left -= max_pages;
+                reserved += delta;
+                decision.action = PlanAction::Admit { route };
+                decision.reserved_chars = delta;
+                selected.push(decision.clone());
+                continue;
+            };
+            decision.action = PlanAction::NotParsed { reason };
+            decision.reserved_chars = 0;
+        }
+        selected
     }
 }
 
@@ -449,21 +521,21 @@ fn admit_pdf(
 }
 
 fn route_hint(
-    plan: &ClassifiedPlan,
+    relative_path: &str,
+    extension: &str,
     route: RouteKind,
     profile: &NormalizedScannerSettings,
 ) -> RouteHint {
     RouteHint {
-        relative_path: plan.relative_path.clone(),
-        extension: plan.extension.clone(),
+        relative_path: relative_path.to_owned(),
+        extension: extension.to_owned(),
         backend: route.backend().to_string(),
         worker_lane: route.worker_lane().to_string(),
         max_excerpt_chars: route.max_excerpt_chars(profile),
     }
 }
 
-/// v2 route classification (mirror of the v1 `classify_candidate` semantics,
-/// frozen for the admission plans).
+/// How the admission plan records the selected parser or a coverage gap.
 enum RouteDecision {
     Route(RouteKind),
     PolicyNotParsed(NotParsedReason),
@@ -477,32 +549,51 @@ fn classify_candidate_v2(
     if file.size_bytes > profile.execution.max_file_size_bytes {
         return RouteDecision::PolicyNotParsed(NotParsedReason::FileSizePolicy);
     }
-    let route = match file.extension.as_str() {
-        ".txt" | ".md" | ".csv" | ".json" | ".log" => Some(RouteKind::LightText),
-        ".xlsx" => office_route(&profile.parse.office.primary_backend, RouteKind::RustXlsx),
-        ".docx" | ".pptx" => {
-            office_route(&profile.parse.office.primary_backend, RouteKind::RustOffice)
+    match crate::classifier::classify_extension(&file.extension, profile) {
+        Ok(route) => RouteDecision::Route(route),
+        Err(crate::classifier::ClassificationError::LegacyExtensionDisabled) => {
+            RouteDecision::PolicyNotParsed(NotParsedReason::LegacyExtensionDisabled)
         }
-        ".xls" => Some(RouteKind::RustXls),
-        ".pdf" if profile.parse.pdf.backend == "rust_pdfium_v3" => Some(RouteKind::Pdf),
-        ".pdf" => None,
-        ".doc" | ".ppt" if profile.parse.office.legacy_extensions_enabled => {
-            Some(RouteKind::RustLegacyOffice)
-        }
-        ".doc" | ".ppt" => {
-            return RouteDecision::PolicyNotParsed(NotParsedReason::LegacyExtensionDisabled);
-        }
-        _ => None,
-    };
-    match route {
-        Some(route) => RouteDecision::Route(route),
-        None => RouteDecision::InvariantReject(RejectReason::ProfileRouteInvariant),
+        Err(_) => RouteDecision::InvariantReject(RejectReason::ProfileRouteInvariant),
     }
 }
 
-fn office_route(primary_backend: &str, rust_route: RouteKind) -> Option<RouteKind> {
-    match primary_backend {
-        "rust_office_oxide_v2" => Some(rust_route),
-        _ => None,
+#[cfg(test)]
+mod image_ocr_tests {
+    use ai_daily_scanner_contract::{PdfPageAudit, PdfPageObservation};
+
+    #[test]
+    fn a_whole_image_document_requires_distinct_positive_observations_for_every_page() {
+        let observed = |numbers: &[u64], has_text, has_image| PdfPageAudit {
+            policy_version: "pdf_text_presence_v2".into(),
+            checked_pages: numbers.to_vec(),
+            observations: Some(
+                numbers
+                    .iter()
+                    .map(|&page| PdfPageObservation {
+                        page,
+                        has_text,
+                        has_image,
+                    })
+                    .collect(),
+            ),
+        };
+        let full = observed(&[1, 2, 4, 3], false, Some(true));
+        assert!(full.all_pages_are_images(4));
+        assert!(!full.all_pages_are_images(5));
+        assert!(!observed(&[], false, Some(true)).all_pages_are_images(0));
+        for audit in [
+            observed(&[1, 1], false, Some(true)),
+            observed(&[1, 3], false, Some(true)),
+            observed(&[1, 2], false, Some(false)),
+            observed(&[1, 2], false, None),
+            observed(&[1, 2], true, Some(true)),
+            PdfPageAudit {
+                observations: None,
+                ..observed(&[1, 2], false, Some(true))
+            },
+        ] {
+            assert!(!audit.all_pages_are_images(2));
+        }
     }
 }

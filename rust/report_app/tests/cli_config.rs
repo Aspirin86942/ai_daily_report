@@ -1,9 +1,9 @@
 use ai_daily_report::{
     cli::{Cli, Command},
     config::AppConfig,
-    types::{self, Period, ReportSource, RunContext},
+    types::{self, Period, RunContext},
 };
-use chrono::{DateTime, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, NaiveTime, Utc};
 use clap::{CommandFactory, Parser};
 use std::{collections::BTreeMap, fs};
 
@@ -116,17 +116,13 @@ fn shanghai_date_and_scheduled_boundary_match_python() {
 
 #[test]
 fn periods_cover_iso_year_and_leap_month_without_scan_side_effects() {
-    let today = NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
-    let week = Period::weekly(today, Some("2026-W01"), ReportSource::Db).unwrap();
+    let week = Period::weekly("2026-W01").unwrap();
     assert_eq!(week.start.to_string(), "2025-12-29");
     assert_eq!(week.end.to_string(), "2026-01-04");
-    assert!(Period::weekly(today, Some("中中ab"), ReportSource::Db).is_err());
-    assert!(Period::weekly(today, Some("2025-W53"), ReportSource::Db).is_err());
+    assert!(Period::weekly("中中ab").is_err());
+    assert!(Period::weekly("2025-W53").is_err());
     assert_eq!(
-        Period::monthly(today, Some("2024-02"), ReportSource::Db)
-            .unwrap()
-            .end
-            .to_string(),
+        Period::monthly("2024-02").unwrap().end.to_string(),
         "2024-02-29"
     );
 }
@@ -159,7 +155,7 @@ fn merge_precedence_and_scanner_replacement_are_explicit() {
     assert_eq!(config.api_key(), "synthetic-env-token");
     assert!(config.config_check().get("enforce_model_budgets").is_none());
     assert_eq!(config.scanner.allowed_extensions.unwrap(), [".txt"]);
-    assert_eq!(config.scanner.max_workers, Some(1));
+    assert_eq!(config.scanner.max_workers, Some(2));
 }
 
 #[test]

@@ -1,4 +1,4 @@
-use super::{query, reports::read_run, timestamp, RunRecord, Store};
+use super::{reports::read_run, timestamp, RunRecord, Store};
 use crate::{reports::period, types::RunPhase, ReportError};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -64,11 +64,6 @@ impl Store {
             self.current(&run.target_date)
         }
     }
-    pub fn pending_period(&self, kind: &str, target: &str) -> Result<Vec<RunRecord>, ReportError> {
-        table(kind)?;
-        query(&self.connection()?,"SELECT * FROM report_runs WHERE run_kind=? AND target_date=? AND phase IN ('prepared','generating','db_committed') AND status!='succeeded' AND COALESCE(error_code,'')!='RUN_SUPERSEDED' ORDER BY CASE WHEN phase='db_committed' THEN 0 ELSE 1 END,created_at,run_id",params![kind,target])?.into_iter().map(|v|serde_json::from_value(v).map_err(Into::into)).collect()
-    }
-
     pub(super) fn mark_period_published(
         &self,
         id: &str,
@@ -97,11 +92,7 @@ impl Store {
             ));
         }
         let (table, column) = table(&run.run_kind)?;
-        let fields = period::fields(if run.run_kind == "weekly" {
-            crate::model::plan::StepKind::Weekly
-        } else {
-            crate::model::plan::StepKind::Monthly
-        });
+        let fields = period::fields(&run.run_kind)?;
         let mut columns = fields.join(",");
         columns.push_str(",raw_json,updated_at");
         let marks = vec!["?"; fields.len() + 2].join(",");

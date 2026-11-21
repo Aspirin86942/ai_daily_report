@@ -3,10 +3,10 @@ use ai_daily_discovery::{
     DiscoveryReport, DiscoveryRequest,
 };
 use ai_daily_scanner_contract::{
-    AuditWorkerLane, BuildContextRequest, CacheMissReason, CacheStatus, ContextAction,
-    ContextDecision, ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck,
-    DoctorCheckStatus, DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, Nullable,
-    ParseStatus, RunStatus, StageMetric, StageName,
+    BuildContextRequest, CacheMissReason, CacheStatus, ContextAction, ContextDecision,
+    ContextEnvelope, ContextSummary, Diagnostic, DiagnosticStage, DoctorCheck, DoctorCheckStatus,
+    DoctorRequest, DoctorResponse, EngineStatus, ErrorCode, Nullable, ParseStatus, RunStatus,
+    StageMetric, StageName,
 };
 use chrono::NaiveDate;
 use std::fs::{self, OpenOptions};
@@ -244,25 +244,6 @@ pub(crate) fn build_context_command(
             );
         }
     };
-    let normalized_settings =
-        match normalize_scanner_settings(&request.scanner_settings, request.report_mode) {
-            Ok(profile) => profile,
-            Err(message) => {
-                return build_error_output(
-                    request,
-                    &version,
-                    diagnostic(
-                        ErrorCode::InvalidRequest,
-                        message,
-                        false,
-                        DiagnosticStage::Request,
-                    ),
-                    Vec::new(),
-                    empty_summary(),
-                    None,
-                );
-            }
-        };
     let canonical = match ScannerStore::canonicalize_request(request, &profile) {
         Ok(canonical) => canonical,
         Err(error) => {
@@ -329,7 +310,7 @@ pub(crate) fn build_context_command(
     };
     // The only monotonic origin for this run is created immediately after the
     // begin_run COMMIT. Handshake/discovery time must consume this same budget.
-    let mut timing = match ActiveRunTiming::start(normalized_settings.total_deadline_ms) {
+    let mut timing = match ActiveRunTiming::start(profile.total_deadline_ms) {
         Ok(timing) => timing,
         Err(message) => {
             let abandon_error = current_time_millis()
@@ -364,7 +345,6 @@ pub(crate) fn build_context_command(
         request,
         &version,
         &profile,
-        &normalized_settings,
         &work_dir,
         store,
         worker_pools,
@@ -381,7 +361,6 @@ fn execute_active_build(
     request: &BuildContextRequest,
     version: &EngineIdentity,
     profile: &ai_daily_scanner_contract::NormalizedScannerSettings,
-    normalized_settings: &ai_daily_scanner_contract::NormalizedScannerSettings,
     work_dir: &Path,
     store: &mut ScannerStore,
     worker_pools: &mut ScannerWorkerPools,
@@ -392,9 +371,8 @@ fn execute_active_build(
     sources: &mut Vec<crate::sources::ScanSource>,
 ) -> ScannerOperation<ContextEnvelope> {
     let rss_tracker = WorkerRssTracker::default();
-    // ---- bounded parallel worker handshakes (spec Solution run.rs order) ----
     // A Scanner owns the verified worker identities with its long-lived pools.
-    // The first run performs the parallel preflight; later runs reuse those
+    // The first run preflights within the worker limit; later runs reuse those
     // identities and each session still validates its own hello on startup.
     let office_command = office::worker_command(&request.adapters);
     let pdf_command = document::worker_command(&request.adapters);
@@ -403,8 +381,6 @@ fn execute_active_build(
     {
         ((Ok(office), Ok(pdf)), 0)
     } else {
-        // One bounded parallel hello batch validates both worker-v3
-        // implementations. Pools start lazily on the first operation.
         let remaining_handshake_ms = timing.remaining_work_ms();
         if remaining_handshake_ms == 0 {
             return finish_active_error(
@@ -429,6 +405,7 @@ fn execute_active_build(
             &pdf_command,
             handshake_timeout,
             &rss_tracker,
+            profile.execution.max_workers,
         );
         (pair, elapsed_ms(handshake_started))
     };
@@ -583,7 +560,7 @@ fn execute_active_build(
     let discovery_duration_ms = elapsed_ms(discovery_started);
 
     // ---- assemble + execute the deep-module scheduler ----
-    let params = crate::session::SessionParams::from_settings(normalized_settings);
+    let params = crate::session::SessionParams::from_settings(profile);
     let (office_pool, pdf_pool) = worker_pools.resolve(
         office_command,
         office_worker.clone(),
@@ -787,7 +764,7 @@ fn execute_active_build(
             .classifier_build
             .clone()
             .unwrap_or_else(|| "0".repeat(64)),
-        profile_hash: match crate::store::classifier_profile_hash(normalized_settings) {
+        profile_hash: match crate::store::classifier_profile_hash(profile) {
             Ok(hash) => hash,
             Err(message) => {
                 return finish_active_error(
@@ -815,7 +792,7 @@ fn execute_active_build(
         request,
         &discovery.files,
         &discovery.issues,
-        normalized_settings,
+        profile,
         &version.engine_build,
         &worker_identities,
         &classifier_identity,
@@ -865,26 +842,30 @@ fn execute_active_build(
         };
         match hit {
             Some(hit) => {
-                let artifact = match store.load_artifact(hit.artifact_id) {
-                    Ok(artifact) => artifact,
-                    Err(error) => {
-                        return finish_active_error(
-                            request,
-                            version,
-                            store,
-                            active,
-                            heartbeat,
-                            warnings,
-                            error.diagnostic(DiagnosticStage::Cache),
-                            elapsed_summary(started_at),
-                            worker_handshake_ms,
-                            &rss_tracker,
-                            timing,
-                        );
-                    }
-                };
+                let (artifact, pages) =
+                    match store.load_artifact(hit.artifact_id).and_then(|artifact| {
+                        let pages = store.snapshot_page_audits(&hit, &artifact)?;
+                        Ok((artifact, pages))
+                    }) {
+                        Ok(value) => value,
+                        Err(error) => {
+                            return finish_active_error(
+                                request,
+                                version,
+                                store,
+                                active,
+                                heartbeat,
+                                warnings,
+                                error.diagnostic(DiagnosticStage::Cache),
+                                elapsed_summary(started_at),
+                                worker_handshake_ms,
+                                &rss_tracker,
+                                timing,
+                            );
+                        }
+                    };
                 artifact_guards_are_current(&artifact, &discovery.files, &timing.source_guards)
-                    .then_some((hit, artifact))
+                    .then_some((hit, artifact, pages))
             }
             None => None,
         }
@@ -892,21 +873,23 @@ fn execute_active_build(
         None
     };
     let snapshot_lookup_ms = elapsed_ms(snapshot_lookup_started);
-    let verified_hit = verified_hit.and_then(|(hit, artifact)| {
-        match crate::sources::snapshot_sources(store, &artifact, &discovery.files, profile) {
+    let verified_hit = verified_hit.and_then(|(hit, artifact, pages)| {
+        match crate::sources::snapshot_sources(store, &artifact, &pages, &discovery.files, profile)
+        {
             Some(structured) => {
                 *sources = structured;
-                Some((hit, artifact))
+                Some((hit, artifact, pages))
             }
             None if profile.parse.cache_payload_version == 0
+                && profile.parse.pdf.image_ocr.is_none()
                 && request.window_start_utc.is_none() =>
             {
-                Some((hit, artifact))
+                Some((hit, artifact, pages))
             }
             None => None,
         }
     });
-    if let Some((hit, artifact)) = verified_hit {
+    if let Some((hit, artifact, pages)) = verified_hit {
         crate::sources::fingerprint_sources(
             sources,
             work_dir,
@@ -926,6 +909,7 @@ fn execute_active_build(
             &classifier_identity,
             hit,
             artifact,
+            pages,
             discovery_duration_ms,
             inventory_prepare_duration_ms,
             snapshot_lookup_ms,
@@ -942,7 +926,7 @@ fn execute_active_build(
         work_dir.to_string_lossy().into_owned(),
         discovery.files,
         discovery.issues,
-        normalized_settings.clone(),
+        profile.clone(),
         worker_identities.clone(),
         version.engine_version.clone(),
         version.engine_build.clone(),
@@ -1533,6 +1517,7 @@ fn finalize_snapshot_hit(
     classifier_identity: &ClassifierIdentity,
     hit: SnapshotHit,
     artifact: ArtifactDraft,
+    mut pages: std::collections::BTreeMap<String, ai_daily_scanner_contract::PdfPageAudit>,
     discovery_duration_ms: u64,
     inventory_prepare_duration_ms: u64,
     snapshot_lookup_ms: u64,
@@ -1543,46 +1528,8 @@ fn finalize_snapshot_hit(
 ) -> ScannerOperation<ContextEnvelope> {
     let mut file_results = snapshot_file_results(&artifact, Some(classifier_identity));
     for record in &mut file_results {
-        let Some(audit) = record.pdf_classification.as_mut() else {
-            continue;
-        };
-        let Some(row) = artifact
-            .file_rows
-            .iter()
-            .find(|r| r.file_identity == record.file_identity)
-        else {
-            continue;
-        };
-        let (Some(kind), Some(hash)) = (
-            row.source_guard_kind.as_deref(),
-            row.source_guard_sha256.as_deref(),
-        ) else {
-            continue;
-        };
-        match store.lookup_classification_cache(
-            &row.file_identity,
-            &row.legacy_source_version,
-            kind,
-            hash,
-            &audit.classifier_profile_hash,
-            &audit.classifier_build,
-            true,
-        ) {
-            Ok(crate::store::ClassificationCacheLookup::Fresh(entry)) => {
-                audit.page_audit = entry.page_audit
-            }
-            Ok(crate::store::ClassificationCacheLookup::Miss(_)) => {}
-            Err(error) => {
-                heartbeat.stop();
-                return build_error_output(
-                    request,
-                    version,
-                    error.diagnostic(DiagnosticStage::Cache),
-                    Vec::new(),
-                    empty_summary(),
-                    Some(active.scan_run_id()),
-                );
-            }
+        if let Some(audit) = record.pdf_classification.as_mut() {
+            audit.page_audit = pages.remove(&record.file_identity);
         }
     }
     let decisions: Vec<ContextDecisionRecord> = artifact
@@ -1881,9 +1828,7 @@ fn artifact_file_rows(outcome: &BudgetedScanOutcome) -> Vec<ArtifactFileRow> {
                     .map(|record| record.parser_backend.clone())
                     .unwrap_or_else(|| "not_parsed".to_string()),
                 worker_lane: result
-                    .map(|record| {
-                        crate::store::inventory::worker_lane_text(record.worker_lane).to_string()
-                    })
+                    .map(|record| record.worker_lane.as_str().to_owned())
                     .unwrap_or_else(|| "not_parsed".to_string()),
                 truncated: result.map(|record| record.truncated).unwrap_or(false),
                 content_sha256: result
@@ -1950,7 +1895,7 @@ fn snapshot_file_results(
             cache_miss_reason: CacheMissReason::None,
             parse_status: row.parse_status,
             parser_backend: row.parser_backend.clone(),
-            worker_lane: snapshot_worker_lane(&row.worker_lane),
+            worker_lane: crate::scheduler::parse_worker_lane(&row.worker_lane),
             truncated: row.truncated,
             content_sha256: row.content_sha256.clone(),
             primary_duration_ms: 0,
@@ -2020,15 +1965,6 @@ fn snapshot_classification_audit(
         classifier_build: provenance.classifier_build.clone(),
         classifier_profile_hash: provenance.classifier_profile_hash.clone(),
     })
-}
-
-fn snapshot_worker_lane(lane: &str) -> AuditWorkerLane {
-    match lane {
-        "rust_core" => AuditWorkerLane::RustCore,
-        "rust_office_process_v3" => AuditWorkerLane::RustOfficeProcessV3,
-        "rust_pdf_process_v3" => AuditWorkerLane::RustPdfProcessV3,
-        _ => AuditWorkerLane::NotParsed,
-    }
 }
 
 fn validate_build_work_dir(work_dir: &str) -> Result<PathBuf, Diagnostic> {

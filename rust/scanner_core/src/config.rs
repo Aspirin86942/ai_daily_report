@@ -68,11 +68,6 @@ pub fn normalize_scanner_settings(
             raw.pdf_max_pages.unwrap_or(5),
         )
     };
-    let (profile_name, per_file_max_chars) = match report_mode {
-        ReportMode::Daily => ("daily_balanced_v1", 100_000),
-        ReportMode::Weekly => ("weekly_balanced_v1", 100_000),
-        ReportMode::Monthly => ("monthly_balanced_v1", 100_000),
-    };
     let global_max_chars = raw.context_max_chars.unwrap_or(500_000);
     let max_file_size_bytes = raw
         .max_file_size_mb
@@ -161,6 +156,7 @@ pub fn normalize_scanner_settings(
                 document_excerpt_max_chars,
             },
             pdf: PdfParseProfile {
+                image_ocr: raw.pdf_image_ocr.filter(|ocr| ocr.enabled),
                 selection_policy_version: CLASSIFIER_POLICY_VERSION.to_string(),
                 backend: "rust_pdfium_v3".to_string(),
                 max_pages: pdf_max_pages,
@@ -168,9 +164,9 @@ pub fn normalize_scanner_settings(
             },
         },
         context: ContextProfile {
-            profile_name: profile_name.to_string(),
+            profile_name: report_mode.compression_profile().as_str().to_owned(),
             global_max_chars,
-            per_file_max_chars,
+            per_file_max_chars: ai_daily_scanner_contract::CONTEXT_PER_FILE_MAX_CHARS,
             small_file_max_bytes: 65_536,
             medium_file_max_bytes: 1_048_576,
             large_file_max_bytes: 10_485_760,

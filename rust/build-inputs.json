@@ -12,7 +12,18 @@
     "archive_license_paths": ["LICENSE", "licenses/"],
     "license": "BSD-3-Clause and bundled third-party notices"
   },
+  "image_ocr": {
+    "model": "PP-OCRv6 Tiny FP32",
+    "license": "Apache-2.0",
+    "source": "https://huggingface.co/byrizki/rusto-models/resolve/34812c324fa258436fbcf1959eaf4ace7af6e5d4/ppocrv6-tiny",
+    "files": [
+      {"name": "det.mnn", "size": 1745176, "sha256": "7d5badf4799718dbe17113b29d75ffcf37e90fc575fcba4e7b7dd1cb641508a1"},
+      {"name": "rec.mnn", "size": 4461484, "sha256": "539ad7adcdc2bc92d824903eba323b19205d1091ef7c2f1c119daf7fcfb5d285"},
+      {"name": "dict.txt", "size": 27156, "sha256": "c5cbe34ef40c29c4df07ed012bf96569cb69a2d2a01a07027e9f13cb832bd9cd"}
+    ]
+  },
   "selected_dependencies": [
+    {"name": "rusto-core", "version": "0.4.1", "license": "MIT", "source": "https://github.com/byrizki/rusto-rs"},
     {"name": "clap", "version": "4.6.7", "license": "MIT OR Apache-2.0", "source": "https://github.com/clap-rs/clap"},
     {"name": "serde-saphyr", "version": "2.0.0", "license": "MIT OR Apache-2.0", "source": "https://github.com/bourumir-wyngs/serde-saphyr"},
     {"name": "reqwest", "version": "0.13.5", "license": "MIT OR Apache-2.0", "source": "https://github.com/seanmonstar/reqwest"},

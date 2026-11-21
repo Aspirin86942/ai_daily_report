@@ -382,20 +382,27 @@ pub(super) fn validate_response(
         .iter()
         .map(|m| m.source.clone())
         .collect();
-    let unverified: BTreeSet<_> = sources
+    let unverified: BTreeMap<_, _> = sources
         .iter()
         .filter(|source| source.unverified())
-        .map(|source| source.source_id.as_str())
+        .map(|source| (source.source_id.as_str(), source))
         .collect();
     for item in &mut response.items {
-        if item.statement_kind == StatementKind::Observed
-            && item
-                .source_ids
-                .iter()
-                .any(|id| unverified.contains(id.as_str()))
-        {
-            // Source certainty bounds the model's claim; the final report still
-            // enforces every source identity and displays the uncertainty label.
+        let mut cited = item
+            .source_ids
+            .iter()
+            .filter_map(|id| unverified.get(id.as_str()));
+        let needs_confirmation = match item.statement_kind {
+            StatementKind::Observed => cited.next().is_some(),
+            // A user note cannot confirm a separate image transcription. Older frozen
+            // inputs predate this backend and keep their original response validation.
+            StatementKind::UserStatement => cited.any(|source| {
+                source.coverage_limits["evidence_audit"]["parser_version"].as_str()
+                    == Some(ai_daily_scanner_contract::OCR_BACKEND)
+            }),
+            StatementKind::Uncertain | StatementKind::Suggestion => false,
+        };
+        if needs_confirmation {
             item.statement_kind = StatementKind::Uncertain;
         }
     }

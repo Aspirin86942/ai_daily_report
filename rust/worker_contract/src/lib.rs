@@ -1,11 +1,13 @@
-//! Shared v3 envelope for crash-isolated scanner workers.
+//! Shared v4 envelope for crash-isolated scanner workers.
 //!
 //! The interface is one hello frame followed by request/response NDJSON pairs.
 //! Request ids, status, diagnostics, and worker identity live only in the
 //! envelope; operation payloads contain domain data and never embed a second
 //! transport protocol.
 
-pub use ai_daily_scanner_contract::{pdf_sample_pages, PdfPageAudit, PdfPageObservation};
+pub use ai_daily_scanner_contract::{
+    pdf_sample_pages, PdfPageAudit, PdfPageObservation, OCR_BACKEND, OCR_RANGE_LABEL,
+};
 use serde::{Deserialize, Serialize};
 
 pub mod archive;
@@ -18,6 +20,11 @@ pub use content_audit::{
 pub const CONTRACT: &str = "ai_daily_worker";
 pub const CONTRACT_VERSION: &str = "ai_daily_worker_v4";
 pub const PROTOCOL_VERSION: u64 = 4;
+pub const OCR_PAGES_PER_FILE: u64 = 3;
+pub const OCR_CHARS_PER_FILE: u64 = 8192;
+pub const OCR_TIMEOUT_MS: u64 = 15_000;
+pub const OFFICE_CONTENT_MISSING_MESSAGE: &str =
+    "Office package contains only metadata and has no document content";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -159,13 +166,19 @@ pub enum ParserLimits {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         selected_pages: Option<Vec<u64>>,
     },
+    #[serde(rename = "pdf_image_ocr")]
+    PdfImageOcr {
+        max_pages: u64,
+        excerpt_max_chars: u64,
+        selected_pages: Vec<u64>,
+    },
 }
 
 impl ParserLimits {
     const fn kind(&self) -> &'static str {
         match self {
             Self::Office { .. } => "office",
-            Self::Pdf { .. } => "pdf",
+            Self::Pdf { .. } | Self::PdfImageOcr { .. } => "pdf",
         }
     }
 
@@ -204,19 +217,38 @@ impl ParserLimits {
                 selected_pages,
             } => {
                 validate_range(*max_pages, 1, 10_000, "max_pages")?;
-                if selected_pages.as_ref().is_some_and(|pages| {
-                    pages.is_empty()
-                        || pages.len() as u64 > *max_pages
-                        || pages.contains(&0)
-                        || pages.iter().collect::<std::collections::HashSet<_>>().len()
-                            != pages.len()
-                }) {
-                    return Err("invalid PDF selected pages".into());
+                if let Some(pages) = selected_pages {
+                    validate_selected_pages(pages, *max_pages)?;
                 }
                 validate_range(*excerpt_max_chars, 1, 10_000_000, "excerpt_max_chars")
             }
+            Self::PdfImageOcr {
+                max_pages,
+                excerpt_max_chars,
+                selected_pages,
+            } => {
+                validate_range(*max_pages, 1, OCR_PAGES_PER_FILE, "max_pages")?;
+                validate_range(
+                    *excerpt_max_chars,
+                    1,
+                    OCR_CHARS_PER_FILE,
+                    "excerpt_max_chars",
+                )?;
+                validate_selected_pages(selected_pages, *max_pages)
+            }
         }
     }
+}
+
+fn validate_selected_pages(pages: &[u64], max_pages: u64) -> Result<(), String> {
+    if pages.is_empty()
+        || pages.len() as u64 > max_pages
+        || pages.contains(&0)
+        || pages.iter().collect::<std::collections::HashSet<_>>().len() != pages.len()
+    {
+        return Err("invalid PDF selected pages".into());
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

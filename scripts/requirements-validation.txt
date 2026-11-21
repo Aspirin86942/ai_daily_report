@@ -1,0 +1,16 @@
+# Python dependencies for verify_rich_facts.py (synthetic Rust acceptance data).
+openpyxl==3.1.5
+pypdf==6.15.0
+python-docx==1.2.0
+python-pptx==1.0.2
+
+# Additional dependencies used by the retained PDF benchmark scripts.
+pdfplumber==0.11.10
+reportlab==4.5.1
+
+# Windows PDF acceptance uses win32api, win32con and win32job.
+pywin32; sys_platform == "win32"
+
+# Optional independent PPTX comparison (--markitdown-python) uses a separate
+# interpreter with markitdown[pptx]==0.1.9. The parser identity and maintenance
+# tests use the Python standard library.

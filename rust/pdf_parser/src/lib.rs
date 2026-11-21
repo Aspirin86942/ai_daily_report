@@ -1,10 +1,17 @@
 use pdfium_render::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeSet, path::Path};
+use std::{
+    collections::BTreeSet,
+    fs::File,
+    io::{self, Read},
+    path::{Path, PathBuf},
+};
 
 mod excerpt;
+mod ocr;
 mod worker;
+pub use ai_daily_worker_contract::OCR_RANGE_LABEL;
 pub use worker::{is_valid_text_char, worker_hello};
 
 pub const BUILD_INPUTS: &str = include_str!("../../build-inputs.json");
@@ -19,6 +26,20 @@ pub enum PdfError {
     Parse(#[from] PdfiumError),
     #[error("PDF_PAGES_INVALID")]
     Pages,
+    #[error("PDF_OCR_PAGE_LIMIT")]
+    OcrLimits,
+    #[error("PDF_OCR_PAGE_NOT_IMAGE_ONLY")]
+    OcrIneligible,
+    #[error("PDF_OCR_UNAVAILABLE")]
+    OcrUnavailable,
+    #[error("PDF_OCR_MODEL_MISSING")]
+    OcrModelMissing,
+    #[error("PDF_OCR_MODEL_MISMATCH")]
+    OcrModelMismatch,
+    #[error("PDF_OCR_TIMEOUT")]
+    OcrTimeout,
+    #[error("PDF_OCR_FAILED")]
+    OcrFailed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,23 +59,30 @@ pub struct PdfText {
 
 pub struct PdfReader {
     pdfium: Pdfium,
+    program_dir: PathBuf,
 }
 
 impl PdfReader {
     /// Bind only the pinned DLL beside this worker. No system-library search.
     pub fn open(program_dir: &Path) -> Result<Self, PdfError> {
-        let library = program_dir.join("pdfium.dll");
+        let library = program_dir.join("pdfium.dll").canonicalize()?;
+        let mut options = File::options();
+        options.read(true);
+        // FILE_SHARE_READ prevents writes and replacement between hashing and loading.
+        #[cfg(windows)]
+        std::os::windows::fs::OpenOptionsExt::share_mode(&mut options, 1);
+        let mut file = options.open(&library)?;
         let expected: serde_json::Value =
             serde_json::from_str(BUILD_INPUTS).expect("validated build manifest");
-        let digest: String = Sha256::digest(std::fs::read(&library)?)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
+        let digest = file_sha256(&mut file)?;
         if Some(digest.as_str()) != expected["pdfium"]["dll_sha256"].as_str() {
             return Err(PdfError::LibraryIdentity);
         }
+        let bindings = Pdfium::bind_to_library(&library)?;
+        drop(file);
         Ok(Self {
-            pdfium: Pdfium::new(Pdfium::bind_to_library(library)?),
+            pdfium: Pdfium::new(bindings),
+            program_dir: program_dir.canonicalize()?,
         })
     }
 
@@ -105,6 +133,23 @@ impl PdfReader {
         }
         Ok((total, false))
     }
+}
+
+fn file_sha256(file: &mut File) -> io::Result<String> {
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        match file.read(&mut buffer) {
+            Ok(0) => return Ok(ai_daily_worker_contract::archive::hex(&hash.finalize())),
+            Ok(read) => hash.update(&buffer[..read]),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    ai_daily_worker_contract::archive::hex(&Sha256::digest(bytes))
 }
 
 fn page_numbers(

@@ -88,13 +88,47 @@ pub(super) fn scan_sources(
         };
         audit.insert("primary_status".into(), json!(status));
         if status == "parse_failed" || status == "not_parsed" {
-            tags.insert("SOURCE_UNAVAILABLE".into());
-            gaps.push(source_gap(
-                &source,
-                "SOURCE_UNAVAILABLE",
-                "parse",
-                "文件未能成功读取或无法确认其稳定版本。",
-            ));
+            let (code, message) = match audit.get("primary_reason").and_then(Value::as_str) {
+                Some("office_content_missing") => (
+                    "OFFICE_CONTENT_MISSING",
+                    "Office 文件仅含包元数据，缺少可提取的文档正文。".to_owned(),
+                ),
+                Some("file_size_policy") => {
+                    let limit = audit
+                        .get("max_file_size_bytes")
+                        .and_then(Value::as_u64)
+                        .map(|n| format!(" {n} 字节"))
+                        .unwrap_or_default();
+                    (
+                        "FILE_SIZE_LIMIT",
+                        format!(
+                            "文件为 {} 字节，超过本次扫描的单文件上限{limit}，未进入解析。",
+                            source.size_bytes
+                        ),
+                    )
+                }
+                Some("pdf_image_ocr_file_quota_exhausted") => (
+                    "OCR_BUDGET",
+                    "已确认整份 PDF 为纯图，本次扫描的识字文件额度已用完。".to_owned(),
+                ),
+                Some("pdf_image_ocr_page_quota_exhausted") => (
+                    "OCR_BUDGET",
+                    "已确认整份 PDF 为纯图，本次扫描的识字页数额度已用完。".to_owned(),
+                ),
+                Some("pdf_image_ocr_timeout") => {
+                    ("OCR_TIMEOUT", "纯图 PDF 的本地识字已到时限。".to_owned())
+                }
+                Some("pdf_image_ocr_failed") => (
+                    "OCR_UNAVAILABLE",
+                    "纯图 PDF 本地识字失败，详见扫描诊断。".to_owned(),
+                ),
+                _ => (
+                    "SOURCE_UNAVAILABLE",
+                    "文件未能成功读取或无法确认其稳定版本。".to_owned(),
+                ),
+            };
+            tags.insert(code.into());
+            gaps.push(source_gap(&source, code, "parse", &message));
         }
         if source.parse_truncated {
             tags.insert("PARSE_BOUNDED".into());
@@ -156,7 +190,9 @@ pub(super) fn scan_sources(
                         tags.insert("PDF_OBSERVED_IMAGE".into());
                     }
                     if classification["status"] == "no_text_in_parse_window" && !unverified {
-                        audit.insert("primary_reason".into(), json!("pdf_window_no_text"));
+                        audit
+                            .entry("primary_reason")
+                            .or_insert_with(|| json!("pdf_window_no_text"));
                         let ranges:Vec<_>=classification["page_audit"]["checked_pages"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|page|json!({"unit":"pdf_page","start":page,"end":page+1,"label":"classification"})).collect();
                         audit.insert("read_ranges".into(), json!(ranges));
                     }

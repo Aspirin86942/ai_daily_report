@@ -45,8 +45,8 @@ use crate::deadline::{Clock, RunDeadlines};
 use crate::identity::{engine_identity, EngineIdentity};
 
 pub use cache::{
-    classifier_profile_hash, parse_profile_hash, sha256_hex, CacheAwarePlanEntry, CacheEntry,
-    CacheLookup, CacheWriteRecord, ClassificationCacheEntry, ClassificationCacheLookup,
+    classifier_profile_hash, parse_profile_hash, sha256_hex, CacheEntry, CacheLookup,
+    CacheWriteRecord, ClassificationCacheEntry, ClassificationCacheLookup,
     ClassificationCacheMissReason, ClassificationCacheWriteRecord, RouteStackFingerprint,
     RouteStackFingerprints, CLASSIFIER_PROFILE_HASH_ALGORITHM, PARSE_PROFILE_HASH_ALGORITHM,
 };
@@ -299,15 +299,15 @@ impl ScannerStore {
         parse_profile_hash: &str,
         inventory_existed_before: bool,
     ) -> Result<CacheLookup, StoreError> {
-        let key = cache::CacheLookupKey {
-            file_identity,
-            source_version,
-            source_guard_kind,
-            source_guard_sha256,
-            parse_profile_hash,
-            inventory_existed_before,
-        };
-        validate_cache_lookup_key(&key)?;
+        if file_identity.is_empty()
+            || inventory::parse_source_version(source_version).is_err()
+            || !valid_guard_wire(source_guard_kind, source_guard_sha256)
+            || !inventory::is_sha256(parse_profile_hash)
+        {
+            return Err(StoreError::InvalidRequest(
+                "cache lookup key is invalid".into(),
+            ));
+        }
         let lookup = cache::lookup_cache(
             &self.connection,
             file_identity,
@@ -319,20 +319,6 @@ impl ScannerStore {
         )
         .map_err(cache_open)?;
         reject_corrupt_parse_cache_lookup(lookup)
-    }
-
-    fn lookup_cache_batch(
-        &self,
-        keys: &[cache::CacheLookupKey<'_>],
-    ) -> Result<Vec<CacheLookup>, StoreError> {
-        for key in keys {
-            validate_cache_lookup_key(key)?;
-        }
-        cache::lookup_cache_batch(&self.connection, keys)
-            .map_err(cache_open)?
-            .into_iter()
-            .map(reject_corrupt_parse_cache_lookup)
-            .collect()
     }
 
     /// Upserts the global `file_inventory` in one bounded short transaction and
@@ -689,65 +675,6 @@ impl ScannerStore {
         }
         Ok(())
     }
-
-    pub fn attach_cache_evidence(
-        &self,
-        planned_files: Vec<crate::planner::PlannedFile>,
-        profile: &NormalizedScannerSettings,
-        route_stacks: &RouteStackFingerprints,
-    ) -> Result<Vec<CacheAwarePlanEntry>, StoreError> {
-        let mut entries = planned_files
-            .into_iter()
-            .map(|planned| match planned.action {
-                crate::planner::PlanAction::Reject(_) => Ok(CacheAwarePlanEntry {
-                    planned,
-                    parse_profile_hash: None,
-                    cache_lookup: None,
-                }),
-                crate::planner::PlanAction::Parse(route) => {
-                    let profile_hash =
-                        parse_profile_hash(1, route_stacks.for_route(route), profile)
-                            .map_err(StoreError::InvalidRequest)?;
-                    Ok(CacheAwarePlanEntry {
-                        planned,
-                        parse_profile_hash: Some(profile_hash),
-                        cache_lookup: None,
-                    })
-                }
-            })
-            .collect::<Result<Vec<_>, StoreError>>()?;
-        let zero_guard = "0".repeat(64);
-        let keys = entries
-            .iter()
-            .filter_map(|entry| {
-                entry
-                    .parse_profile_hash
-                    .as_deref()
-                    .map(|parse_profile_hash| cache::CacheLookupKey {
-                        file_identity: &entry.planned.file.file_identity,
-                        source_version: &entry.planned.file.source_version,
-                        source_guard_kind: "content_sha256_v1",
-                        source_guard_sha256: &zero_guard,
-                        parse_profile_hash,
-                        inventory_existed_before: false,
-                    })
-            })
-            .collect::<Vec<_>>();
-        let mut lookups = self.lookup_cache_batch(&keys)?.into_iter();
-        for entry in &mut entries {
-            if entry.parse_profile_hash.is_some() {
-                entry.cache_lookup = Some(
-                    lookups
-                        .next()
-                        .ok_or_else(|| cache_open("batch cache lookup count mismatch"))?,
-                );
-            }
-        }
-        if lookups.next().is_some() {
-            return Err(cache_open("batch cache lookup count mismatch"));
-        }
-        Ok(entries)
-    }
 }
 
 fn validate_database_path(path: &Path) -> Result<(), StoreError> {
@@ -788,20 +715,6 @@ fn valid_guard_wire(kind: &str, hash: &str) -> bool {
         kind,
         "windows_file_id_change_time_v1" | "unix_inode_ctime_v1" | "content_sha256_v1"
     ) && inventory::is_sha256(hash)
-}
-
-fn validate_cache_lookup_key(key: &cache::CacheLookupKey<'_>) -> Result<(), StoreError> {
-    if key.file_identity.is_empty()
-        || key.source_version.is_empty()
-        || inventory::parse_source_version(key.source_version).is_err()
-        || !valid_guard_wire(key.source_guard_kind, key.source_guard_sha256)
-        || !inventory::is_sha256(key.parse_profile_hash)
-    {
-        return Err(StoreError::InvalidRequest(
-            "cache lookup key is invalid".to_string(),
-        ));
-    }
-    Ok(())
 }
 
 fn now_millis() -> Result<u64, StoreError> {
