@@ -1,5 +1,15 @@
 # 当前运行与验收状态
 
+## 个人日报内核三期已部署（2026-11-22，上海时间）
+
+**02:12:47 完成本机正式切换。** 日报和健康检查均已启用，使用 `.releases/rust-20261122-kernel-phase3-01`。程序由干净的源码提交 `c9f82f6` 构建，发布清单 SHA-256 为 `098b1ea3bf6803931aa0e8da0dab98fef4f74722e190ea52a8ff4f3da18d2eaa`。清单内 527 个文件核验通过，3 项独立程序包测试全部通过。[正式包记录](../.artifacts/kernel-phase3-release-20261122/release.json) · [切换回执](../.artifacts/kernel-phase3-deployment-20261122/attempt-e8227a96651e4dbc9edfba5ca2b96e29/switch.json)
+
+两个正式任务的执行路径、账号、权限和触发时间均已回读。下一次日报计划于 11 月 22 日 09:00 汇总 11 月 21 日的材料，健康检查每天 11:00 和 23:00 运行。正式配置只更新了 Office 和 PDF 解析程序的路径。切换后，按该配置选择的两个进程在隔离目录各解析一份合成文件，图片文字识别关闭。部署验收新增真实模型调用 0 次。[日报任务核对](../.artifacts/kernel-phase3-release-20261122/check-task-daily.json) · [健康任务核对](../.artifacts/kernel-phase3-release-20261122/check-task-health.json) · [解析实测](../.artifacts/kernel-phase3-deployment-20261122/attempt-e8227a96651e4dbc9edfba5ca2b96e29/runtime/native-after.json)
+
+报告库和扫描库的内容指纹、283 个已发布文件的哈希均与切换前一致。数据库保有 223 份日报、1 份周报、1 份月报和 1,668 条模型调用明细。在正式数据库的一致副本上对同一目标日执行健康检查，7 项结果与二期相同，其中有 1 项历史报告错误和 1 项材料范围预警。[业务核对](../.artifacts/kernel-phase3-deployment-20261122/attempt-e8227a96651e4dbc9edfba5ca2b96e29/runtime/business-after.json) · [健康检查](../.artifacts/kernel-phase3-deployment-20261122/attempt-e8227a96651e4dbc9edfba5ca2b96e29/runtime/health-after.json)
+
+二期包、原配置、任务定义及权限、两份数据库一致备份均可用于核验。隔离实测中，二期成功复用了三期使用过的检索索引，并从三期生成的测试日报中恢复了字节一致的正文和附件。[回退说明](../.artifacts/kernel-phase3-deployment-20261122/ROLLBACK.md) · [跨版本读写](../.artifacts/kernel-phase3-release-20261122/compat-_0bme2v2/result.json) · [正文和附件恢复](../.artifacts/kernel-phase3-release-20261122/recovery-hb71tpa2/result.json) · [三期同机性能与回归](plans/2026-11-22-kernel-phase3-results.md)
+
 ## 个人日报内核二期已部署（2026-11-21，上海时间）
 
 **16:42:32 完成正式切换，16:42:45 通过即时核验。** 日报和健康检查均已启用并指向 `.releases/rust-20261121-kernel-phase2-01`。候选包清单中的 526 项文件全部匹配，SHA-256 为 `cde44cb6917f03a59706236ec70ecc23525dc4eda899f8b5da9a9543d2be2268`。三项程序同批构建，本地 25 项验收通过。单进程四批暖扫描中位数 53.96 毫秒，223 份日报首次建索引 3.11 秒，索引 41.95 MiB，独立热查询中位数 13.71 毫秒。[本地全量验收](../.artifacts/kernel-phase2-20261121/final-verification.json) · [正式切换回执](../.artifacts/kernel-phase2-deployment-20261121/switch.json)
