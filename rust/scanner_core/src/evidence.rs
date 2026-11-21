@@ -1,9 +1,8 @@
 //! Complete evidence assembly for the current scanner run.
 
 use ai_daily_scanner_contract::{
-    ClassificationCacheStatus, ClassificationTransport, FileAuditV2, Nullable, ParseCacheStatus,
-    PdfClassificationAuditV1, PdfClassificationStatus, ReuseKind, RunStatus, ScannerEvidence,
-    SourceGuardKind, Validate,
+    FileAuditV2, Nullable, ParseCacheStatus, PdfClassificationAuditV1, PdfClassificationStatus,
+    ReuseKind, RunStatus, ScannerEvidence, SourceGuardKind, Validate,
 };
 
 use crate::artifact::PdfClassificationProvenanceV1;
@@ -76,7 +75,8 @@ fn determine_reuse_kind(
 /// Assembles one strict `FileAuditV2` from a persisted current-schema row.
 fn assemble_file_audit_v2(row: FileAuditV2Source) -> Result<FileAuditV2, String> {
     let source_guard_kind = match row.source_guard_kind.as_deref() {
-        Some(kind) => parse_source_guard_kind(kind)?,
+        Some(kind) => crate::source_guard::source_guard_kind_from_text(kind)
+            .ok_or_else(|| format!("unknown source guard kind: {kind}"))?,
         None => SourceGuardKind::Unavailable,
     };
     let parse_cache_status = match row.parse_cache_status.as_deref() {
@@ -87,26 +87,17 @@ fn assemble_file_audit_v2(row: FileAuditV2Source) -> Result<FileAuditV2, String>
         Some(value) => return Err(format!("unknown parse_cache_status: {value}")),
         None => return Err("file row has no parse_cache_status".to_string()),
     };
-    let parse_transport = row
-        .parse_transport
-        .ok_or_else(|| "file execution provenance is unavailable".to_string())?;
-    let parse_attempt_count = row
-        .parse_attempt_count
-        .ok_or_else(|| "file execution provenance is unavailable".to_string())?;
-    // spec Part 5.3/Part 3: the immutable artifact provenance only maps to a
-    // snapshot audit when THIS current row is actually a snapshot row. A cold
-    // run must never stamp snapshot identity onto real execution
-    // (its run pages/duration are not persisted), so `pdf_classification` is
-    // null for miss/not_applicable rows.
-    let pdf_classification = match row.classification_execution {
-        Some(execution) => Some(execution),
-        None => match row.classifier.as_ref() {
-            Some(provenance) if row.parse_cache_status.as_deref() == Some("snapshot") => {
-                assemble_snapshot_classification(provenance)
-            }
+    let (parse_transport, parse_attempt_count) =
+        row.parse_transport
+            .zip(row.parse_attempt_count)
+            .ok_or_else(|| "file execution provenance is unavailable".to_string())?;
+    // Executed rows keep their recorded audit. Only snapshot rows inherit artifact counts.
+    let pdf_classification = row
+        .classification_execution
+        .or_else(|| match parse_cache_status {
+            ParseCacheStatus::Snapshot => row.classifier.and_then(assemble_snapshot_classification),
             _ => None,
-        },
-    };
+        });
     Ok(FileAuditV2 {
         relative_path: row.relative_path,
         file_identity: row.file_identity,
@@ -131,54 +122,19 @@ fn assemble_file_audit_v2(row: FileAuditV2Source) -> Result<FileAuditV2, String>
     })
 }
 
-/// Rebuilds the snapshot `PdfClassificationAuditV1` from the artifact's
-/// immutable provenance (spec Part 3: text/no-text context snapshot row keeps
-/// page counts, zeroes every execution field).
+/// Historical evidence rows omit unknown/error observations and normalize a skipped classifier.
 fn assemble_snapshot_classification(
-    provenance: &PdfClassificationProvenanceV1,
+    mut provenance: PdfClassificationProvenanceV1,
 ) -> Option<PdfClassificationAuditV1> {
     match provenance.status {
         PdfClassificationStatus::TextInParseWindow
-        | PdfClassificationStatus::NoTextInParseWindow => Some(PdfClassificationAuditV1 {
-            page_audit: None,
-            status: provenance.status,
-            page_count: Nullable(provenance.page_count),
-            classification_cache_status: ClassificationCacheStatus::Snapshot,
-            classification_cache_miss_reason: String::new(),
-            result_examined_pages: Nullable(provenance.result_examined_pages),
-            run_inspected_pages: Nullable(Some(0)),
-            nominal_charged_pages: provenance.nominal_charged_pages,
-            duration_ms: 0,
-            transport: ClassificationTransport::Snapshot,
-            attempt_count: 0,
-            classifier_build: provenance.classifier_build.clone(),
-            classifier_profile_hash: provenance.classifier_profile_hash.clone(),
-        }),
-        PdfClassificationStatus::NotClassifiedByBudget => Some(PdfClassificationAuditV1 {
-            page_audit: None,
-            status: provenance.status,
-            page_count: Nullable(None),
-            classification_cache_status: ClassificationCacheStatus::NotEligible,
-            classification_cache_miss_reason: String::new(),
-            result_examined_pages: Nullable(Some(0)),
-            run_inspected_pages: Nullable(Some(0)),
-            nominal_charged_pages: 0,
-            duration_ms: 0,
-            transport: ClassificationTransport::NotApplicable,
-            attempt_count: 0,
-            classifier_build: provenance.classifier_build.clone(),
-            classifier_profile_hash: provenance.classifier_profile_hash.clone(),
-        }),
-        PdfClassificationStatus::Unknown | PdfClassificationStatus::Error => None,
+        | PdfClassificationStatus::NoTextInParseWindow => {}
+        PdfClassificationStatus::NotClassifiedByBudget => {
+            provenance.page_count = None;
+            provenance.result_examined_pages = Some(0);
+            provenance.nominal_charged_pages = 0;
+        }
+        PdfClassificationStatus::Unknown | PdfClassificationStatus::Error => return None,
     }
-}
-
-fn parse_source_guard_kind(value: &str) -> Result<SourceGuardKind, String> {
-    match value {
-        "windows_file_id_change_time_v1" => Ok(SourceGuardKind::WindowsFileIdChangeTimeV1),
-        "unix_inode_ctime_v1" => Ok(SourceGuardKind::UnixInodeCtimeV1),
-        "content_sha256_v1" => Ok(SourceGuardKind::ContentSha256V1),
-        "unavailable" => Ok(SourceGuardKind::Unavailable),
-        _ => Err(format!("unknown source guard kind: {value}")),
-    }
+    Some(provenance.into_snapshot_audit())
 }

@@ -2,7 +2,10 @@ use crate::{ocr, PdfError, PdfReader};
 use ai_daily_worker_contract::*;
 use pdfium_render::prelude::*;
 use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
     path::Path,
+    sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
@@ -244,17 +247,51 @@ impl PdfReader {
         request
             .validate()
             .map_err(|_| diagnostic(&request.file_path, "PARSER_INVALID_PAYLOAD", false))?;
-        if source(&request.file_path)?.0 != request.source_version {
+        let (version, bytes) = source(&request.file_path)?;
+        if version != request.source_version {
             return Err(diagnostic(
                 &request.file_path,
                 "SOURCE_VERSION_CHANGED",
                 false,
             ));
         }
+        // PDFium's file callbacks collapse I/O errors into short reads. Only a
+        // native document-open error from successful reads can identify bad content.
+        let file = File::open(&request.file_path).map_err(|error| {
+            parse_error(
+                &request.file_path,
+                &PdfError::Parse(PdfiumError::IoError(error)),
+            )
+        })?;
+        let io_failed = AtomicBool::new(false);
         let document = self
             .pdfium
-            .load_pdf_from_file(&request.file_path, None)
-            .map_err(|error| parse_error(&request.file_path, &PdfError::Parse(error)))?;
+            .load_pdf_from_reader(
+                ClassifierInput {
+                    file,
+                    io_failed: &io_failed,
+                },
+                None,
+            )
+            .map_err(|error| {
+                let native_cause = match error {
+                    PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::FormatError) => {
+                        Some("FPDF_ERR_FORMAT")
+                    }
+                    PdfiumError::PdfiumLibraryInternalError(PdfiumInternalError::PasswordError) => {
+                        Some("FPDF_ERR_PASSWORD")
+                    }
+                    _ => None,
+                };
+                let mut diagnostic = parse_error(&request.file_path, &PdfError::Parse(error));
+                // FPDF_FILEACCESS cannot represent a length above u32::MAX on Windows.
+                if let Some(code) = native_cause
+                    .filter(|_| bytes <= u64::from(u32::MAX) && !io_failed.load(Ordering::Relaxed))
+                {
+                    diagnostic.message = code.into();
+                }
+                diagnostic
+            })?;
         let count = document.pages().len() as u64;
         if count == 0 {
             return Err(diagnostic(&request.file_path, "PARSER_FAILED", false));
@@ -309,6 +346,29 @@ impl PdfReader {
             page_audit: Some(audit),
             diagnostic: None,
         })
+    }
+}
+
+struct ClassifierInput<'a> {
+    file: File,
+    io_failed: &'a AtomicBool,
+}
+
+impl Read for ClassifierInput<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let result = self.file.read(buf);
+        if !matches!(result, Ok(n) if n == buf.len()) {
+            self.io_failed.store(true, Ordering::Relaxed);
+        }
+        result
+    }
+}
+
+impl Seek for ClassifierInput<'_> {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        self.file
+            .seek(pos)
+            .inspect_err(|_| self.io_failed.store(true, Ordering::Relaxed))
     }
 }
 
@@ -367,4 +427,25 @@ pub fn is_valid_text_char(c: char) -> bool {
         0xfeff | 0xfff9..=0xfffb | 0x110bd | 0x110cd | 0x13430..=0x1343f |
         0x1bca0..=0x1bca3 | 0x1d173..=0x1d17a | 0xe0001 | 0xe0020..=0xe007f |
         0xe000..=0xf8ff | 0xf0000..=0xffffd | 0x100000..=0x10fffd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifier_remembers_short_reads_and_failed_seeks() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("input.pdf");
+        std::fs::write(&path, b"x").unwrap();
+        let io_failed = AtomicBool::new(false);
+        let mut input = ClassifierInput {
+            file: File::open(path).unwrap(),
+            io_failed: &io_failed,
+        };
+        assert_eq!(input.read(&mut [0; 2]).unwrap(), 1);
+        assert!(io_failed.swap(false, Ordering::Relaxed));
+        assert!(input.seek(SeekFrom::Current(-2)).is_err());
+        assert!(io_failed.load(Ordering::Relaxed));
+    }
 }

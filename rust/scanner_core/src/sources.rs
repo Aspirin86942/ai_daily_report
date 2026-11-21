@@ -7,7 +7,7 @@ use ai_daily_scanner_contract::{
     AuditWorkerLane, CacheStatus, NormalizedScannerSettings, ParseStatus,
 };
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{de::value::StrDeserializer, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -47,10 +47,21 @@ pub(crate) fn collect_sources(
     discovery: &[DiscoveredFileOut],
     profile: &NormalizedScannerSettings,
 ) -> Vec<ScanSource> {
-    let files: HashMap<_, _> = discovery
+    collect_indexed_sources(evidence, &files_by_identity(discovery), profile)
+}
+
+fn files_by_identity(discovery: &[DiscoveredFileOut]) -> HashMap<&str, &DiscoveredFileOut> {
+    discovery
         .iter()
         .map(|f| (f.file_identity.as_str(), f))
-        .collect();
+        .collect()
+}
+
+fn collect_indexed_sources(
+    evidence: &[ContextFileEvidence],
+    files: &HashMap<&str, &DiscoveredFileOut>,
+    profile: &NormalizedScannerSettings,
+) -> Vec<ScanSource> {
     let mut ordered: Vec<_> = evidence.iter().collect();
     let is_ocr =
         |item: &ContextFileEvidence| item.parser_backend == crate::parsers::document::OCR_BACKEND;
@@ -100,19 +111,19 @@ pub(crate) fn collect_sources(
                 .as_ref()
                 .map(|a| serde_json::to_value(a).unwrap())
                 .unwrap_or_else(|| serde_json::json!({"version": 1}));
-            let status = if item.parse_status == ParseStatus::NotParsed {
-                "not_parsed"
-            } else if item.parse_status != ParseStatus::Success {
-                "parse_failed"
-            } else if excerpt.is_empty()
-                || selected
-                    .audit
-                    .as_ref()
-                    .is_some_and(|a| a.usable_chars == Some(0))
-            {
-                "empty_excerpt"
-            } else {
-                "usable_excerpt"
+            let status = match item.parse_status {
+                ParseStatus::NotParsed => "not_parsed",
+                ParseStatus::Error | ParseStatus::Timeout => "parse_failed",
+                ParseStatus::Success
+                    if excerpt.is_empty()
+                        || selected
+                            .audit
+                            .as_ref()
+                            .is_some_and(|a| a.usable_chars == Some(0)) =>
+                {
+                    "empty_excerpt"
+                }
+                ParseStatus::Success => "usable_excerpt",
             };
             audit["primary_status"] = serde_json::json!(status);
             if selected.ranges.iter().flatten().any(|range| {
@@ -157,13 +168,12 @@ pub(crate) fn collect_sources(
                 && !item.truncated
                 && item.evidence_audit.is_some()
             {
-                audit["primary_reason"] =
-                    if item.parser_backend == crate::parsers::document::OCR_BACKEND {
-                        "pdf_image_ocr_empty"
-                    } else {
-                        "empty_document"
-                    }
-                    .into();
+                audit["primary_reason"] = if is_ocr(item) {
+                    "pdf_image_ocr_empty"
+                } else {
+                    "empty_document"
+                }
+                .into();
             }
             if is_ocr(item) {
                 audit["algorithm_versions"]["pdf_image_ocr"] =
@@ -216,11 +226,15 @@ pub(crate) fn snapshot_sources(
     discovery: &[DiscoveredFileOut],
     profile: &NormalizedScannerSettings,
 ) -> Option<Vec<ScanSource>> {
-    let files: HashMap<_, _> = discovery
+    let files = files_by_identity(discovery);
+    // Keep the first matching decision, including for historical inputs.
+    let reasons: HashMap<_, _> = artifact
+        .decision_rows
         .iter()
-        .map(|f| (f.file_identity.as_str(), f))
+        .rev()
+        .map(|row| (row.file_identity.as_str(), &row.reason))
         .collect();
-    let mut evidence = Vec::new();
+    let mut evidence = Vec::with_capacity(artifact.file_rows.len());
     for row in &artifact.file_rows {
         let file = files.get(row.file_identity.as_str())?;
         if row.parser_backend == crate::parsers::document::OCR_BACKEND {
@@ -236,9 +250,9 @@ pub(crate) fn snapshot_sources(
                 return None;
             }
         }
-        let (content, evidence_audit) = if row.parser_backend == "pdf_metadata_v2" {
-            (String::new(), None)
-        } else if row.parse_status == ParseStatus::Success {
+        let (content, evidence_audit) = if row.parse_status == ParseStatus::Success
+            && row.parser_backend != "pdf_metadata_v2"
+        {
             match store
                 .lookup_cache(
                     &row.file_identity,
@@ -272,20 +286,20 @@ pub(crate) fn snapshot_sources(
             size_bytes: Some(file.size_bytes),
             content,
             parser_backend: row.parser_backend.clone(),
-            worker_lane: serde_json::from_value(serde_json::Value::String(row.worker_lane.clone()))
-                .ok()?,
+            worker_lane: AuditWorkerLane::deserialize(
+                StrDeserializer::<serde::de::value::Error>::new(&row.worker_lane),
+            )
+            .ok()?,
             cache_status: CacheStatus::Fresh,
             parse_status: row.parse_status,
             truncated: row.truncated,
             error: None,
-            reason: artifact
-                .decision_rows
-                .iter()
-                .find(|d| d.file_identity == row.file_identity)
-                .map(|d| d.reason.clone()),
+            reason: reasons
+                .get(row.file_identity.as_str())
+                .map(|reason| (*reason).clone()),
         });
     }
-    Some(collect_sources(&evidence, discovery, profile))
+    Some(collect_indexed_sources(&evidence, &files, profile))
 }
 
 pub(crate) fn fingerprint_sources(
@@ -301,12 +315,20 @@ pub(crate) fn fingerprint_sources(
         }
         let path = Path::new(&source.absolute_path);
         let hash = source.guard.as_ref().and_then(|guard| {
-            if !metadata_matches_discovery(path, source) || !observer.verify(path, guard) {
+            let modified = DateTime::parse_from_rfc3339(&source.modified_at_utc).ok()?;
+            let matches = || {
+                std::fs::metadata(path).is_ok_and(|metadata| {
+                    metadata.len() == source.size_bytes
+                        && metadata
+                            .modified()
+                            .is_ok_and(|time| DateTime::<Utc>::from(time) == modified)
+                }) && observer.verify(path, guard)
+            };
+            if !matches() {
                 return None;
             }
             let hash = bounded_content_hash(path, root, max_bytes, deadline)?;
-            (metadata_matches_discovery(path, source) && observer.verify(path, guard))
-                .then_some(hash)
+            matches().then_some(hash)
         });
         if let Some(hash) = hash {
             source.content_sha256 = Some(hash);
@@ -317,30 +339,21 @@ pub(crate) fn fingerprint_sources(
             source.excerpt_sha256 = crate::store::sha256_hex(b"");
             if let Some(audit) = source.coverage_limits.get_mut("evidence_audit") {
                 audit["usable_chars"] = serde_json::json!(0);
-                audit["content_units"] = serde_json::json!([]);
-                audit["excerpt_ranges"] = serde_json::json!([]);
+                for field in [
+                    "content_units",
+                    "excerpt_ranges",
+                    "excerpt_block_ends",
+                    "excerpt_block_context",
+                ] {
+                    audit[field] = serde_json::json!([]);
+                }
                 if let Some(fields) = audit.as_object_mut() {
                     fields.remove("omitted_ranges");
                 }
-                audit["excerpt_block_ends"] = serde_json::json!([]);
-                audit["excerpt_block_context"] = serde_json::json!([]);
                 audit["primary_status"] = serde_json::json!("parse_failed");
             }
         }
     }
-}
-
-fn metadata_matches_discovery(path: &Path, source: &ScanSource) -> bool {
-    let Ok(metadata) = std::fs::metadata(path) else {
-        return false;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return false;
-    };
-    let Ok(expected) = DateTime::parse_from_rfc3339(&source.modified_at_utc) else {
-        return false;
-    };
-    metadata.len() == source.size_bytes && DateTime::<Utc>::from(modified) == expected
 }
 
 fn bounded_content_hash(
@@ -356,7 +369,7 @@ fn bounded_content_hash(
     if file.metadata().ok()?.len() > max_bytes {
         return None;
     }
-    let mut reader = std::io::BufReader::new(file).take(max_bytes.saturating_add(1));
+    let mut reader = file.take(max_bytes.saturating_add(1));
     let mut hasher = Sha256::new();
     let mut bytes = 0;
     let mut buffer = [0u8; 65536];
@@ -374,13 +387,7 @@ fn bounded_content_hash(
         }
         hasher.update(&buffer[..read]);
     }
-    Some(
-        hasher
-            .finalize()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    )
+    Some(ai_daily_worker_contract::archive::hex(&hasher.finalize()))
 }
 
 #[cfg(test)]

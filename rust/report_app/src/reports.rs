@@ -1,6 +1,5 @@
-use crate::ReportError;
 use chrono::{DateTime, FixedOffset};
-use minijinja::{context, Environment, Error, ErrorKind, Value};
+use minijinja::{Environment, Error, ErrorKind, Value};
 use serde_json::Value as JsonValue;
 pub mod data;
 pub mod period;
@@ -86,15 +85,6 @@ pub fn environment() -> Environment<'static> {
     env
 }
 
-pub fn render(template: &str, report: &JsonValue, now: &str) -> Result<String, ReportError> {
-    environment()
-        .render_str(
-            template,
-            context! { report => template_value(report), now => now },
-        )
-        .map_err(|error| ReportError::new("TEMPLATE_INVALID", error.to_string()))
-}
-
 // serde_json's arbitrary_precision feature serializes numbers through a private
 // map. Convert actual JSON values directly so that numeric report fields remain
 // numbers in the template rather than exposing that internal representation.
@@ -123,4 +113,19 @@ pub(crate) fn template_value(value: &JsonValue) -> Value {
                 .map(|(key, value)| (key.clone(), template_value(value))),
         ),
     }
+}
+
+#[cfg(test)]
+#[test]
+fn frozen_report_template_preserves_json_numbers_and_empty_values() {
+    let report = template_value(&serde_json::json!({
+        "items": [], "value": null, "count": 32, "ratio": 0.75
+    }));
+    let template = "{% for x in report.items %}{{x}}{% else %}无{% endfor %}|{{report.value or '缺失'}}|{{report.count}}/{{report.ratio}}";
+    assert_eq!(
+        environment()
+            .render_str(template, minijinja::context! { report })
+            .unwrap(),
+        "无|缺失|32/0.75"
+    );
 }

@@ -65,22 +65,6 @@ impl HttpTransport {
             https_proxy: config.proxy_https.clone(),
         }
     }
-    pub fn with_endpoint(
-        endpoint: &str,
-        key: &str,
-        http_proxy: &str,
-        https_proxy: &str,
-    ) -> Result<Self, ReportError> {
-        let transport = Self {
-            client: OnceLock::new(),
-            endpoint: endpoint.into(),
-            api_key: key.into(),
-            http_proxy: http_proxy.into(),
-            https_proxy: https_proxy.into(),
-        };
-        transport.prepare()?;
-        Ok(transport)
-    }
 }
 
 impl ModelTransport for HttpTransport {

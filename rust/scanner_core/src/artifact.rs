@@ -13,9 +13,9 @@
 
 use ai_daily_discovery::{DiscoveredFileOut, DiscoveryIssue};
 use ai_daily_scanner_contract::{
-    BuildContextRequest, ContextAction, ContextEnvelope, ContextSummary, Diagnostic, EngineStatus,
-    NormalizedScannerSettings, Nullable, ParseStatus, PdfClassificationStatus, ReportMode,
-    Validate,
+    BuildContextRequest, ClassificationCacheStatus, ClassificationTransport, ContextAction,
+    ContextEnvelope, ContextSummary, Diagnostic, EngineStatus, NormalizedScannerSettings, Nullable,
+    ParseStatus, PdfClassificationAuditV1, PdfClassificationStatus, ReportMode, Validate,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -77,6 +77,37 @@ pub struct PdfClassificationProvenanceV1 {
     pub nominal_charged_pages: u64,
     pub classifier_build: String,
     pub classifier_profile_hash: String,
+}
+
+impl PdfClassificationProvenanceV1 {
+    pub(crate) fn into_snapshot_audit(self) -> PdfClassificationAuditV1 {
+        let (classification_cache_status, transport) = match self.status {
+            PdfClassificationStatus::NotClassifiedByBudget => (
+                ClassificationCacheStatus::NotEligible,
+                ClassificationTransport::NotApplicable,
+            ),
+            _ => (
+                ClassificationCacheStatus::Snapshot,
+                ClassificationTransport::Snapshot,
+            ),
+        };
+        PdfClassificationAuditV1 {
+            pdf_open_failure_key: None,
+            page_audit: None,
+            status: self.status,
+            page_count: Nullable(self.page_count),
+            classification_cache_status,
+            classification_cache_miss_reason: String::new(),
+            result_examined_pages: Nullable(self.result_examined_pages),
+            run_inspected_pages: Nullable(Some(0)),
+            nominal_charged_pages: self.nominal_charged_pages,
+            duration_ms: 0,
+            transport,
+            attempt_count: 0,
+            classifier_build: self.classifier_build,
+            classifier_profile_hash: self.classifier_profile_hash,
+        }
+    }
 }
 
 /// Immutable per-source-file artifact row (spec Part 5.1 `context_artifact_files`).
@@ -152,17 +183,14 @@ impl ArtifactDraft {
                     decision_rows.len()
                 ));
             }
-            let mut files: Vec<&str> = file_rows
+            // SQL replay orders both row sets by identity. Validate them in that same order.
+            file_rows.sort_unstable_by(|a, b| a.file_identity.cmp(&b.file_identity));
+            decision_rows.sort_unstable_by(|a, b| a.file_identity.cmp(&b.file_identity));
+            if file_rows
                 .iter()
-                .map(|row| row.file_identity.as_str())
-                .collect();
-            let mut decisions: Vec<&str> = decision_rows
-                .iter()
-                .map(|row| row.file_identity.as_str())
-                .collect();
-            files.sort_unstable();
-            decisions.sort_unstable();
-            if files != decisions {
+                .zip(&decision_rows)
+                .any(|(file, decision)| file.file_identity != decision.file_identity)
+            {
                 return Err(
                     "eligible artifact file rows and decision rows must be 1:1 per file"
                         .to_string(),
@@ -171,9 +199,6 @@ impl ArtifactDraft {
         } else if !file_rows.is_empty() || !decision_rows.is_empty() {
             return Err("ineligible artifact must carry no file or decision rows".to_string());
         }
-        // SQL replay orders these relational rows by identity; make fresh drafts canonical too.
-        file_rows.sort_unstable_by(|a, b| a.file_identity.cmp(&b.file_identity));
-        decision_rows.sort_unstable_by(|a, b| a.file_identity.cmp(&b.file_identity));
         Ok(ArtifactDraft {
             snapshot_eligible,
             final_context,
@@ -186,7 +211,7 @@ impl ArtifactDraft {
 }
 
 /// Classifier identity entering the snapshot key (spec Part 5.4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ClassifierIdentity {
     pub contract: String,
     pub build: String,
@@ -211,7 +236,7 @@ struct SnapshotKeyPayload<'a> {
     report_mode: ReportMode,
     engine_build: &'a str,
     workers: WorkerCanonical<'a>,
-    classifier: ClassifierCanonical<'a>,
+    classifier: &'a ClassifierIdentity,
 }
 
 #[derive(Serialize)]
@@ -222,13 +247,6 @@ struct WorkerCanonical<'a> {
     pdf_contract: Option<&'a str>,
     pdf_version: Option<&'a str>,
     pdf_build: Option<&'a str>,
-}
-
-#[derive(Serialize)]
-struct ClassifierCanonical<'a> {
-    contract: &'a str,
-    build: &'a str,
-    profile_hash: &'a str,
 }
 
 /// Canonical snapshot-key JSON (spec Part 5.4). The payload is serialized from
@@ -266,18 +284,15 @@ pub fn snapshot_key_parts(
             pdf_version: worker_ids.pdf_version.as_deref(),
             pdf_build: worker_ids.pdf_build.as_deref(),
         },
-        classifier: ClassifierCanonical {
-            contract: &classifier_ids.contract,
-            build: &classifier_ids.build,
-            profile_hash: &classifier_ids.profile_hash,
-        },
+        classifier: classifier_ids,
     };
     let canonical_bytes = serde_json::to_vec(&payload)
         .map_err(|error| format!("snapshot key cannot be canonicalized: {error}"))?;
-    let canonical_json = String::from_utf8(canonical_bytes.clone())
+    let sha256 = crate::store::cache::domain_hash(SNAPSHOT_KEY_DOMAIN, &canonical_bytes);
+    let canonical_json = String::from_utf8(canonical_bytes)
         .map_err(|error| format!("snapshot key canonical JSON is not UTF-8: {error}"))?;
     Ok(SnapshotKeyParts {
-        sha256: snapshot_domain_hash(&canonical_bytes),
+        sha256,
         canonical_json,
     })
 }
@@ -305,13 +320,6 @@ pub fn snapshot_key(
     .sha256)
 }
 
-fn snapshot_domain_hash(bytes: &[u8]) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(SNAPSHOT_KEY_DOMAIN);
-    hasher.update(bytes);
-    hex_bytes(&hasher.finalize())
-}
-
 /// Rebuilds and re-validates the frozen `ContextEnvelope v1` from the stored
 /// `final_envelope_metadata_json` (small request/engine/status/warnings/error
 /// fields), the current `context_runs` summary, and the artifact's
@@ -322,67 +330,38 @@ pub fn rebuild_envelope(
     current_summary: &ContextSummary,
     artifact: Option<&ArtifactDraft>,
 ) -> Result<ContextEnvelope, String> {
-    let contract = metadata
-        .get("contract")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "envelope metadata missing 'contract'".to_string())?
-        .to_string();
-    let protocol_version = metadata
-        .get("protocol_version")
-        .and_then(serde_json::Value::as_u64)
-        .ok_or_else(|| "envelope metadata missing 'protocol_version'".to_string())?;
-    let request_id = metadata
-        .get("request_id")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "envelope metadata missing 'request_id'".to_string())?
-        .to_string();
-    let engine_version = metadata
-        .get("engine_version")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "envelope metadata missing 'engine_version'".to_string())?
-        .to_string();
-    let engine_build = metadata
-        .get("engine_build")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "envelope metadata missing 'engine_build'".to_string())?
-        .to_string();
-    let status: EngineStatus = serde_json::from_value(
+    let missing = |field| format!("envelope metadata missing '{field}'");
+    let text = |field| {
         metadata
-            .get("status")
-            .cloned()
-            .ok_or_else(|| "envelope metadata missing 'status'".to_string())?,
-    )
-    .map_err(|error| format!("envelope metadata 'status' is invalid: {error}"))?;
-    let scan_run_id = nullable_field(metadata, "scan_run_id")?;
-    let context_run_id = nullable_field(metadata, "context_run_id")?;
-    let warnings: Vec<Diagnostic> = match metadata.get("warnings") {
-        None => Vec::new(),
-        Some(value) => serde_json::from_value(value.clone())
-            .map_err(|error| format!("envelope metadata 'warnings' is invalid: {error}"))?,
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| missing(field))
     };
-    let error: Nullable<Diagnostic> = match metadata.get("error") {
-        None | Some(serde_json::Value::Null) => Nullable(None),
-        Some(value) => serde_json::from_value(value.clone())
-            .map(Nullable)
-            .map_err(|error| format!("envelope metadata 'error' is invalid: {error}"))?,
-    };
-
-    let file_context = artifact
-        .map(|draft| draft.final_context.clone())
-        .unwrap_or_default();
     let envelope = ContextEnvelope {
-        contract,
-        protocol_version,
-        request_id,
-        engine_version,
-        engine_build,
-        status,
-        file_context,
+        contract: text("contract")?,
+        protocol_version: metadata
+            .get("protocol_version")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| missing("protocol_version"))?,
+        request_id: text("request_id")?,
+        engine_version: text("engine_version")?,
+        engine_build: text("engine_build")?,
+        status: EngineStatus::deserialize(metadata.get("status").ok_or_else(|| missing("status"))?)
+            .map_err(|error| format!("envelope metadata 'status' is invalid: {error}"))?,
+        scan_run_id: nullable_field(metadata, "scan_run_id")?,
+        context_run_id: nullable_field(metadata, "context_run_id")?,
+        warnings: metadata
+            .get("warnings")
+            .map(Vec::<Diagnostic>::deserialize)
+            .transpose()
+            .map_err(|error| format!("envelope metadata 'warnings' is invalid: {error}"))?
+            .unwrap_or_default(),
+        error: nullable_field(metadata, "error")?,
+        file_context: artifact
+            .map(|draft| draft.final_context.clone())
+            .unwrap_or_default(),
         summary: current_summary.clone(),
-        scan_run_id,
-        context_run_id,
-        warnings,
-        error,
     };
     envelope.validate()?;
     Ok(envelope)
@@ -392,28 +371,14 @@ fn nullable_field<T>(metadata: &serde_json::Value, field: &str) -> Result<Nullab
 where
     T: serde::de::DeserializeOwned,
 {
-    match metadata.get(field) {
-        None | Some(serde_json::Value::Null) => Ok(Nullable(None)),
-        Some(value) => serde_json::from_value(value.clone())
-            .map(Nullable)
-            .map_err(|error| format!("envelope metadata '{field}' is invalid: {error}")),
-    }
+    Option::<T>::deserialize(&metadata[field])
+        .map(Nullable)
+        .map_err(|error| format!("envelope metadata '{field}' is invalid: {error}"))
 }
 
-/// SHA-256 of `bytes` as 64 lowercase hex characters.
+/// SHA-256 of the original bytes in lowercase hexadecimal.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    hex_bytes(&digest)
-}
-
-fn hex_bytes(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        output.push(HEX[(byte >> 4) as usize] as char);
-        output.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    output
+    ai_daily_worker_contract::archive::hex(&Sha256::digest(bytes))
 }
 
 #[cfg(test)]
@@ -421,6 +386,27 @@ mod tests {
     use super::*;
     use crate::config::normalize_scanner_settings;
     use ai_daily_scanner_contract::ScannerSettings;
+
+    #[test]
+    fn historical_nullable_fields_keep_missing_null_and_invalid_distinct() {
+        use serde_json::json;
+        for (metadata, expected) in [
+            (json!({}), None),
+            (json!({"id":null}), None),
+            (json!({"id":7}), Some(7)),
+        ] {
+            assert_eq!(
+                nullable_field::<u64>(&metadata, "id"),
+                Ok(Nullable(expected))
+            );
+        }
+        let invalid = json!({"id":"wrong"});
+        let original = serde_json::from_value::<Option<u64>>(invalid["id"].clone()).unwrap_err();
+        assert_eq!(
+            nullable_field::<u64>(&invalid, "id"),
+            Err(format!("envelope metadata 'id' is invalid: {original}"))
+        );
+    }
 
     #[test]
     fn rebuild_envelope_error_run_requires_no_artifact() {
@@ -444,18 +430,8 @@ mod tests {
             }
         });
         let summary = ContextSummary {
-            source_file_count: 0,
-            success_count: 0,
-            timeout_count: 0,
-            included_file_count: 0,
-            omitted_file_count: 0,
-            error_file_count: 0,
-            input_chars: 0,
-            output_chars: 0,
             total_duration_ms: 1,
-            discovery_duration_ms: 0,
-            parse_duration_ms: 0,
-            compression_duration_ms: 0,
+            ..Default::default()
         };
         let envelope = rebuild_envelope(&metadata, &summary, None).expect("error rebuild");
         assert_eq!(envelope.file_context, "");

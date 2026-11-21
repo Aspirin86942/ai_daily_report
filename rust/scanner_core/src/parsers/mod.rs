@@ -13,7 +13,7 @@ use crate::fallback::{FailureClass, ParseFailure};
 use crate::process::{run_process, ProcessError, ProcessSpec, WorkerRssTracker};
 use crate::scanner::next_request_id;
 use ai_daily_scanner_contract::{
-    AdapterPaths, Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerSettings, Nullable,
+    Diagnostic, DiagnosticStage, ErrorCode, NormalizedScannerSettings, Nullable,
 };
 use ai_daily_worker_contract::{ParseRequest, ParseResult, ParserLimits, WorkerHello, WorkerKind};
 
@@ -79,69 +79,7 @@ impl RegisteredWorker {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct WorkerRegistry {
-    pub office: Option<RegisteredWorker>,
-    pub pdf: Option<RegisteredWorker>,
-}
-
-pub fn preflight_workers(
-    profile: &NormalizedScannerSettings,
-    adapters: &AdapterPaths,
-    timeout: Duration,
-) -> Result<WorkerRegistry, ParseFailure> {
-    let needs = required_worker_set(profile);
-    let office_command = needs.office.then(|| office::worker_command(adapters));
-    let pdf_command = needs.pdf.then(|| document::worker_command(adapters));
-    preflight_worker_commands(office_command.as_ref(), pdf_command.as_ref(), timeout)
-}
-
-/// Runs the continuation only after all route-relevant worker identities have
-/// been frozen. Task 7 uses this boundary before its first cache lookup.
-pub fn preflight_then<T>(
-    profile: &NormalizedScannerSettings,
-    adapters: &AdapterPaths,
-    timeout: Duration,
-    continuation: impl FnOnce(&WorkerRegistry) -> T,
-) -> Result<T, ParseFailure> {
-    let registry = preflight_workers(profile, adapters, timeout)?;
-    Ok(continuation(&registry))
-}
-
-/// Injectable form used by fault tests and Task 7 cache-boundary tests.
-pub fn preflight_commands_then<T>(
-    office_command: Option<&WorkerCommand>,
-    pdf_command: Option<&WorkerCommand>,
-    timeout: Duration,
-    continuation: impl FnOnce(&WorkerRegistry) -> T,
-) -> Result<T, ParseFailure> {
-    let registry = preflight_worker_commands(office_command, pdf_command, timeout)?;
-    Ok(continuation(&registry))
-}
-
-fn preflight_worker_commands(
-    office_command: Option<&WorkerCommand>,
-    pdf_command: Option<&WorkerCommand>,
-    timeout: Duration,
-) -> Result<WorkerRegistry, ParseFailure> {
-    let (office, pdf) = match (office_command, pdf_command) {
-        (Some(office), Some(python)) => {
-            let (office_result, pdf_result) = register_worker_pair(office, python, timeout);
-            (Some(office_result?), Some(pdf_result?))
-        }
-        (office, python) => (
-            office
-                .map(|command| register_worker(command, timeout))
-                .transpose()?,
-            python
-                .map(|command| register_worker(command, timeout))
-                .transpose()?,
-        ),
-    };
-    Ok(WorkerRegistry { office, pdf })
-}
-
-/// Runs the independent Office and Python version handshakes concurrently.
+/// Runs the independent Office and PDF version requests concurrently.
 pub fn register_worker_pair(
     office_command: &WorkerCommand,
     pdf_command: &WorkerCommand,
@@ -694,33 +632,11 @@ pub(crate) fn worker_request(
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct RequiredWorkerSet {
-    office: bool,
-    pdf: bool,
-}
-
-fn required_worker_set(profile: &NormalizedScannerSettings) -> RequiredWorkerSet {
-    let allows = |extension: &str| {
-        profile
-            .discovery
-            .allowed_extensions
-            .iter()
-            .any(|value| value == extension)
-    };
-    RequiredWorkerSet {
-        office: [".docx", ".pptx", ".xlsx", ".xls"].into_iter().any(allows)
-            || (profile.parse.office.legacy_extensions_enabled
-                && [".doc", ".ppt"].into_iter().any(allows)),
-        pdf: allows(".pdf"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::normalize_scanner_settings;
-    use ai_daily_scanner_contract::{ReportMode, ScannerSettings};
+    use ai_daily_scanner_contract::{AdapterPaths, ReportMode, ScannerSettings};
 
     #[test]
     fn frozen_default_requires_both_worker_fingerprints() {
@@ -729,13 +645,21 @@ mod tests {
         let profile = normalize_scanner_settings(&raw, ReportMode::Daily)
             .expect("default profile should normalize");
 
-        assert_eq!(
-            required_worker_set(&profile),
-            RequiredWorkerSet {
-                office: true,
-                pdf: true,
-            }
-        );
+        let adapters = AdapterPaths {
+            office_worker_path: "office".into(),
+            pdf_worker_path: "pdf".into(),
+        };
+        for (worker, kind) in [
+            (office::worker_command(&adapters), WorkerKind::Office),
+            (document::worker_command(&adapters), WorkerKind::Pdf),
+        ] {
+            assert_eq!(worker.expected_kind, kind);
+            assert!(worker.required_extensions.iter().any(|extension| {
+                profile.discovery.allowed_extensions.contains(extension)
+                    && (profile.parse.office.legacy_extensions_enabled
+                        || !matches!(extension.as_str(), ".doc" | ".ppt"))
+            }));
+        }
     }
 
     #[test]

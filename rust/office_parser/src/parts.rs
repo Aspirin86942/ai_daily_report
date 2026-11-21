@@ -1,5 +1,8 @@
-use super::*;
-use std::time::Duration;
+use quick_xml::events::{BytesRef, BytesStart, BytesText};
+use std::fs::File;
+use std::io::{Read, Seek};
+use std::time::{Duration, Instant};
+use zip::read::ZipArchive;
 
 // Daily inspection shares one decompressed-byte allowance across all inspected parts.
 // A partial XML part may supply complete worksheet rows, never a partial cell or chart.
@@ -9,11 +12,10 @@ pub(super) struct PartBudget {
 }
 
 impl PartBudget {
-    pub fn new(request: &OfficeParseRequest) -> Self {
-        let timeout = positive_limit(&request.limits, "remaining_timeout_ms", 30_000);
+    pub fn new(timeout: u64) -> Self {
         Self {
             remaining: 32 * 1024 * 1024,
-            deadline: Instant::now() + Duration::from_millis(timeout.min(3_600_000) as u64),
+            deadline: Instant::now() + Duration::from_millis(timeout.min(3_600_000)),
         }
     }
 
@@ -67,4 +69,61 @@ impl PartBudget {
         let partial = bytes.len() < size;
         Ok((bytes, partial))
     }
+}
+
+pub(super) fn resolve_zip_member<R: Read + Seek>(
+    archive: &ZipArchive<R>,
+    requested: &str,
+) -> Result<String, String> {
+    let mut matches = archive
+        .file_names()
+        .filter(|name| name.eq_ignore_ascii_case(requested));
+    let first = matches
+        .next()
+        .ok_or_else(|| format!("ZIP entry {requested} missing"))?;
+    if matches.next().is_some() {
+        return Err(format!("ZIP entry {requested} has ambiguous case"));
+    }
+    Ok(first.to_string())
+}
+
+pub(super) fn attr_value(e: &BytesStart<'_>, local_name: &[u8]) -> Result<Option<String>, String> {
+    for attr in e.attributes().with_checks(false) {
+        let attr = attr.map_err(|error| format!("XML attribute error: {error}"))?;
+        if is_local_name(attr.key.as_ref(), local_name) {
+            return attr
+                .decoded_and_normalized_value(quick_xml::XmlVersion::Implicit1_0, e.decoder())
+                .map(|value| Some(value.into_owned()))
+                .map_err(|error| format!("XML attribute decode error: {error}"));
+        }
+    }
+    Ok(None)
+}
+
+pub(super) fn is_local_name(name: &[u8], expected: &[u8]) -> bool {
+    let local = name
+        .iter()
+        .rposition(|byte| *byte == b':')
+        .map(|index| &name[index + 1..])
+        .unwrap_or(name);
+    local == expected
+}
+
+pub(super) fn unescape_text(e: &BytesText<'_>) -> Result<String, String> {
+    let decoded = e
+        .decode()
+        .map_err(|error| format!("XML text decode error: {error}"))?;
+    quick_xml::escape::unescape(&decoded)
+        .map(|value| value.into_owned())
+        .map_err(|error| format!("XML text unescape error: {error}"))
+}
+
+pub(super) fn unescape_general_ref(e: &BytesRef<'_>) -> Result<String, String> {
+    let decoded = e
+        .decode()
+        .map_err(|error| format!("XML reference decode error: {error}"))?;
+    let wrapped = format!("&{decoded};");
+    quick_xml::escape::unescape(&wrapped)
+        .map(|value| value.into_owned())
+        .map_err(|error| format!("XML reference unescape error: {error}"))
 }

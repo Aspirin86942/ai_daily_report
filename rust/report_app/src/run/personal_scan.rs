@@ -14,7 +14,7 @@ use crate::{
 use ai_daily_scanner_contract::EngineStatus;
 use ai_daily_worker_contract::{ContentUnit, ContentUnitKind, SourceRange, SourceRangeUnit};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, path::Path};
+use std::path::Path;
 
 fn invalid_units() -> ReportError {
     ReportError::new("SCAN_SOURCE_INVALID", "扫描摘录的结构位置与原文不一致")
@@ -104,9 +104,6 @@ fn materials(
         serde_json::from_value(audit.remove("excerpt_block_context").unwrap_or(Value::Null))?;
     let excerpt_ranges: Option<Vec<SourceRange>> =
         serde_json::from_value(audit.remove("excerpt_ranges").unwrap_or(Value::Null))?;
-    // Read and omitted ranges describe the file once. Excerpt ranges belong to each block.
-    let mut read_ranges = audit.remove("read_ranges");
-    let mut omitted_ranges = audit.remove("omitted_ranges");
     let units = units.unwrap_or_default();
     let mut ends = ends.unwrap_or_else(|| vec![units.len()]);
     let mut inherited = inherited.unwrap_or_else(|| vec![Vec::new(); ends.len()]);
@@ -144,11 +141,20 @@ fn materials(
                 ContentUnitKind::Heading | ContentUnitKind::Paragraph | ContentUnitKind::Text
             )
         })
-        && !short_text_has_gap(&units, read_ranges.as_ref(), omitted_ranges.as_ref())
+        && !short_text_has_gap(
+            &units,
+            audit.get("read_ranges"),
+            audit.get("omitted_ranges"),
+        )
     {
         ends = vec![units.len()];
         inherited = vec![Vec::new()];
     }
+    // File-wide ranges travel with the first block. Each block has its own excerpt ranges.
+    let mut file_ranges: Vec<_> = ["read_ranges", "omitted_ranges"]
+        .into_iter()
+        .filter_map(|key| audit.remove(key).map(|value| (key, value)))
+        .collect();
     let mut result = Vec::with_capacity(ends.len());
     let mut first = 0;
     let mut start_char = 0;
@@ -194,13 +200,8 @@ fn materials(
             "context": context,
         });
         block.coverage_limits["evidence_audit"]["excerpt_ranges"] = json!(ranges);
-        if first == 0 {
-            if let Some(read) = read_ranges.take() {
-                block.coverage_limits["evidence_audit"]["read_ranges"] = read;
-            }
-            if let Some(omitted) = omitted_ranges.take() {
-                block.coverage_limits["evidence_audit"]["omitted_ranges"] = omitted;
-            }
+        for (key, value) in file_ranges.drain(..) {
+            block.coverage_limits["evidence_audit"][key] = value;
         }
         block.excerpt_chars = end_char - start_char;
         block.excerpt_sha256 = quote_hash.clone();
@@ -252,29 +253,19 @@ pub fn prepare(app: &App, request: &ReportRequest) -> Result<Selection, ReportEr
         });
     }
     let scan = app.scan(request)?;
-    let (sources, gaps) = input::scan_sources(&scan)?;
-    selection.gaps = gaps;
     selection.summary.incomplete_inventory = scan.envelope.status != EngineStatus::Ok;
+    let sources = input::scan_sources(scan, &mut selection.gaps)?;
     selection.summary.observed_files = sources.len() as u64;
-    let raw: BTreeMap<_, _> = scan
-        .sources
-        .iter()
-        .map(|s| (s.source_id.as_str(), s))
-        .collect();
     let permissions = EvidencePermissions::new(&app.config);
-    for source in sources {
+    for (source, excerpt) in sources {
         selection.summary.inspected_files += 1;
-        let path = source
-            .relative_path
-            .as_deref()
-            .unwrap_or_default()
-            .to_owned();
-        let absolute = app.config.paths.work_dir.join(&path);
+        let path = source.relative_path.as_deref().unwrap_or_default();
+        let absolute = app.config.paths.work_dir.join(path);
         if !permissions
             .as_ref()
             .is_some_and(|policy| policy.permits(&absolute))
         {
-            selection.summary.omit("out_of_scope", &path);
+            selection.summary.omit("out_of_scope", path);
             continue;
         }
         if !source.usable() {
@@ -287,19 +278,18 @@ pub fn prepare(app: &App, request: &ReportRequest) -> Result<Selection, ReportEr
                 _ if source.parse_status == "success" => "no_usable_text",
                 _ => "read_failed",
             };
-            selection.summary.omit(reason, &path);
+            selection.summary.omit(reason, path);
             continue;
         }
-        let original = raw[source.source_id.as_str()];
         let chars = source.excerpt_chars;
         if selection.summary.selected_chars + chars > MAX_INPUT_CHARS {
             // Keep the complete scanner excerpt; never cut a sentence or table row here.
-            selection.summary.omit("budget", &path);
+            selection.summary.omit("budget", path);
             continue;
         }
         selection.materials.extend(materials(
             source,
-            &original.excerpt,
+            &excerpt,
             &absolute,
             &request.context.run_id,
         )?);

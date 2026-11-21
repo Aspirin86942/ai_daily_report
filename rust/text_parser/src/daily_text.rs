@@ -245,6 +245,23 @@ struct Candidate {
     rank: u8,
 }
 
+impl Candidate {
+    fn line(window: usize, index: usize, piece: &Piece<'_>) -> Self {
+        Self {
+            window,
+            page_unit: None,
+            units: 0..0,
+            header: 0..0,
+            rows: index..index + 1,
+            kind: ContentUnitKind::Text,
+            heading: None,
+            level: 0,
+            cost: piece.chars + 1,
+            rank: 0,
+        }
+    }
+}
+
 fn heading_level(text: &str) -> usize {
     let hashes = text.bytes().take_while(|&b| b == b'#').count();
     if hashes != 0 {
@@ -474,16 +491,11 @@ fn candidates(
         }
         let rank = fact_rank(text);
         all.push(Candidate {
-            window,
-            page_unit: None,
-            units: 0..0,
-            header: 0..0,
-            rows: index..index + 1,
             kind,
             heading: section,
             level,
-            cost: pieces[index].chars + 1,
             rank: if first { rank.min(3) } else { rank },
+            ..Candidate::line(window, index, &pieces[index])
         });
         first = kind == ContentUnitKind::Heading;
         if first {
@@ -498,7 +510,6 @@ fn candidates(
 /// field of the last row, and is part of both the character and source span.
 struct TextOutput {
     text: String,
-    chars: u64,
     max_chars: u64,
     audit: ParsedContentAudit,
     audit_bytes: usize,
@@ -511,7 +522,6 @@ impl TextOutput {
             .len();
         Self {
             text: String::new(),
-            chars: 0,
             max_chars,
             audit,
             audit_bytes,
@@ -527,7 +537,7 @@ impl TextOutput {
     ) -> bool {
         let units = self.audit.content_units.as_mut().unwrap();
         let separator = usize::from(!units.is_empty());
-        let start = self.chars + separator as u64;
+        let start = units.last().map_or(0, |last| last.text_end + 1);
         let end = start + chars;
         if end > self.max_chars || units.len() >= 512 || ranges.len() > 128 {
             return false;
@@ -568,7 +578,6 @@ impl TextOutput {
             self.text.push('\n');
         }
         self.text.push_str(text);
-        self.chars = end;
         self.audit_bytes = bytes;
         self.audit.usable_chars = Some(usable);
         units.push(unit);
@@ -610,18 +619,7 @@ pub(super) fn audited_text(
                 .enumerate()
                 .filter(|(_, p)| !p.text.is_empty())
             {
-                all.push(Candidate {
-                    window: w,
-                    page_unit: None,
-                    units: 0..0,
-                    header: 0..0,
-                    rows: i..i + 1,
-                    heading: None,
-                    kind: ContentUnitKind::Text,
-                    level: 0,
-                    cost: p.chars + 1,
-                    rank: 0,
-                });
+                all.push(Candidate::line(w, i, p));
             }
         } else {
             bounded |= candidates(&mut all, &pieces, &pages, w, sampled, budget);

@@ -4,7 +4,6 @@ use ai_daily_report::{
     model::transport::{HttpResponse, ModelTransport, TransportFailure},
     reports::personal::{
         EvidenceAttachment, Material, Selection, MAX_FILE_CHARS, MAX_REPORT_BYTES, MAX_USER_CHARS,
-        SCAN_TEMPLATE,
     },
     run::{
         personal::{finish, PersonalInput},
@@ -92,33 +91,20 @@ fn request(day: NaiveDate, save: bool) -> ReportRequest {
 
 /// Persist the pre-upgrade input exactly as a prepared scan did, then recover it from disk.
 fn finish_frozen_v5(app: &App, request: ReportRequest) -> Result<ReportOutcome, ReportError> {
-    let mut context = request.context;
-    context.config_fingerprint = app.fingerprint(false)?;
-    let now = context.started_at;
-    let source = ai_daily_report::reports::data::ReportSource::user(&request.input, now);
-    let mut selection = Selection::default();
-    selection.summary.selected_chars = source.excerpt_chars;
-    selection.materials.push(Material {
-        source,
-        text: request.input,
-        evidence: vec![],
-        priority: 0,
-    });
-    let plan =
-        ai_daily_report::model::personal::prepare_scan(&app.config.llm, &context, &mut selection)?;
-    assert_eq!(plan.version, 6);
-    let input_fingerprint = fingerprint(&json!({
-        "context":context,"selection":selection,"plan":plan,"template":SCAN_TEMPLATE
+    let mut input: PersonalInput =
+        serde_json::from_str(include_str!("fixtures/retired/input-v5.json"))?;
+    assert_eq!(input.context.target_date, request.context.target_date);
+    assert_eq!(input.selection.user_notes(), request.input);
+    assert_eq!(input.plan.as_ref().unwrap().version, 6);
+    // The frozen model request and template stay byte-identical across test runs.
+    // Only the outer run and configuration belong to this isolated database.
+    input.context = request.context;
+    input.context.config_fingerprint = app.fingerprint(false)?;
+    input.recovery_fingerprint = app.fingerprint(true)?;
+    input.input_fingerprint = fingerprint(&json!({
+        "context":input.context, "selection":input.selection, "plan":input.plan, "template":input.template
     }))?;
-    let input = PersonalInput {
-        version: 5,
-        context,
-        selection,
-        plan: Some(plan),
-        template: SCAN_TEMPLATE.into(),
-        input_fingerprint,
-        recovery_fingerprint: app.fingerprint(true)?,
-    };
+    let now = input.context.started_at;
     let id = &input.context.run_id;
     app.store.create_personal(
         &input.context,
@@ -196,6 +182,9 @@ fn expanded_personal_input_preserves_material_through_182000_chars_and_rejects_o
     config.llm.context_window_tokens = Some(1_000_000);
     let day = NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
     let context = request(day, false).context;
+    let fixture: PersonalInput =
+        serde_json::from_str(include_str!("fixtures/retired/input-v5.json")).unwrap();
+    let frozen = fixture.plan.unwrap();
     let notes = "🦀".repeat(MAX_USER_CHARS);
     for file_chars in [20_001, 180_000, 180_001] {
         let mut text = "中🦀".repeat(file_chars / 2);
@@ -238,15 +227,30 @@ fn expanded_personal_input_preserves_material_through_182000_chars_and_rejects_o
                 priority: 1,
             },
         ];
-        let plan =
-            ai_daily_report::model::personal::prepare_scan(&config.llm, &context, &mut selection);
+        let plan = ai_daily_report::model::personal::prepare_detailed_scan(
+            &config.llm,
+            &context,
+            &selection,
+        );
+        // Bind the boundary-sized materials to the old wire format, then let
+        // the retained v6 validator independently rebuild and check its request.
+        let mut historical = frozen.clone();
+        historical.target["selection"] = json!(selection);
         if file_chars == 180_001 {
+            assert_eq!(
+                historical.validate(&config.llm).unwrap_err().code,
+                "PERSONAL_REPORT_INVALID"
+            );
             assert_eq!(plan.unwrap_err().code, "PERSONAL_REPORT_INVALID");
             assert!(selection.validate().is_err());
             continue;
         }
         let plan = plan.unwrap();
         plan.validate(&config.llm).unwrap();
+        historical.source_map = plan.source_map.clone();
+        historical.request["messages"][1] = plan.request["messages"][1].clone();
+        historical.validate(&config.llm).unwrap();
+        assert_eq!(historical.output_capacity_bytes, MAX_REPORT_BYTES);
         assert_eq!(plan.output_capacity_bytes, MAX_REPORT_BYTES);
         assert!(plan.output_capacity_bytes > 100_000);
         let input: Value =

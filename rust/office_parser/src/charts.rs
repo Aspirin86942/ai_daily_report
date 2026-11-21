@@ -1,8 +1,15 @@
-use super::*;
+use crate::parts::{self, attr_value, unescape_general_ref, unescape_text};
+use ai_daily_worker_contract::{AuditTextBuilder, ContentUnitKind, SourceRange, SourceRangeUnit};
 use office_oxide::core::opc::PartName;
 use office_oxide::core::relationships::{rel_types, Relationships, TargetMode};
 use office_oxide::pptx::{GraphicContent, Shape};
+use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::path::Path;
+use std::time::Instant;
+use zip::read::ZipArchive;
 
 const CHART: &[u8] = b"http://schemas.openxmlformats.org/drawingml/2006/chart";
 const DRAWING: &[u8] = b"http://schemas.openxmlformats.org/drawingml/2006/main";
@@ -37,8 +44,8 @@ fn target(links: &Relationships, id: &str, kind: &str, source: &PartName) -> Opt
 }
 
 impl SlideCharts {
-    pub fn open(request: &OfficeParseRequest, mut parts: parts::PartBudget) -> Option<Self> {
-        let mut zip = ZipArchive::new(File::open(&request.file_path).ok()?).ok()?;
+    pub fn open(path: &Path, mut parts: parts::PartBudget) -> Option<Self> {
+        let mut zip = ZipArchive::new(File::open(path).ok()?).ok()?;
         let presentation = parts.main_part(&mut zip)?;
         let xml = parts.complete(&mut zip, &presentation.rels_path(), 1024 * 1024)?;
         let links = Relationships::parse(&xml).ok()?;

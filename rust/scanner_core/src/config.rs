@@ -20,54 +20,21 @@ pub fn normalize_scanner_settings(
     report_mode: ReportMode,
 ) -> Result<NormalizedScannerSettings, String> {
     raw.validate()?;
-    let summary_mode = !matches!(report_mode, ReportMode::Daily);
-    let text_max_chars = if summary_mode {
-        raw.summary_text_max_chars.unwrap_or(2_000)
-    } else {
-        raw.text_max_chars.unwrap_or(6_000)
+    let limit = |daily: Option<u64>, summary: Option<u64>, daily_default, summary_default| {
+        if report_mode == ReportMode::Daily {
+            daily.unwrap_or(daily_default)
+        } else {
+            summary.unwrap_or(summary_default)
+        }
     };
+    let text_max_chars = limit(raw.text_max_chars, raw.summary_text_max_chars, 6_000, 2_000);
+    let document_excerpt_max_chars = limit(
+        raw.document_excerpt_max_chars,
+        raw.summary_document_excerpt_max_chars,
+        text_max_chars,
+        text_max_chars,
+    );
     let default_head_bytes = raw.direct_text_max_bytes.unwrap_or(262_144);
-    let document_excerpt_max_chars = if summary_mode {
-        raw.summary_document_excerpt_max_chars
-            .unwrap_or(text_max_chars)
-    } else {
-        raw.document_excerpt_max_chars.unwrap_or(text_max_chars)
-    };
-    let (
-        excel_max_sheets,
-        excel_max_rows,
-        excel_max_columns,
-        docx_max_paragraphs,
-        docx_max_tables,
-        docx_table_max_rows,
-        docx_table_max_cols,
-        pptx_max_slides,
-        pdf_max_pages,
-    ) = if summary_mode {
-        (
-            raw.summary_excel_max_sheets.unwrap_or(2),
-            raw.summary_excel_max_rows.unwrap_or(10),
-            raw.summary_excel_max_columns.unwrap_or(12),
-            raw.summary_docx_max_paragraphs.unwrap_or(80),
-            raw.summary_docx_max_tables.unwrap_or(8),
-            raw.summary_docx_table_max_rows.unwrap_or(20),
-            raw.summary_docx_table_max_cols.unwrap_or(8),
-            raw.summary_pptx_max_slides.unwrap_or(15),
-            raw.summary_pdf_max_pages.unwrap_or(2),
-        )
-    } else {
-        (
-            raw.excel_max_sheets.unwrap_or(5),
-            raw.excel_max_rows.unwrap_or(50),
-            raw.excel_max_columns.unwrap_or(20),
-            raw.docx_max_paragraphs.unwrap_or(200),
-            raw.docx_max_tables.unwrap_or(20),
-            raw.docx_table_max_rows.unwrap_or(50),
-            raw.docx_table_max_cols.unwrap_or(12),
-            raw.pptx_max_slides.unwrap_or(50),
-            raw.pdf_max_pages.unwrap_or(5),
-        )
-    };
     let global_max_chars = raw.context_max_chars.unwrap_or(500_000);
     let max_file_size_bytes = raw
         .max_file_size_mb
@@ -85,16 +52,16 @@ pub fn normalize_scanner_settings(
         report_mode,
         discovery: DiscoveryProfile {
             allowed_extensions: canonical_strings(
-                raw.allowed_extensions.as_ref(),
+                raw.allowed_extensions.as_deref(),
                 DEFAULT_ALLOWED_EXTENSIONS,
                 "allowed_extensions",
             )?,
             ignored_patterns: canonical_strings(
-                raw.ignored_patterns.as_ref(),
+                raw.ignored_patterns.as_deref(),
                 DEFAULT_IGNORED_PATTERNS,
                 "ignored_patterns",
             )?,
-            excluded_dirs: canonical_strings(raw.excluded_dirs.as_ref(), &[], "excluded_dirs")?,
+            excluded_dirs: canonical_strings(raw.excluded_dirs.as_deref(), &[], "excluded_dirs")?,
             follow_symlinks: raw.follow_symlinks.unwrap_or(false),
             cloud_files_policy: raw
                 .cloud_files_policy
@@ -120,12 +87,13 @@ pub fn normalize_scanner_settings(
             cache_payload_version: 1,
             excerpt_policy_version: crate::source_allocation::EXCERPT_POLICY_VERSION.into(),
             excerpt_priority_paths: {
-                let mut paths = raw.excerpt_priority_paths.clone().unwrap_or_default();
-                paths = paths
-                    .into_iter()
+                let mut paths: Vec<_> = raw
+                    .excerpt_priority_paths
+                    .iter()
+                    .flatten()
                     .map(|path| path.replace('\\', "/"))
                     .collect();
-                paths.sort();
+                paths.sort_unstable();
                 paths.dedup();
                 paths
             },
@@ -144,14 +112,34 @@ pub fn normalize_scanner_settings(
             office: OfficeParseProfile {
                 primary_backend: "rust_office_oxide_v2".to_string(),
                 legacy_extensions_enabled: raw.legacy_office_enabled.unwrap_or(false),
-                excel_max_sheets,
-                excel_max_rows,
-                excel_max_columns,
-                docx_max_paragraphs,
-                docx_max_tables,
-                docx_table_max_rows,
-                docx_table_max_cols,
-                pptx_max_slides,
+                excel_max_sheets: limit(raw.excel_max_sheets, raw.summary_excel_max_sheets, 5, 2),
+                excel_max_rows: limit(raw.excel_max_rows, raw.summary_excel_max_rows, 50, 10),
+                excel_max_columns: limit(
+                    raw.excel_max_columns,
+                    raw.summary_excel_max_columns,
+                    20,
+                    12,
+                ),
+                docx_max_paragraphs: limit(
+                    raw.docx_max_paragraphs,
+                    raw.summary_docx_max_paragraphs,
+                    200,
+                    80,
+                ),
+                docx_max_tables: limit(raw.docx_max_tables, raw.summary_docx_max_tables, 20, 8),
+                docx_table_max_rows: limit(
+                    raw.docx_table_max_rows,
+                    raw.summary_docx_table_max_rows,
+                    50,
+                    20,
+                ),
+                docx_table_max_cols: limit(
+                    raw.docx_table_max_cols,
+                    raw.summary_docx_table_max_cols,
+                    12,
+                    8,
+                ),
+                pptx_max_slides: limit(raw.pptx_max_slides, raw.summary_pptx_max_slides, 50, 15),
                 pptx_include_notes: raw.pptx_include_notes.unwrap_or(true),
                 document_excerpt_max_chars,
             },
@@ -159,7 +147,7 @@ pub fn normalize_scanner_settings(
                 image_ocr: raw.pdf_image_ocr.filter(|ocr| ocr.enabled),
                 selection_policy_version: CLASSIFIER_POLICY_VERSION.to_string(),
                 backend: "rust_pdfium_v3".to_string(),
-                max_pages: pdf_max_pages,
+                max_pages: limit(raw.pdf_max_pages, raw.summary_pdf_max_pages, 5, 2),
                 excerpt_max_chars: document_excerpt_max_chars,
             },
         },
@@ -195,22 +183,21 @@ pub fn normalize_scanner_settings(
 }
 
 fn canonical_strings(
-    configured: Option<&Vec<String>>,
+    configured: Option<&[String]>,
     defaults: &[&str],
     field: &str,
 ) -> Result<Vec<String>, String> {
-    let values = configured
-        .cloned()
-        .unwrap_or_else(|| defaults.iter().map(|value| (*value).to_string()).collect());
-    let mut canonical = Vec::with_capacity(values.len());
-    for value in values {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return Err(format!("{field} contains an empty value"));
-        }
-        canonical.push(trimmed.to_string());
+    let mut canonical: Vec<String> = match configured {
+        Some(values) => values.iter().map(|value| value.trim().to_owned()).collect(),
+        None => defaults
+            .iter()
+            .map(|value| value.trim().to_owned())
+            .collect(),
+    };
+    if canonical.iter().any(String::is_empty) {
+        return Err(format!("{field} contains an empty value"));
     }
-    canonical.sort();
+    canonical.sort_unstable();
     canonical.dedup();
     Ok(canonical)
 }
@@ -218,12 +205,13 @@ fn canonical_strings(
 fn normalize_timeout_map(
     configured: Option<&BTreeMap<String, u64>>,
 ) -> Result<BTreeMap<String, u64>, String> {
-    let defaults = BTreeMap::from([
-        (".pdf".to_string(), 45_u64),
-        (".xls".to_string(), 60_u64),
-        (".xlsx".to_string(), 60_u64),
-    ]);
-    let source = configured.unwrap_or(&defaults);
+    let Some(source) = configured else {
+        return Ok(BTreeMap::from([
+            (".pdf".into(), 45_000),
+            (".xls".into(), 60_000),
+            (".xlsx".into(), 60_000),
+        ]));
+    };
     let mut normalized = BTreeMap::new();
     for (extension, seconds) in source {
         let key = extension.trim().to_string();

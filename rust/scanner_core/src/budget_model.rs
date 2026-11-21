@@ -140,13 +140,8 @@ pub struct RouteHint {
     pub max_excerpt_chars: u64,
 }
 
-/// A candidate file for the omitted-summary detail-slot pre-selection.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OmittedCandidate {
-    pub file_identity: String,
-    pub relative_path: String,
-    pub extension: String,
-}
+/// The candidate and selected slot carry the same identity.
+pub use SlotKey as OmittedCandidate;
 
 /// Identifies one pre-selected omitted detail slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,27 +169,37 @@ pub struct OmittedSummaryPlan {
 
 impl OmittedSummaryPlan {
     pub fn build(files: &[OmittedCandidate], global_max_chars: u64) -> Self {
+        Self::from_paths(
+            files.iter().map(|f| {
+                (
+                    f.file_identity.as_str(),
+                    f.relative_path.as_str(),
+                    f.extension.as_str(),
+                )
+            }),
+            global_max_chars,
+        )
+    }
+
+    pub(crate) fn from_paths<'a>(
+        files: impl Iterator<Item = (&'a str, &'a str, &'a str)>,
+        global_max_chars: u64,
+    ) -> Self {
         let reservation = omitted_summary_reservation(global_max_chars);
         let fixed = omitted_summary_fixed_chars();
-        // Detail slots are pre-selected by nominal rank (single ordering
-        // implementation), regardless of the caller's input order.
-        let mut ordered: Vec<&OmittedCandidate> = files.iter().collect();
-        ordered.sort_by_key(|file| {
-            crate::nominal::NominalKey::new(
-                &file.relative_path,
-                &file.extension,
-                &file.file_identity,
-            )
+        let mut ordered: Vec<_> = files.collect();
+        ordered.sort_by_cached_key(|&(id, path, extension)| {
+            crate::nominal::NominalKey::new(path, extension, id)
         });
         let mut used = fixed;
         let mut detail_slots = Vec::new();
-        for file in ordered {
-            let row_cost = max_omitted_row_chars(&file.relative_path) + 1;
+        for (id, path, extension) in ordered {
+            let row_cost = max_omitted_row_chars(path) + 1;
             if used.saturating_add(row_cost) <= reservation {
                 detail_slots.push(SlotKey {
-                    file_identity: file.file_identity.clone(),
-                    relative_path: file.relative_path.clone(),
-                    extension: file.extension.clone(),
+                    file_identity: id.to_owned(),
+                    relative_path: path.to_owned(),
+                    extension: extension.to_owned(),
                 });
                 used += row_cost;
             } else {

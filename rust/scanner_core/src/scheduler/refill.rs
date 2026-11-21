@@ -114,7 +114,7 @@ impl BudgetedContextScheduler {
     #[allow(clippy::too_many_arguments)]
     fn reclaim_chars(
         &self,
-        discovery: &[DiscoveredFileOut],
+        snapshot: &HashMap<String, &DiscoveredFileOut>,
         work_dir: &str,
         profile: &NormalizedScannerSettings,
         classified: &[ClassifiedPlan],
@@ -125,13 +125,14 @@ impl BudgetedContextScheduler {
         model: &ContextBudgetModel,
     ) -> Result<u64, SchedulerFailure> {
         let evidence = build_evidence(
-            discovery,
+            snapshot,
             work_dir,
             classified,
             admission,
             classifications,
             runtime,
             outputs,
+            |_, _, _| {},
         )?;
         let rendered =
             build_context(evidence, &profile.context, profile.report_mode).map_err(|message| {
@@ -218,7 +219,7 @@ impl BudgetedContextScheduler {
                 break;
             }
             ledger.refunded_chars += self.reclaim_chars(
-                discovery,
+                snapshot,
                 work_dir,
                 profile,
                 classified,
@@ -443,7 +444,7 @@ impl BudgetedContextScheduler {
                 )
             });
             ledger.refunded_chars += self.reclaim_chars(
-                discovery,
+                snapshot,
                 work_dir,
                 profile,
                 classified,

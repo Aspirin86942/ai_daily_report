@@ -1,7 +1,7 @@
 use super::{
-    audited_text, byte_ranges, format_csv_row, is_attention_fact, metadata_lines, parse_csv,
+    audited_text, byte_ranges, format_csv_row, is_attention_fact, parse_csv, preview_metadata,
     AuditTextBuilder, ContentUnitKind, LightTextWarning, ParsedContentAudit, RawExcerpt,
-    SourceRange, SourceRangeUnit,
+    SourceRange, SourceRangeUnit, LEGACY_CSV_FIELD_SIZE_LIMIT,
 };
 
 struct Record {
@@ -122,36 +122,6 @@ fn section_header(row: &[String], columns: &[String]) -> bool {
     matches >= 2
 }
 
-// Only complete logical records from a bounded read have a known end. A quote in an
-// unquoted field is a literal character under the retained CSV reader's rules.
-fn complete_window(text: &str) -> &str {
-    let mut field_start = true;
-    let mut quoted = false;
-    let mut end = 0;
-    let mut chars = text.char_indices().peekable();
-    while let Some((byte, ch)) = chars.next() {
-        if quoted {
-            if ch == '"' && chars.next_if(|(_, next)| *next == '"').is_none() {
-                quoted = false;
-            }
-        } else {
-            match ch {
-                '"' if field_start => {
-                    quoted = true;
-                    field_start = false;
-                }
-                ',' => field_start = true,
-                '\n' => {
-                    field_start = true;
-                    end = byte + 1;
-                }
-                _ => field_start = false,
-            }
-        }
-    }
-    &text[..end]
-}
-
 fn csv_range(start: usize, end: usize) -> SourceRange {
     SourceRange::new(
         SourceRangeUnit::CsvRecord,
@@ -166,12 +136,7 @@ pub(super) fn audited_csv(
     max_chars: u64,
 ) -> (String, bool, Option<LightTextWarning>, ParsedContentAudit) {
     let input = raw.text.trim_start_matches('\u{feff}');
-    let input = if raw.truncated {
-        complete_window(input)
-    } else {
-        input
-    };
-    let Ok(rows) = parse_csv(input) else {
+    let Ok(rows) = parse_csv(input, LEGACY_CSV_FIELD_SIZE_LIMIT, raw.truncated) else {
         return audited_text(
             std::slice::from_ref(raw),
             max_chars,
@@ -295,7 +260,7 @@ pub(super) fn audited_csv(
         }
     }
 
-    let meta = metadata_lines("CSV preview", raw.source, raw.truncated).join("\n");
+    let meta = preview_metadata("CSV preview", raw.source, raw.truncated);
     let include_meta = (meta.chars().count() as u64) < remaining;
     if include_meta {
         builder.push(&meta, ContentUnitKind::Heading, vec![]);

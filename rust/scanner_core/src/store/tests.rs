@@ -253,20 +253,7 @@ fn canonical_for_request_id(harness: &Harness, request_id: &str) -> CanonicalReq
 }
 
 fn empty_summary() -> ContextSummary {
-    ContextSummary {
-        source_file_count: 0,
-        success_count: 0,
-        timeout_count: 0,
-        included_file_count: 0,
-        omitted_file_count: 0,
-        error_file_count: 0,
-        input_chars: 0,
-        output_chars: 0,
-        total_duration_ms: 0,
-        discovery_duration_ms: 0,
-        parse_duration_ms: 0,
-        compression_duration_ms: 0,
-    }
+    ContextSummary::default()
 }
 
 fn run_error() -> Diagnostic {
@@ -429,6 +416,7 @@ fn audit_size_counts_the_execution_child_payload() {
     )];
     let parse_only_size = compute_audit_size(&batch);
     batch.file_results[0].pdf_classification = Some(PdfClassificationAuditV1 {
+        pdf_open_failure_key: None,
         page_audit: None,
         status: PdfClassificationStatus::TextInParseWindow,
         page_count: Nullable(Some(2)),
@@ -515,16 +503,14 @@ fn success_batch(
     let summary = ContextSummary {
         source_file_count: 1,
         success_count: 1,
-        timeout_count: 0,
         included_file_count: 1,
-        omitted_file_count: 0,
-        error_file_count: 0,
         input_chars: content.chars().count() as u64,
         output_chars: content.chars().count() as u64,
         total_duration_ms: 8,
         discovery_duration_ms: 2,
         parse_duration_ms: 3,
         compression_duration_ms: 1,
+        ..Default::default()
     };
     let envelope = ContextEnvelope {
         contract: "ai_daily_context".to_string(),
@@ -1156,17 +1142,12 @@ fn error_run_with_file_rows_produces_complete_evidence() {
     };
     let summary = ContextSummary {
         source_file_count: 1,
-        success_count: 0,
-        timeout_count: 0,
-        included_file_count: 0,
-        omitted_file_count: 0,
         error_file_count: 1,
         input_chars: 5,
-        output_chars: 0,
         total_duration_ms: 3,
         discovery_duration_ms: 2,
         parse_duration_ms: 1,
-        compression_duration_ms: 0,
+        ..Default::default()
     };
     let context = ContextRunRecord {
         context_profile_hash: "0".repeat(64),
@@ -1294,38 +1275,9 @@ fn error_run_with_file_rows_produces_complete_evidence() {
                 refunded_classification_pages: 0,
                 rounds: Vec::new(),
             }),
-            source_guard_content_hash_file_count: 0,
-            source_guard_unavailable_count: 0,
-            source_guard_bytes_read: 0,
-            candidate_file_count: 0,
-            admitted_file_count: 0,
-            classification_slot_count: 0,
-            confirmed_run_inspected_pages_total: 0,
-            unobserved_classification_attempt_count: 0,
-            nominal_charged_pages_total: 0,
-            extraction_slot_count: 0,
-            pdfplumber_invocations: 0,
-            snapshot_hit: false,
-            parse_cache_lookup_count: 0,
-            classification_cache_lookup_count: 0,
-            parse_cache_all_hit: Nullable(None),
-            classification_cache_all_hit: Nullable(None),
-            stage_deadline_exhausted_count: 0,
-            session_restart_count: 0,
-            session_fallback_count: 0,
-            classify_attempt_count: 0,
-            parse_attempt_count: 0,
-            reserved_chars: 0,
-            rendered_chars: 0,
             worker_handshake_ms: 5,
             discovery_ms: 2,
-            snapshot_lookup_ms: 0,
-            current_run_audit_write_ms: 0,
-            terminal_precommit_ms: 0,
-            deadline_precommit_elapsed_ms: 0,
-            envelope_rebuild_ms: 0,
-            terminal_rows_written: 0,
-            peak_worker_rss_bytes: Nullable(None),
+            ..Default::default()
         }),
     };
     finalize_for_test(&mut harness.store, &active, &batch, 2).expect("error finalize");
@@ -1522,39 +1474,9 @@ fn zero_file_error_run_produces_complete_evidence() {
         snapshot_hit: None,
         execution_metrics: Some(ai_daily_scanner_contract::ExecutionMetricsV2 {
             discovery_observed_file_count: 1_000_001,
-            refill_audit: None,
-            source_guard_content_hash_file_count: 0,
-            source_guard_unavailable_count: 0,
-            source_guard_bytes_read: 0,
-            candidate_file_count: 0,
-            admitted_file_count: 0,
-            classification_slot_count: 0,
-            confirmed_run_inspected_pages_total: 0,
-            unobserved_classification_attempt_count: 0,
-            nominal_charged_pages_total: 0,
-            extraction_slot_count: 0,
-            pdfplumber_invocations: 0,
-            snapshot_hit: false,
-            parse_cache_lookup_count: 0,
-            classification_cache_lookup_count: 0,
-            parse_cache_all_hit: Nullable(None),
-            classification_cache_all_hit: Nullable(None),
-            stage_deadline_exhausted_count: 0,
-            session_restart_count: 0,
-            session_fallback_count: 0,
-            classify_attempt_count: 0,
-            parse_attempt_count: 0,
-            reserved_chars: 0,
-            rendered_chars: 0,
             worker_handshake_ms: 5,
             discovery_ms: 2,
-            snapshot_lookup_ms: 0,
-            current_run_audit_write_ms: 0,
-            terminal_precommit_ms: 0,
-            deadline_precommit_elapsed_ms: 0,
-            envelope_rebuild_ms: 0,
-            terminal_rows_written: 0,
-            peak_worker_rss_bytes: Nullable(None),
+            ..Default::default()
         }),
     };
     finalize_for_test(&mut harness.store, &active, &batch, 2).expect("zero-file error finalize");

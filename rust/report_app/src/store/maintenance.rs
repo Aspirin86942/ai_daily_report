@@ -36,20 +36,6 @@ impl Store {
         query(&self.connection()?,
             "SELECT call_id,run_id,status,error_code,usage_json,request_sha256,response_sha256 FROM report_model_calls WHERE COALESCE(json_extract(usage_json,'$.job_id'),json_extract(usage_json,'$.reserved_budget.job_id'))=? ORDER BY call_id", [job])
     }
-    pub fn calls_after(&self, baseline: i64) -> Result<u64, ReportError> {
-        Ok(self.connection()?.query_row(
-            "SELECT COUNT(*) FROM report_model_calls WHERE call_id>?",
-            [baseline],
-            |r| r.get::<_, i64>(0),
-        )? as u64)
-    }
-    pub fn last_call_id(&self) -> Result<i64, ReportError> {
-        Ok(self.connection()?.query_row(
-            "SELECT COALESCE(MAX(call_id),0) FROM report_model_calls",
-            [],
-            |r| r.get(0),
-        )?)
-    }
 }
 pub(crate) fn file_sha(path: &Path) -> Result<String, ReportError> {
     use sha2::{Digest, Sha256};

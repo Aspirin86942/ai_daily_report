@@ -1,5 +1,11 @@
-use super::*;
+use crate::parts::{self, attr_value, unescape_general_ref, unescape_text};
 use office_oxide::docx::{BlockElement, DocxDocument};
+use quick_xml::events::Event;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::File;
+use std::path::Path;
+use std::time::Instant;
+use zip::read::ZipArchive;
 
 pub(super) struct Caption {
     pub text: String,
@@ -74,11 +80,11 @@ fn global_table_number(text: &str) -> Option<usize> {
 // Match the same top-level block sequence as office_oxide. Ambiguous adjacency and
 // a different block sequence cannot supply an attributed table caption.
 pub(super) fn read(
-    request: &OfficeParseRequest,
+    path: &Path,
     doc: &DocxDocument,
     parts: &mut parts::PartBudget,
 ) -> Option<(BTreeMap<usize, Caption>, bool)> {
-    let mut zip = ZipArchive::new(File::open(&request.file_path).ok()?).ok()?;
+    let mut zip = ZipArchive::new(File::open(path).ok()?).ok()?;
     let main = parts.main_part(&mut zip)?;
     let xml = parts.complete(&mut zip, main.as_str(), 8 * 1024 * 1024)?;
     let mut reader = quick_xml::Reader::from_reader(xml.as_slice());

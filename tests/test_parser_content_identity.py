@@ -90,6 +90,8 @@ class ParserContentIdentityTests(unittest.TestCase):
 
     def test_pdf_selected_pages_and_excerpt_allocation_invalidate_content(self):
         for name, needle, replacement in (
+            ("scanner_core/src/source_allocation/ranges.rs", b"fn full_excerpt", b"fn changed_excerpt"),
+            ("scanner_core/src/session/pool.rs", b"remaining_timeout_ms", b"changed_timeout_ms"),
             ("scanner_core/src/parsers/document.rs", b"profile.max_pages == 2", b"profile.max_pages == 3"),
             ("pdf_parser/src/excerpt.rs", b"const MAX_LINES: usize = 512", b"const MAX_LINES: usize = 511"),
         ):

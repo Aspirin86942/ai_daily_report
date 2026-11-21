@@ -89,6 +89,20 @@ $Manifest = Join-Path $Evidence 'manifest.json'
 
 ## 保留边界
 
+二期工作树的 17 个 Python 文件均用于开发机离线操作。Windows 发布包和 Daily、Health 任务直接运行 Rust 程序或随包 PowerShell 脚本。
+
+| 路径与文件 | 离线用途 |
+| --- | --- |
+| `scripts/compress_historical_artifacts.py`、`scripts/deduplicate_historical_artifacts.py` | 对明确选定的历史归档执行存储维护和回退 |
+| `tests/test_historical_artifact_compression.py`、`tests/test_historical_artifact_deduplication.py` | 在临时目录验证两项维护操作 |
+| `scripts/pdf_benchmark/` 下的 `generate_corpus.py`、`generate_classifier_corpus.py`、`metrics.py`、`run_python.py`、`run_rust.py`、`summarize.py` | 制作固定 PDF 语料，对照提取质量和耗时 |
+| `rust/pdf_extract_bench/oxide_compare/` 下的 `corpus.py`、`compare.py`、`score.py` | 比较候选 PDF 解析器，生成质量评分 |
+| `scripts/verify_rich_facts.py`、`rust/scanner_core/tests/semantic_daily_entry.py` | 用合成文档核对事实和原文范围，生成报告时使用本机替身 |
+| `tests/test_parser_content_identity.py` | 改动临时源码树，验证解析身份按预期失效或复用 |
+| `tests/windows_pdf_ocr_acceptance.py` | 已有的独立识别测试工具，需单独选择启用识别的验收场景 |
+
+历史看板生成脚本保存在[可恢复的单文件归档](../.artifacts/kernel-phase2-20261121/offline-python/audit-board-script.zip)，原路径和 SHA-256 见[归档记录](../.artifacts/kernel-phase2-20261121/offline-python/archived.json)。
+
 当前 Rust 验收使用 [verify_rich_facts.py](verify_rich_facts.py) 和[验证依赖清单](requirements-validation.txt)。旧 Python 生成、发布与补录脚本随匹配的源码和解析器归档。恢复原路径、文件哈希和隔离演练见[内核优化验收](../docs/plans/2026-11-21-kernel-optimization.md)。`rust/pdf_extract_bench` 保留开发对照工具。
 
 一次性探查脚本与生成 dump 的移除清单、引用核对及恢复方法见[工程清理自检记录](../docs/plans/2026-10-18-engineering-cleanup-plan.md)。`.tmp/` 的历史日志、`outputs/` 中被归档文档引用的原始工作簿和业务证据继续保留。

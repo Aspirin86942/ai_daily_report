@@ -6,7 +6,6 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
 
 pub(super) const DETAILED_PLAN_VERSION: u32 = 7;
 
@@ -94,12 +93,6 @@ pub fn request_limit(llm: &Llm, output: u64) -> Result<usize, ReportError> {
 }
 
 impl PlannedStep {
-    pub fn source_ids(&self) -> BTreeSet<String> {
-        self.source_map
-            .as_object()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default()
-    }
     pub fn bytes(&self) -> Result<Vec<u8>, ReportError> {
         canonical_json(&self.request)
     }

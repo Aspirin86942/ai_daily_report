@@ -104,10 +104,10 @@ pub(super) fn load_artifact_for_replay(
         )
         .optional()
         .map_err(cache_open)?;
-    match artifact_id {
-        Some(Some(id)) => Ok(Some(load_artifact_from_connection(connection, id)?)),
-        _ => Ok(None),
-    }
+    artifact_id
+        .flatten()
+        .map(|id| load_artifact_from_connection(connection, id))
+        .transpose()
 }
 
 pub(super) fn parse_contract_enum<T>(value: &str) -> Result<T, StoreError>
@@ -148,7 +148,15 @@ pub(super) fn envelope_metadata_json(
             .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
     }
     let mut pages = std::collections::BTreeMap::new();
+    let mut open_failures = std::collections::BTreeMap::new();
     for record in &batch.file_results {
+        if let Some(key) = record
+            .pdf_classification
+            .as_ref()
+            .and_then(|item| item.pdf_open_failure_key.as_ref())
+        {
+            open_failures.insert(&record.file_identity, key);
+        }
         if let Some(audit) = record
             .pdf_classification
             .as_ref()
@@ -160,6 +168,10 @@ pub(super) fn envelope_metadata_json(
     }
     if !pages.is_empty() {
         value["pdf_page_audits"] = serde_json::to_value(pages)
+            .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
+    }
+    if !open_failures.is_empty() {
+        value["pdf_open_failures"] = serde_json::to_value(open_failures)
             .map_err(|error| StoreError::InvalidRequest(error.to_string()))?;
     }
     serde_json::to_string(&value).map_err(|error| StoreError::InvalidRequest(error.to_string()))
@@ -197,16 +209,10 @@ pub(super) fn artifact_size_bytes_with_check(
         size += row.file_identity.len() as i64;
         size += row.relative_path.len() as i64;
         size += row.legacy_source_version.len() as i64;
-        size += row
-            .source_guard_kind
-            .as_ref()
-            .map_or(0, |value| value.len() as i64);
-        size += row
-            .source_guard_sha256
-            .as_ref()
-            .map_or(0, |value| value.len() as i64);
+        size += row.source_guard_kind.as_deref().unwrap_or_default().len() as i64;
+        size += row.source_guard_sha256.as_deref().unwrap_or_default().len() as i64;
         size += row.parse_profile_hash.len() as i64;
-        size += inventory::enum_text(&row.parse_status).len() as i64; // parse_status TEXT
+        size += row.parse_status.as_str().len() as i64; // parse_status TEXT
         size += row.parser_backend.len() as i64;
         size += row.worker_lane.len() as i64;
         size += 8; // truncated (i64)
@@ -297,6 +303,7 @@ pub(super) fn insert_artifact(
         for rows in draft.file_rows.chunks(TERMINAL_WRITE_BATCH_SIZE) {
             ensure_deadline()?;
             for row in rows {
+                let classifier = row.classifier.as_ref();
                 file_stmt
                     .execute(params![
                         artifact_id,
@@ -311,24 +318,14 @@ pub(super) fn insert_artifact(
                         row.worker_lane,
                         i64::from(row.truncated),
                         row.content_sha256,
-                        row.classifier
-                            .as_ref()
-                            .map(|classifier| inventory::enum_text(&classifier.status)),
-                        row.classifier
-                            .as_ref()
-                            .and_then(|classifier| classifier.page_count.map(|value| value as i64)),
-                        row.classifier.as_ref().and_then(|classifier| classifier
-                            .result_examined_pages
-                            .map(|value| value as i64)),
-                        row.classifier
-                            .as_ref()
-                            .map(|classifier| classifier.nominal_charged_pages as i64),
-                        row.classifier
-                            .as_ref()
-                            .map(|classifier| classifier.classifier_build.clone()),
-                        row.classifier
-                            .as_ref()
-                            .map(|classifier| classifier.classifier_profile_hash.clone()),
+                        classifier.map(|c| inventory::enum_text(&c.status)),
+                        classifier.and_then(|c| c.page_count).map(|n| n as i64),
+                        classifier
+                            .and_then(|c| c.result_examined_pages)
+                            .map(|n| n as i64),
+                        classifier.map(|c| c.nominal_charged_pages as i64),
+                        classifier.map(|c| c.classifier_build.as_str()),
+                        classifier.map(|c| c.classifier_profile_hash.as_str()),
                     ])
                     .map_err(cache_write)?;
             }
@@ -397,145 +394,27 @@ pub(super) fn load_artifact_from_connection_with_check(
             StoreError::RunCorrupt(format!("artifact semantic summary is invalid: {error}"))
         })?;
 
-    let mut file_stmt = connection
-        .prepare(
-            "SELECT file_identity, relative_path, source_version,
+    let file_rows = load_owned_rows(
+        connection,
+        artifact_id,
+        ensure_deadline,
+        "SELECT file_identity, relative_path, source_version,
                     source_guard_kind, source_guard_sha256, parse_profile_hash, parse_status,
                     parser_backend, worker_lane, truncated, content_sha256,
                     classifier_status, classifier_page_count, classifier_result_examined_pages,
                     classifier_nominal_charged_pages, classifier_build, classifier_profile_hash
              FROM context_artifact_files WHERE artifact_id=?1 ORDER BY file_identity",
-        )
-        .map_err(cache_open)?;
-    let file_query = file_stmt
-        .query_map([artifact_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
-                row.get::<_, i64>(9)? != 0,
-                row.get::<_, String>(10)?,
-                row.get::<_, Option<String>>(11)?,
-                row.get::<_, Option<i64>>(12)?,
-                row.get::<_, Option<i64>>(13)?,
-                row.get::<_, Option<i64>>(14)?,
-                row.get::<_, Option<String>>(15)?,
-                row.get::<_, Option<String>>(16)?,
-            ))
-        })
-        .map_err(cache_open)?;
-    let mut file_rows = Vec::new();
-    for (index, row) in file_query.enumerate() {
-        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
-            ensure_deadline()?;
-        }
-        let (
-            file_identity,
-            relative_path,
-            source_version,
-            source_guard_kind,
-            source_guard_sha256,
-            parse_profile_hash,
-            parse_status_text,
-            parser_backend,
-            worker_lane,
-            truncated,
-            content_sha256,
-            classifier_status,
-            classifier_page_count,
-            classifier_examined,
-            classifier_nominal,
-            classifier_build,
-            classifier_profile_hash,
-        ) = row.map_err(cache_open)?;
-        let parse_status: ParseStatus = parse_contract_enum(&parse_status_text)?;
-        let classifier = match (classifier_status, classifier_build, classifier_profile_hash) {
-            (Some(status_text), Some(build), Some(profile_hash)) => {
-                let status = parse_contract_enum(&status_text)?;
-                Some(crate::artifact::PdfClassificationProvenanceV1 {
-                    status,
-                    page_count: classifier_page_count.map(|value| value as u64),
-                    result_examined_pages: classifier_examined.map(|value| value as u64),
-                    nominal_charged_pages: classifier_nominal.unwrap_or(0) as u64,
-                    classifier_build: build,
-                    classifier_profile_hash: profile_hash,
-                })
-            }
-            _ => None,
-        };
-        file_rows.push(ArtifactFileRow {
-            file_identity,
-            relative_path,
-            legacy_source_version: source_version,
-            source_guard_kind,
-            source_guard_sha256,
-            parse_profile_hash,
-            parse_status,
-            parser_backend,
-            worker_lane,
-            truncated,
-            content_sha256,
-            classifier,
-        });
-    }
-
-    let mut decision_stmt = connection
-        .prepare(
-            "SELECT file_identity, relative_path, action, reason, priority,
+        decode_file_row,
+    )?;
+    let decision_rows = load_owned_rows(
+        connection,
+        artifact_id,
+        ensure_deadline,
+        "SELECT file_identity, relative_path, action, reason, priority,
                     input_chars, output_chars, truncated, error_code
              FROM context_artifact_decisions WHERE artifact_id=?1 ORDER BY file_identity",
-        )
-        .map_err(cache_open)?;
-    let decision_query = decision_stmt
-        .query_map([artifact_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, i64>(4)?,
-                row.get::<_, i64>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, i64>(7)? != 0,
-                row.get::<_, String>(8)?,
-            ))
-        })
-        .map_err(cache_open)?;
-    let mut decision_rows = Vec::new();
-    for (index, row) in decision_query.enumerate() {
-        if index % TERMINAL_WRITE_BATCH_SIZE == 0 {
-            ensure_deadline()?;
-        }
-        let (
-            file_identity,
-            relative_path,
-            action_text,
-            reason,
-            priority,
-            input_chars,
-            output_chars,
-            truncated,
-            error_code,
-        ) = row.map_err(cache_open)?;
-        let action: ContextAction = parse_contract_enum(&action_text)?;
-        decision_rows.push(crate::artifact::ArtifactDecisionRow {
-            file_identity,
-            relative_path,
-            action,
-            reason,
-            priority: priority as u64,
-            input_chars: input_chars as u64,
-            output_chars: output_chars as u64,
-            truncated,
-            error_code,
-        });
-    }
+        decode_decision_row,
+    )?;
 
     if crate::artifact::sha256_hex(final_context.as_bytes()) != context_sha256 {
         return Err(StoreError::RunCorrupt(
@@ -549,6 +428,101 @@ pub(super) fn load_artifact_from_connection_with_check(
         semantic_summary,
         file_rows,
         decision_rows,
+    })
+}
+
+fn load_owned_rows<T>(
+    connection: &Connection,
+    artifact_id: i64,
+    ensure_deadline: &dyn Fn() -> Result<(), StoreError>,
+    sql: &str,
+    decode: impl Fn(&rusqlite::Row<'_>) -> Result<T, StoreError>,
+) -> Result<Vec<T>, StoreError> {
+    let mut statement = connection.prepare(sql).map_err(cache_open)?;
+    let mut rows = statement.query([artifact_id]).map_err(cache_open)?;
+    let mut result = Vec::new();
+    while let Some(row) = rows.next().transpose() {
+        if result.len() % TERMINAL_WRITE_BATCH_SIZE == 0 {
+            ensure_deadline()?;
+        }
+        result.push(decode(row.map_err(cache_open)?)?);
+    }
+    Ok(result)
+}
+
+fn decode_file_row(row: &rusqlite::Row<'_>) -> Result<ArtifactFileRow, StoreError> {
+    let (
+        file_identity,
+        relative_path,
+        legacy_source_version,
+        source_guard_kind,
+        source_guard_sha256,
+        parse_profile_hash,
+        status,
+        parser_backend,
+        worker_lane,
+        truncated,
+        content_sha256,
+    ): (_, _, _, _, _, _, String, _, _, i64, _) = row.try_into().map_err(cache_open)?;
+    let classifier_status: Option<String> = row.get(11).map_err(cache_open)?;
+    let page_count: Option<i64> = row.get(12).map_err(cache_open)?;
+    let examined: Option<i64> = row.get(13).map_err(cache_open)?;
+    let nominal: Option<i64> = row.get(14).map_err(cache_open)?;
+    let build = row.get(15).map_err(cache_open)?;
+    let profile = row.get(16).map_err(cache_open)?;
+    // SQLite type errors take precedence over persisted enum errors.
+    let parse_status: ParseStatus = parse_contract_enum(&status)?;
+    let classifier = match (classifier_status, build, profile) {
+        (Some(status), Some(classifier_build), Some(classifier_profile_hash)) => {
+            Some(crate::artifact::PdfClassificationProvenanceV1 {
+                status: parse_contract_enum(&status)?,
+                page_count: page_count.map(|n| n as u64),
+                result_examined_pages: examined.map(|n| n as u64),
+                nominal_charged_pages: nominal.unwrap_or(0) as u64,
+                classifier_build,
+                classifier_profile_hash,
+            })
+        }
+        _ => None,
+    };
+    Ok(ArtifactFileRow {
+        file_identity,
+        relative_path,
+        legacy_source_version,
+        source_guard_kind,
+        source_guard_sha256,
+        parse_profile_hash,
+        parse_status,
+        parser_backend,
+        worker_lane,
+        truncated: truncated != 0,
+        content_sha256,
+        classifier,
+    })
+}
+
+fn decode_decision_row(row: &rusqlite::Row<'_>) -> Result<ArtifactDecisionRow, StoreError> {
+    let (
+        file_identity,
+        relative_path,
+        action,
+        reason,
+        priority,
+        input_chars,
+        output_chars,
+        truncated,
+        error_code,
+    ): (_, _, String, _, i64, i64, i64, i64, _) = row.try_into().map_err(cache_open)?;
+    Ok(ArtifactDecisionRow {
+        file_identity,
+        relative_path,
+        action: parse_contract_enum::<ContextAction>(&action)?,
+        reason,
+        priority: priority as u64,
+        input_chars: input_chars as u64,
+        output_chars: output_chars as u64,
+        truncated: truncated != 0,
+        error_code,
     })
 }
 

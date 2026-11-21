@@ -74,52 +74,38 @@ impl PersonalInput {
                 source.model_truncated = !sent;
             }
         }
-        if let Some(result) = generated {
-            match result {
-                Ok(output) => {
-                    report.items = output.items;
-                    if let Some(code) = output.compaction_error {
-                        report.gaps.push(CoverageGap::new(
-                            code,
-                            "model",
-                            None,
-                            "摘要精简未完成，已按完整事项保底减量并保留下一步计划。",
-                        ));
-                    }
-                    if output.omitted > 0 {
-                        report.gaps.push(CoverageGap::new(
-                            "PERSONAL_OUTPUT_REDUCED",
-                            "model",
-                            None,
-                            "部分完整事项因篇幅限制未展开。",
-                        ));
-                    }
-                    report.quality = if report.gaps.is_empty() && !report.selection.partial() {
-                        "complete"
-                    } else {
-                        "partial"
-                    }
-                    .into();
+        let summarized = matches!(generated, Some(Ok(_)));
+        let mut gap = |code, message| {
+            report
+                .gaps
+                .push(CoverageGap::new(code, "model", None, message))
+        };
+        match generated {
+            Some(Ok(output)) => {
+                report.items = output.items;
+                if let Some(code) = output.compaction_error {
+                    gap(
+                        code,
+                        "摘要精简未完成，已按完整事项保底减量并保留下一步计划。",
+                    );
                 }
-                Err(e) => {
-                    report.quality = "partial".into();
-                    report.gaps.push(CoverageGap::new(
-                        e.code,
-                        "model",
-                        None,
-                        "模型未形成有效总结，用户原文及材料范围已保留。",
-                    ));
+                if output.omitted > 0 {
+                    gap("PERSONAL_OUTPUT_REDUCED", "部分完整事项因篇幅限制未展开。");
                 }
             }
+            Some(Err(e)) => gap(e.code, "模型未形成有效总结，用户原文及材料范围已保留。"),
+            None => {}
         }
         if report.items.is_empty() && !self.selection.materials.is_empty() {
-            report.quality = "partial".into();
-            report.gaps.push(CoverageGap::new(
+            gap(
                 "PERSONAL_SUMMARY_UNAVAILABLE",
-                "model",
-                None,
                 "尚无可用事项总结，不能据此确认工作成果。",
-            ));
+            );
+        }
+        if !report.gaps.is_empty() {
+            report.quality = "partial".into();
+        } else if summarized && !report.selection.partial() {
+            report.quality = "complete".into();
         }
         if self.version == 5 {
             report.retain_cited();
@@ -200,24 +186,19 @@ pub fn run(
     }
     let deadline = started + PERSONAL_WORK_BUDGET;
     check_deadline(deadline)?;
-    let lock = ReportLock::acquire(
-        &app.store.path,
-        &app.config.report.scope_id,
-        Duration::from_secs(5).min(deadline.saturating_duration_since(Instant::now())),
-    )?;
+    let lock = lock_until(app, deadline)?;
     app.store
         .recover_interrupted(request.context.started_at, &lock)?;
     request.context.config_fingerprint = app.fingerprint(false)?;
     let date = request.context.target_date.to_string();
     if request.regeneration_reason.is_some() && request.input.is_empty() {
-        if let Some(current) = app.store.current(&date)? {
-            if let Some(report) = current.report_json.as_deref() {
-                let report: serde_json::Value = serde_json::from_str(report)?;
-                request.input = report["user_notes"].as_str().unwrap_or("").to_owned();
-            }
+        if let Some(report) = app.store.current(&date)?.and_then(|r| r.report_json) {
+            let report: serde_json::Value = serde_json::from_str(&report)?;
+            request.input = report["user_notes"].as_str().unwrap_or("").to_owned();
         }
     }
-    if request.save && !request.dry_run && request.regeneration_reason.is_none() {
+    let save = request.save && !request.dry_run;
+    if save && request.regeneration_reason.is_none() {
         if let Some(current) = app.store.current(&date)? {
             let mut result = super::repair_run(app, &current.run_id, Utc::now())?;
             result.action = "existing".into();
@@ -246,11 +227,7 @@ pub fn run(
     let id = &request.context.run_id;
     app.store.create_personal(
         &request.context,
-        if request.save && !request.dry_run {
-            "report"
-        } else {
-            "preview"
-        },
+        if save { "report" } else { "preview" },
         id,
         request.regeneration_reason.as_deref(),
         request.context.started_at,
@@ -321,12 +298,16 @@ pub fn finish(
     started: Instant,
     deadline: Instant,
 ) -> Result<ReportOutcome, ReportError> {
-    let _lock = ReportLock::acquire(
+    let _lock = lock_until(app, deadline)?;
+    finish_frozen(app, id, started, deadline, &snapshots(app)?, None)
+}
+
+fn lock_until(app: &App, deadline: Instant) -> Result<ReportLock, ReportError> {
+    ReportLock::acquire(
         &app.store.path,
         &app.config.report.scope_id,
         Duration::from_secs(5).min(deadline.saturating_duration_since(Instant::now())),
-    )?;
-    finish_frozen(app, id, started, deadline, &snapshots(app)?, None)
+    )
 }
 
 fn finish_frozen(
@@ -338,21 +319,17 @@ fn finish_frozen(
     just_saved: Option<(SnapshotRef, PersonalInput)>,
 ) -> Result<ReportOutcome, ReportError> {
     let run = app.store.get(id)?;
-    let reference =
-        SnapshotRef {
-            path: run.snapshot_path.clone().ok_or_else(|| {
-                ReportError::new("PERSONAL_INPUT_EXPIRED", "个人日报临时输入已过期")
-            })?,
-            sha256: run.snapshot_sha256.clone().ok_or_else(|| {
-                ReportError::new("PERSONAL_INPUT_EXPIRED", "个人日报临时输入已过期")
-            })?,
-        };
+    let expired = || ReportError::new("PERSONAL_INPUT_EXPIRED", "个人日报临时输入已过期");
+    let reference = SnapshotRef {
+        path: run.snapshot_path.clone().ok_or_else(expired)?,
+        sha256: run.snapshot_sha256.clone().ok_or_else(expired)?,
+    };
     let mut input = match just_saved {
         Some((saved, input)) if saved == reference => input,
         _ => {
             let value = snapshots.read(&reference).map_err(|e| {
                 if e.code == "SNAPSHOT_MISSING" {
-                    ReportError::new("PERSONAL_INPUT_EXPIRED", "个人日报临时输入已过期")
+                    expired()
                 } else {
                     e
                 }
@@ -447,19 +424,21 @@ fn finish_frozen(
     };
     let mut report = input.report(&app.config.report.root_alias, generated);
     if report.items.is_empty() {
-        if let Some(current) = app.store.current(&run.target_date)? {
-            if current.run_id != id {
-                let previous: serde_json::Value =
-                    serde_json::from_str(current.report_json.as_deref().unwrap_or("{}"))?;
-                if previous["items"]
-                    .as_array()
-                    .is_some_and(|items| !items.is_empty())
-                {
-                    return Err(ReportError::new(
-                        "PERSONAL_RECOVERY_INCOMPLETE",
-                        "恢复未形成有效总结，保留已发布的有效内容",
-                    ));
-                }
+        if let Some(current) = app
+            .store
+            .current(&run.target_date)?
+            .filter(|r| r.run_id != id)
+        {
+            let previous: serde_json::Value =
+                serde_json::from_str(current.report_json.as_deref().unwrap_or("{}"))?;
+            if previous["items"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+            {
+                return Err(ReportError::new(
+                    "PERSONAL_RECOVERY_INCOMPLETE",
+                    "恢复未形成有效总结，保留已发布的有效内容",
+                ));
             }
         }
     }
@@ -494,9 +473,9 @@ fn finish_frozen(
     check_deadline(started + PERSONAL_APP_BUDGET)?;
     let value = serde_json::to_value(&report)?;
     let now = Utc::now();
-    let (output_path, action) = if run.run_kind == "preview" {
+    let (output_path, action, markdown) = if run.run_kind == "preview" {
         app.store.finish_preview(id, &value, &markdown, now)?;
-        (None, "preview")
+        (None, "preview", report.render_preview(&input.template)?)
     } else {
         let publisher = Publisher::new(&app.config.paths.reports_dir, &app.store)?;
         let path = publisher.output_path(&report.date)?;
@@ -507,12 +486,8 @@ fn finish_frozen(
         (
             Some(publisher.publish_with_config(id, now, &app.config)?),
             "published",
+            markdown,
         )
-    };
-    let markdown = if run.run_kind == "preview" {
-        report.render_preview(&input.template)?
-    } else {
-        markdown
     };
     let model_calls = app.store.calls(id)?.len() as u64;
     app.store.compact_personal_until(

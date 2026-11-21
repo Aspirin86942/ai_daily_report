@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod archive;
 mod content_audit;
+pub mod stdio;
 pub use content_audit::{
     AuditTextBuilder, ContentUnit, ContentUnitKind, ParsedContentAudit, SourceRange,
     SourceRangeUnit,

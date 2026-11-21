@@ -1,14 +1,8 @@
-use crate::{
-    model::contracts::{ComposedReport, SelectedFact},
-    snapshots::digest,
-    types::{parse_date, utc_window},
-    ReportError,
-};
+use crate::{snapshots::digest, ReportError};
 use ai_daily_scanner_core::sources::ScanSource;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::BTreeSet;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -150,10 +144,6 @@ fn relative(text: &str) -> bool {
         && !text.contains(':')
         && text.split(['/', '\\']).all(|p| !matches!(p, ".." | "."))
 }
-fn invalid() -> ReportError {
-    ReportError::new("REPORT_DATA_INVALID", "报告结构、日期窗口或来源引用无效")
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoverageGap {
@@ -172,128 +162,5 @@ impl CoverageGap {
             relative_path: None,
             stage: stage.into(),
         }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DailyReport {
-    pub schema_version: u32,
-    pub report_kind: String,
-    pub date: String,
-    pub scope_id: String,
-    pub root_alias: String,
-    pub timezone: String,
-    pub window_start_utc: String,
-    pub window_end_utc: String,
-    pub quality: String,
-    pub sources: Vec<ReportSource>,
-    pub gaps: Vec<CoverageGap>,
-    pub missed_dates: Vec<String>,
-    pub generated_at: String,
-    pub user_notes: String,
-    pub facts: Vec<SelectedFact>,
-    pub content: Option<ComposedReport>,
-}
-
-impl DailyReport {
-    pub fn validate(&self) -> Result<(), ReportError> {
-        let day = parse_date(&self.date)?;
-        let (start, end) = utc_window(day)?;
-        if !matches!(self.schema_version, 3 | 4)
-            || self.report_kind != "file_evidence"
-            || self.scope_id != "personal_work"
-            || self.timezone != "Asia/Shanghai"
-            || self.root_alias.is_empty()
-            || self.root_alias.chars().count() > 64
-            || DateTime::parse_from_rfc3339(&self.window_start_utc)
-                .ok()
-                .map(|t| t.with_timezone(&Utc))
-                != Some(start)
-            || DateTime::parse_from_rfc3339(&self.window_end_utc)
-                .ok()
-                .map(|t| t.with_timezone(&Utc))
-                != Some(end)
-            || !utc(&self.generated_at)
-            || self.user_notes.chars().count() > 65536
-            || !matches!(self.quality.as_str(), "complete" | "partial" | "no_changes")
-        {
-            return Err(invalid());
-        }
-        let mut available = BTreeSet::new();
-        let mut ids = BTreeSet::new();
-        let mut unverified = BTreeSet::new();
-        for source in &self.sources {
-            source.validate()?;
-            if !ids.insert(source.source_id.clone()) {
-                return Err(invalid());
-            }
-            if source.usable() {
-                available.insert(source.source_id.clone());
-            }
-            if source.unverified() {
-                unverified.insert(source.source_id.clone());
-            }
-        }
-        for gap in &self.gaps {
-            if gap.source_id.as_ref().is_some_and(|id| !ids.contains(id))
-                || gap.code.is_empty()
-                || gap.code.len() > 128
-                || !gap
-                    .code
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                || gap.message.is_empty()
-                || !matches!(
-                    gap.stage.as_str(),
-                    "discovery" | "parse" | "excerpt" | "model" | "schedule"
-                )
-            {
-                return Err(invalid());
-            }
-        }
-        for day in &self.missed_dates {
-            parse_date(day)?;
-        }
-        if self.quality == "no_changes"
-            && (!self.sources.is_empty()
-                || !self.facts.is_empty()
-                || !self.gaps.is_empty()
-                || self.content.is_some())
-        {
-            return Err(invalid());
-        }
-        if self.schema_version == 3 && self.quality != "no_changes" && available.is_empty() {
-            return Err(invalid());
-        }
-        if self.quality == "complete"
-            && (!self.gaps.is_empty()
-                || self.sources.iter().any(|s| {
-                    s.parse_status != "success"
-                        || s.parse_truncated
-                        || s.excerpt_truncated
-                        || s.model_truncated
-                        || s.unverified()
-                }))
-        {
-            return Err(invalid());
-        }
-        let mut fact_ids = BTreeSet::new();
-        for selected in &self.facts {
-            if !fact_ids.insert(&selected.fact_id)
-                || selected.fact.source_ids.is_empty()
-                || selected.fact.source_ids.iter().any(|id| {
-                    !available.contains(id) || (!selected.pending && unverified.contains(id))
-                })
-            {
-                return Err(invalid());
-            }
-        }
-        match (&self.content, self.facts.is_empty()) {
-            (Some(content), false) => content.validate(&self.facts)?,
-            (None, true) => {}
-            _ => return Err(invalid()),
-        }
-        Ok(())
     }
 }

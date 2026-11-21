@@ -5,8 +5,7 @@ use std::{borrow::Cow, collections::BTreeMap};
 use ai_daily_scanner_contract::{ContextAction, ContextDecision, ParseStatus, ReportMode};
 
 use crate::budget_model::{
-    budget_model_mismatch, count_chars, OmittedCandidate, OmittedSummaryPlan, MAX_U64_DIGITS,
-    SECTION_SEPARATOR_CHARS,
+    budget_model_mismatch, count_chars, OmittedSummaryPlan, MAX_U64_DIGITS, SECTION_SEPARATOR_CHARS,
 };
 use crate::decision::{decide_files, BudgetProfile, ContextFileEvidence, DecidedFile};
 
@@ -111,15 +110,17 @@ pub fn build_context(
     let mut metadata_only_count = 0_u64;
     let mut compressed_file_count = 0_u64;
 
-    let omitted_candidates: Vec<OmittedCandidate> = decided
-        .iter()
-        .map(|item| OmittedCandidate {
-            file_identity: item.evidence.file_identity.clone(),
-            relative_path: item.evidence.relative_path.clone(),
-            extension: item.evidence.extension.clone(),
-        })
-        .collect();
-    let omitted_plan = OmittedSummaryPlan::build(&omitted_candidates, profile.global_max_chars());
+    let omitted_plan = OmittedSummaryPlan::from_paths(
+        decided.iter().map(|item| {
+            let evidence = &item.evidence;
+            (
+                evidence.file_identity.as_str(),
+                evidence.relative_path.as_str(),
+                evidence.extension.as_str(),
+            )
+        }),
+        profile.global_max_chars(),
+    );
     let mut prefix = section_prefix_chars(&sections);
     let footer = count_chars(PARSE_FOOTER) + SECTION_SEPARATOR_CHARS + 1;
 

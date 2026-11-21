@@ -172,15 +172,6 @@ impl Store {
         Ok(())
     }
 
-    pub fn finish_observation(
-        &self,
-        id: &str,
-        current: &RunRecord,
-        now: DateTime<Utc>,
-    ) -> Result<(), ReportError> {
-        changed_one(self.connection()?.execute("UPDATE report_runs SET status='succeeded',quality=?,previous_run_id=?,updated_at=?,finished_at=? WHERE run_id=? AND phase='prepared' AND status='running'", params![current.quality,current.run_id,timestamp(now),timestamp(now),id])?, "RUN_PHASE_INVALID")
-    }
-
     pub fn finish_scan_preview(
         &self,
         id: &str,
@@ -224,31 +215,6 @@ impl Store {
             return Ok(vec![]);
         }
         Ok(self.reports_in_range(first, target - Duration::days(1))?.1)
-    }
-
-    pub fn save_scan_failure(
-        &self,
-        id: &str,
-        snapshot: &crate::snapshots::SnapshotRef,
-        sources: &[Value],
-    ) -> Result<(), ReportError> {
-        let mut conn = self.connection()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        changed_one(tx.execute("UPDATE report_runs SET snapshot_path=?,snapshot_sha256=?,quality='unavailable' WHERE run_id=? AND phase='scanning'",params![snapshot.path,snapshot.sha256,id])?,"RUN_PHASE_INVALID")?;
-        for source in sources {
-            tx.execute(
-                "INSERT INTO report_run_sources(run_id,source_id,metadata_json) VALUES (?,?,?)",
-                params![
-                    id,
-                    source["source_id"]
-                        .as_str()
-                        .ok_or_else(|| ReportError::new("SOURCE_INVALID", "缺少来源身份"))?,
-                    source.to_string()
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
     }
 
     pub fn list_reports(&self) -> Result<Vec<String>, ReportError> {

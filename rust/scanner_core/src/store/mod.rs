@@ -135,69 +135,26 @@ impl ScannerStore {
         now_ms: u64,
         parse_hits: &[String],
         classification_hits: &[String],
-        deadline: Option<(RunDeadlines, &dyn Clock)>,
+        deadline: WorkDeadline<'_>,
     ) -> Result<(), StoreError> {
         let now_ms = checked_i64(now_ms, "cache touch timestamp")?;
         if parse_hits.is_empty() && classification_hits.is_empty() {
             return Ok(());
         }
-        let ensure_work_deadline = || {
-            if deadline
-                .is_some_and(|(deadlines, clock)| deadlines.remaining_to_work_deadline(clock) == 0)
-            {
-                Err(StoreError::WorkDeadlineExhausted)
-            } else {
-                Ok(())
-            }
-        };
-        ensure_work_deadline()?;
-        if let Some((deadlines, clock)) = deadline {
-            let remaining_ms = deadlines.remaining_to_work_deadline(clock);
-            if remaining_ms == 0 {
-                return Err(StoreError::WorkDeadlineExhausted);
-            }
-            self.connection
-                .busy_timeout(Duration::from_millis(remaining_ms.min(BUSY_TIMEOUT_MS)))
-                .map_err(cache_write)?;
-        }
         let bucket = cache::date_bucket_for_ms(now_ms);
-        let result = (|| -> Result<(), StoreError> {
-            let transaction = self
-                .connection
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(cache_write)?;
-            cache::touch_parse_cache_access_with_check(&transaction, parse_hits, &bucket, &|| {
-                ensure_work_deadline().is_ok()
-            })
-            .map_err(cache_mutation)?;
+        self.commit_work_batch(deadline, "cache touch", true, |transaction| {
+            let open = || check_work_deadline(deadline).is_ok();
+            cache::touch_parse_cache_access_with_check(transaction, parse_hits, &bucket, &open)
+                .map_err(cache_mutation)?;
             cache::touch_classification_cache_access_with_check(
-                &transaction,
+                transaction,
                 classification_hits,
                 &bucket,
-                &|| ensure_work_deadline().is_ok(),
+                &open,
             )
             .map_err(cache_mutation)?;
-            ensure_work_deadline()?;
-            transaction.commit().map_err(cache_write)
-        })();
-        let restore = if deadline.is_some() {
-            restore_default_busy_timeout(&self.connection).map_err(cache_write)
-        } else {
             Ok(())
-        };
-        match (result, restore) {
-            (Ok(()), Ok(())) => Ok(()),
-            (Ok(()), Err(_)) => {
-                eprintln!(
-                    "scanner warning: SQLite busy timeout restore failed after cache touch commit"
-                );
-                Ok(())
-            }
-            (Err(error), Ok(())) => Err(error),
-            (Err(_), Err(error)) => Err(StoreError::BusyTimeoutRestore {
-                detail: error.to_string(),
-            }),
-        }
+        })
     }
 
     /// Opportunistic age/orphan row GC (spec Part 4): runs after the terminal
@@ -351,17 +308,9 @@ impl ScannerStore {
         records: &[InventoryRecord],
         scan_run_id: i64,
         now_ms: u64,
-        deadline: Option<(RunDeadlines, &dyn Clock)>,
+        deadline: WorkDeadline<'_>,
     ) -> Result<HashSet<String>, StoreError> {
-        let ensure_work_deadline = || {
-            if deadline
-                .is_some_and(|(deadlines, clock)| deadlines.remaining_to_work_deadline(clock) == 0)
-            {
-                Err(StoreError::WorkDeadlineExhausted)
-            } else {
-                Ok(())
-            }
-        };
+        let ensure_work_deadline = || check_work_deadline(deadline);
         let now_ms = checked_i64(now_ms, "inventory timestamp")?;
         let mut unique = HashSet::with_capacity(records.len());
         for (index, record) in records.iter().enumerate() {
@@ -378,21 +327,7 @@ impl ScannerStore {
         let mut existed = std::collections::HashSet::new();
         for (batch_index, chunk) in records.chunks(CACHE_TRANSACTION_BATCH_SIZE).enumerate() {
             let is_last_batch = (batch_index + 1) * CACHE_TRANSACTION_BATCH_SIZE >= records.len();
-            ensure_work_deadline()?;
-            if let Some((deadlines, clock)) = deadline {
-                let remaining_ms = deadlines.remaining_to_work_deadline(clock);
-                if remaining_ms == 0 {
-                    return Err(StoreError::WorkDeadlineExhausted);
-                }
-                self.connection
-                    .busy_timeout(Duration::from_millis(remaining_ms.min(BUSY_TIMEOUT_MS)))
-                    .map_err(cache_write)?;
-            }
-            let batch_result = (|| {
-                let transaction = self
-                    .connection
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(cache_write)?;
+            self.commit_work_batch(deadline, "inventory", is_last_batch, |transaction| {
                 for record in chunk {
                     ensure_work_deadline()?;
                     let already: bool = transaction
@@ -407,34 +342,13 @@ impl ScannerStore {
                     }
                 }
                 inventory::upsert_inventory(
-                    &transaction,
+                    transaction,
                     scan_run_id,
                     now_ms,
                     chunk,
                     &ensure_work_deadline,
-                )?;
-                ensure_work_deadline()?;
-                transaction.commit().map_err(cache_write)
-            })();
-            let restore_result = if deadline.is_some() {
-                restore_default_busy_timeout(&self.connection).map_err(cache_write)
-            } else {
-                Ok(())
-            };
-            match (batch_result, restore_result) {
-                (Ok(()), Ok(())) => {}
-                (Ok(()), Err(_)) if is_last_batch => {
-                    eprintln!(
-                        "scanner warning: SQLite busy timeout restore failed after inventory commit"
-                    );
-                }
-                (Err(error), Ok(())) => return Err(error),
-                (_, Err(error)) => {
-                    return Err(StoreError::BusyTimeoutRestore {
-                        detail: error.to_string(),
-                    })
-                }
-            }
+                )
+            })?;
         }
         Ok(existed)
     }
@@ -464,76 +378,16 @@ impl ScannerStore {
         &mut self,
         records: &[CacheWriteRecord],
         cached_at_ms: u64,
-        deadline: Option<(RunDeadlines, &dyn Clock)>,
+        deadline: WorkDeadline<'_>,
     ) -> Result<(), StoreError> {
-        if deadline.is_some() && records.len() > CACHE_TRANSACTION_BATCH_SIZE {
-            return Err(StoreError::InvalidRequest(format!(
-                "parse cache write batch exceeds {CACHE_TRANSACTION_BATCH_SIZE} records"
-            )));
-        }
-        let ensure_work_deadline = || {
-            if deadline
-                .is_some_and(|(deadlines, clock)| deadlines.remaining_to_work_deadline(clock) == 0)
-            {
-                Err(StoreError::WorkDeadlineExhausted)
-            } else {
-                Ok(())
-            }
-        };
-        let cached_at_ms = checked_i64(cached_at_ms, "cache write timestamp")?;
-        for (index, record) in records.iter().enumerate() {
-            if index % CACHE_TRANSACTION_BATCH_SIZE == 0 {
-                ensure_work_deadline()?;
-            }
-            record.validate().map_err(StoreError::InvalidRequest)?;
-        }
-        for chunk in records.chunks(CACHE_TRANSACTION_BATCH_SIZE) {
-            ensure_work_deadline()?;
-            if let Some((deadlines, clock)) = deadline {
-                let remaining_ms = deadlines.remaining_to_work_deadline(clock);
-                if remaining_ms == 0 {
-                    return Err(StoreError::WorkDeadlineExhausted);
-                }
-                self.connection
-                    .busy_timeout(Duration::from_millis(remaining_ms.min(BUSY_TIMEOUT_MS)))
-                    .map_err(cache_write)?;
-            }
-            let batch_result = (|| {
-                let transaction = self
-                    .connection
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(cache_write)?;
-                ensure_work_deadline()?;
-                cache::write_success_cache_with_check(&transaction, cached_at_ms, chunk, &|| {
-                    ensure_work_deadline().is_ok()
-                })
-                .map_err(cache_mutation)?;
-                ensure_work_deadline()?;
-                transaction.commit().map_err(cache_write)
-            })();
-            let restore_result = if deadline.is_some() {
-                restore_default_busy_timeout(&self.connection).map_err(cache_write)
-            } else {
-                Ok(())
-            };
-            match (batch_result, restore_result) {
-                (Ok(()), Ok(())) => {}
-                (Ok(()), Err(_)) => {
-                    // This deadline-aware API admits exactly one transaction
-                    // batch, so the successful COMMIT is the complete receipt.
-                    eprintln!(
-                        "scanner warning: SQLite busy timeout restore failed after parse cache commit"
-                    );
-                }
-                (Err(error), Ok(())) => return Err(error),
-                (Err(_), Err(error)) => {
-                    return Err(StoreError::BusyTimeoutRestore {
-                        detail: error.to_string(),
-                    })
-                }
-            }
-        }
-        Ok(())
+        self.write_cache_batch(
+            records,
+            checked_i64(cached_at_ms, "cache write timestamp"),
+            deadline,
+            "parse cache",
+            CacheWriteRecord::validate,
+            cache::write_success_cache_with_check,
+        )
     }
 
     /// Typed classification-cache lookup (spec Part 3.2). The miss-reason tree
@@ -603,76 +457,105 @@ impl ScannerStore {
         &mut self,
         records: &[ClassificationCacheWriteRecord],
         cached_at_ms: u64,
-        deadline: Option<(RunDeadlines, &dyn Clock)>,
+        deadline: WorkDeadline<'_>,
+    ) -> Result<(), StoreError> {
+        self.write_cache_batch(
+            records,
+            checked_i64(cached_at_ms, "classification cache write timestamp"),
+            deadline,
+            "classification cache",
+            ClassificationCacheWriteRecord::validate,
+            cache::write_success_classification_cache_with_check,
+        )
+    }
+
+    fn write_cache_batch<T>(
+        &mut self,
+        records: &[T],
+        cached_at: Result<i64, StoreError>,
+        deadline: WorkDeadline<'_>,
+        label: &str,
+        validate: impl Fn(&T) -> Result<(), String>,
+        insert: impl Fn(
+            &rusqlite::Transaction<'_>,
+            i64,
+            &[T],
+            &dyn Fn() -> bool,
+        ) -> Result<(), cache::CacheMutationError>,
     ) -> Result<(), StoreError> {
         if deadline.is_some() && records.len() > CACHE_TRANSACTION_BATCH_SIZE {
             return Err(StoreError::InvalidRequest(format!(
-                "classification cache write batch exceeds {CACHE_TRANSACTION_BATCH_SIZE} records"
+                "{label} write batch exceeds {CACHE_TRANSACTION_BATCH_SIZE} records"
             )));
         }
-        let ensure_work_deadline = || {
-            if deadline
-                .is_some_and(|(deadlines, clock)| deadlines.remaining_to_work_deadline(clock) == 0)
-            {
-                Err(StoreError::WorkDeadlineExhausted)
-            } else {
-                Ok(())
-            }
-        };
-        let cached_at_ms = checked_i64(cached_at_ms, "classification cache write timestamp")?;
+        let cached_at = cached_at?;
         for (index, record) in records.iter().enumerate() {
             if index % CACHE_TRANSACTION_BATCH_SIZE == 0 {
-                ensure_work_deadline()?;
+                check_work_deadline(deadline)?;
             }
-            record.validate().map_err(StoreError::InvalidRequest)?;
+            validate(record).map_err(StoreError::InvalidRequest)?;
         }
         for chunk in records.chunks(CACHE_TRANSACTION_BATCH_SIZE) {
-            ensure_work_deadline()?;
-            if let Some((deadlines, clock)) = deadline {
-                let remaining_ms = deadlines.remaining_to_work_deadline(clock);
-                if remaining_ms == 0 {
-                    return Err(StoreError::WorkDeadlineExhausted);
-                }
-                self.connection
-                    .busy_timeout(Duration::from_millis(remaining_ms.min(BUSY_TIMEOUT_MS)))
-                    .map_err(cache_write)?;
+            self.commit_work_batch(deadline, label, true, |transaction| {
+                check_work_deadline(deadline)?;
+                insert(transaction, cached_at, chunk, &|| {
+                    check_work_deadline(deadline).is_ok()
+                })
+                .map_err(cache_mutation)
+            })?;
+        }
+        Ok(())
+    }
+
+    fn commit_work_batch(
+        &mut self,
+        deadline: WorkDeadline<'_>,
+        label: &str,
+        final_batch: bool,
+        write: impl FnOnce(&rusqlite::Transaction<'_>) -> Result<(), StoreError>,
+    ) -> Result<(), StoreError> {
+        check_work_deadline(deadline)?;
+        if let Some((deadlines, clock)) = deadline {
+            let remaining = deadlines.remaining_to_work_deadline(clock);
+            if remaining == 0 {
+                return Err(StoreError::WorkDeadlineExhausted);
             }
-            let batch_result = (|| {
-                let transaction = self
-                    .connection
-                    .transaction_with_behavior(TransactionBehavior::Immediate)
-                    .map_err(cache_write)?;
-                ensure_work_deadline()?;
-                cache::write_success_classification_cache_with_check(
-                    &transaction,
-                    cached_at_ms,
-                    chunk,
-                    &|| ensure_work_deadline().is_ok(),
-                )
-                .map_err(cache_mutation)?;
-                ensure_work_deadline()?;
-                transaction.commit().map_err(cache_write)
-            })();
-            let restore_result = if deadline.is_some() {
-                restore_default_busy_timeout(&self.connection).map_err(cache_write)
-            } else {
-                Ok(())
-            };
-            match (batch_result, restore_result) {
-                (Ok(()), Ok(())) => {}
-                (Ok(()), Err(_)) => {
-                    eprintln!(
-                        "scanner warning: SQLite busy timeout restore failed after classification cache commit"
-                    );
-                }
-                (Err(error), Ok(())) => return Err(error),
-                (Err(_), Err(error)) => {
+            self.connection
+                .busy_timeout(Duration::from_millis(remaining.min(BUSY_TIMEOUT_MS)))
+                .map_err(cache_write)?;
+        }
+        let committed = (|| {
+            let tx = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(cache_write)?;
+            write(&tx)?;
+            check_work_deadline(deadline)?;
+            tx.commit().map_err(cache_write)
+        })();
+        if deadline.is_some() {
+            if let Err(error) = restore_default_busy_timeout(&self.connection).map_err(cache_write)
+            {
+                if committed.is_err() || !final_batch {
                     return Err(StoreError::BusyTimeoutRestore {
                         detail: error.to_string(),
-                    })
+                    });
                 }
+                eprintln!(
+                    "scanner warning: SQLite busy timeout restore failed after {label} commit"
+                );
             }
         }
+        committed
+    }
+}
+
+type WorkDeadline<'a> = Option<(RunDeadlines, &'a dyn Clock)>;
+
+fn check_work_deadline(deadline: WorkDeadline<'_>) -> Result<(), StoreError> {
+    if deadline.is_some_and(|(deadlines, clock)| deadlines.remaining_to_work_deadline(clock) == 0) {
+        Err(StoreError::WorkDeadlineExhausted)
+    } else {
         Ok(())
     }
 }

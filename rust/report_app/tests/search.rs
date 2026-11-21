@@ -353,7 +353,7 @@ fn reindex_updates_metadata_and_deleted_index_is_recoverable() {
     assert!(result.get("results").is_none());
     assert!(search::render(&result, Format::Text).contains("建立 9 个片段"));
     let meta = fixture.meta();
-    assert_eq!(meta["schema_version"], "5");
+    assert_eq!(meta["schema_version"], "6");
     assert_eq!(meta["source_count"], "5");
     assert_eq!(meta["source_max_updated_at"], "2026-10-17T10:00:00Z");
     assert_eq!(meta["indexed_fragments"], "9");
@@ -366,7 +366,7 @@ fn reindex_updates_metadata_and_deleted_index_is_recoverable() {
         )
         .unwrap();
     assert_eq!(fixture.execute(&arguments("审批"))["index_rebuilt"], true);
-    assert_eq!(fixture.meta()["schema_version"], "5");
+    assert_eq!(fixture.meta()["schema_version"], "6");
     assert_eq!(fixture.execute(&reindex())["index_rebuilt"], true);
     assert_eq!(fixture.execute(&arguments("审批"))["index_rebuilt"], false);
     let index = fixture.config.paths.db_dir.join("report_search.sqlite3");
@@ -384,9 +384,7 @@ fn older_row_replacement_and_deletion_refresh_only_its_fragments() {
     let unchanged_rowids = || -> Vec<i64> {
         fixture
             .index()
-            .prepare(
-                "SELECT rowid FROM report_search WHERE report_key != '2026-10-15' ORDER BY rowid",
-            )
+            .prepare("SELECT id FROM fragments WHERE report_key != '2026-10-15' ORDER BY id")
             .unwrap()
             .query_map([], |r| r.get(0))
             .unwrap()
@@ -727,7 +725,7 @@ fn cli_phrase_requires_original_whitespace_and_one_contiguous_source_string() {
             .contains(&format!("[{literal}]")));
         if day == 1 {
             assert_eq!(hits["index_rebuilt"], true);
-            assert_eq!(fixture.meta()["schema_version"], "5");
+            assert_eq!(fixture.meta()["schema_version"], "6");
         }
     }
     assert_eq!(phrase("预算\n\n审批")["total"], 0);
@@ -769,7 +767,7 @@ fn like_snippets_use_unicode_context_and_fragments_are_bounded() {
     let body: String = fixture
         .index()
         .query_row(
-            "SELECT body FROM report_search WHERE report_key='2026-10-17'",
+            "SELECT replace(body,char(31),'') FROM fragments WHERE report_key='2026-10-17'",
             [],
             |row| row.get(0),
         )
@@ -786,7 +784,7 @@ fn failed_rebuild_rolls_back_fragments_and_metadata() {
     let meta = fixture.meta();
     let old_bodies: Vec<String> = fixture
         .index()
-        .prepare("SELECT body FROM report_search ORDER BY rowid")
+        .prepare("SELECT body FROM fragments ORDER BY id")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -809,7 +807,7 @@ fn failed_rebuild_rolls_back_fragments_and_metadata() {
     assert_eq!(fixture.meta(), meta);
     let bodies: Vec<String> = fixture
         .index()
-        .prepare("SELECT body FROM report_search ORDER BY rowid")
+        .prepare("SELECT body FROM fragments ORDER BY id")
         .unwrap()
         .query_map([], |row| row.get(0))
         .unwrap()
@@ -1153,7 +1151,173 @@ fn failed_v3_index_upgrade_preserves_the_old_schema_and_all_data() {
     assert_eq!(fixture.meta()["schema_version"], "3");
     index.execute_batch("DROP TRIGGER fail_upgrade").unwrap();
     assert_eq!(fixture.execute(&arguments("采购审批"))["total"], 1);
-    assert_eq!(fixture.meta()["schema_version"], "5");
+    assert_eq!(fixture.meta()["schema_version"], "6");
+}
+
+#[test]
+fn exact_phrase_in_utf8_search_indexes() {
+    check_phrase_index_encoding("UTF-8");
+}
+
+#[test]
+fn exact_phrase_in_utf16le_search_indexes() {
+    check_phrase_index_encoding("UTF-16le");
+}
+
+#[test]
+fn exact_phrase_in_utf16be_search_indexes() {
+    check_phrase_index_encoding("UTF-16be");
+}
+
+fn check_phrase_index_encoding(encoding: &str) {
+    let day = "2026-10-14";
+    let body_terms = "\x1f甲\x1f \x1f乙\x1f";
+    let score = |index: &Connection| {
+        index
+            .query_one(
+                "SELECT bm25(report_phrases,1,0) FROM report_phrases WHERE report_phrases MATCH ?",
+                [format!("literals : \"{body_terms}\"")],
+                |r| r.get::<_, f64>(0),
+            )
+            .unwrap()
+    };
+    for upgrade in [true, false] {
+        let fixture = Fixture::new();
+        let raw = json!({"work_summary":"甲 乙"}).to_string();
+        fixture.put_raw("daily", day, &raw, "fixed");
+        let index = fixture.index();
+        index.pragma_update(None, "encoding", encoding).unwrap();
+        let old_score = if upgrade {
+            index.execute_batch(
+                "CREATE TABLE index_meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                 INSERT INTO index_meta VALUES('schema_version','5');
+                 CREATE TABLE indexed_reports(kind TEXT NOT NULL,report_key TEXT NOT NULL,
+                    raw_sha256 TEXT NOT NULL,fragments INTEGER NOT NULL,PRIMARY KEY(kind,report_key)) WITHOUT ROWID;
+                 CREATE VIRTUAL TABLE report_search USING fts5(report_key UNINDEXED,kind UNINDEXED,
+                    report_label UNINDEXED,report_date UNINDEXED,title,body,sources UNINDEXED,
+                    location UNINDEXED,title_terms,body_terms,tokenize='trigram');
+                 CREATE VIRTUAL TABLE report_phrases USING fts5(literals,tokenize='trigram');",
+            ).unwrap();
+            index
+                .execute(
+                    "INSERT INTO indexed_reports VALUES('daily',?, ?,1)",
+                    params![day, ai_daily_report::snapshots::digest(raw.as_bytes())],
+                )
+                .unwrap();
+            index.execute(
+                "INSERT INTO report_search VALUES(?1,'daily',?1,?1,'工作总结','甲 乙','',NULL,?2,?3)",
+                params![day, "\x1f工\x1f作\x1f总\x1f结\x1f", body_terms],
+            ).unwrap();
+            index.execute_batch(
+                "INSERT INTO report_phrases(rowid,literals) SELECT rowid,title_terms||body_terms FROM report_search",
+            ).unwrap();
+            Some(score(&index))
+        } else {
+            // Persist the requested encoding in the file while leaving its schema empty.
+            index
+                .execute_batch("CREATE TABLE seed(x); DROP TABLE seed")
+                .unwrap();
+            None
+        };
+        drop(index);
+        let phrase = |q: &str| {
+            fixture.execute(&SearchArgs {
+                phrase: true,
+                ..arguments(q)
+            })
+        };
+        let hits = phrase("甲 乙");
+        assert_eq!(hits["total"], 1, "{encoding} upgrade={upgrade}");
+        assert_eq!(hits["index_rebuilt"], true);
+        assert!(hits["results"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("[甲 乙]"));
+        assert_eq!(fixture.meta()["schema_version"], "6");
+        let index = fixture.index();
+        assert_eq!(
+            index
+                .query_one("PRAGMA encoding", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            encoding
+        );
+        let part = index
+            .query_one(
+                "SELECT start,size,literal FROM literal_parts WHERE ordinal=1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<i64>>(0)?,
+                        r.get::<_, Option<i64>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let literal = body_terms.trim_matches('\x1f');
+        if encoding == "UTF-8" {
+            assert_eq!(part, (Some(1), Some(literal.len() as i64), None));
+        } else {
+            assert_eq!(part, (None, None, Some(literal.to_owned())));
+        }
+        if let Some(old_score) = old_score {
+            assert_eq!(score(&index), old_score);
+        }
+        drop(index);
+        fixture.put("daily", day, json!({"work_summary":"🙂 丙"}));
+        assert_eq!(phrase("甲 乙")["total"], 0);
+        let hits = phrase("🙂 丙");
+        assert_eq!(hits["total"], 1);
+        assert!(hits["results"][0]["snippet"]
+            .as_str()
+            .unwrap()
+            .contains("[🙂 丙]"));
+    }
+}
+
+#[test]
+fn external_postings_match_their_content_across_replacement_deletion_and_rebuild() {
+    let fixture = Fixture::new();
+    let first = "2026-10-14";
+    let second = "2026-10-15";
+    fixture.put(
+        "daily",
+        first,
+        json!({"work_summary":"A\u{0000}BC　ÉΣ，🙂"}),
+    );
+    fixture.put("daily", second, json!({"work_summary":"甲  乙"}));
+    assert_eq!(fixture.execute(&arguments("ABC"))["total"], 1);
+    assert_eq!(fixture.execute(&arguments("A\u{0000}B"))["total"], 1);
+    let check = || {
+        let index = fixture.index();
+        for table in ["report_search", "report_phrases"] {
+            index
+                .execute_batch(&format!(
+                    "INSERT INTO {table}({table},rank) VALUES('integrity-check',1)"
+                ))
+                .unwrap();
+            let content_copy: bool = index
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?)",
+                    [format!("{table}_content")],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(!content_copy);
+        }
+    };
+    check();
+    fixture.put("daily", first, json!({"work_summary":"新资料"}));
+    assert_eq!(fixture.execute(&arguments("A\u{0000}B"))["total"], 0);
+    check();
+    fixture
+        .database()
+        .execute("DELETE FROM daily_reports WHERE date=?", [second])
+        .unwrap();
+    assert_eq!(fixture.execute(&arguments("乙"))["total"], 0);
+    check();
+    fixture.execute(&reindex());
+    check();
 }
 
 #[test]

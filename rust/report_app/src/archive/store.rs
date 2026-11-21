@@ -111,17 +111,6 @@ impl ArchiveStore {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
-    pub fn put_json(&self, path: &Path, value: &impl Serialize) -> Result<String, ReportError> {
-        let bytes = crate::snapshots::canonical_json(&serde_json::to_value(value)?)?;
-        if path.exists() {
-            if fs::read(path)? != bytes {
-                return Err(error("ARCHIVE_IMMUTABLE_CONFLICT"));
-            }
-        } else {
-            atomic_write(path, &bytes)?;
-        }
-        Ok(crate::snapshots::digest(&bytes))
-    }
     pub fn read_manifest(&self, id: &str) -> Result<Value, ReportError> {
         let text: String = self.conn.query_row(
             "SELECT manifest_json FROM extractions WHERE id=? AND status IN('complete','partial')",

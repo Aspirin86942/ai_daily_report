@@ -884,6 +884,7 @@ impl CachePort for TestCache {
         file: &DiscoveredFileOut,
         _classifier_profile_hash: &str,
         _classifier_build: &str,
+        _pdf_open_failure_key: &str,
         _inventory_existed_before: bool,
     ) -> Result<ClassificationCacheLookup, CachePortError> {
         if let Some(error) = &self.classification_lookup_error {
@@ -2569,7 +2570,9 @@ fn classifier_unknown_maps_timeout_vs_crash() {
     let discovery = vec![
         discovered("timeout.pdf", ".pdf", 128),
         discovered("crash.pdf", ".pdf", 128),
+        discovered("generic.pdf", ".pdf", 128),
     ];
+    let generic_path = r"C:\corpus\generic.pdf";
     let classifier = TestClassifier {
         results: HashMap::from([
             (
@@ -2579,6 +2582,23 @@ fn classifier_unknown_maps_timeout_vs_crash() {
             (
                 "C:\\corpus\\crash.pdf".to_string(),
                 unknown_result("PARSER_FAILED"),
+            ),
+            (
+                generic_path.to_string(),
+                ClassifyResult {
+                    status: ClassifyStatus::Error,
+                    diagnostic: Some(WorkerDiagnostic {
+                        error_code: "PARSER_FAILED".into(),
+                        message: "PDF input could not be processed".into(),
+                        retryable: false,
+                        stage: "parse".into(),
+                        file_path: Some(generic_path.into()),
+                        backend: Some("rust_pdfium_v3".into()),
+                    }),
+                    page_count: None,
+                    result_examined_pages: None,
+                    page_audit: None,
+                },
             ),
         ]),
     };
@@ -2611,6 +2631,12 @@ fn classifier_unknown_maps_timeout_vs_crash() {
         crash.error.as_ref().is_some_and(|diag| diag.retryable),
         "crash/transient must be retryable"
     );
+    assert_eq!(outcome.execution_metrics.classify_attempt_count, 3);
+    for file in &outcome.file_results {
+        let audit = file.pdf_classification.as_ref().unwrap();
+        assert_eq!(audit.attempt_count, 1);
+        assert!(audit.pdf_open_failure_key.is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------

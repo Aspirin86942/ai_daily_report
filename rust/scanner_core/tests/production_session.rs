@@ -233,6 +233,147 @@ mod windows {
     }
 
     #[test]
+    fn pdf_open_failure_reuse_preserves_gaps_and_invalidates_on_changed_inputs() {
+        use ai_daily_scanner_contract::{ClassificationCacheStatus, ErrorCode, ParseStatus};
+        use std::fs::{self, File};
+
+        let root = repository_root();
+        let (pdf, office, readable) = local_runtime(&root).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        fs::create_dir(&work).unwrap();
+        fs::write(work.join("note.md"), "A readable source").unwrap();
+        let path = work.join("report.pdf");
+        fs::write(&path, b"invalid PDF").unwrap();
+        let scan = |pages, chars| {
+            let request: BuildContextRequest = serde_json::from_value(json!({
+                "contract": "ai_daily_context", "protocol_version": 1,
+                "request_id": "72666666-7266-4266-8266-726666666666",
+                "work_dir": work, "scan_db_path": temp.path().join("scan_index_rust_v3.sqlite3"),
+                "start_date": "2000-01-01", "end_date": "2099-12-31", "report_mode": "daily",
+                "compression_profile": null,
+                "scanner_settings": {"max_workers": 1, "total_deadline_ms": 60000,
+                    "pdf_max_pages": pages, "document_excerpt_max_chars": chars},
+                "adapters": {"office_worker_path": office, "pdf_worker_path": pdf}
+            }))
+            .unwrap();
+            let scanner = Scanner::open(ScannerConfig::from_build_request(&request)).unwrap();
+            let output = scanner
+                .build_context(&ScanRequest::from_build_request(&request))
+                .unwrap();
+            assert_eq!(output.exit_code, 0, "{:?}", output.value.envelope);
+            let evidence = output.value.evidence.unwrap();
+            let file = evidence
+                .files
+                .into_iter()
+                .find(|file| file.relative_path == "report.pdf")
+                .unwrap();
+            (
+                file,
+                evidence.execution_metrics,
+                output.value.envelope.file_context,
+            )
+        };
+        let check_failure = |pages, chars, code, attempts| {
+            let (file, metrics, context) = scan(pages, chars);
+            let audit = file.pdf_classification.0.as_ref().unwrap();
+            assert_eq!(file.parse_status, ParseStatus::Error);
+            let diagnostic = file.final_diagnostic.0.as_ref().unwrap();
+            assert_eq!(diagnostic.error_code, code);
+            assert!(!diagnostic.retryable);
+            assert_eq!(file.parse_attempt_count, 0);
+            assert_eq!(audit.attempt_count, attempts);
+            assert_eq!(metrics.classify_attempt_count, attempts);
+            assert_eq!(metrics.classification_cache_all_hit.0, Some(attempts == 0));
+            assert!(audit.pdf_open_failure_key.is_some());
+            assert_eq!(audit.nominal_charged_pages, pages);
+            assert_eq!(metrics.nominal_charged_pages_total, pages);
+            let refill = metrics.refill_audit.as_ref().unwrap();
+            assert_eq!(refill.classification_pages_held, pages);
+            assert_eq!(refill.refunded_classification_pages, 0);
+            if attempts == 0 {
+                assert_eq!(
+                    audit.classification_cache_status,
+                    ClassificationCacheStatus::Fresh
+                );
+                assert_eq!(audit.run_inspected_pages.0, Some(0));
+                assert_eq!(metrics.unobserved_classification_attempt_count, 0);
+            } else {
+                assert_eq!(
+                    audit.classification_cache_status,
+                    ClassificationCacheStatus::Miss
+                );
+            }
+            println!(
+                "PDF_OPEN_FAILURE {}",
+                json!({"code":code,"attempts":attempts,
+                "file":file.relative_path,"source_version":file.source_version,"guard":file.source_guard_sha256,
+                "audit":audit,"held_pages":refill.classification_pages_held,"refunded_pages":refill.refunded_classification_pages,
+                "context_sha256":ai_daily_scanner_core::store::sha256_hex(context.as_bytes())})
+            );
+            (file, context)
+        };
+
+        let (cold, gap) = check_failure(5, 3200, ErrorCode::ParserFailed, 1);
+        let (warm, warm_gap) = check_failure(5, 3200, ErrorCode::ParserFailed, 0);
+        assert_eq!(warm_gap, gap);
+        assert_eq!(warm.final_diagnostic, cold.final_diagnostic);
+        assert_eq!(warm.source_guard_sha256, cold.source_guard_sha256);
+        // Model a retained v3 row written by an older classifier. A previous
+        // matching proof for the same file must not supersede the latest row.
+        let db =
+            rusqlite::Connection::open(temp.path().join("scan_index_rust_v3.sqlite3")).unwrap();
+        assert_eq!(db.execute("UPDATE scan_file_execution SET classifier_build=?1
+            WHERE file_identity=?2 AND scan_run_id=(SELECT max(scan_run_id) FROM scan_file_results WHERE file_identity=?2)",
+            rusqlite::params!["0".repeat(64), cold.file_identity]).unwrap(), 1);
+        check_failure(5, 3200, ErrorCode::ParserFailed, 1);
+        assert_eq!(db.execute("UPDATE scan_runs SET
+            final_envelope_metadata_json=json_remove(final_envelope_metadata_json, '$.pdf_open_failures'),
+            final_envelope_json=json_remove(final_envelope_json, '$.pdf_open_failures')
+            WHERE scan_run_id=(SELECT max(scan_run_id) FROM scan_file_results WHERE file_identity=?1)",
+            [&cold.file_identity]).unwrap(), 1);
+        check_failure(5, 3200, ErrorCode::ParserFailed, 1);
+        check_failure(2, 3200, ErrorCode::ParserFailed, 1);
+        check_failure(2, 4000, ErrorCode::ParserFailed, 1);
+
+        fs::copy(
+            root.join("tests/fixtures/pdf_classifier/error_encrypted_01.pdf"),
+            &path,
+        )
+        .unwrap();
+        let (_, encrypted_gap) = check_failure(2, 4000, ErrorCode::PdfProtected, 1);
+        assert_eq!(
+            check_failure(2, 4000, ErrorCode::PdfProtected, 0).1,
+            encrypted_gap
+        );
+
+        let valid = fs::read(&readable).unwrap();
+        fs::write(&path, vec![b'X'; valid.len()]).unwrap();
+        let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+        let (damaged, _) = check_failure(2, 4000, ErrorCode::ParserFailed, 1);
+        check_failure(2, 4000, ErrorCode::ParserFailed, 0);
+        fs::write(&path, &valid).unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let (repaired, metrics, _) = scan(2, 4000);
+        assert_eq!(damaged.source_version, repaired.source_version);
+        assert_ne!(damaged.source_guard_sha256, repaired.source_guard_sha256);
+        assert_eq!(repaired.parse_status, ParseStatus::Success);
+        assert_eq!(repaired.parse_attempt_count, 1);
+        assert_eq!(metrics.classify_attempt_count, 1);
+        println!(
+            "PDF_REPAIRED {}",
+            json!({"source_version":repaired.source_version,
+            "prior_guard":damaged.source_guard_sha256, "guard":repaired.source_guard_sha256,
+            "classification_attempts":metrics.classify_attempt_count, "parse_attempts":repaired.parse_attempt_count})
+        );
+    }
+
+    #[test]
     fn daily_pdf_selection_invalidates_cached_cover_and_reuses_five_page_evidence() {
         let root = repository_root();
         let (pdf, office, _) = local_runtime(&root).unwrap();

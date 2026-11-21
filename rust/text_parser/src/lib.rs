@@ -9,202 +9,18 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use thiserror::Error;
 
+mod archive;
 mod daily_csv;
 mod daily_text;
+#[cfg(test)]
+mod tests;
+
+pub use archive::parse_archive_text;
 use daily_csv::audited_csv;
 use daily_text::audited_text;
 
 const TEXT_FILE_TYPES: &[&str] = &[".txt", ".md", ".csv", ".json", ".log"];
 const LEGACY_CSV_FIELD_SIZE_LIMIT: usize = 131_072;
-
-pub fn parse_archive_text(
-    request: &ai_daily_worker_contract::archive::ArchiveTextRequest,
-) -> Result<ai_daily_worker_contract::archive::ArchiveArtifact, &'static str> {
-    use ai_daily_worker_contract::archive::ArchiveWriter;
-    use std::time::{Duration, Instant};
-    request.validate().map_err(|_| "PARSER_INVALID_PAYLOAD")?;
-    if std::fs::metadata(&request.file_path)
-        .map_err(|_| "SOURCE_UNAVAILABLE")?
-        .len()
-        > request.max_input_bytes
-    {
-        return Err("FILE_TOO_LARGE");
-    }
-    let started = Instant::now();
-    let deadline = started + Duration::from_millis(request.timeout_ms);
-    let csv = request.file_type == ".csv";
-    let mut encodings = if csv {
-        Vec::new()
-    } else {
-        vec![encoding_rs::UTF_8]
-    };
-    if csv {
-        for name in &request.csv_encodings {
-            let encoding = if name == "gb18030" {
-                encoding_rs::GB18030
-            } else {
-                encoding_rs::UTF_8
-            };
-            if !encodings.contains(&encoding) {
-                encodings.push(encoding);
-            }
-        }
-    }
-    for (attempt, encoding) in encodings.into_iter().enumerate() {
-        if attempt > 0 {
-            // Only files created in this request's private staging directory.
-            for name in ["body.md", "units.jsonl", "units.idx"] {
-                std::fs::remove_file(request.output_dir.join(name))
-                    .map_err(|_| "ARCHIVE_OUTPUT_FAILED")?;
-            }
-        }
-        let mut writer = ArchiveWriter::new(&request.output_dir, request.max_output_bytes)
-            .map_err(|_| "ARCHIVE_OUTPUT_FAILED")?;
-        let mut decoder = encoding.new_decoder_with_bom_removal();
-        let mut file = File::open(&request.file_path).map_err(|_| "SOURCE_UNAVAILABLE")?;
-        let mut bytes = [0; 65536];
-        let mut record = String::new();
-        let mut quoted = false;
-        let mut row = 1;
-        let mut offset = 0;
-        let mut failed = false;
-        let mut stopped = false;
-        loop {
-            if Instant::now() >= deadline {
-                return Err("PARSE_DEADLINE");
-            }
-            let size = file.read(&mut bytes).map_err(|_| "SOURCE_UNAVAILABLE")?;
-            let mut decoded = String::with_capacity(512 * 1024);
-            let (result, consumed) = decoder.decode_to_string_without_replacement(
-                &bytes[..size],
-                &mut decoded,
-                size == 0,
-            );
-            if result != encoding_rs::DecoderResult::InputEmpty || consumed != size {
-                failed = true;
-                break;
-            }
-            for character in decoded.chars() {
-                record.push(character);
-                if csv && character == '"' {
-                    quoted = !quoted;
-                }
-                if (character == '\n' && (!csv || !quoted)) || (!csv && record.len() >= 256 * 1024)
-                {
-                    if !archive_text_record(&mut writer, &record, csv, row, offset) {
-                        stopped = true;
-                        break;
-                    }
-                    offset += record.chars().count() as u64;
-                    row += 1;
-                    record.clear();
-                }
-                if csv && record.len() >= 8 * 1024 * 1024 {
-                    writer.gap("CSV_RECORD_COARSE");
-                    let range = SourceRange::new(
-                        SourceRangeUnit::CsvRecord,
-                        row,
-                        row + 1,
-                        Some("raw_csv_fragment".into()),
-                    );
-                    if !writer.push(&record, ContentUnitKind::Text, vec![range]) {
-                        stopped = true;
-                        break;
-                    }
-                    record.clear();
-                }
-            }
-            if stopped || size == 0 {
-                break;
-            }
-        }
-        if failed {
-            drop(writer);
-            continue;
-        }
-        if csv && quoted {
-            return Err("CSV_INVALID");
-        }
-        if !record.is_empty() && !stopped {
-            archive_text_record(&mut writer, &record, csv, row, offset);
-        }
-        let mut artifact = writer.finish();
-        if artifact.error.is_some() {
-            return Err("ARCHIVE_OUTPUT_FAILED");
-        }
-        artifact.raw_sha256 = request.raw_sha256.clone();
-        artifact.parser_backend = "light_text_v2".into();
-        artifact.worker_lane = "rust_text_archive_process_v4".into();
-        artifact.duration_ms = started.elapsed().as_millis() as u64;
-        if artifact.usable_chars == 0 {
-            artifact.gaps.push("NO_USABLE_TEXT".into());
-        }
-        return Ok(artifact);
-    }
-    Err("TEXT_DECODE_FAILED")
-}
-
-fn archive_text_record(
-    writer: &mut ai_daily_worker_contract::archive::ArchiveWriter,
-    text: &str,
-    csv: bool,
-    row: u64,
-    offset: u64,
-) -> bool {
-    if csv {
-        let range = SourceRange::new(SourceRangeUnit::CsvRecord, row, row + 1, None);
-        match parse_csv_with_limit(text, 8 * 1024 * 1024) {
-            Ok(rows) => {
-                for cells in rows {
-                    let escaped = cells
-                        .iter()
-                        .map(|v| {
-                            v.replace('\\', "\\\\")
-                                .replace('|', "\\|")
-                                .replace('\r', "")
-                                .replace('\n', "<br>")
-                        })
-                        .collect::<Vec<_>>();
-                    if !writer.push(
-                        &format!("| {} |", escaped.join(" | ")),
-                        if row == 1 {
-                            ContentUnitKind::TableHeader
-                        } else {
-                            ContentUnitKind::TableRow
-                        },
-                        vec![range.clone()],
-                    ) {
-                        return false;
-                    }
-                }
-            }
-            Err(_) => {
-                writer.gap("CSV_RECORD_INVALID");
-                return writer.push(text, ContentUnitKind::Text, vec![range]);
-            }
-        }
-        true
-    } else {
-        let end = offset + text.chars().count() as u64;
-        if end == offset {
-            return true;
-        }
-        writer.push(
-            text,
-            if text.trim_start().starts_with('#') {
-                ContentUnitKind::Heading
-            } else {
-                ContentUnitKind::Text
-            },
-            vec![SourceRange::new(
-                SourceRangeUnit::TextChar,
-                offset,
-                end,
-                None,
-            )],
-        )
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParsedLightText {
@@ -507,7 +323,7 @@ fn read_tail(
     }
     let (leading_context, raw) = context_and_raw.split_at(leading_length);
     let truncated = start_offset > 0;
-    let text = decode_tail(raw, leading_context, truncated)?;
+    let text = decode_head(trim_leading_utf8_fragment(raw, leading_context), false)?;
     let byte_end = context_offset + context_and_raw.len() as u64;
     Ok(RawExcerpt {
         text_byte_start: byte_end - text.len() as u64,
@@ -564,21 +380,6 @@ fn decode_head(raw: &[u8], trim_trailing_fragment: bool) -> Result<String, Light
     }
 }
 
-fn decode_tail(
-    raw: &[u8],
-    leading_context: &[u8],
-    trim_leading_fragment: bool,
-) -> Result<String, LightTextError> {
-    let trimmed = if trim_leading_fragment {
-        trim_leading_utf8_fragment(raw, leading_context)
-    } else {
-        raw
-    };
-    std::str::from_utf8(trimmed)
-        .map(str::to_string)
-        .map_err(|_| LightTextError::DecodeFailed)
-}
-
 fn trim_leading_utf8_fragment<'a>(raw: &'a [u8], leading_context: &[u8]) -> &'a [u8] {
     if raw.first().is_none_or(|byte| !is_utf8_continuation(*byte)) {
         return raw;
@@ -619,73 +420,38 @@ fn build_json_content(
     raw: &RawExcerpt,
     max_chars: u64,
 ) -> (String, bool, Option<LightTextWarning>) {
-    if raw.truncated {
-        return build_text_content(
-            raw,
-            "JSON preview",
-            max_chars,
-            Some(LightTextWarning::JsonPreviewFallback),
-        );
-    }
-    let normalized_json = normalize_python_json_constants(&raw.text);
-    let payload: Value = match serde_json::from_str(normalized_json.as_ref()) {
-        Ok(payload) => payload,
-        Err(_) => {
-            return build_text_content(
-                raw,
-                "JSON preview",
-                max_chars,
-                Some(LightTextWarning::JsonPreviewFallback),
-            );
+    let payload = if raw.truncated {
+        None
+    } else {
+        serde_json::from_str::<Value>(&normalize_python_json_constants(&raw.text)).ok()
+    };
+    let warning = payload
+        .is_none()
+        .then_some(LightTextWarning::JsonPreviewFallback);
+    let title = if matches!(payload, Some(Value::Object(_))) {
+        "JSON object preview"
+    } else {
+        "JSON preview"
+    };
+    let detail = match payload {
+        Some(Value::Object(values)) => {
+            let mut keys: Vec<_> = values.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            format!("top_level_keys: {}", keys.join(", "))
         }
+        Some(Value::Array(values)) => {
+            format!("top_level_type: list\ntop_level_items: {}", values.len())
+        }
+        Some(Value::String(_)) => "top_level_type: str".into(),
+        Some(Value::Number(_)) => format!("top_level_type: {}", python_json_number_type(&raw.text)),
+        Some(Value::Bool(_)) => "top_level_type: bool".into(),
+        Some(Value::Null) => "top_level_type: NoneType".into(),
+        None => format!("warning: {}", LightTextWarning::JsonPreviewFallback.code()),
     };
     let (content, truncated) = finalize_content(
         |truncated| {
-            let title = if payload.is_object() {
-                "JSON object preview"
-            } else {
-                "JSON preview"
-            };
-            let mut lines = metadata_lines(title, raw.source, truncated);
-            match &payload {
-                Value::Object(values) => {
-                    let mut keys: Vec<&str> = values.keys().map(String::as_str).collect();
-                    keys.sort_unstable();
-                    lines.push(format!("top_level_keys: {}", keys.join(", ")));
-                }
-                Value::Array(values) => {
-                    lines.push("top_level_type: list".to_string());
-                    lines.push(format!("top_level_items: {}", values.len()));
-                }
-                Value::String(_) => lines.push("top_level_type: str".to_string()),
-                Value::Number(_) => lines.push(format!(
-                    "top_level_type: {}",
-                    python_json_number_type(&raw.text)
-                )),
-                Value::Bool(_) => lines.push("top_level_type: bool".to_string()),
-                Value::Null => lines.push("top_level_type: NoneType".to_string()),
-            }
-            preview_body(lines, &raw.text)
-        },
-        raw.truncated,
-        max_chars,
-    );
-    (content, truncated, None)
-}
-
-fn build_text_content(
-    raw: &RawExcerpt,
-    title: &str,
-    max_chars: u64,
-    warning: Option<LightTextWarning>,
-) -> (String, bool, Option<LightTextWarning>) {
-    let (content, truncated) = finalize_content(
-        |truncated| {
-            let mut lines = metadata_lines(title, raw.source, truncated);
-            if let Some(warning) = warning {
-                lines.push(format!("warning: {}", warning.code()));
-            }
-            preview_body(lines, &raw.text)
+            let meta = preview_metadata(title, raw.source, truncated);
+            format!("{meta}\n{detail}\n\n{}", raw.text)
         },
         raw.truncated,
         max_chars,
@@ -769,19 +535,8 @@ fn python_json_number_type(input: &str) -> &'static str {
     }
 }
 
-fn metadata_lines(title: &str, excerpt_source: &str, truncated: bool) -> Vec<String> {
-    vec![
-        title.to_string(),
-        format!("excerpt_source: {excerpt_source}"),
-        format!("truncated: {truncated}"),
-    ]
-}
-
-fn preview_body(lines: Vec<String>, text: &str) -> String {
-    let mut body = lines.join("\n");
-    body.push_str("\n\n");
-    body.push_str(text);
-    body
+fn preview_metadata(title: &str, excerpt_source: &str, truncated: bool) -> String {
+    format!("{title}\nexcerpt_source: {excerpt_source}\ntruncated: {truncated}")
 }
 
 fn finalize_content<F>(builder: F, read_truncated: bool, max_chars: u64) -> (String, bool)
@@ -816,170 +571,109 @@ fn format_csv_row(row: &[String]) -> String {
         .join(" | ")
 }
 
-fn parse_csv(input: &str) -> Result<Vec<Vec<String>>, ()> {
-    parse_csv_with_limit(input, LEGACY_CSV_FIELD_SIZE_LIMIT)
+enum CsvToken {
+    Value(char),
+    FieldEnd,
+    RowEnd,
+    Invalid,
 }
-fn parse_csv_with_limit(input: &str, limit: usize) -> Result<Vec<Vec<String>>, ()> {
+
+// Report each token's byte end. Both window selection and field decoding must agree on
+// literal quotes, escaped quotes, quoted newlines and CRLF.
+fn csv_tokens(input: &str) -> impl Iterator<Item = (usize, CsvToken)> + '_ {
+    #[derive(PartialEq)]
+    enum Field {
+        Start,
+        Unquoted,
+        Quoted,
+        Closed,
+    }
+    let mut state = Field::Start;
+    let mut chars = input.chars();
+    std::iter::from_fn(move || loop {
+        let Some(ch) = chars.next() else {
+            return (std::mem::replace(&mut state, Field::Start) == Field::Quoted)
+                .then_some((input.len(), CsvToken::Invalid));
+        };
+        let token = match ch {
+            '"' if state == Field::Start => {
+                state = Field::Quoted;
+                continue;
+            }
+            '"' if state == Field::Quoted => {
+                if !chars.as_str().starts_with('"') {
+                    state = Field::Closed;
+                    continue;
+                }
+                chars.next();
+                CsvToken::Value('"')
+            }
+            _ if state == Field::Quoted => CsvToken::Value(ch),
+            ',' => {
+                state = Field::Start;
+                CsvToken::FieldEnd
+            }
+            '\r' if !chars.as_str().starts_with('\n') => {
+                state = Field::Unquoted;
+                CsvToken::Invalid
+            }
+            '\r' | '\n' => {
+                if ch == '\r' {
+                    chars.next();
+                }
+                state = Field::Start;
+                CsvToken::RowEnd
+            }
+            _ if state == Field::Closed => {
+                state = Field::Unquoted;
+                CsvToken::Invalid
+            }
+            _ => {
+                state = Field::Unquoted;
+                CsvToken::Value(ch)
+            }
+        };
+        return Some((input.len() - chars.as_str().len(), token));
+    })
+}
+
+fn parse_csv(input: &str, limit: usize, partial: bool) -> Result<Vec<Vec<String>>, ()> {
+    // A discarded tail can contain millions of separators. Find its boundary without
+    // allocating fields or rejecting errors in that unfinished logical record.
+    let input = if partial {
+        let end = csv_tokens(input)
+            .filter_map(|(end, token)| matches!(token, CsvToken::RowEnd).then_some(end))
+            .last()
+            .unwrap_or(0);
+        &input[..end]
+    } else {
+        input
+    };
     let mut rows = Vec::new();
     let mut row = Vec::new();
     let mut field = String::new();
-    let mut chars = input.chars().peekable();
-    let mut in_quotes = false;
-    let mut after_quote = false;
-    let mut field_started = false;
-    let mut field_chars = 0_usize;
-    while let Some(character) = chars.next() {
-        if in_quotes {
-            if character == '"' {
-                if chars.peek() == Some(&'"') {
-                    chars.next();
-                    push_csv_field_char(&mut field, &mut field_chars, '"', limit)?;
-                } else {
-                    in_quotes = false;
-                    after_quote = true;
+    let mut field_chars = 0;
+    let mut row_start = 0;
+    for (end, token) in csv_tokens(input) {
+        match token {
+            CsvToken::Value(ch) if field_chars < limit => {
+                field.push(ch);
+                field_chars += 1;
+            }
+            CsvToken::Invalid | CsvToken::Value(_) => return Err(()),
+            CsvToken::FieldEnd | CsvToken::RowEnd => {
+                row.push(std::mem::take(&mut field));
+                field_chars = 0;
+                if matches!(token, CsvToken::RowEnd) {
+                    rows.push(std::mem::take(&mut row));
+                    row_start = end;
                 }
-            } else {
-                push_csv_field_char(&mut field, &mut field_chars, character, limit)?;
-            }
-            continue;
-        }
-        match character {
-            '"' if !field_started => {
-                in_quotes = true;
-                field_started = true;
-            }
-            ',' => {
-                row.push(std::mem::take(&mut field));
-                after_quote = false;
-                field_started = false;
-                field_chars = 0;
-            }
-            '\n' => {
-                row.push(std::mem::take(&mut field));
-                rows.push(std::mem::take(&mut row));
-                after_quote = false;
-                field_started = false;
-                field_chars = 0;
-            }
-            '\r' => {
-                if chars.peek() != Some(&'\n') {
-                    return Err(());
-                }
-                chars.next();
-                row.push(std::mem::take(&mut field));
-                rows.push(std::mem::take(&mut row));
-                after_quote = false;
-                field_started = false;
-                field_chars = 0;
-            }
-            _ if after_quote => return Err(()),
-            '"' => {
-                push_csv_field_char(&mut field, &mut field_chars, character, limit)?;
-                field_started = true;
-            }
-            _ => {
-                push_csv_field_char(&mut field, &mut field_chars, character, limit)?;
-                field_started = true;
             }
         }
     }
-    if in_quotes {
-        return Err(());
-    }
-    if field_started || after_quote || !field.is_empty() || !row.is_empty() {
+    if row_start < input.len() {
         row.push(field);
         rows.push(row);
     }
     Ok(rows)
-}
-
-fn push_csv_field_char(
-    field: &mut String,
-    field_chars: &mut usize,
-    value: char,
-    limit: usize,
-) -> Result<(), ()> {
-    *field_chars = field_chars.checked_add(1).ok_or(())?;
-    if *field_chars > limit {
-        return Err(());
-    }
-    field.push(value);
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::fs;
-    use tempfile::tempdir;
-
-    #[test]
-    fn log_excerpt_keeps_the_recent_tail_lines() {
-        let directory = tempdir().expect("temporary root should exist");
-        let path = directory.path().join("app.log");
-        let lines: Vec<String> = (0..500)
-            .map(|i| format!("2026-08-11 {i:04} 日志行"))
-            .collect();
-        fs::write(&path, lines.join("\n")).expect("log fixture should be written");
-        let profile = TextParseProfile {
-            csv_encodings: ai_daily_scanner_contract::default_csv_encodings(),
-            backend: "light_text_v2".to_string(),
-            read_head_bytes: 1_048_576,
-            read_tail_bytes: 1_048_576,
-            max_chars: 1_000,
-            excerpt_max_chars: 1_000,
-        };
-        let parsed =
-            parse_light_text(&path, ".log", &profile, 16 * 1024 * 1024).expect("log should parse");
-
-        assert!(parsed.truncated);
-        assert!(parsed.content.contains("Log tail preview"));
-        assert!(parsed.content.contains("excerpt_source: tail"));
-        assert!(parsed.content.ends_with("2026-08-11 0499 日志行"));
-        assert!(parsed.content.chars().count() <= 1_000);
-    }
-
-    #[test]
-    fn bounded_text_excerpt_keeps_both_ends_of_a_regular_file() {
-        let directory = tempdir().expect("temporary root should exist");
-        let path = directory.path().join("notes.md");
-        let lines: Vec<String> = (0..500)
-            .map(|i| format!("2026-08-11 {i:04} 日志行"))
-            .collect();
-        fs::write(&path, lines.join("\n")).expect("md fixture should be written");
-        let profile = TextParseProfile {
-            csv_encodings: ai_daily_scanner_contract::default_csv_encodings(),
-            backend: "light_text_v2".to_string(),
-            read_head_bytes: 1_048_576,
-            read_tail_bytes: 1_048_576,
-            max_chars: 1_000,
-            excerpt_max_chars: 1_000,
-        };
-        let parsed =
-            parse_light_text(&path, ".md", &profile, 16 * 1024 * 1024).expect("md should parse");
-
-        assert!(parsed.truncated);
-        assert!(parsed.content.contains("2026-08-11 0000 日志行"));
-        assert!(parsed.content.contains("2026-08-11 0499 日志行"));
-        assert!(parsed.content.chars().count() <= 1_000);
-    }
-
-    #[test]
-    fn bounded_read_uses_the_same_open_handle_as_its_metadata() {
-        let directory = tempdir().expect("temporary root should exist");
-        let path = directory.path().join("candidate.txt");
-        let archived = directory.path().join("opened.txt");
-        fs::write(&path, "opened content").expect("original fixture should be written");
-        let mut file = File::open(&path).expect("original fixture should open");
-        let metadata = file.metadata().expect("opened metadata should be readable");
-        fs::rename(&path, &archived).expect("opened fixture should be renamed");
-        fs::write(&path, "replacement content that is much larger")
-            .expect("replacement fixture should be written");
-
-        let excerpt = read_head(&mut file, metadata.len(), 1024, None)
-            .expect("the original opened handle should remain readable");
-
-        assert_eq!(excerpt.text, "opened content");
-        assert!(!excerpt.truncated);
-    }
 }

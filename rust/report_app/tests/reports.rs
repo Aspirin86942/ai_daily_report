@@ -1,107 +1,95 @@
 use ai_daily_report::{
-    model::contracts::{CitedText, ComposedReport, Fact, Matter, SelectedFact},
-    reports::data::{DailyReport, ReportSource},
-    snapshots::digest,
+    evidence::EvidenceRef,
+    reports::{
+        data::ReportSource,
+        personal::{validate_items, ItemKind, PersonalItem, StatementKind},
+    },
+    snapshots::{canonical_json, digest},
+    types::{parse_date, RunContext},
 };
-use chrono::{DateTime, Utc};
-use serde_json::json;
+use serde_json::{json, Value};
 
-fn report() -> DailyReport {
-    let now = DateTime::parse_from_rfc3339("2026-10-15T01:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let original="普通采购：含税金额不超过50000元且预算内，部门负责人审批；超过50000元或预算外，财务复核并交分管负责人审批。紧急采购先经书面确认，2个工作日内补齐单据；关联交易不适用。草稿待评审，生效日期尚未确定。";
-    let mut source = ReportSource::user(original, now);
-    source.model_chars = source.excerpt_chars;
-    let detail = CitedText {
-        text: original.into(),
-        fact_ids: vec!["batch_000:000".into()],
-        source_ids: vec!["user_input".into()],
-    };
-    DailyReport {
-        schema_version: 3,
-        report_kind: "file_evidence".into(),
-        date: "2026-10-11".into(),
-        scope_id: "personal_work".into(),
-        root_alias: "合成材料".into(),
-        timezone: "Asia/Shanghai".into(),
-        window_start_utc: "2026-10-10T16:00:00Z".into(),
-        window_end_utc: "2026-10-11T16:00:00Z".into(),
-        quality: "complete".into(),
-        sources: vec![source],
-        gaps: vec![],
-        missed_dates: vec![],
-        generated_at: now.to_rfc3339(),
-        user_notes: String::new(),
-        facts: vec![SelectedFact {
-            matter_id: None,
-            evidence: vec![],
-            fact_id: "batch_000:000".into(),
-            pending: false,
-            fact: Fact {
-                topic: "采购审批调整".into(),
-                background: None,
-                detail: original.into(),
-                conditions: vec![],
-                status: Some("草稿待评审".into()),
-                source_ids: vec!["user_input".into()],
-                uncertainty: None,
-            },
-        }],
-        content: Some(ComposedReport {
-            schema_version: 3,
-            overview: vec![CitedText {
-                text: "采购审批方案仍待评审，生效日期尚未确定。".into(),
-                ..detail.clone()
-            }],
-            matters: vec![Matter {
-                matter_id: None,
-                title: "采购审批调整".into(),
-                background: None,
-                details: vec![detail],
-                status: None,
-            }],
-            pending: vec![],
-        }),
-    }
-}
+const V3: &[u8] = include_bytes!("fixtures/retired/report-v3.json");
+const V4: &str = include_str!("fixtures/readability/v4-input.json");
+const V4_BODY: &str = include_str!("fixtures/readability/v4-expected.md");
 
 #[test]
 fn invalid_source_identity_and_window_fail_at_the_report_boundary() {
-    let mut r = report();
-    r.sources[0].content_sha256 = Some("wrong".into());
-    assert!(r.validate().is_err());
-    r = report();
-    r.sources[0].model_chars += 1;
-    assert!(r.validate().is_err());
-    r = report();
-    r.window_end_utc = "2026-10-12T16:00:00Z".into();
-    assert!(r.validate().is_err());
-    r = report();
-    r.sources[0].coverage_limits = json!({"ocr":{"text_unverified":true}});
-    assert!(r.validate().is_err());
-    r = report();
-    r.sources[0].source_id = format!("src_{}", digest(b"other"));
-    assert!(r.validate().is_err());
+    let report: Value = serde_json::from_slice(V3).unwrap();
+    let original: ReportSource = serde_json::from_value(report["sources"][0].clone()).unwrap();
+    original.validate().unwrap();
+    let mut changed = original.clone();
+    changed.content_sha256 = Some("wrong".into());
+    assert!(changed.validate().is_err());
+    let mut changed = original.clone();
+    changed.model_chars += 1;
+    assert!(changed.validate().is_err());
+    let mut changed = original;
+    changed.source_id = format!("src_{}", digest(b"other"));
+    assert!(changed.validate().is_err());
+
+    let mut ctx = RunContext::new(
+        "1".repeat(32),
+        serde_json::from_value(report["generated_at"].clone()).unwrap(),
+        parse_date(report["date"].as_str().unwrap()).unwrap(),
+        "a".repeat(64),
+    )
+    .unwrap();
+    ctx.window_start_utc = serde_json::from_value(report["window_start_utc"].clone()).unwrap();
+    ctx.window_end_utc = serde_json::from_value(report["window_end_utc"].clone()).unwrap();
+    ctx.validate().unwrap();
+    ctx.window_end_utc = "2026-10-12T16:00:00Z".parse().unwrap();
+    assert!(ctx.validate().is_err());
+
+    let saved: Value = serde_json::from_str(V4).unwrap();
+    let mut source: ReportSource = serde_json::from_value(saved["sources"][0].clone()).unwrap();
+    let fact = &saved["facts"][0]["fact"];
+    let observed = [PersonalItem {
+        title: fact["topic"].as_str().unwrap().into(),
+        text: fact["detail"].as_str().unwrap().into(),
+        kind: ItemKind::Progress,
+        statement_kind: StatementKind::Observed,
+        source_ids: vec![source.source_id.clone()],
+    }];
+    validate_items(&observed, std::slice::from_ref(&source)).unwrap();
+    source.coverage_limits = json!({"ocr":{"text_unverified":true}});
+    assert!(validate_items(&observed, &[source]).is_err());
 }
 
 #[test]
 fn historical_fact_keeps_its_conditions_status_and_evidence() {
-    let original = report();
-    let bytes = serde_json::to_vec(&original).unwrap();
-    let decoded: DailyReport = serde_json::from_slice(&bytes).unwrap();
-    decoded.validate().unwrap();
-    assert_eq!(serde_json::to_vec(&decoded).unwrap(), bytes);
+    let report: Value = serde_json::from_slice(V3).unwrap();
+    assert_eq!(serde_json::to_vec(&report).unwrap(), V3);
+    assert_eq!(
+        digest(V3),
+        "897daeed22e5365de801398e89b21922326c50ca21cdedc80ec4100375d7c957"
+    );
+    assert_eq!(
+        report["facts"][0]["fact"]["detail"],
+        report["content"]["matters"][0]["details"][0]["text"]
+    );
+    assert_eq!(report["facts"][0]["fact"]["status"], "草稿待评审");
 
-    let saved: DailyReport =
-        serde_json::from_str(include_str!("fixtures/readability/v4-input.json")).unwrap();
-    saved.validate().unwrap();
-    let body = include_str!("fixtures/readability/v4-expected.md");
-    for fact in &saved.facts {
-        for reference in &fact.evidence {
-            assert!(body.contains(&reference.quote));
-            assert!(body.contains(&reference.version_id));
-            assert!(body.contains(&reference.quote_sha256));
+    let saved: Value = serde_json::from_str(V4).unwrap();
+    assert_eq!(
+        digest(&canonical_json(&saved).unwrap()),
+        "f43b6e3d3f7ed65d2f1661dcb7fecba3699d7b19dc755e958d45d3c0ca5e322b"
+    );
+    assert_eq!(
+        digest(V4_BODY.as_bytes()),
+        "4ac9ae0db26eadf5d5f50ae8dee79db926bf20fbcfed4eaaf8e3bf370be45d5e"
+    );
+    for source in serde_json::from_value::<Vec<ReportSource>>(saved["sources"].clone()).unwrap() {
+        source.validate().unwrap();
+    }
+    for fact in saved["facts"].as_array().unwrap() {
+        for reference in
+            serde_json::from_value::<Vec<EvidenceRef>>(fact["evidence"].clone()).unwrap()
+        {
+            assert_eq!(digest(reference.quote.as_bytes()), reference.quote_sha256);
+            assert!(V4_BODY.contains(&reference.quote));
+            assert!(V4_BODY.contains(&reference.version_id));
+            assert!(V4_BODY.contains(&reference.quote_sha256));
         }
     }
 }

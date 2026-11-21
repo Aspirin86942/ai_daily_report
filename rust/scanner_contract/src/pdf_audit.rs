@@ -62,17 +62,23 @@ impl PdfPageAudit {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        let mut seen = HashSet::new();
         if !matches!(
             self.policy_version.as_str(),
             "pdf_text_presence_v1" | "pdf_text_presence_v2"
         ) || self.checked_pages.len() > 10_000
-            || self.checked_pages.contains(&0)
-            || self.checked_pages.iter().collect::<HashSet<_>>().len() != self.checked_pages.len()
+            || self
+                .checked_pages
+                .iter()
+                .any(|&page| page == 0 || !seen.insert(page))
         {
             return Err("invalid PDF page audit".into());
         }
         if self.observations.as_ref().is_some_and(|items| {
-            items.iter().map(|item| item.page).collect::<Vec<_>>() != self.checked_pages
+            items
+                .iter()
+                .map(|item| item.page)
+                .ne(self.checked_pages.iter().copied())
         }) {
             return Err("PDF observations do not match checked pages".into());
         }

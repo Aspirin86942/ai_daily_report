@@ -1,5 +1,28 @@
 # 当前运行与验收状态
 
+## 个人日报内核二期已部署（2026-11-21，上海时间）
+
+**16:42:32 完成正式切换，16:42:45 通过即时核验。** 日报和健康检查均已启用并指向 `.releases/rust-20261121-kernel-phase2-01`。候选包清单中的 526 项文件全部匹配，SHA-256 为 `cde44cb6917f03a59706236ec70ecc23525dc4eda899f8b5da9a9543d2be2268`。三项程序同批构建，本地 25 项验收通过。单进程四批暖扫描中位数 53.96 毫秒，223 份日报首次建索引 3.11 秒，索引 41.95 MiB，独立热查询中位数 13.71 毫秒。[本地全量验收](../.artifacts/kernel-phase2-20261121/final-verification.json) · [正式切换回执](../.artifacts/kernel-phase2-deployment-20261121/switch.json)
+
+正式配置 `config-rust` 仅更新了 Office 和 PDF 解析程序的路径。两个合成文件在隔离目录由正式配置选中的两个同版进程成功解析。图片文字识别（OCR）关闭，本次切换和自检新增真实模型调用 0 次。两项任务的时间、运行权限和时限均已回读核对。223 份日报、历史周报和月报、283 个发布文件及 1,668 条模型调用明细均与切换前匹配。[任务回读](../.artifacts/kernel-phase2-deployment-20261121/task-readback.json) · [解析实测](../.artifacts/kernel-phase2-deployment-20261121/runtime/native-after.json) · [业务核对](../.artifacts/kernel-phase2-deployment-20261121/runtime/business-after.json)
+
+切换时的健康检查有 1 项历史错误和 1 项材料范围预警，7 项检查与切换前逐项一致。原包、三份非凭据配置、两项任务定义及权限、两个数据库和现存恢复快照均已备份核验。一期包 `.releases/rust-20261121-kernel-once-01` 可用于回退。[健康回读](../.artifacts/kernel-phase2-deployment-20261121/runtime/health-after.json) · [备份核验](../.artifacts/kernel-phase2-deployment-20261121/backup-verification.json) · [回退说明](../.artifacts/kernel-phase2-deployment-20261121/ROLLBACK.md)
+
+本次交付以本地全量验收和正式切换即时核验收尾。正式日报每天 09:00 汇总前一天的材料，健康巡检每天 11:00 和 23:00 运行，均为上海时间。
+
+## 日报内核优化包已部署（2026-11-21，上海时间）
+
+**13:06:06 完成切换。** 正式版本目录为 `.releases/rust-20261121-kernel-once-01`。安装目录的 525 个文件通过发布清单核验，清单 SHA-256 与已验收的交付包一致。对应源码已提交为 `5e8c8e9`，交付包原样保留了提交前的构建元数据。两项任务都由 Windows 任务计划程序实际启动，均观察到新目录中的 `ai-daily-report.exe`。[正式验收记录](../.artifacts/kernel-once-deployment-20261121/final-verification.json)
+
+| 正式任务 | 切换后实跑 | 下一次执行（上海时间） |
+| --- | --- | --- |
+| `AI Daily Report` | 13:06:49 启动，813 毫秒完成，退出码 0。复用 11 月 20 日已发布日报，新增模型调用 0 次。 | 11 月 22 日 09:00，汇总 11 月 21 日 |
+| `AI Daily Report Health` | 13:08:33 启动，由新包内的健康脚本调用同包主程序。7 项检查与切换前一致，执行成功。原有告警触发健康程序返回 2、任务脚本返回 1，本次通知已去重。 | 11 月 21 日 23:00，此后每天 11:00 和 23:00 |
+
+正式配置仍用 `config-rust`，两项任务的触发器、账号、权限、补跑设置和时限均已回读核对。Office 和 PDF 解析器均指向新包。使用该程序和正式扫描设置，在隔离目录成功解析两个合成文件，扫描库记录 `max_workers=2`，图片文字识别关闭。获授权的正式模型自检使用内置虚构文本，调用 1 次，4.389 秒成功。[双进程回读](../.artifacts/kernel-once-deployment-20261121/dual-worker-runtime.json) · [任务回读](../.artifacts/kernel-once-deployment-20261121/task-readback-final.json)
+
+健康报告仍有 1 项历史错误和 1 项材料范围预警。11 月 17 日、19 日有解析缺口，11 月 20 日已有日报缺少总结。223 份日报、1 份周报、1 份月报的数据库记录逐字段一致，283 个已发布文件哈希均匹配。按既有保留规则压缩了 2 条旧调用明细，并清除了 14 条旧调用中的过期快照引用。永久计数仅因本次自检增加 1 次。原始明细和切换前的 43 个恢复快照已备份。[业务与调用核对](../.artifacts/kernel-once-deployment-20261121/business-final.json) · [备份与回退](../.artifacts/kernel-once-deployment-20261121/ROLLBACK.md)
+
 ## 详版个人日报已部署到本机正式环境（2026-11-21，上海时间）
 
 **10:14:56 完成切换。** 正式包为 `.releases/rust-20261121-detailed-daily-01`，对应提交 `818433f`。468 个包文件、11 个模板和两个解析进程均已核验。日报和健康检查共用 `config-rust`，配置中仅替换 Office、PDF 两个解析程序路径。两项任务的运行账号、权限、触发器、补跑设置和运行时限均与切换前一致。[正式部署核验](../.artifacts/rich-daily-deployment-20261121/final-verification.json)

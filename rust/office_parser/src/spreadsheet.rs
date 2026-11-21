@@ -1,12 +1,59 @@
-use super::*;
-use crate::parts::PartBudget;
+mod render;
+mod summary;
+
+use crate::{escape_markdown_cell, OfficeContent};
+use ai_daily_worker_contract::{ContentUnitKind, SourceRange, SourceRangeUnit};
+use render::render_workbook;
 use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet};
+use std::time::Instant;
 
-const DIRECTORY_LIMIT: usize = 1024;
+pub(super) const DIRECTORY_LIMIT: usize = 1024;
 const PROBE_LIMIT: usize = 32;
-const PART_LIMIT: usize = 8 * 1024 * 1024;
 
-pub(super) fn column_name(mut column: usize) -> String {
+#[derive(Debug, Clone)]
+pub(super) struct XlsxBudget {
+    pub(super) deadline: Instant,
+    pub(super) max_sheets: usize,
+    pub(super) max_rows: usize,
+    pub(super) max_columns: usize,
+    pub(super) max_chars: usize,
+}
+
+#[derive(Debug)]
+pub(super) struct PreviewSheet {
+    name: String,
+    rows: Vec<Vec<String>>,
+    columns: Vec<usize>,
+    row_numbers: Vec<u64>,
+    total_rows: BTreeSet<u64>,
+    formula_rows: BTreeSet<u64>,
+    priority: u8,
+    truncated: bool,
+}
+
+struct XlsxRow {
+    text: String,
+    kind: ContentUnitKind,
+    ranges: Vec<SourceRange>,
+    separator: Option<String>,
+    cells: Vec<String>,
+}
+
+impl XlsxRow {
+    fn chars(&self) -> usize {
+        self.text.chars().count() + 1 + self.separator.as_ref().map_or(0, |s| s.chars().count() + 1)
+    }
+
+    fn useful(&self) -> bool {
+        matches!(
+            self.kind,
+            ContentUnitKind::TableRow | ContentUnitKind::Total
+        )
+    }
+}
+
+fn column_name(mut column: usize) -> String {
     let mut letters = Vec::new();
     while column > 0 {
         column -= 1;
@@ -16,12 +63,7 @@ pub(super) fn column_name(mut column: usize) -> String {
     letters.into_iter().rev().collect()
 }
 
-pub(super) fn cell_ranges(
-    name: &str,
-    row: u64,
-    columns: &[usize],
-    cells: &[String],
-) -> Vec<SourceRange> {
+fn cell_ranges(name: &str, row: u64, columns: &[usize], cells: &[String]) -> Vec<SourceRange> {
     let mut result: Vec<SourceRange> = Vec::new();
     for (&column, cell) in columns.iter().zip(cells) {
         if cell.is_empty() {
@@ -45,7 +87,7 @@ pub(super) fn cell_ranges(
     result
 }
 
-pub(super) fn positioned_values(
+fn positioned_values(
     sheet: &PreviewSheet,
     number: u64,
     cells: &[String],
@@ -115,7 +157,7 @@ pub(super) fn positioned_values(
     rows
 }
 
-pub(super) fn exception(value: &str) -> bool {
+fn exception(value: &str) -> bool {
     if !value
         .bytes()
         .any(|c| c.is_ascii_alphabetic() || !c.is_ascii())
@@ -157,12 +199,12 @@ fn unit_scope(value: &str) -> Option<&str> {
     (!note.trim().is_empty()).then_some(scope.trim())
 }
 
-pub(super) fn unit(value: &str) -> bool {
+fn unit(value: &str) -> bool {
     unit_scope(value).is_some()
 }
 
 // A sheet-wide note can qualify a matching field. A column with its own unit is already explicit.
-pub(super) fn applicable_unit(row: &XlsxRow, index: usize, header: &str) -> Option<usize> {
+fn applicable_unit(row: &XlsxRow, index: usize, header: &str) -> Option<usize> {
     let header = header.trim();
     if header.is_empty() || header.contains(['(', '（', '[', '【', '/', '%', '％']) {
         return None;
@@ -189,7 +231,7 @@ pub(super) fn applicable_unit(row: &XlsxRow, index: usize, header: &str) -> Opti
     notes.next().is_none().then_some(note.0)
 }
 
-pub(super) fn total(value: &str) -> bool {
+fn total(value: &str) -> bool {
     ["合计", "小计", "总计", "总额"]
         .iter()
         .any(|word| value.contains(word))
@@ -398,7 +440,7 @@ pub(super) fn render_selection(
     budget: &XlsxBudget,
     format: &str,
     mut truncated: bool,
-) -> (String, bool, ParsedContentAudit) {
+) -> OfficeContent {
     truncated |= sheets.len() < names.len() || sheets.len() > budget.max_sheets;
     // For equal evidence keep the first sheet, then the last, then workbook order.
     sheets.sort_by_key(|(i, s)| {
@@ -426,107 +468,62 @@ pub(super) fn render_selection(
             directory.push_str(&entry);
         }
     }
-    let (text, limited, audit) = render_workbook(&sheets, budget, format, &directory);
-    (text, limited || truncated, audit)
+    let (text, audit, limited) = render_workbook(&sheets, budget, format, &directory);
+    (text, audit, limited || truncated)
 }
 
-pub(super) fn daily_xlsx(
-    mut parts: PartBudget,
-    zip: &mut ZipArchive<File>,
-    budget: &XlsxBudget,
-) -> Result<(String, bool, ParsedContentAudit), String> {
-    parts.reserve_render_time();
-    let (book, book_partial) = parts.read(zip, "xl/workbook.xml", 2 * 1024 * 1024)?;
-    let (rels, rels_partial) = parts.read(zip, "xl/_rels/workbook.xml.rels", 2 * 1024 * 1024)?;
-    if book_partial || rels_partial {
-        return Ok(render_selection(&[], vec![], budget, "xlsx", true));
-    }
-    let (refs, mut truncated) = parse_workbook_sheets(
-        std::str::from_utf8(&book).map_err(|e| e.to_string())?,
-        DIRECTORY_LIMIT,
-    )?;
-    let relationships =
-        parse_workbook_relationships(std::str::from_utf8(&rels).map_err(|e| e.to_string())?, true)?;
-    let names: Vec<_> = refs.iter().map(|s| s.name.clone()).collect();
-    let (strings, strings_partial) = if zip
-        .file_names()
-        .any(|n| n.eq_ignore_ascii_case("xl/sharedStrings.xml"))
-    {
-        let (xml, partial) = parts.read(zip, "xl/sharedStrings.xml", PART_LIMIT)?;
-        read_string_table(
-            xml.as_slice(),
-            131_072,
-            Some(parts.deadline),
-            partial.then_some(xml.len() as u64),
-        )?
-    } else {
-        (HashMap::new(), false)
-    };
-    truncated |= strings_partial;
-    let mut samples = Vec::new();
-    let order = probe_order(&names, budget.max_sheets);
-    let count = order.len();
-    for (probed, index) in order.into_iter().enumerate() {
-        if Instant::now() >= parts.deadline || parts.remaining == 0 {
-            truncated = true;
-            break;
+pub(super) fn is_header_row(cells: &[String]) -> bool {
+    is_header_row_values(cells.iter().map(String::as_str))
+}
+
+fn is_header_row_values<'a>(cells: impl Iterator<Item = &'a str>) -> bool {
+    const LABELS: &[&str] = &[
+        "姓名",
+        "月份",
+        "部门",
+        "基本工资",
+        "应付工资",
+        "实发工资",
+        "出勤系数",
+        "代扣代缴合计",
+        "序号",
+        "交易日期",
+        "交易币种",
+        "交易金额",
+        "收款方名称",
+        "总计",
+        "所属公司",
+        "送审合同类型",
+        "审批流",
+        "项目",
+        "项目名称",
+        "名称",
+        "数量",
+        "金额",
+        "单位",
+        "余额",
+        "差异",
+        "差异金额",
+        "异常说明",
+        "状态",
+        "结果",
+        "负责人",
+        "预算额",
+        "实付额",
+        "实收额",
+        "实际金额",
+        "Name",
+        "Amount",
+        "Date",
+        "Total",
+    ];
+    let mut labels = 0;
+    for cell in cells {
+        if cell.parse::<f64>().is_ok() {
+            return false;
         }
-        let sheet = &refs[index];
-        let Some(path) = resolve_sheet_path(sheet, &relationships) else {
-            truncated = true;
-            continue;
-        };
-        let allowance = PART_LIMIT.min(parts.remaining / (count - probed));
-        let (xml, partial) = parts.read(zip, &path, allowance)?;
-        let mut sample = SheetSample::new(&sheet.name, budget.max_rows);
-        let mut value_bytes = PART_LIMIT;
-        let limited = visit_sheet_rows(
-            xml.as_slice(),
-            1_048_576,
-            16_384,
-            false,
-            Some(parts.deadline),
-            partial.then_some(xml.len() as u64),
-            |n, row| {
-                let mut values = Vec::new();
-                let mut formula = false;
-                let mut sum = false;
-                for (column, cell) in &row {
-                    let cached = match cell {
-                        PreviewCell::Formula(f, cached) => {
-                            formula = true;
-                            sum |= vertical_sum_formula(f, n);
-                            cached.as_ref()
-                        }
-                        value => value,
-                    };
-                    let value = match cached {
-                        PreviewCell::Text(text) => text,
-                        PreviewCell::SharedString(id) => match strings.get(id) {
-                            Some(text) => text,
-                            None if strings_partial => {
-                                sample.truncated = true;
-                                // A missing label could change the meaning of another value in this row.
-                                return Ok(true);
-                            }
-                            None => return Err("referenced shared string is missing".into()),
-                        },
-                        PreviewCell::Formula(..) => unreachable!(),
-                    };
-                    if !value.is_empty() {
-                        if value.len() > value_bytes {
-                            return Ok(false);
-                        }
-                        value_bytes -= value.len();
-                        values.push((*column, value.clone()));
-                    }
-                }
-                sample.observe(n, values, formula, sum);
-                Ok(true)
-            },
-        )?;
-        sample.truncated |= limited;
-        samples.push((index, sample.finish(budget.max_columns)));
+        let label = cell.split(['(', '（']).next().unwrap_or(cell).trim();
+        labels += usize::from(LABELS.contains(&label));
     }
-    Ok(render_selection(&names, samples, budget, "xlsx", truncated))
+    labels >= 2
 }

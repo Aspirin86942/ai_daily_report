@@ -1,15 +1,16 @@
-//! Replay an immutable saved response through the real validator in a temporary store.
-//! Production databases and snapshots are opened read-only; transport never uses HTTP.
+//! Replay a saved response in isolation, optionally staging it for the publisher.
+//! The source database and snapshots are read-only. Transport uses saved responses only.
 use ai_daily_report::{
     config::AppConfig,
     model::{
         transport::{HttpResponse, ModelTransport, TransportFailure},
         ModelRunner,
     },
+    publish::Publisher,
     reports::personal::{body_chars, StatementKind},
     run::personal::PersonalInput,
-    snapshots::{digest, SnapshotStore},
-    store::Store,
+    snapshots::{digest, fingerprint, SnapshotStore},
+    store::{StagedReport, Store},
 };
 use chrono::Utc;
 use clap::Parser;
@@ -28,6 +29,9 @@ struct Args {
     config_dir: PathBuf,
     #[arg(long)]
     call_id: i64,
+    /// Stage a report in this new directory for the candidate's repair-output command.
+    #[arg(long)]
+    stage_root: Option<PathBuf>,
 }
 
 struct SavedResponse {
@@ -67,12 +71,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let plan = input.plan.as_ref().ok_or("frozen plan missing")?;
     input.selection.validate()?;
     let temporary = tempfile::tempdir()?;
+    let (root, run_kind) = match args.stage_root.as_deref() {
+        Some(root) => {
+            fs::create_dir(root)?;
+            (root, "report")
+        }
+        None => (temporary.path(), "preview"),
+    };
     let now = Utc::now();
-    let store = Store::open(&temporary.path().join("reports.sqlite3"), now)?;
-    let snapshots = SnapshotStore::new(temporary.path().join("snapshots"), 16 * 1024 * 1024)?;
+    let store = Store::open(&root.join("db/reports.sqlite3"), now)?;
+    let snapshots = SnapshotStore::new(root.join("data/daily_cache/snapshots"), 16 * 1024 * 1024)?;
     let id = &input.context.run_id;
-    store.create(&input.context, "preview", id, None, now)?;
-    store.register_personal_run(id)?;
+    store.create_personal(&input.context, run_kind, id, None, now)?;
     let saved = snapshots.put_bytes(id, "personal-input", &input_bytes)?;
     store.prepare(id, &saved, &input.input_fingerprint, &[], now)?;
     let mut responses = BTreeMap::new();
@@ -120,6 +130,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let body = input.render_output(&mut report)?;
     if report.items.is_empty() {
         return Err("saved response has no publishable items".into());
+    }
+    if args.stage_root.is_some() {
+        let publisher = Publisher::new(&root.join("reports"), &store)?;
+        let path = publisher.output_path(&report.date)?;
+        let value = serde_json::to_value(&report)?;
+        store.stage_report(
+            id,
+            &StagedReport {
+                report: &value,
+                markdown: &body,
+                output_path: path.to_str().ok_or("invalid replay output path")?,
+                publication_fingerprint: &fingerprint(&json!({
+                    "input": input.input_fingerprint, "report": value, "template": input.template,
+                }))?,
+            },
+            now,
+        )?;
     }
     println!(
         "{}",

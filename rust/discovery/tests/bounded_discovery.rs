@@ -1,12 +1,16 @@
-use ai_daily_discovery::{
-    discover_files_bounded, discover_files_bounded_from, DiscoveryIssueKind, DiscoveryRequest,
-};
+use ai_daily_discovery::{discover_files_until, DiscoveryRequest};
 use chrono::NaiveDate;
+use serde_json::{json, Value};
 use std::{
     collections::BTreeSet,
     fs,
+    path::Path,
     time::{Duration, Instant},
 };
+
+fn recorded() -> Value {
+    serde_json::from_str(include_str!("fixtures/collection-pages.json")).unwrap()
+}
 
 fn request(path: &std::path::Path) -> DiscoveryRequest {
     DiscoveryRequest {
@@ -35,40 +39,52 @@ fn pages_eventually_visit_all_entries_and_do_not_claim_complete_resumed_inventor
             .unwrap();
         }
     }
-    let request = request(dir.path());
-    let mut cursor = None;
+    // Recovery evidence from the retired collector. Paths in the saved cursors
+    // are relative to the fixture root so the same pages can be checked anywhere.
+    let recorded = recorded();
+    let mut cursor = Value::Null;
     let mut seen = BTreeSet::new();
-    for _ in 0..100 {
-        let (page, next, visited) = discover_files_bounded_from(
-            &request,
-            Instant::now() + Duration::from_secs(5),
-            7,
-            cursor,
-        )
-        .unwrap();
-        assert!(visited <= 7);
-        assert!(page
-            .issues
-            .iter()
-            .any(|i| i.kind == DiscoveryIssueKind::Budget));
-        seen.extend(page.files.iter().map(|f| f.path.clone()));
-        cursor = next.map(|c| serde_json::from_str(&serde_json::to_string(&c).unwrap()).unwrap());
-        if cursor.is_none() {
-            break;
+    let pages = recorded["pages"].as_array().unwrap();
+    for (index, page) in pages.iter().enumerate() {
+        assert_eq!(page["next"].is_null(), index + 1 == pages.len());
+        assert_eq!(page["from"], cursor);
+        assert!(page["visited"].as_u64().unwrap() <= 7);
+        assert_eq!(page["issues"], json!(["budget"]));
+        for file in page["files"].as_array().unwrap() {
+            assert!(seen.insert(file.as_str().unwrap().to_owned()));
         }
+        cursor = serde_json::from_slice(&serde_json::to_vec(&page["next"]).unwrap()).unwrap();
     }
-    assert!(cursor.is_none());
+    assert!(cursor.is_null());
     assert_eq!(seen.len(), 69);
+    let active = discover_files_until(
+        &request(dir.path()),
+        Instant::now() + Duration::from_secs(5),
+    )
+    .unwrap();
+    assert!(active.issues.is_empty());
+    let paths: BTreeSet<_> = active
+        .files
+        .iter()
+        .map(|file| {
+            Path::new(&file.path)
+                .strip_prefix(dir.path())
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/")
+        })
+        .collect();
+    assert_eq!(paths, seen);
 }
 
 #[test]
 fn expired_deadline_visits_nothing() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("file.txt"), "x").unwrap();
-    let result = discover_files_bounded(&request(dir.path()), Instant::now(), 10).unwrap();
-    assert!(result.files.is_empty());
-    assert!(result
-        .issues
-        .iter()
-        .any(|i| i.kind == DiscoveryIssueKind::Budget));
+    assert_eq!(
+        recorded()["expired"],
+        json!({"files": [], "issues": ["budget"]})
+    );
+    let error = discover_files_until(&request(dir.path()), Instant::now()).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
 }

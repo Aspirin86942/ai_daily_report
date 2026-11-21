@@ -1,181 +1,38 @@
-use std::io::{self, BufRead, Write};
-
-use ai_daily_office_parser::{parse_worker_request, worker_hello};
+use ai_daily_office_parser::{parse_archive_request, parse_worker_request, worker_hello};
 use ai_daily_worker_contract::{
-    ParseRequest, WorkerDiagnostic, WorkerOperation, WorkerRequest, WorkerResponse,
-    WorkerResponseStatus, CONTRACT, PROTOCOL_VERSION,
+    archive::{ArchiveRequest, ArchiveTextRequest},
+    stdio::{self, handle_payload, request_error, OperationResult},
+    ParseRequest, WorkerKind, WorkerOperation,
 };
-use serde::Serialize;
+use serde_json::Value;
 
 fn main() {
-    std::process::exit(dispatch());
+    std::process::exit(stdio::run(
+        worker_hello(),
+        env!("AI_DAILY_PARSER_BUILD"),
+        env!("AI_DAILY_ENGINE_BUILD"),
+        include_str!(concat!(env!("OUT_DIR"), "/parser-build.json")),
+        || Some(handle),
+    ));
 }
 
-fn dispatch() -> i32 {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args == ["parser-build"] {
-        return emit(&serde_json::json!({
-            "parser_content_identity": env!("AI_DAILY_PARSER_BUILD"),
-            "engine_build": env!("AI_DAILY_ENGINE_BUILD"),
-            "inputs": serde_json::from_str::<serde_json::Value>(include_str!(concat!(env!("OUT_DIR"), "/parser-build.json"))).expect("compiled parser inputs")
-        })).map_or(1, |()| 0);
-    }
-    if args == ["hello"] {
-        return emit(&worker_hello()).map_or(1, |()| 0);
-    }
-    if args == ["session"] {
-        return worker_session();
-    }
-    eprintln!("usage: ai-daily-office-parser <hello|session>");
-    1
-}
-
-fn worker_session() -> i32 {
-    if emit(&worker_hello()).is_err() {
-        return 1;
-    }
-    let stdin = io::stdin();
-    for line in stdin.lock().lines() {
-        let request = match line
-            .map_err(|error| error.to_string())
-            .and_then(|line| {
-                serde_json::from_str::<WorkerRequest>(&line).map_err(|e| e.to_string())
+fn handle(operation: WorkerOperation, payload: Value) -> Option<OperationResult> {
+    match operation {
+        WorkerOperation::OfficeParse => {
+            handle_payload(payload, ParseRequest::validate, parse_worker_request)
+        }
+        WorkerOperation::ArchiveOfficeParse => {
+            handle_payload(payload, ArchiveRequest::validate, parse_archive_request)
+        }
+        WorkerOperation::ArchiveTextParse => {
+            handle_payload(payload, ArchiveTextRequest::validate, |input| {
+                ai_daily_text_parser::parse_archive_text(input)
+                    .map_err(|code| request_error(WorkerKind::Office, code))
             })
-            .and_then(|request| request.validate().map(|()| request))
-        {
-            Ok(request) => request,
-            Err(_) => return 2,
-        };
-        if request.operation == WorkerOperation::ArchiveTextParse {
-            let result = serde_json::from_value::<
-                ai_daily_worker_contract::archive::ArchiveTextRequest,
-            >(request.payload.clone())
-            .ok()
-            .filter(|r| r.validate().is_ok());
-            let response = match result {
-                Some(value) => match ai_daily_text_parser::parse_archive_text(&value) {
-                    Ok(artifact) => WorkerResponse {
-                        contract: CONTRACT.into(),
-                        protocol_version: PROTOCOL_VERSION,
-                        request_id: request.request_id.clone(),
-                        operation: request.operation,
-                        status: WorkerResponseStatus::Ok,
-                        result: Some(serde_json::to_value(artifact).unwrap()),
-                        error: None,
-                    },
-                    Err(code) => session_error(&request, code, false),
-                },
-                None => session_error(&request, "INVALID_REQUEST", false),
-            };
-            if emit(&response).is_err() {
-                return 1;
-            }
-            continue;
         }
-        if request.operation == WorkerOperation::ArchiveOfficeParse {
-            let result =
-                serde_json::from_value::<ai_daily_worker_contract::archive::ArchiveRequest>(
-                    request.payload.clone(),
-                )
-                .ok()
-                .filter(|value| value.validate().is_ok());
-            let response = match result {
-                Some(value) => match ai_daily_office_parser::parse_archive_request(&value) {
-                    Ok(artifact) => WorkerResponse {
-                        contract: CONTRACT.into(),
-                        protocol_version: PROTOCOL_VERSION,
-                        request_id: request.request_id.clone(),
-                        operation: request.operation,
-                        status: WorkerResponseStatus::Ok,
-                        result: Some(serde_json::to_value(artifact).unwrap()),
-                        error: None,
-                    },
-                    Err(error) => WorkerResponse {
-                        contract: CONTRACT.into(),
-                        protocol_version: PROTOCOL_VERSION,
-                        request_id: request.request_id.clone(),
-                        operation: request.operation,
-                        status: WorkerResponseStatus::Error,
-                        result: None,
-                        error: Some(*error),
-                    },
-                },
-                None => session_error(&request, "INVALID_REQUEST", false),
-            };
-            if emit(&response).is_err() {
-                return 1;
-            }
-            continue;
-        }
-        if request.operation != WorkerOperation::OfficeParse {
-            if emit(&session_error(&request, "UNSUPPORTED_OPERATION", false)).is_err() {
-                return 1;
-            }
-            continue;
-        }
-        let parse_request = match serde_json::from_value::<ParseRequest>(request.payload.clone())
-            .map_err(|error| error.to_string())
-            .and_then(|request| request.validate().map(|()| request))
-        {
-            Ok(parse_request) => parse_request,
-            _ => {
-                if emit(&session_error(&request, "INVALID_REQUEST", false)).is_err() {
-                    return 1;
-                }
-                return 2;
-            }
-        };
-        let response = match parse_worker_request(&parse_request) {
-            Ok(parsed) => WorkerResponse {
-                contract: CONTRACT.to_string(),
-                protocol_version: PROTOCOL_VERSION,
-                request_id: request.request_id,
-                operation: request.operation,
-                status: WorkerResponseStatus::Ok,
-                result: Some(serde_json::to_value(parsed).expect("parse result must serialize")),
-                error: None,
-            },
-            Err(error) => WorkerResponse {
-                contract: CONTRACT.to_string(),
-                protocol_version: PROTOCOL_VERSION,
-                request_id: request.request_id,
-                operation: request.operation,
-                status: WorkerResponseStatus::Error,
-                result: None,
-                error: Some(*error),
-            },
-        };
-        if emit(&response).is_err() {
-            return 1;
-        }
+        _ => Some(Err(request_error(
+            WorkerKind::Office,
+            "UNSUPPORTED_OPERATION",
+        ))),
     }
-    0
-}
-
-fn session_error(request: &WorkerRequest, error_code: &str, retryable: bool) -> WorkerResponse {
-    WorkerResponse {
-        contract: CONTRACT.to_string(),
-        protocol_version: PROTOCOL_VERSION,
-        request_id: request.request_id.clone(),
-        operation: request.operation,
-        status: WorkerResponseStatus::Error,
-        result: None,
-        error: Some(WorkerDiagnostic {
-            error_code: error_code.to_string(),
-            message: "worker request was rejected".to_string(),
-            retryable,
-            stage: "request".to_string(),
-            file_path: None,
-            backend: None,
-        }),
-    }
-}
-
-fn emit<T: Serialize>(payload: &T) -> Result<(), serde_json::Error> {
-    let stdout = io::stdout();
-    let mut locked = stdout.lock();
-    serde_json::to_writer(&mut locked, payload)?;
-    let _ = locked.write_all(b"\n");
-    let _ = locked.flush();
-    Ok(())
 }

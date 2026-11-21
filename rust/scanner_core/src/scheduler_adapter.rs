@@ -3,7 +3,7 @@
 //! parser/classifier executor and `CachePort` are local replaceable adapters).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -14,14 +14,16 @@ use ai_daily_scanner_contract::{
 };
 
 use crate::budget_model::RouteKind;
+use crate::fallback::{FailureClass, ParseFailure};
 use crate::parsers::light_text;
 use crate::scheduler::{
     CachePort, CachePortError, ParseLookupOutcome, ParseRequest, ParseResult, ParserPort,
     RealClock, RunDeadlines,
 };
+use crate::session::{WorkerPool, WorkerTransport};
 use crate::store::{
-    CacheWriteRecord, ClassificationCacheLookup, ClassificationCacheWriteRecord, InventoryRecord,
-    RouteStackFingerprints, ScannerStore, StoreError,
+    sha256_hex, CacheWriteRecord, ClassificationCacheLookup, ClassificationCacheWriteRecord,
+    InventoryRecord, RouteStackFingerprints, ScannerStore, StoreError,
 };
 
 /// Store-backed [`CachePort`]. One lazily validated connection is reused for
@@ -85,6 +87,20 @@ fn map_store_error(error: StoreError) -> CachePortError {
     }
 }
 
+fn cache_guard(file: &DiscoveredFileOut) -> Result<(&str, &str), CachePortError> {
+    let required = |field| CachePortError::InvalidKey {
+        detail: format!("source guard {field} is missing"),
+    };
+    Ok((
+        file.source_guard_kind
+            .as_deref()
+            .ok_or_else(|| required("kind"))?,
+        file.source_guard_sha256
+            .as_deref()
+            .ok_or_else(|| required("sha256"))?,
+    ))
+}
+
 impl CachePort for StoreCachePort {
     fn prepare_inventory(
         &self,
@@ -136,18 +152,7 @@ impl CachePort for StoreCachePort {
             }
             _ => base_hash,
         };
-        let guard_kind =
-            file.source_guard_kind
-                .as_deref()
-                .ok_or_else(|| CachePortError::InvalidKey {
-                    detail: "source guard kind is missing".to_string(),
-                })?;
-        let guard_sha256 =
-            file.source_guard_sha256
-                .as_deref()
-                .ok_or_else(|| CachePortError::InvalidKey {
-                    detail: "source guard sha256 is missing".to_string(),
-                })?;
+        let (guard_kind, guard_sha256) = cache_guard(file)?;
         let lookup = self.with_store(|store| {
             store.lookup_cache(
                 &file.file_identity,
@@ -170,22 +175,12 @@ impl CachePort for StoreCachePort {
         file: &DiscoveredFileOut,
         classifier_profile_hash: &str,
         classifier_build: &str,
+        pdf_open_failure_key: &str,
         inventory_existed_before: bool,
     ) -> Result<ClassificationCacheLookup, CachePortError> {
-        let guard_kind =
-            file.source_guard_kind
-                .as_deref()
-                .ok_or_else(|| CachePortError::InvalidKey {
-                    detail: "source guard kind is missing".to_string(),
-                })?;
-        let guard_sha256 =
-            file.source_guard_sha256
-                .as_deref()
-                .ok_or_else(|| CachePortError::InvalidKey {
-                    detail: "source guard sha256 is missing".to_string(),
-                })?;
+        let (guard_kind, guard_sha256) = cache_guard(file)?;
         let lookup = self.with_store(|store| {
-            store.lookup_classification_cache(
+            let lookup = store.lookup_classification_cache(
                 &file.file_identity,
                 &file.source_version,
                 guard_kind,
@@ -193,7 +188,18 @@ impl CachePort for StoreCachePort {
                 classifier_profile_hash,
                 classifier_build,
                 inventory_existed_before,
-            )
+            )?;
+            if inventory_existed_before && matches!(lookup, ClassificationCacheLookup::Miss(_)) {
+                if let Some(failure) = store.pdf_open_failure(
+                    &file.file_identity,
+                    pdf_open_failure_key,
+                    classifier_profile_hash,
+                    classifier_build,
+                )? {
+                    return Ok(ClassificationCacheLookup::PdfOpenError(failure));
+                }
+            }
+            Ok(lookup)
         })?;
         // Partial runs have no artifact-file rows. Their successful classification
         // cache may retain counts without observations. Re-probe eligible-length
@@ -259,18 +265,18 @@ impl CachePort for StoreCachePort {
 }
 
 /// Production parser adapter. Light text stays in-process; every Office/PDF
-/// route crosses one of the two long-lived worker-v3 pools.
+/// route uses its registered worker-v4 pool.
 pub struct ProductionParser {
     profile: NormalizedScannerSettings,
-    pdf_pool: Arc<crate::session::WorkerPool>,
-    office_pool: Arc<crate::session::WorkerPool>,
+    pdf_pool: Arc<WorkerPool>,
+    office_pool: Arc<WorkerPool>,
 }
 
 impl ProductionParser {
     pub fn new(
         profile: &NormalizedScannerSettings,
-        pdf_pool: Arc<crate::session::WorkerPool>,
-        office_pool: Arc<crate::session::WorkerPool>,
+        pdf_pool: Arc<WorkerPool>,
+        office_pool: Arc<WorkerPool>,
     ) -> Self {
         Self {
             profile: profile.clone(),
@@ -279,11 +285,110 @@ impl ProductionParser {
         }
     }
 
-    fn parse_with_worker_pool(
-        &self,
-        request: &ParseRequest,
-        pool: &crate::session::WorkerPool,
-    ) -> ParseResult {
+    fn parse_light_text(&self, request: &ParseRequest) -> ParseResult {
+        let started = std::time::Instant::now();
+        let file = &request.file;
+        let source_matches = || {
+            crate::parsers::current_source(&file.path)
+                .map(|(version, _)| version == file.source_version)
+        };
+        let transport = ParseTransport::RustInProcess;
+        let fail = |code, message: &str, retryable, elapsed: Option<u64>| {
+            let failure = ParseFailure {
+                class: if retryable {
+                    FailureClass::EnvironmentUnavailable
+                } else {
+                    FailureClass::Deterministic
+                },
+                diagnostic: Diagnostic {
+                    error_code: code,
+                    message: message.into(),
+                    retryable,
+                    stage: DiagnosticStage::Parse,
+                    file_path: Nullable(Some(file.path.clone())),
+                    backend: Nullable(Some(request.route.backend().into())),
+                },
+            };
+            request.failed(
+                failure,
+                transport,
+                u64::from(elapsed.is_some()),
+                elapsed.unwrap_or(0),
+            )
+        };
+        let changed = |elapsed| {
+            fail(
+                ErrorCode::SourceVersionChanged,
+                "file source version changed before or during parsing",
+                false,
+                elapsed,
+            )
+        };
+        let timeout = |message, elapsed| fail(ErrorCode::ParserTimeout, message, false, elapsed);
+        match source_matches() {
+            Ok(true) => {}
+            Ok(false) => return changed(None),
+            Err(()) => {
+                return fail(
+                    ErrorCode::ParserFailed,
+                    "file metadata is unavailable",
+                    true,
+                    None,
+                )
+            }
+        }
+        if elapsed_ms(started) >= request.timeout_ms {
+            return timeout("light text deadline exhausted before reading", None);
+        }
+        let parsed = match light_text::parse_light_text(
+            Path::new(&file.path),
+            &file.extension,
+            &self.profile.parse.text,
+            self.profile.execution.max_file_size_bytes,
+        ) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                use light_text::LightTextError::*;
+                let code = if error == FileTooLarge {
+                    ErrorCode::FileTooLarge
+                } else {
+                    ErrorCode::ParserFailed
+                };
+                let retryable = matches!(error, ReadFailed | MetadataFailed);
+                let duration_ms = elapsed_ms(started);
+                return fail(code, &error.to_string(), retryable, Some(duration_ms));
+            }
+        };
+        if source_matches() != Ok(true) {
+            return changed(Some(elapsed_ms(started)));
+        }
+        let hash = sha256_hex(parsed.content.as_bytes());
+        let duration_ms = elapsed_ms(started);
+        if duration_ms >= request.timeout_ms {
+            return timeout("light text exceeded its deadline", Some(duration_ms));
+        }
+        ParseResult {
+            content: parsed.content,
+            evidence_audit: Some(parsed.evidence_audit),
+            truncated: parsed.truncated,
+            ..request.result(
+                Some(request.route.backend()),
+                hash,
+                transport,
+                1,
+                duration_ms,
+            )
+        }
+    }
+}
+
+impl ParserPort for ProductionParser {
+    fn parse(&self, request: &ParseRequest) -> ParseResult {
+        let pool = match request.route {
+            RouteKind::LightText => return self.parse_light_text(request),
+            RouteKind::Pdf | RouteKind::PdfImageOcr { .. } => &self.pdf_pool,
+            _ => &self.office_pool,
+        };
         let worker_request = crate::parsers::worker_request(
             &request.file,
             request.route,
@@ -293,211 +398,66 @@ impl ProductionParser {
         );
         match pool.parse_worker(&worker_request, Duration::from_millis(request.timeout_ms)) {
             Ok(outcome) => {
-                let duration_ms = outcome.duration_ms;
                 let response = outcome.value;
-                let content_sha256 = crate::store::sha256_hex(response.content.as_bytes());
+                let backend = if matches!(request.route, RouteKind::PdfImageOcr { .. }) {
+                    request.route.backend()
+                } else {
+                    response.parser_backend.as_str()
+                };
+                let result = request.result(
+                    Some(backend),
+                    sha256_hex(response.content.as_bytes()),
+                    outcome.transport.into(),
+                    outcome.attempt_count,
+                    outcome.duration_ms,
+                );
                 ParseResult {
-                    evidence_audit: response.evidence_audit,
-                    file_identity: request.file.file_identity.clone(),
                     content: response.content,
-                    parser_backend: if matches!(request.route, RouteKind::PdfImageOcr { .. }) {
-                        request.route.backend()
-                    } else {
-                        response.parser_backend.as_str()
-                    }
-                    .to_string(),
-                    worker_lane: request.route.worker_lane().to_string(),
+                    evidence_audit: response.evidence_audit,
                     truncated: response.truncated,
-                    content_sha256,
-                    parse_status: ParseStatus::Success,
-                    error: None,
-                    warnings: Vec::new(),
-                    failure_class: String::new(),
-                    fallback_backend: String::new(),
-                    fallback_reason_code: String::new(),
-                    parse_transport: match outcome.transport {
-                        crate::session::WorkerTransport::Session => ParseTransport::Session,
-                        crate::session::WorkerTransport::NotApplicable => {
-                            ParseTransport::NotApplicable
-                        }
-                    },
-                    parse_attempt_count: outcome.attempt_count,
-                    primary_duration_ms: duration_ms,
-                    fallback_duration_ms: 0,
-                    parse_duration_ms: duration_ms,
+                    ..result
                 }
             }
-            Err(failure) => {
-                let parse_status = if failure.failure.is_timeout() {
-                    ParseStatus::Timeout
-                } else {
-                    ParseStatus::Error
-                };
-                let parser_started = failure.attempt_count > 0;
-                ParseResult {
-                    evidence_audit: None,
-                    file_identity: request.file.file_identity.clone(),
-                    content: String::new(),
-                    parser_backend: if parser_started {
-                        request.route.backend().to_string()
-                    } else {
-                        "not_parsed".to_string()
-                    },
-                    worker_lane: if parser_started {
-                        request.route.worker_lane().to_string()
-                    } else {
-                        "not_parsed".to_string()
-                    },
-                    truncated: false,
-                    content_sha256: crate::store::sha256_hex(b""),
-                    parse_status,
-                    error: Some(failure.failure.diagnostic),
-                    warnings: Vec::new(),
-                    failure_class: failure.failure.class.as_str().to_string(),
-                    fallback_backend: String::new(),
-                    fallback_reason_code: String::new(),
-                    parse_transport: if parser_started {
-                        match failure.transport {
-                            crate::session::WorkerTransport::Session => ParseTransport::Session,
-                            crate::session::WorkerTransport::NotApplicable => {
-                                ParseTransport::NotApplicable
-                            }
-                        }
-                    } else {
-                        ParseTransport::NotApplicable
-                    },
-                    parse_attempt_count: failure.attempt_count,
-                    primary_duration_ms: if parser_started {
-                        failure.duration_ms
-                    } else {
-                        0
-                    },
-                    fallback_duration_ms: 0,
-                    parse_duration_ms: if parser_started {
-                        failure.duration_ms
-                    } else {
-                        0
-                    },
-                }
-            }
+            Err(failure) => request.failed(
+                failure.failure,
+                failure.transport.into(),
+                failure.attempt_count,
+                failure.duration_ms,
+            ),
         }
     }
 }
 
-impl ParserPort for ProductionParser {
-    fn parse(&self, request: &ParseRequest) -> ParseResult {
-        match request.route {
-            RouteKind::LightText => self.parse_light_text(request),
-            RouteKind::Pdf | RouteKind::PdfImageOcr { .. } => {
-                self.parse_with_worker_pool(request, &self.pdf_pool)
-            }
-            _ => self.parse_with_worker_pool(request, &self.office_pool),
+impl From<WorkerTransport> for ParseTransport {
+    fn from(transport: WorkerTransport) -> Self {
+        match transport {
+            WorkerTransport::Session => Self::Session,
+            WorkerTransport::NotApplicable => Self::NotApplicable,
         }
     }
 }
 
-impl ProductionParser {
-    fn parse_light_text(&self, request: &ParseRequest) -> ParseResult {
-        let started = std::time::Instant::now();
-        let path = PathBuf::from(&request.file.path);
-        let observed_before = match crate::parsers::current_source(&request.file.path) {
-            Ok((source_version, _)) if source_version == request.file.source_version => {
-                source_version
-            }
-            Ok(_) => {
-                return light_text_error(
-                    request,
-                    ErrorCode::SourceVersionChanged,
-                    "file source version changed before or during parsing",
-                    false,
-                    0,
-                    0,
-                );
-            }
-            Err(()) => {
-                return light_text_error(
-                    request,
-                    ErrorCode::ParserFailed,
-                    "file metadata is unavailable",
-                    true,
-                    0,
-                    0,
-                );
-            }
+impl ParseRequest {
+    fn result(
+        &self,
+        backend: Option<&str>,
+        content_sha256: String,
+        transport: ParseTransport,
+        attempt_count: u64,
+        duration_ms: u64,
+    ) -> ParseResult {
+        // A pre-dispatch error has no executed backend, transport or elapsed parse time.
+        let (backend, lane, parse_transport, duration_ms) = match backend {
+            Some(backend) => (backend, self.route.worker_lane(), transport, duration_ms),
+            None => ("not_parsed", "not_parsed", ParseTransport::NotApplicable, 0),
         };
-        if elapsed_ms(started) >= request.timeout_ms {
-            return light_text_error(
-                request,
-                ErrorCode::ParserTimeout,
-                "light text deadline exhausted before reading",
-                false,
-                0,
-                0,
-            );
-        }
-        let parsed = match light_text::parse_light_text(
-            &path,
-            &request.file.extension,
-            &self.profile.parse.text,
-            self.profile.execution.max_file_size_bytes,
-        ) {
-            Ok(parsed) => parsed,
-            Err(error) => {
-                let retryable = matches!(
-                    error,
-                    light_text::LightTextError::ReadFailed
-                        | light_text::LightTextError::MetadataFailed
-                );
-                let code = if error == light_text::LightTextError::FileTooLarge {
-                    ErrorCode::FileTooLarge
-                } else {
-                    ErrorCode::ParserFailed
-                };
-                let duration_ms = elapsed_ms(started);
-                return light_text_error(
-                    request,
-                    code,
-                    &error.to_string(),
-                    retryable,
-                    1,
-                    duration_ms,
-                );
-            }
-        };
-        if crate::parsers::current_source(&request.file.path)
-            .map(|(source_version, _)| source_version)
-            .as_deref()
-            != Ok(observed_before.as_str())
-        {
-            let duration_ms = elapsed_ms(started);
-            return light_text_error(
-                request,
-                ErrorCode::SourceVersionChanged,
-                "file source version changed before or during parsing",
-                false,
-                1,
-                duration_ms,
-            );
-        }
-        let content_sha256 = crate::store::sha256_hex(parsed.content.as_bytes());
-        let duration_ms = elapsed_ms(started);
-        if duration_ms >= request.timeout_ms {
-            return light_text_error(
-                request,
-                ErrorCode::ParserTimeout,
-                "light text exceeded its deadline",
-                false,
-                1,
-                duration_ms,
-            );
-        }
         ParseResult {
-            evidence_audit: Some(parsed.evidence_audit),
-            file_identity: request.file.file_identity.clone(),
-            content: parsed.content,
-            parser_backend: "light_text_v2".to_string(),
-            worker_lane: "rust_core".to_string(),
-            truncated: parsed.truncated,
+            file_identity: self.file.file_identity.clone(),
+            content: String::new(),
+            evidence_audit: None,
+            parser_backend: backend.into(),
+            worker_lane: lane.into(),
+            truncated: false,
             content_sha256,
             parse_status: ParseStatus::Success,
             error: None,
@@ -505,69 +465,32 @@ impl ProductionParser {
             failure_class: String::new(),
             fallback_backend: String::new(),
             fallback_reason_code: String::new(),
-            parse_transport: ParseTransport::RustInProcess,
-            parse_attempt_count: 1,
+            parse_transport,
+            parse_attempt_count: attempt_count,
             primary_duration_ms: duration_ms,
             fallback_duration_ms: 0,
             parse_duration_ms: duration_ms,
         }
     }
-}
 
-fn light_text_error(
-    request: &ParseRequest,
-    error_code: ErrorCode,
-    message: &str,
-    retryable: bool,
-    attempt_count: u64,
-    duration_ms: u64,
-) -> ParseResult {
-    ParseResult {
-        evidence_audit: None,
-        file_identity: request.file.file_identity.clone(),
-        content: String::new(),
-        parser_backend: if attempt_count == 0 {
-            "not_parsed".to_string()
-        } else {
-            "light_text_v2".to_string()
-        },
-        worker_lane: if attempt_count == 0 {
-            "not_parsed".to_string()
-        } else {
-            "rust_core".to_string()
-        },
-        truncated: false,
-        content_sha256: crate::store::sha256_hex(b""),
-        parse_status: if error_code == ErrorCode::ParserTimeout {
-            ParseStatus::Timeout
-        } else {
-            ParseStatus::Error
-        },
-        error: Some(Diagnostic {
-            error_code,
-            message: message.to_string(),
-            retryable,
-            stage: DiagnosticStage::Parse,
-            file_path: Nullable(Some(request.file.path.clone())),
-            backend: Nullable(Some("light_text_v2".to_string())),
-        }),
-        warnings: Vec::new(),
-        failure_class: if retryable {
-            "environment_unavailable".to_string()
-        } else {
-            "deterministic".to_string()
-        },
-        fallback_backend: String::new(),
-        fallback_reason_code: String::new(),
-        parse_transport: if attempt_count == 0 {
-            ParseTransport::NotApplicable
-        } else {
-            ParseTransport::RustInProcess
-        },
-        parse_attempt_count: attempt_count,
-        primary_duration_ms: duration_ms,
-        fallback_duration_ms: 0,
-        parse_duration_ms: duration_ms,
+    fn failed(
+        &self,
+        failure: ParseFailure,
+        transport: ParseTransport,
+        attempts: u64,
+        duration_ms: u64,
+    ) -> ParseResult {
+        let backend = (attempts > 0).then(|| self.route.backend());
+        ParseResult {
+            parse_status: if failure.is_timeout() {
+                ParseStatus::Timeout
+            } else {
+                ParseStatus::Error
+            },
+            failure_class: failure.class.as_str().into(),
+            error: Some(failure.diagnostic),
+            ..self.result(backend, sha256_hex(b""), transport, attempts, duration_ms)
+        }
     }
 }
 

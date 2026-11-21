@@ -38,30 +38,6 @@ pub fn schema() -> Value {
         "kind":"progress|attention|next_step","statement_kind":"observed|user_statement|uncertain|suggestion","source_ids":["输入来源编号"]}]})
 }
 
-pub fn prepare(
-    llm: &Llm,
-    context: &RunContext,
-    selection: &mut Selection,
-) -> Result<PlannedStep, ReportError> {
-    prepare_version(llm, context, selection, 2)
-}
-
-pub fn prepare_scan(
-    llm: &Llm,
-    context: &RunContext,
-    selection: &mut Selection,
-) -> Result<PlannedStep, ReportError> {
-    prepare_version(llm, context, selection, 6)
-}
-
-fn summary_limit(prompt_version: u32) -> usize {
-    if prompt_version >= 6 {
-        MAX_SUMMARY_CHARS_EXTENDED
-    } else {
-        MAX_SUMMARY_CHARS
-    }
-}
-
 /// Character ceiling enforced by a response version. Versions 4/5 keep the
 /// historical 600-character limits; versions 6/7 allow the 1,500-character body.
 fn summary_cap(prompt_version: Option<u64>) -> Option<usize> {
@@ -72,58 +48,17 @@ fn summary_cap(prompt_version: Option<u64>) -> Option<usize> {
     }
 }
 
-fn prepare_version(
-    llm: &Llm,
-    context: &RunContext,
-    selection: &mut Selection,
-    prompt_version: u32,
-) -> Result<PlannedStep, ReportError> {
-    loop {
-        let step = summary_step(llm, context, selection, prompt_version)?;
-        match step.validate(llm) {
-            Ok(()) => return Ok(step),
-            Err(error) if error.code == "MODEL_REQUEST_TOO_LARGE" => {
-                let remove = selection
-                    .materials
-                    .iter()
-                    .rposition(|m| m.source.source_id != "user_input")
-                    .ok_or(error)?;
-                let material = selection.materials.remove(remove);
-                selection.summary.selected_chars -= material.text.chars().count();
-                selection.summary.omit(
-                    "budget",
-                    material.source.relative_path.as_deref().unwrap_or(""),
-                );
-                selection.summary.selected_files = selection
-                    .materials
-                    .iter()
-                    .filter_map(|m| m.source.relative_path.as_ref())
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len() as u64;
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
 fn summary_step(
     llm: &Llm,
     context: &RunContext,
     selection: &Selection,
     prompt_version: u32,
 ) -> Result<PlannedStep, ReportError> {
-    let mut target = json!({"date":context.target_date,"window_start_utc":context.window_start_utc,
+    let target = json!({"date":context.target_date,"window_start_utc":context.window_start_utc,
         "window_end_utc":context.window_end_utc,"selection":selection,
         "summary_prompt_version":prompt_version});
-    let version = if prompt_version == DETAILED_PROMPT_VERSION {
-        DETAILED_PLAN_VERSION
-    } else {
-        target["summary_limits"] =
-            json!({"max_chars":summary_limit(prompt_version),"max_items":MAX_SUMMARY_ITEMS});
-        6
-    };
     let mut step = PlannedStep {
-        version,
+        version: DETAILED_PLAN_VERSION,
         kind: StepKind::PersonalSummary,
         logical_step: "personal_summary".into(),
         revision: 0,

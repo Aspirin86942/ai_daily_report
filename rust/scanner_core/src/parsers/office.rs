@@ -9,19 +9,16 @@ pub fn worker_command(adapters: &AdapterPaths) -> WorkerCommand {
         base_args: Vec::new(),
         current_dir: None,
         expected_kind: WorkerKind::Office,
-        required_backends: vec![
-            "rust_office_oxide_v2".to_string(),
-            "rust_xlsx_bounded_v2".to_string(),
-            "rust_xls_calamine_v3".to_string(),
-            "rust_legacy_office_v3".to_string(),
-        ],
-        required_extensions: vec![
-            ".docx".to_string(),
-            ".pptx".to_string(),
-            ".xlsx".to_string(),
-            ".xls".to_string(),
-            ".doc".to_string(),
-            ".ppt".to_string(),
-        ],
+        required_backends: [
+            "rust_office_oxide_v2",
+            "rust_xlsx_bounded_v2",
+            "rust_xls_calamine_v3",
+            "rust_legacy_office_v3",
+        ]
+        .map(str::to_owned)
+        .into(),
+        required_extensions: [".docx", ".pptx", ".xlsx", ".xls", ".doc", ".ppt"]
+            .map(str::to_owned)
+            .into(),
     }
 }

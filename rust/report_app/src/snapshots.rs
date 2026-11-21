@@ -14,10 +14,7 @@ pub fn digest(bytes: &[u8]) -> String {
 }
 
 pub fn valid_hash(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    hex(value, 64)
 }
 
 /// Match the existing Python canonical JSON contract. Existing snapshots are
@@ -145,16 +142,10 @@ impl SnapshotStore {
         })
     }
     pub fn new(root: PathBuf, max_bytes: u64) -> Result<Self, ReportError> {
-        let root = std::path::absolute(root)?;
-        reject_redirects(&root, "SNAPSHOT_PATH_REDIRECTED")?;
-        fs::create_dir_all(&root)?;
-        Ok(Self {
-            root: fs::canonicalize(root)?,
-            max_bytes,
-            max_file_bytes: max_bytes.min(512 * 1024 * 1024),
-            write_lock: Mutex::new(()),
-            quota: None,
-        })
+        let mut store = Self::retained(root, max_bytes)?;
+        fs::create_dir_all(&store.root)?;
+        store.root = fs::canonicalize(store.root)?;
+        Ok(store)
     }
     pub fn with_quota(
         root: PathBuf,

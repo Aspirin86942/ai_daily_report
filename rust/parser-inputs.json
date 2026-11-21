@@ -16,11 +16,13 @@
     "scanner_core/src/classifier.rs",
     "scanner_core/src/config.rs",
     "scanner_core/src/source_allocation.rs",
+    "scanner_core/src/source_allocation",
     "scanner_core/src/sources.rs",
     "scanner_core/src/source_guard.rs",
     "scanner_core/src/scheduler_adapter.rs",
     "scanner_core/src/process.rs",
     "scanner_core/src/session.rs",
+    "scanner_core/src/session",
     "scanner_core/src/windows_job.rs"
   ],
   "dependency_roots": [

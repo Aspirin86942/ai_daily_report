@@ -34,20 +34,31 @@ pub(super) fn append_literal(encoded: &mut String, text: &str) {
 }
 
 pub(super) fn expression(query: &str, original: bool, phrase: bool) -> String {
-    if original {
-        // Keep the existing literal trigram index and its original-text snippets.
-        return format!("{{title body}} : \"{}\"", query.replace('"', "\"\""));
-    }
-    let quote = |word: &str| format!("\"{}\"", encode(word).replace('"', "\"\""));
+    let quote = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
     if phrase {
-        return quote(query);
+        quote(&encode(query))
+    } else if original {
+        quote(query)
+    } else {
+        query
+            .split_whitespace()
+            .map(|s| quote(&encode(s)))
+            .collect::<Vec<_>>()
+            .join(" AND ")
     }
-    let words = query
-        .split_whitespace()
-        .map(quote)
-        .collect::<Vec<_>>()
-        .join(" AND ");
-    format!("{{title_terms body_terms}} : ({words})")
+}
+
+pub(super) fn compact_expression(query: &str, original: bool, phrase: bool) -> String {
+    if phrase {
+        format!("literals : {}", expression(query, false, true))
+    } else {
+        let columns = if original {
+            "title body raw_title raw_body"
+        } else {
+            "title body nul_title nul_body"
+        };
+        format!("{{{columns}}} : ({})", expression(query, false, false))
+    }
 }
 
 pub(super) fn decode(snippet: &str) -> String {

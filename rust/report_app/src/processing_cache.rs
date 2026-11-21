@@ -19,7 +19,7 @@ pub const MAX_INPUT_BYTES: u64 = 50 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 pub const RETENTION_DAYS: i64 = 7;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Entry {
     created: DateTime<Utc>,
@@ -283,29 +283,6 @@ impl CacheQuota {
         reservation.commit(&[path.to_owned()])
     }
 
-    pub fn relocate(&self, source: &Path, destination: &Path) -> Result<(), ReportError> {
-        let old = self.relative(source)?;
-        let new = self.relative(destination)?;
-        let mut state = self.state.lock().map_err(|_| full())?;
-        let entry = state
-            .entries
-            .get(&old)
-            .cloned()
-            .ok_or_else(|| ReportError::new("PROCESSING_UNKNOWN_FILE", "恢复来源未登记"))?;
-        if destination.exists() {
-            return Err(ReportError::new(
-                "PROCESSING_WRITE_CONFLICT",
-                "恢复目标已经存在",
-            ));
-        }
-        state.entries.insert(new, entry);
-        self.save(&state)?;
-        fs::create_dir_all(destination.parent().ok_or_else(full)?)?;
-        fs::rename(source, destination)?;
-        state.entries.remove(&old);
-        self.save(&state)
-    }
-
     pub fn expired(&self) -> Result<Vec<PathBuf>, ReportError> {
         let state = self.state.lock().map_err(|_| full())?;
         state
@@ -314,20 +291,6 @@ impl CacheQuota {
             .filter(|(_, e)| {
                 !e.pending && e.created <= self.now - chrono::Duration::days(RETENTION_DAYS)
             })
-            .map(|(path, _)| self.path(path))
-            .collect()
-    }
-
-    pub fn reclaim_candidates(&self) -> Result<Vec<PathBuf>, ReportError> {
-        let state = self.state.lock().map_err(|_| full())?;
-        let mut entries: Vec<_> = state
-            .entries
-            .iter()
-            .filter(|(_, e)| !e.pending && e.created < self.now)
-            .collect();
-        entries.sort_by_key(|(path, e)| (e.created, *path));
-        entries
-            .into_iter()
             .map(|(path, _)| self.path(path))
             .collect()
     }
@@ -394,15 +357,6 @@ pub struct CacheReservation {
 }
 
 impl CacheReservation {
-    pub fn track_empty_directory(&mut self, path: &Path) -> Result<(), ReportError> {
-        if !path.is_dir() || fs::read_dir(path)?.next().is_some() {
-            return Err(ReportError::new(
-                "PROCESSING_WRITE_CONFLICT",
-                "暂存目录必须为空",
-            ));
-        }
-        self.track_inner(path, true)
-    }
     pub fn track_existing_empty(&mut self, path: &Path) -> Result<(), ReportError> {
         if fs::metadata(path)?.len() != 0 {
             return Err(ReportError::new(

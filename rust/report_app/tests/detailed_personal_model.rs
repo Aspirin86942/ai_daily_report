@@ -2,9 +2,7 @@ use ai_daily_report::{
     config::{AppConfig, Llm},
     evidence::EvidenceRef,
     model::{
-        personal::{
-            generate, prepare_detailed_scan, prepare_scan, PersonalOutput, SCAN_PROMPT_DETAILED,
-        },
+        personal::{generate, prepare_detailed_scan, PersonalOutput, SCAN_PROMPT_DETAILED},
         plan::PlannedStep,
         transport::{HttpResponse, ModelTransport, TransportFailure},
         ModelRunner,
@@ -13,7 +11,7 @@ use ai_daily_report::{
         data::ReportSource,
         personal::{body_chars, Material, Selection, SelectionSummary},
     },
-    snapshots::{canonical_json, digest, SnapshotStore},
+    snapshots::{digest, SnapshotStore},
     store::Store,
     types::RunContext,
     ReportError,
@@ -266,12 +264,10 @@ fn narrow_byte_and_context_limits_rotate_whole_blocks_and_charge_header_context(
         assert_eq!(sent.summary.selected_files, 3);
         assert_eq!(sent.summary.selected_chars, expected.summary.selected_chars);
         assert_eq!(sent.summary.omissions["budget"], 3);
+        let source_ids: BTreeSet<_> = plan.source_map.as_object().unwrap().keys().collect();
         assert_eq!(
-            plan.source_ids(),
-            sent.materials
-                .iter()
-                .map(|m| m.source.source_id.clone())
-                .collect()
+            source_ids,
+            sent.materials.iter().map(|m| &m.source.source_id).collect()
         );
         let content = plan.request["messages"][1]["content"].as_str().unwrap();
         assert!(!content.contains("LOCAL_ONLY"));
@@ -282,8 +278,9 @@ fn narrow_byte_and_context_limits_rotate_whole_blocks_and_charge_header_context(
         narrow.max_request_utf8_bytes = exact - 1;
         let smaller = prepare_detailed_scan(&narrow, &context(), &full).unwrap();
         assert!(smaller.bytes().unwrap().len() < exact);
-        assert!(smaller.source_ids().contains("user_input"));
-        assert_ne!(smaller.source_ids(), plan.source_ids());
+        let smaller_map = smaller.source_map.as_object().unwrap();
+        assert!(smaller_map.contains_key("user_input"));
+        assert_ne!(smaller_map.keys().collect::<BTreeSet<_>>(), source_ids);
         assert_eq!(smaller.target["selection"]["summary"]["selected_files"], 3);
     }
     assert_eq!(json!(full), original);
@@ -307,7 +304,7 @@ fn thousands_of_blocks_share_a_single_request_across_files() {
         .unwrap()
         .len();
     let plan = prepare_detailed_scan(&llm, &context(), &full).unwrap();
-    assert_eq!(plan.source_ids().len(), 32);
+    assert_eq!(plan.source_map.as_object().unwrap().len(), 32);
     let sent: Selection = serde_json::from_value(plan.target["selection"].clone()).unwrap();
     assert_eq!(json!(sent.materials), json!(one_per_file.materials));
     assert_eq!(sent.summary.omissions["budget"], 2016);
@@ -392,7 +389,7 @@ fn omitted_real_ids_and_invented_ids_cannot_support_a_detailed_item() {
 #[test]
 fn only_detailed_plans_reject_titles_longer_than_160_unicode_characters() {
     let llm = llm();
-    let mut full = selection(vec![notes("调整金额仍待审批。")]);
+    let full = selection(vec![notes("调整金额仍待审批。")]);
     let plan = prepare_detailed_scan(&llm, &context(), &full).unwrap();
     let short = "🦀".repeat(160);
     let long = format!("{short}元");
@@ -405,7 +402,7 @@ fn only_detailed_plans_reject_titles_longer_than_160_unicode_characters() {
     let (rejected, call) = execute(&llm, &plan, oversized.clone());
     assert_eq!(rejected.unwrap_err().code, "MODEL_RESPONSE_INVALID");
     assert_eq!(call["status"], "failed");
-    let legacy = prepare_scan(&llm, &context(), &mut full).unwrap();
+    let legacy = serde_json::from_str(include_str!("fixtures/retired/plan-v6-title.json")).unwrap();
     assert_eq!(
         execute(&llm, &legacy, oversized).0.unwrap().items[0].title,
         long
@@ -430,7 +427,12 @@ fn lower_output_limit_replays_frozen_v6_and_v7_calls_and_bounds_new_sends() {
             if detailed {
                 prepare_detailed_scan(config, &ctx, &full).unwrap()
             } else {
-                prepare_scan(config, &ctx, &mut full.clone()).unwrap()
+                serde_json::from_str(if config.verified_max_output_tokens == Some(2048) {
+                    include_str!("fixtures/retired/plan-v6-tokens2048.json")
+                } else {
+                    include_str!("fixtures/retired/plan-v6-tokens4096.json")
+                })
+                .unwrap()
             }
         };
         let plan = prepare(&original);
@@ -548,10 +550,9 @@ fn file_turn_prefers_an_affordable_total_and_keeps_original_display_order() {
 #[test]
 fn frozen_v6_request_bytes_and_response_rules_remain_authoritative() {
     let llm = llm();
-    let mut full = selection(vec![notes("Budget 42")]);
-    let old = prepare_scan(&llm, &context(), &mut full).unwrap();
+    let full = selection(vec![notes("Budget 42")]);
     let frozen: PlannedStep =
-        serde_json::from_slice(&canonical_json(&json!(old)).unwrap()).unwrap();
+        serde_json::from_str(include_str!("fixtures/retired/plan-v6-budget.json")).unwrap();
     frozen.validate(&llm).unwrap();
     assert_eq!(frozen.version, 6);
     assert_eq!(frozen.target["summary_prompt_version"], 6);

@@ -1,0 +1,16 @@
+{
+  "expired": {"files":[],"issues":["budget"]},
+  "pages": [
+    {"files":["a/000.txt","a/001.txt","a/002.txt","a/003.txt","a/004.txt","a/005.txt"],"from":null,"issues":["budget"],"next":{"root":".","stack":[{"offset":1,"path":""},{"offset":6,"path":"a"}]},"visited":7},
+    {"files":["a/006.txt","a/007.txt","a/008.txt","a/009.txt","a/010.txt","a/011.txt","a/012.txt"],"from":{"root":".","stack":[{"offset":1,"path":""},{"offset":6,"path":"a"}]},"issues":["budget"],"next":{"root":".","stack":[{"offset":1,"path":""},{"offset":13,"path":"a"}]},"visited":7},
+    {"files":["a/013.txt","a/014.txt","a/015.txt","a/016.txt","a/017.txt","a/018.txt","a/019.txt"],"from":{"root":".","stack":[{"offset":1,"path":""},{"offset":13,"path":"a"}]},"issues":["budget"],"next":{"root":".","stack":[{"offset":1,"path":""},{"offset":20,"path":"a"}]},"visited":7},
+    {"files":["a/020.txt","a/021.txt","a/022.txt","b/000.txt","b/001.txt","b/002.txt"],"from":{"root":".","stack":[{"offset":1,"path":""},{"offset":20,"path":"a"}]},"issues":["budget"],"next":{"root":".","stack":[{"offset":2,"path":""},{"offset":3,"path":"b"}]},"visited":7},
+    {"files":["b/003.txt","b/004.txt","b/005.txt","b/006.txt","b/007.txt","b/008.txt","b/009.txt"],"from":{"root":".","stack":[{"offset":2,"path":""},{"offset":3,"path":"b"}]},"issues":["budget"],"next":{"root":".","stack":[{"offset":2,"path":""},{"offset":10,"path":"b"}]},"visited":7},
+    {"files":["b/010.txt","b/011.txt","b/012.txt","b/013.txt","b/014.txt","b/015.txt","b/016.txt"],"from":{"root":".","stack":[{"offset":2,"path":""},{"offset":10,"path":"b"}]},"issues":["budget"],"next":{"root":".","stack":[{"offset":2,"path":""},{"offset":17,"path":"b"}]},"visited":7},
+    {"files":["b/017.txt","b/018.txt","b/019.txt","b/020.txt","b/021.txt","b/022.txt"],"from":{"root":".","stack":[{"offset":2,"path":""},{"offset":17,"path":"b"}]},"issues":["budget"],"next":{"root":".","stack":[{"offset":3,"path":""},{"offset":0,"path":"c"}]},"visited":7},
+    {"files":["c/000.txt","c/001.txt","c/002.txt","c/003.txt","c/004.txt","c/005.txt","c/006.txt"],"from":{"root":".","stack":[{"offset":3,"path":""},{"offset":0,"path":"c"}]},"issues":["budget"],"next":{"root":".","stack":[{"offset":3,"path":""},{"offset":7,"path":"c"}]},"visited":7},
+    {"files":["c/007.txt","c/008.txt","c/009.txt","c/010.txt","c/011.txt","c/012.txt","c/013.txt"],"from":{"root":".","stack":[{"offset":3,"path":""},{"offset":7,"path":"c"}]},"issues":["budget"],"next":{"root":".","stack":[{"offset":3,"path":""},{"offset":14,"path":"c"}]},"visited":7},
+    {"files":["c/014.txt","c/015.txt","c/016.txt","c/017.txt","c/018.txt","c/019.txt","c/020.txt"],"from":{"root":".","stack":[{"offset":3,"path":""},{"offset":14,"path":"c"}]},"issues":["budget"],"next":{"root":".","stack":[{"offset":3,"path":""},{"offset":21,"path":"c"}]},"visited":7},
+    {"files":["c/021.txt","c/022.txt"],"from":{"root":".","stack":[{"offset":3,"path":""},{"offset":21,"path":"c"}]},"issues":["budget"],"next":null,"visited":2}
+  ]
+}

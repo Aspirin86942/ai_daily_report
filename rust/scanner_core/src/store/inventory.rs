@@ -9,6 +9,8 @@ use rusqlite::{params, Transaction};
 
 use crate::source_guard::{source_guard_kind_from_text, SourceGuardKind};
 
+pub(crate) mod relations;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InventoryRecord {
     pub file_identity: String,
@@ -84,17 +86,7 @@ fn valid_inventory_guard(kind: &Option<String>, hash: &Option<String>) -> bool {
         (Some(kind), None) => {
             source_guard_kind_from_text(kind) == Some(SourceGuardKind::Unavailable)
         }
-        (Some(kind), Some(hash)) => {
-            is_sha256(hash)
-                && matches!(
-                    source_guard_kind_from_text(kind),
-                    Some(
-                        SourceGuardKind::WindowsFileIdChangeTimeV1
-                            | SourceGuardKind::UnixInodeCtimeV1
-                            | SourceGuardKind::ContentSha256V1
-                    )
-                )
-        }
+        (Some(kind), Some(hash)) => super::valid_guard_wire(kind, hash),
         _ => false,
     }
 }
@@ -130,6 +122,29 @@ impl FileResultRecord {
         self.validate_for_persistence(false)
     }
 
+    /// spec Part 5.2 current-run `parse_cache_status`: `fresh` for an exact
+    /// parse-cache hit, `miss` for this round's body parse, `not_applicable` for
+    /// rows where no body parser ran (policy/semantic/runtime NotParsed, classifier
+    /// failure, pre-classification reject, no-text metadata-only).
+    fn parse_cache_status(&self, snapshot: bool) -> ParseCacheStatus {
+        if snapshot {
+            return ParseCacheStatus::Snapshot;
+        }
+        match self.parse_status {
+            ParseStatus::Success if self.cache_status == CacheStatus::Fresh => {
+                ParseCacheStatus::Fresh
+            }
+            ParseStatus::Success if self.parser_backend == "pdf_metadata_v2" => {
+                ParseCacheStatus::NotApplicable
+            }
+            ParseStatus::Error | ParseStatus::Timeout if self.parser_backend == "not_parsed" => {
+                ParseCacheStatus::NotApplicable
+            }
+            ParseStatus::NotParsed => ParseCacheStatus::NotApplicable,
+            _ => ParseCacheStatus::Miss,
+        }
+    }
+
     pub(crate) fn validate_for_persistence(&self, snapshot_rows: bool) -> Result<(), String> {
         let durations_fit = [
             self.primary_duration_ms,
@@ -146,57 +161,29 @@ impl FileResultRecord {
                 | (CacheStatus::Miss, CacheMissReason::ParserIdentityChanged)
                 | (CacheStatus::Miss, CacheMissReason::EntryAbsentOrEvicted)
         );
-        let error_consistent = match self.parse_status {
-            ParseStatus::Success => self.error.is_none(),
-            ParseStatus::Error | ParseStatus::Timeout => self.error.is_some(),
-            ParseStatus::NotParsed => self.error.is_none(),
-        };
-        let execution_consistent = if snapshot_rows {
-            !matches!(self.parse_status, ParseStatus::Error | ParseStatus::Timeout)
-                && self.parse_transport == ParseTransport::Snapshot
-                && self.parse_attempt_count == 0
-                && self.primary_duration_ms == 0
-                && self.fallback_duration_ms == 0
-                && self.parse_duration_ms == 0
-        } else {
-            match parse_cache_status_text(self) {
-                "fresh" => {
-                    self.parse_status == ParseStatus::Success
-                        && self.parse_transport == ParseTransport::NotApplicable
-                        && self.parse_attempt_count == 0
-                        && self.primary_duration_ms == 0
-                        && self.fallback_duration_ms == 0
-                        && self.parse_duration_ms == 0
-                }
-                "miss" => {
-                    matches!(
-                        self.parse_status,
-                        ParseStatus::Success | ParseStatus::Error | ParseStatus::Timeout
-                    ) && matches!(
-                        self.parse_transport,
-                        ParseTransport::Session
-                            | ParseTransport::OneShot
-                            | ParseTransport::RustInProcess
-                    ) && (1..=3).contains(&self.parse_attempt_count)
-                }
-                "not_applicable" => {
-                    self.parse_transport == ParseTransport::NotApplicable
-                        && self.parse_attempt_count == 0
-                        && self.primary_duration_ms == 0
-                        && self.fallback_duration_ms == 0
-                        && self.parse_duration_ms == 0
-                }
-                _ => false,
+        let error_consistent = self.error.is_some()
+            == matches!(self.parse_status, ParseStatus::Error | ParseStatus::Timeout);
+        let parse_cache_status = self.parse_cache_status(snapshot_rows);
+        let zero_execution = self.parse_attempt_count == 0
+            && self.primary_duration_ms == 0
+            && self.fallback_duration_ms == 0
+            && self.parse_duration_ms == 0;
+        let execution_consistent = match parse_cache_status {
+            ParseCacheStatus::Snapshot => {
+                zero_execution
+                    && self.parse_transport == ParseTransport::Snapshot
+                    && !matches!(self.parse_status, ParseStatus::Error | ParseStatus::Timeout)
             }
-        };
-        let parse_cache_status = if snapshot_rows {
-            ParseCacheStatus::Snapshot
-        } else {
-            match parse_cache_status_text(self) {
-                "fresh" => ParseCacheStatus::Fresh,
-                "miss" => ParseCacheStatus::Miss,
-                "not_applicable" => ParseCacheStatus::NotApplicable,
-                _ => return Err("invalid scan file result".to_string()),
+            ParseCacheStatus::Fresh | ParseCacheStatus::NotApplicable => {
+                zero_execution && self.parse_transport == ParseTransport::NotApplicable
+            }
+            ParseCacheStatus::Miss => {
+                matches!(
+                    self.parse_transport,
+                    ParseTransport::Session
+                        | ParseTransport::OneShot
+                        | ParseTransport::RustInProcess
+                ) && (1..=3).contains(&self.parse_attempt_count)
             }
         };
         let provenance_consistent = validate_file_parse_provenance(
@@ -225,23 +212,19 @@ impl FileResultRecord {
             fallback_backend: self.fallback_backend.clone(),
             fallback_reason_code: self.fallback_reason_code.clone(),
         };
-        if self.file_identity.is_empty()
-            || self.relative_path.is_empty()
-            || self.source_version.is_empty()
-            || !is_sha256(&self.parse_profile_hash)
-            || self.parser_backend.is_empty()
-            || !is_sha256(&self.content_sha256)
+        let classifier_error = self
+            .pdf_classification
+            .as_ref()
+            .and_then(|item| item.validate().err());
+        let file_audit = audit.validate().is_ok();
+        if !is_sha256(&self.parse_profile_hash)
             || !durations_fit
             || !cache_consistent
             || !error_consistent
-            || self.parse_attempt_count > 3
             || !execution_consistent
             || !provenance_consistent
-            || self
-                .pdf_classification
-                .as_ref()
-                .is_some_and(|audit| audit.validate().is_err())
-            || audit.validate().is_err()
+            || classifier_error.is_some()
+            || !file_audit
             || self
                 .error
                 .as_ref()
@@ -250,14 +233,8 @@ impl FileResultRecord {
             return Err(format!(
                 "invalid scan file result: cache={cache_consistent}, error={error_consistent}, \
                  execution={execution_consistent}, provenance={provenance_consistent}, \
-                 classifier_audit={}, file_audit={}, classifier_error={:?}",
-                self.pdf_classification
-                    .as_ref()
-                    .is_none_or(|audit| audit.validate().is_ok()),
-                audit.validate().is_ok(),
-                self.pdf_classification
-                    .as_ref()
-                    .and_then(|audit| audit.validate().err()),
+                 classifier_audit={}, file_audit={file_audit}, classifier_error={classifier_error:?}",
+                classifier_error.is_none(),
             ));
         }
         Ok(())
@@ -377,39 +354,10 @@ pub(crate) fn insert_file_results(
          )",
     )?;
     for record in records {
-        let error_code = record
-            .error
-            .as_ref()
-            .map(|value| enum_text(&value.error_code));
-        let error_message = record.error.as_ref().map(|value| value.message.as_str());
-        let error_retryable = record
-            .error
-            .as_ref()
-            .map(|value| i64::from(value.retryable));
-        let error_stage = record.error.as_ref().map(|value| enum_text(&value.stage));
-        let error_file_path = record
-            .error
-            .as_ref()
-            .and_then(|value| value.file_path.0.as_deref());
-        let error_backend = record
-            .error
-            .as_ref()
-            .and_then(|value| value.backend.0.as_deref());
-        // spec Part 5.2: a snapshot-hit current row is `snapshot`; otherwise the
-        // full_v2 `parse_cache_status` is derived from the record's own
-        // execution semantics (never copies a source run's miss/hit).
-        let parse_cache_status = if snapshot_rows {
-            "snapshot"
-        } else {
-            parse_cache_status_text(record)
-        };
-        // spec Part 5.2/5.3: `cache_miss_reason` is only valid when
-        // `parse_cache_status=miss`; fresh / snapshot / not_applicable rows must
-        // carry an empty reason. A not_applicable row (policy/semantic/runtime
-        // NotParsed, classifier failure, no-text metadata) may have performed a
-        // lookup (record.cache_status=miss), but the row's v2 parse provenance
-        // is not_applicable, so the reason must not leak into the audit.
-        let cache_miss_reason = if parse_cache_status == "miss" {
+        let error = record.error.as_ref();
+        let parse_cache_status = record.parse_cache_status(snapshot_rows);
+        // A lookup can miss even when the body parser never runs. Only body misses have a reason.
+        let cache_miss_reason = if parse_cache_status == ParseCacheStatus::Miss {
             cache_miss_reason_text(record.cache_miss_reason)
         } else {
             ""
@@ -433,81 +381,54 @@ pub(crate) fn insert_file_results(
             record.failure_class,
             record.fallback_backend,
             record.fallback_reason_code,
-            error_code,
-            error_message,
-            error_retryable,
-            error_stage,
-            error_file_path,
-            error_backend,
-            parse_cache_status,
+            error.map(|value| enum_text(&value.error_code)),
+            error.map(|value| value.message.as_str()),
+            error.map(|value| i64::from(value.retryable)),
+            error.map(|value| enum_text(&value.stage)),
+            error.and_then(|value| value.file_path.0.as_deref()),
+            error.and_then(|value| value.backend.0.as_deref()),
+            enum_text(&parse_cache_status),
         ])?;
         let parse_transport = if snapshot_rows {
             "snapshot".to_string()
         } else {
             enum_text(&record.parse_transport)
         };
-        let parse_attempt_count = if snapshot_rows {
-            0
-        } else {
-            record.parse_attempt_count as i64
-        };
+        let run_counter = |value: u64| if snapshot_rows { 0 } else { value as i64 };
         let classification = record.pdf_classification.as_ref();
-        let classification_status = classification.map(|value| enum_text(&value.status));
-        let classification_page_count = classification
-            .and_then(|value| value.page_count.0)
-            .map(|value| value as i64);
-        let classification_cache_status =
-            classification.map(|value| persisted_classification_cache_status(value, snapshot_rows));
-        let classification_cache_miss_reason = classification.map(|value| {
+        let (classification_cache, classification_transport) = classification
+            .map(|audit| persisted_classification(audit, snapshot_rows))
+            .unzip();
+        let inspected_pages = classification.and_then(|audit| {
             if snapshot_rows {
-                String::new()
+                Some(0)
             } else {
-                value.classification_cache_miss_reason.clone()
-            }
-        });
-        let classification_result_examined_pages = classification
-            .and_then(|value| value.result_examined_pages.0)
-            .map(|value| value as i64);
-        let classification_run_inspected_pages = classification.and_then(|value| {
-            if snapshot_rows {
-                Some(0_i64)
-            } else {
-                value.run_inspected_pages.0.map(|pages| pages as i64)
-            }
-        });
-        let classification_nominal_charged_pages =
-            classification.map(|value| value.nominal_charged_pages as i64);
-        let classification_duration_ms = classification.map(|value| {
-            if snapshot_rows {
-                0_i64
-            } else {
-                value.duration_ms as i64
-            }
-        });
-        let classification_transport =
-            classification.map(|value| persisted_classification_transport(value, snapshot_rows));
-        let classification_attempt_count = classification.map(|value| {
-            if snapshot_rows {
-                0_i64
-            } else {
-                value.attempt_count as i64
+                audit.run_inspected_pages.0.map(|pages| pages as i64)
             }
         });
         execution_statement.execute(params![
             scan_run_id,
             record.file_identity,
             parse_transport,
-            parse_attempt_count,
-            classification_status,
-            classification_page_count,
-            classification_cache_status,
-            classification_cache_miss_reason,
-            classification_result_examined_pages,
-            classification_run_inspected_pages,
-            classification_nominal_charged_pages,
-            classification_duration_ms,
+            run_counter(record.parse_attempt_count),
+            classification.map(|audit| enum_text(&audit.status)),
+            classification
+                .and_then(|audit| audit.page_count.0)
+                .map(|n| n as i64),
+            classification_cache,
+            classification.map(|audit| if snapshot_rows {
+                ""
+            } else {
+                audit.classification_cache_miss_reason.as_str()
+            }),
+            classification
+                .and_then(|audit| audit.result_examined_pages.0)
+                .map(|n| n as i64),
+            inspected_pages,
+            classification.map(|audit| audit.nominal_charged_pages as i64),
+            classification.map(|audit| run_counter(audit.duration_ms)),
             classification_transport,
-            classification_attempt_count,
+            classification.map(|audit| run_counter(audit.attempt_count)),
             classification.map(|value| value.classifier_build.as_str()),
             classification.map(|value| value.classifier_profile_hash.as_str()),
         ])?;
@@ -515,53 +436,20 @@ pub(crate) fn insert_file_results(
     Ok(())
 }
 
-fn persisted_classification_cache_status(
+fn persisted_classification(
     classification: &PdfClassificationAuditV1,
     snapshot_rows: bool,
-) -> String {
+) -> (String, String) {
     if snapshot_rows
         && classification.status
             != ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget
     {
-        "snapshot".to_string()
+        ("snapshot".into(), "snapshot".into())
     } else {
-        enum_text(&classification.classification_cache_status)
-    }
-}
-
-fn persisted_classification_transport(
-    classification: &PdfClassificationAuditV1,
-    snapshot_rows: bool,
-) -> String {
-    if snapshot_rows
-        && classification.status
-            != ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget
-    {
-        "snapshot".to_string()
-    } else {
-        enum_text(&classification.transport)
-    }
-}
-
-/// spec Part 5.2 current-run `parse_cache_status`: `fresh` for an exact
-/// parse-cache hit, `miss` for this round's body parse, `not_applicable` for
-/// rows where no body parser ran (policy/semantic/runtime NotParsed, classifier
-/// failure, pre-classification reject, no-text metadata-only).
-fn parse_cache_status_text(record: &FileResultRecord) -> &'static str {
-    match (record.parse_status, record.cache_status) {
-        (ParseStatus::Success, CacheStatus::Fresh) => "fresh",
-        // spec Part 5.2: a no-text PDF metadata-only draft never ran a body
-        // parser, so its v2 parse provenance is not_applicable (not a miss,
-        // and the cache_miss_reason stays empty per Part 4).
-        (ParseStatus::Success, CacheStatus::Miss) if record.parser_backend == "pdf_metadata_v2" => {
-            "not_applicable"
-        }
-        (ParseStatus::Success, CacheStatus::Miss) => "miss",
-        (ParseStatus::Error | ParseStatus::Timeout, _) if record.parser_backend == "not_parsed" => {
-            "not_applicable"
-        }
-        (ParseStatus::Error | ParseStatus::Timeout, _) => "miss",
-        (ParseStatus::NotParsed, _) => "not_applicable",
+        (
+            enum_text(&classification.classification_cache_status),
+            enum_text(&classification.transport),
+        )
     }
 }
 
@@ -683,6 +571,7 @@ mod tests {
         omitted.parse_transport = ParseTransport::NotApplicable;
         omitted.parse_attempt_count = 0;
         omitted.pdf_classification = Some(PdfClassificationAuditV1 {
+            pdf_open_failure_key: None,
             page_audit: None,
             status: ai_daily_scanner_contract::PdfClassificationStatus::NoTextInParseWindow,
             page_count: ai_daily_scanner_contract::Nullable(Some(2)),
@@ -706,6 +595,7 @@ mod tests {
     #[test]
     fn snapshot_budget_exclusion_preserves_zero_execution_classification_shape() {
         let classification = PdfClassificationAuditV1 {
+            pdf_open_failure_key: None,
             page_audit: None,
             status: ai_daily_scanner_contract::PdfClassificationStatus::NotClassifiedByBudget,
             page_count: ai_daily_scanner_contract::Nullable(None),
@@ -723,12 +613,8 @@ mod tests {
         };
 
         assert_eq!(
-            persisted_classification_cache_status(&classification, true),
-            "not_eligible"
-        );
-        assert_eq!(
-            persisted_classification_transport(&classification, true),
-            "not_applicable"
+            persisted_classification(&classification, true),
+            ("not_eligible".to_string(), "not_applicable".to_string())
         );
     }
 
