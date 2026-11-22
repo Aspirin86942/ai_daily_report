@@ -451,14 +451,11 @@ fn scan_dry_run_keeps_budgets_and_reports_unread_ranges_without_model_calls() {
     request.dry_run = true;
     run_daily(request, &f.app).unwrap();
     assert_eq!(f.cached_observations(), observations);
-    let execution = f
-        .app
-        .scan(&f.request())
-        .unwrap()
-        .evidence()
-        .execution_metrics;
+    let execution = f.app.scan(&f.request()).unwrap().stats;
     assert_eq!(execution.parse_attempt_count, 0);
     assert!(execution.snapshot_hit);
+    assert!(execution.parse_cache_lookup_count > 0);
+    assert_eq!(execution.parse_cache_all_hit, Some(true));
 }
 
 #[test]

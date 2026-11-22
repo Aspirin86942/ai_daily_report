@@ -1,19 +1,19 @@
 use crate::{
     reports::data::{CoverageGap, ReportSource},
-    scan::sources::{ScannedFile, SourceProfile},
+    scan::{
+        sources::{ScannedFile, SourceProfile},
+        ScanResult,
+    },
     snapshots::reject_redirects,
     types::RunContext,
     ReportError,
 };
-use daily_parsers::settings::{ContextEnvelope, EngineStatus, ErrorCode, ParseStatus};
+use daily_parsers::settings::{EngineStatus, ErrorCode, ParseStatus};
 use serde_json::Value;
 use std::{collections::BTreeSet, fs::File, io::Read};
 
-pub(super) fn scan_gaps(
-    envelope: &ContextEnvelope,
-    gaps: &mut Vec<CoverageGap>,
-) -> Result<(), ReportError> {
-    for warning in envelope
+pub(super) fn scan_gaps(scan: &ScanResult, gaps: &mut Vec<CoverageGap>) -> Result<(), ReportError> {
+    for warning in scan
         .warnings
         .iter()
         .filter(|warning| warning.error_code != ErrorCode::WorkerRssUnavailable)
@@ -26,7 +26,7 @@ pub(super) fn scan_gaps(
             "扫描存在未覆盖的范围，请结合其他材料确认。",
         ));
     }
-    let (code, message) = match envelope.status {
+    let (code, message) = match scan.status {
         EngineStatus::Error => ("SCAN_UNAVAILABLE", "扫描未能完成，文件内容覆盖无法确认。"),
         EngineStatus::Partial if gaps.is_empty() => ("SCAN_PARTIAL", "扫描存在未完成的采集范围。"),
         _ => return Ok(()),
@@ -37,7 +37,7 @@ pub(super) fn scan_gaps(
 
 pub(super) fn file_gap(file: &ScannedFile, code: &str, stage: &str, message: &str) -> CoverageGap {
     let mut gap = CoverageGap::new(code, stage, Some(&file.source_id), message);
-    gap.relative_path = Some(file.audit.relative_path.clone());
+    gap.relative_path = Some(file.relative_path.clone());
     gap
 }
 
@@ -50,7 +50,7 @@ pub(super) fn file_gaps<'a>(
         tags.insert(code);
         gaps.push(file_gap(file, code, stage, message));
     };
-    if file.audit.parse_status != ParseStatus::Success {
+    if file.parse_status != ParseStatus::Success {
         let size_message;
         let (code, message) = match file.reason {
             Some("office_content_missing") => (
@@ -87,7 +87,7 @@ pub(super) fn file_gaps<'a>(
         };
         tag_gap(code, "parse", message);
     }
-    if file.audit.truncated {
+    if file.parse_truncated {
         tag_gap(
             "PARSE_BOUNDED",
             "parse",
@@ -95,7 +95,7 @@ pub(super) fn file_gaps<'a>(
         );
     }
     if file.excerpt.truncated
-        || (file.audit.parse_status == ParseStatus::Success && file.excerpt.text.is_empty())
+        || (file.parse_status == ParseStatus::Success && file.excerpt.text.is_empty())
     {
         tag_gap(
             "EXCERPT_BOUNDED",
@@ -120,8 +120,8 @@ pub(super) fn file_gaps<'a>(
         tags.insert("PDF_OBSERVED_IMAGE");
     }
     if file.extension == ".pdf" {
-        if let Some(diagnostic) = &file.audit.final_diagnostic.0 {
-            tags.insert(match diagnostic.error_code {
+        if let Some(code) = file.pdf_error_code {
+            tags.insert(match code {
                 ErrorCode::PdfProtected => "PDF_PROTECTED",
                 ErrorCode::ParserTimeout => "PDF_PROBE_TIMEOUT",
                 _ => "PDF_PARSE_FAILED",
@@ -151,7 +151,7 @@ pub(super) fn report_source(
     let source = ReportSource {
         source_id: file.source_id.clone(),
         source_kind: "file".into(),
-        relative_path: Some(file.audit.relative_path.clone()),
+        relative_path: Some(file.relative_path.clone()),
         extension: Some(file.extension.clone()),
         size_bytes: file.size_bytes,
         modified_at_utc: Some(file.modified_at_utc.clone()),
@@ -160,10 +160,10 @@ pub(super) fn report_source(
         excerpt_sha256: file.excerpt_sha256.clone(),
         excerpt_chars: file.excerpt.chars,
         model_chars: 0,
-        parser_backend: Some(file.audit.parser_backend.clone()),
-        worker_lane: Some(file.audit.worker_lane.as_str().into()),
-        parse_status: file.audit.parse_status.as_str().into(),
-        parse_truncated: file.audit.truncated,
+        parser_backend: Some(file.parser_backend.to_owned()),
+        worker_lane: Some(file.worker_lane.into()),
+        parse_status: file.parse_status.as_str().into(),
+        parse_truncated: file.parse_truncated,
         excerpt_truncated: file.excerpt.truncated,
         model_truncated: false,
         coverage_limits: Value::Null,

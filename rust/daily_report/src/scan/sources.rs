@@ -1,18 +1,19 @@
 pub(crate) use super::allocation::{range_spans, ranges_for, AllocatedExcerpt, ExcerptBlock};
 use super::{
     allocation::range_gaps,
-    parse::{self, Candidate, Outcome},
+    parse::{self, Candidate, Completed, Outcome},
     sha256_hex,
     source_guard::file_source_id,
-    PARSER_CONTENT_IDENTITY,
+    PdfRuntime, PARSER_CONTENT_IDENTITY,
 };
 use chrono::{DateTime, Utc};
 use daily_parsers::{
-    contract::SourceRangeUnit,
+    contract::{
+        ContentUnit, ParsedContentAudit, SourceGuardKind, SourceRange, SourceRangeUnit, WorkerLane,
+    },
     pdf_wire::PdfNegativeKind,
     settings::{
-        AuditWorkerLane, FileAuditV2, NormalizedScannerSettings, ParseStatus, PdfPageAudit,
-        OCR_BACKEND,
+        Diagnostic, ErrorCode, NormalizedScannerSettings, ParseStatus, PdfPageAudit, OCR_BACKEND,
     },
 };
 use serde::Serialize;
@@ -30,7 +31,7 @@ pub struct ScanSource {
     pub excerpt_sha256: String,
     pub excerpt: String,
     pub parser_backend: String,
-    pub worker_lane: AuditWorkerLane,
+    pub worker_lane: String,
     pub parse_status: ParseStatus,
     pub parse_truncated: bool,
     pub excerpt_truncated: bool,
@@ -39,10 +40,9 @@ pub struct ScanSource {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct SourceProfile {
+pub struct SourceProfile {
     pub observed_at_utc: String,
     limits: Value,
-    algorithms: Value,
 }
 
 impl SourceProfile {
@@ -55,24 +55,34 @@ impl SourceProfile {
             "pdf_inspection_page_limit": profile.max_total_pdf_classification_pages,
             "pdf_extraction_limit": profile.max_pdf_text_extractions,
         });
-        Self {
-            observed_at_utc: observed.to_rfc3339(),
-            limits,
-            algorithms: json!({
+        limits["evidence_audit"] = json!({
+            "version": 1,
+            "algorithm_versions": {
                 "cache_payload": "4",
                 "excerpt": profile.parse.excerpt_policy_version,
                 "admission": profile.admission_policy_version,
                 "pdf_selection": profile.parse.pdf.selection_policy_version,
                 "parser_content_identity": PARSER_CONTENT_IDENTITY,
-            }),
+            },
+        });
+        Self {
+            observed_at_utc: observed.to_rfc3339(),
+            limits,
         }
     }
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ScannedFile {
-    pub audit: FileAuditV2,
-    pub excerpt: AllocatedExcerpt,
+pub struct ScannedFile {
+    pub relative_path: String,
+    pub parse_status: ParseStatus,
+    pub parser_backend: &'static str,
+    pub worker_lane: &'static str,
+    pub parse_truncated: bool,
+    pub pdf_charged_pages: Option<u64>,
+    pdf_page_audit: Option<PdfPageAudit>,
+    pub pdf_error_code: Option<ErrorCode>,
+    pub(crate) excerpt: AllocatedExcerpt,
     pub source_id: String,
     pub extension: String,
     pub size_bytes: u64,
@@ -83,49 +93,61 @@ pub(crate) struct ScannedFile {
     pub max_file_size_bytes: Option<u64>,
     pub ocr_tag: Option<String>,
     pub unverified: bool,
-    priority: u64,
-    pdf_extraction_slot: Option<bool>,
+    pub priority: u64,
+    pub pdf_extraction_slot: Option<bool>,
     pdf_ocr_reserved_pages: Option<u64>,
+}
+
+pub struct ScanExcerpt<'a> {
+    pub text: &'a str,
+    pub chars: usize,
+    pub truncated: bool,
+    pub audit: Option<&'a ParsedContentAudit>,
+    pub units: Option<&'a [ContentUnit]>,
+    pub read_ranges: Option<&'a [SourceRange]>,
+    pub omitted_ranges: &'a [SourceRange],
+    pub ranges: Option<&'a [SourceRange]>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanBenchFile {
+    pub input_chars: u64,
+    pub content_sha256: String,
+    pub parse_duration_ms: u64,
+    pub diagnostic_code: Option<String>,
+    pub final_diagnostic: Option<Diagnostic>,
+    pub source_guard_kind: Option<SourceGuardKind>,
+    pub parse_attempted: bool,
+    pub pdf_runtime: Option<PdfRuntime>,
 }
 
 impl ScannedFile {
     pub(super) fn new(
         file: &Candidate,
+        native: &Completed,
         mut excerpt: AllocatedExcerpt,
-        audit: FileAuditV2,
+        parse_attempted: bool,
+        error_code: Option<ErrorCode>,
         profile: &NormalizedScannerSettings,
     ) -> Self {
         let completed = file.result();
         let parsed = completed.obtained();
-        let unverified = audit.parser_backend == OCR_BACKEND && parsed.is_some();
-        let reason = completed
-            .outcome
-            .reason()
-            .or_else(|| excerpt.truncated.then_some("excerpt_character_budget"))
-            .or_else(|| {
-                (audit.parse_status == ParseStatus::Success && excerpt.text.is_empty()).then_some(
-                    if audit.parser_backend == OCR_BACKEND {
-                        "pdf_image_ocr_empty"
-                    } else {
-                        "empty_document"
-                    },
-                )
-            });
-        if let Some((pdf, page_count)) = audit
-            .pdf_classification
-            .0
-            .as_ref()
-            .and_then(|pdf| Some((pdf, pdf.page_count.0?)))
-        {
+        let parse_status = completed.outcome.status();
+        let failed = matches!(parse_status, ParseStatus::Error | ParseStatus::Timeout);
+        let no_text = matches!(
+            completed.outcome,
+            Outcome::Negative(PdfNegativeKind::NoText)
+        );
+        let pdf = native.pdf.as_ref();
+        let classification = pdf.map(|pdf| &pdf.classification);
+        let pdf_page_audit = classification.and_then(|result| result.page_audit.as_ref());
+        if let Some(page_count) = classification.and_then(|result| result.page_count) {
             let mut read = range_spans(
                 excerpt.read_ranges.as_deref().unwrap_or_default(),
                 SourceRangeUnit::PdfPage,
             );
-            if matches!(
-                completed.outcome,
-                Outcome::Negative(PdfNegativeKind::NoText)
-            ) {
-                read.extend(checked_pages(pdf.page_audit.as_ref()));
+            if let Some(pages) = pdf_page_audit.filter(|_| no_text) {
+                read.extend(pages.checked_pages.iter().map(|&page| (page, page + 1)));
             }
             read.sort_unstable();
             range_gaps(
@@ -137,19 +159,61 @@ impl ScannedFile {
                 &mut excerpt.omitted_ranges,
             );
         }
-        let modified_nanos: u128 = audit
+        let parse_truncated = parsed.is_some_and(|(result, _)| result.truncated)
+            || (no_text
+                && classification
+                    .is_some_and(|result| result.page_count > result.result_examined_pages));
+        let (parser_backend, worker_lane) =
+            if file.ocr.is_some() && (parsed.is_some() || parse_attempted) {
+                (OCR_BACKEND, WorkerLane::RustPdfProcessV3.as_str())
+            } else if no_text {
+                ("pdf_metadata_v2", WorkerLane::RustCore.as_str())
+            } else if parsed.is_some() || (parse_attempted && failed) {
+                let backend = file.backend.expect("parsed file has a backend");
+                (backend.as_str(), backend.lane().as_str())
+            } else {
+                ("not_parsed", "not_parsed")
+            };
+        let reason = completed
+            .outcome
+            .reason()
+            .or_else(|| excerpt.truncated.then_some("excerpt_character_budget"))
+            .or_else(|| {
+                (parse_status == ParseStatus::Success && excerpt.text.is_empty()).then_some(
+                    if parser_backend == OCR_BACKEND {
+                        "pdf_image_ocr_empty"
+                    } else {
+                        "empty_document"
+                    },
+                )
+            });
+        // Discovery's display timestamp has microsecond precision. Its version retains nanoseconds.
+        let mtime_ns: u128 = file
+            .file
             .source_version
             .strip_prefix("mtime_ns=")
             .and_then(|version| version.split_once(':'))
             .and_then(|(ns, _)| ns.parse().ok())
             .expect("discovery produced a valid modification timestamp");
         let modified = DateTime::<Utc>::from_timestamp(
-            (modified_nanos / 1_000_000_000) as i64,
-            (modified_nanos % 1_000_000_000) as u32,
+            (mtime_ns / 1_000_000_000) as i64,
+            (mtime_ns % 1_000_000_000) as u32,
         )
         .expect("filesystem modification timestamp fits chrono");
         Self {
-            source_id: file_source_id(&audit.relative_path),
+            relative_path: file.relative_path.clone(),
+            parse_status,
+            parser_backend,
+            worker_lane,
+            parse_truncated,
+            pdf_charged_pages: pdf.map(|pdf| pdf.charged_pages),
+            pdf_page_audit: pdf_page_audit.cloned(),
+            pdf_error_code: if file.file.extension == ".pdf" {
+                error_code
+            } else {
+                None
+            },
+            source_id: file_source_id(&file.relative_path),
             extension: file.file.extension.clone(),
             size_bytes: file.file.size_bytes,
             modified_at_utc: modified.to_rfc3339(),
@@ -164,57 +228,40 @@ impl ScannedFile {
                 .diagnostic()
                 .filter(|d| d.message.starts_with("PDF_OCR_"))
                 .map(|d| d.message.clone()),
-            unverified,
+            unverified: parser_backend == OCR_BACKEND && parsed.is_some(),
             priority: file.priority,
-            pdf_extraction_slot: file
-                .completed
-                .as_ref()
-                .and_then(|result| result.pdf.as_ref())
-                .map(|pdf| pdf.extraction_slot),
+            pdf_extraction_slot: pdf.map(|pdf| pdf.extraction_slot),
             pdf_ocr_reserved_pages: file
                 .ocr
                 .as_ref()
                 .and_then(|result| result.query.as_ref())
                 .and_then(|query| query.pdf_window.as_ref())
                 .map(|window| window.extract_max_pages),
-            audit,
             excerpt,
         }
     }
 
-    pub(crate) fn pdf_pages(&self) -> Option<&PdfPageAudit> {
-        self.audit
-            .pdf_classification
-            .0
-            .as_ref()?
-            .page_audit
-            .as_ref()
+    pub fn pdf_pages(&self) -> Option<&PdfPageAudit> {
+        self.pdf_page_audit.as_ref()
     }
 
-    fn coverage_limits(&self, profile: &SourceProfile, for_report: bool) -> Value {
+    pub fn coverage_limits(&self, profile: &SourceProfile) -> Value {
         let mut limits = profile.limits.clone();
         let admission = &mut limits["scan_admission"];
         admission["priority"] = self.priority.into();
-        admission["pdf_reserved_pages"] = json!(self
-            .pdf_extraction_slot
-            .and(self.audit.pdf_classification.0.as_ref())
-            .map(|pdf| pdf.nominal_charged_pages));
+        admission["pdf_reserved_pages"] =
+            json!(self.pdf_extraction_slot.and(self.pdf_charged_pages));
         admission["pdf_extraction_slot"] = json!(self.pdf_extraction_slot);
         if let Some(pages) = self.pdf_ocr_reserved_pages {
             admission["pdf_ocr_reserved_pages"] = pages.into();
         }
-        let mut audit = self.excerpt.audit.as_ref().map_or_else(
-            || json!({"version": 1}),
-            |parser| serde_json::to_value(parser).expect("serializable parser audit"),
-        );
-        if for_report {
-            let fields = audit.as_object_mut().unwrap();
-            fields.remove("content_units");
-            fields.remove("read_ranges");
-        } else if let Some(units) = &self.excerpt.units {
-            audit["content_units"] = json!(units);
+        let audit = &mut limits["evidence_audit"];
+        if let Some(parser) = &self.excerpt.audit {
+            audit["usable_chars"] = json!(parser.usable_chars);
+            audit["encoding"] = json!(parser.encoding);
+            audit["detected_format"] = json!(parser.detected_format);
         }
-        audit["primary_status"] = match self.audit.parse_status {
+        audit["primary_status"] = match self.parse_status {
             ParseStatus::NotParsed => "not_parsed",
             ParseStatus::Timeout | ParseStatus::Error => "parse_failed",
             ParseStatus::Success if self.excerpt.text.is_empty() => "empty_excerpt",
@@ -233,54 +280,34 @@ impl ScannedFile {
         if let Some(pages) = self.pdf_pages() {
             audit["pdf_page_audit"] = json!(pages);
         }
-        audit["parser_version"] = self.audit.parser_backend.as_str().into();
-        audit["algorithm_versions"] = profile.algorithms.clone();
-        limits["evidence_audit"] = audit;
+        audit["parser_version"] = self.parser_backend.into();
         limits
     }
 
     pub(crate) fn report_limits(&self, profile: &SourceProfile, tags: impl Serialize) -> Value {
-        let mut limits = self.coverage_limits(profile, true);
+        let mut limits = self.coverage_limits(profile);
         limits["evidence_audit"]["secondary_tags"] = json!(tags);
         limits
     }
 
-    pub(super) fn scan_view(&self, profile: &SourceProfile) -> ScanSource {
-        let mut limits = self.coverage_limits(profile, false);
-        let audit = &mut limits["evidence_audit"];
-        self.excerpt.write_file_ranges(audit);
-        if let Some(tag) = &self.ocr_tag {
-            audit["secondary_tags"] = json!([tag]);
+    pub fn benchmark_excerpt(&self) -> ScanExcerpt<'_> {
+        ScanExcerpt {
+            text: &self.excerpt.text,
+            chars: self.excerpt.chars,
+            truncated: self.excerpt.truncated,
+            audit: self.excerpt.audit.as_ref(),
+            units: self.excerpt.units.as_deref(),
+            read_ranges: self.excerpt.read_ranges.as_deref(),
+            omitted_ranges: &self.excerpt.omitted_ranges,
+            ranges: self.excerpt.ranges.as_deref(),
         }
-        audit["excerpt_ranges"] = json!(self.excerpt.ranges);
-        if !self.excerpt.blocks.is_empty() {
-            let (ends, parents): (Vec<_>, Vec<_>) = self
-                .excerpt
-                .blocks
-                .iter()
-                .map(|block| (block.end, &block.inherited))
-                .unzip();
-            audit["excerpt_block_ends"] = json!(ends);
-            audit["excerpt_block_context"] = json!(parents);
-        }
-        ScanSource {
-            source_id: self.source_id.clone(),
-            relative_path: self.audit.relative_path.clone(),
-            extension: self.extension.clone(),
-            size_bytes: self.size_bytes,
-            modified_at_utc: self.modified_at_utc.clone(),
-            observed_at_utc: profile.observed_at_utc.clone(),
-            content_sha256: self.raw_sha256.clone(),
-            excerpt_sha256: self.excerpt_sha256.clone(),
-            excerpt: self.excerpt.text.clone(),
-            parser_backend: self.audit.parser_backend.clone(),
-            worker_lane: self.audit.worker_lane,
-            parse_status: self.audit.parse_status,
-            parse_truncated: self.audit.truncated,
-            excerpt_truncated: self.excerpt.truncated,
-            coverage_limits: limits,
-            reason: self.reason.map(str::to_owned),
-        }
+    }
+
+    pub fn benchmark_blocks(&self) -> impl Iterator<Item = (usize, &[usize])> {
+        self.excerpt
+            .blocks
+            .iter()
+            .map(|block| (block.end, block.inherited.as_slice()))
     }
 }
 
@@ -293,11 +320,4 @@ impl AllocatedExcerpt {
             audit["omitted_ranges"] = json!(self.omitted_ranges);
         }
     }
-}
-
-fn checked_pages(pages: Option<&PdfPageAudit>) -> impl Iterator<Item = (u64, u64)> + '_ {
-    pages
-        .into_iter()
-        .flat_map(|pages| &pages.checked_pages)
-        .map(|page| (*page, page + 1))
 }

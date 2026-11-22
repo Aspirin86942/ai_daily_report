@@ -216,15 +216,15 @@ fn select_files(
     config: &crate::config::AppConfig,
     run_id: &str,
     mut selection: Selection,
-    mut scan: crate::scan::ContextResult,
+    mut scan: crate::scan::ScanResult,
 ) -> Result<Selection, ReportError> {
-    selection.summary.incomplete_inventory = scan.envelope.status != EngineStatus::Ok;
+    selection.summary.incomplete_inventory = scan.status != EngineStatus::Ok;
     selection.summary.observed_files = scan.files.len() as u64;
-    input::scan_gaps(&scan.envelope, &mut selection.gaps)?;
+    input::scan_gaps(&scan, &mut selection.gaps)?;
     scan.files.sort_by(|a, b| {
         a.source_id
             .cmp(&b.source_id)
-            .then_with(|| a.audit.relative_path.cmp(&b.audit.relative_path))
+            .then_with(|| a.relative_path.cmp(&b.relative_path))
     });
     let permissions = EvidencePermissions::new(config);
     let mut selection_gaps = Vec::new();
@@ -233,7 +233,7 @@ fn select_files(
         let mut source = input::report_source(&file, &scan.source_profile)?;
         let tags = input::file_gaps(&file, &mut selection.gaps);
         selection.summary.inspected_files += 1;
-        let path = &file.audit.relative_path;
+        let path = &file.relative_path;
         let absolute = config.paths.work_dir.join(path);
         let mut omit = |reason, message| {
             selection.summary.omit(reason, path);
@@ -300,9 +300,8 @@ mod tests {
             model::personal::PersonalOutput,
             run::personal::new_input,
             scan::{cache::CACHE_FILENAME, ScanRequest, Scanner, ScannerConfig},
-            types::{ReportMode, RunContext},
+            types::RunContext,
         };
-        use daily_parsers::settings::AdapterPaths;
         use std::{collections::BTreeMap, fs};
 
         let root = tempfile::tempdir().unwrap();
@@ -330,41 +329,26 @@ mod tests {
         let mut expected = None;
         for workers in [1, 2, 4, 8] {
             let scanner = Scanner::open(ScannerConfig {
-                work_dir: work.to_str().unwrap().into(),
+                work_dir: work.clone(),
                 scan_db_path: root
                     .path()
                     .join(format!("cache-{workers}"))
-                    .join(CACHE_FILENAME)
-                    .to_str()
-                    .unwrap()
-                    .into(),
+                    .join(CACHE_FILENAME),
                 scanner_settings: serde_json::from_value(json!({"max_workers":workers})).unwrap(),
-                adapters: AdapterPaths {
-                    office_worker_path: root
-                        .path()
-                        .join("ai-daily-report.exe")
-                        .to_string_lossy()
-                        .into_owned(),
-                    pdf_worker_path: app.config.pdf_worker_path.to_string_lossy().into_owned(),
-                },
+                pdf_worker_path: app.config.pdf_worker_path.clone(),
             })
             .unwrap();
             for _ in 0..2 {
                 let scan = scanner
-                    .build_context_with_request_id_at(
+                    .build_context_at(
                         &ScanRequest {
-                            report_mode: ReportMode::Daily,
-                            start_date: "1970-01-01".into(),
-                            end_date: "2099-12-31".into(),
-                            window_start_utc: None,
-                            window_end_utc: None,
-                            compression_profile: None,
+                            start_date: "1970-01-01".parse().unwrap(),
+                            end_date: "2099-12-31".parse().unwrap(),
+                            utc_window: None,
                         },
-                        "e6ecffdc-4aec-4872-a8bc-f376da969901".into(),
                         clock,
                     )
-                    .unwrap()
-                    .value;
+                    .unwrap();
                 let selection =
                     select_files(&app.config, &context.run_id, Selection::default(), scan).unwrap();
                 assert_eq!(selection.materials.len(), 8);

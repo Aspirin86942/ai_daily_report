@@ -56,6 +56,26 @@ pub enum WorkerLane {
     RustPdfProcessV3,
 }
 
+impl WorkerLane {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RustCore => "rust_core",
+            Self::RustOfficeProcessV3 => "rust_office_process_v3",
+            Self::RustOfficeInProcess => "rust_office_in_process",
+            Self::RustPdfProcessV3 => "rust_pdf_process_v3",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceGuardKind {
+    WindowsFileIdChangeTimeV1,
+    UnixInodeCtimeV1,
+    ContentSha256V1,
+    Unavailable,
+}
+
 impl ParserBackend {
     pub const fn as_str(self) -> &'static str {
         match self {

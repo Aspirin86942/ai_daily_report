@@ -178,6 +178,29 @@ fn strict_doctor_uses_real_same_build_workers_and_checks_packaged_templates() {
     let value = operations::doctor(&app, false, now()).unwrap();
     assert_eq!(value["status"], "ok");
     assert_eq!(value["templates"], names.len());
+    assert_eq!(value["build"], env!("AI_DAILY_REPORT_BUILD"));
+    assert_eq!(
+        value["parser_content_identity"],
+        daily_parsers::PARSER_CONTENT_IDENTITY
+    );
+    assert_eq!(value["model"]["calls"], 0);
+    let scanner = value["scanner"].as_object().unwrap();
+    assert_eq!(
+        scanner.keys().map(String::as_str).collect::<BTreeSet<_>>(),
+        BTreeSet::from(["checks", "status"])
+    );
+    assert_eq!(scanner["status"], "ok");
+    let checks = scanner["checks"].as_array().unwrap();
+    assert_eq!(
+        checks
+            .iter()
+            .map(|check| check["name"].as_str().unwrap())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["scan_cache_v4", "office_parser", "pdf_worker"])
+    );
+    assert!(checks
+        .iter()
+        .all(|check| check["status"] == "ok" && !check["message"].as_str().unwrap().is_empty()));
     assert_eq!(app.store.list_runs(None, 100).unwrap().len(), 0);
     for name in [
         "daily_prompt.md",

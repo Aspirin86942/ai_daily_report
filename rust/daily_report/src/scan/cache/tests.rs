@@ -311,7 +311,7 @@ fn actual_wal_commits_cold_same_day_and_cross_day() {
 #[test]
 fn scanner_build_context_uses_real_cache_and_rechecks_replaced_source() {
     use crate::scan::{ScanRequest, Scanner, ScannerConfig};
-    use daily_parsers::settings::{AdapterPaths, ReportMode};
+    use daily_parsers::settings::EngineStatus;
     use std::{fs::FileTimes, time::UNIX_EPOCH};
 
     let temp = tempfile::tempdir().unwrap();
@@ -323,7 +323,7 @@ fn scanner_build_context_uses_real_cache_and_rechecks_replaced_source() {
     fs::write(&report, b"separate synthetic report store").unwrap();
     let file = work.join("review.md");
     let json = work.join("status.json");
-    let stamp = UNIX_EPOCH + Duration::from_secs(1_795_113_000);
+    let stamp = UNIX_EPOCH + Duration::new(1_795_113_000, 123_456_700);
     let write = |path: &Path, text: &str| {
         fs::write(path, text).unwrap();
         fs::File::options()
@@ -335,33 +335,24 @@ fn scanner_build_context_uses_real_cache_and_rechecks_replaced_source() {
     };
     write(&file, "# Review\nApprove amount 125 first.\n");
     write(&json, r#"{"state":"pending"}"#);
-    let path = |path: &Path| path.to_string_lossy().into_owned();
-    let unused_worker = path(&temp.path().join("unused.exe"));
     let scanner = Scanner::open(ScannerConfig {
-        work_dir: path(&work),
-        scan_db_path: path(&cache.join(CACHE_FILENAME)),
+        work_dir: work.clone(),
+        scan_db_path: cache.join(CACHE_FILENAME),
         scanner_settings: serde_json::from_value(serde_json::json!({"max_workers": 1})).unwrap(),
-        adapters: AdapterPaths {
-            office_worker_path: unused_worker.clone(),
-            pdf_worker_path: unused_worker,
-        },
+        pdf_worker_path: temp.path().join("unused.exe"),
     })
     .unwrap();
     let utc = chrono::DateTime::<chrono::Utc>::from(stamp);
     let target = utc.with_timezone(&crate::types::shanghai()).date_naive();
     let request = ScanRequest {
-        report_mode: ReportMode::Daily,
-        start_date: target.to_string(),
-        end_date: target.to_string(),
-        window_start_utc: None,
-        window_end_utc: None,
-        compression_profile: None,
+        start_date: target,
+        end_date: target,
+        utc_window: None,
     };
 
     let cold = scanner.build_context(&request).unwrap();
-    assert_eq!(cold.exit_code, 0, "{:?}", cold.value.envelope);
-    let cold = cold.value;
-    assert_eq!(cold.evidence().execution_metrics.parse_attempt_count, 2);
+    assert_eq!(cold.status, EngineStatus::Ok, "{:?}", cold.warnings);
+    assert_eq!(cold.stats.parse_attempt_count, 2);
     let sql = direct(&cache);
     assert_eq!(
         sql.query_row(
@@ -373,25 +364,28 @@ fn scanner_build_context_uses_real_cache_and_rechecks_replaced_source() {
         2
     );
     assert_eq!(wal_commits(&cache), 1);
-    let report_source = |run: &crate::scan::ContextResult| {
-        let text = run
-            .sources()
-            .into_iter()
+    let expected_modified =
+        chrono::DateTime::<chrono::Utc>::from(fs::metadata(&file).unwrap().modified().unwrap());
+    let report_source = |run: &crate::scan::ScanResult| {
+        let source = run
+            .files
+            .iter()
             .find(|source| source.relative_path == "review.md")
             .unwrap();
-        (text.excerpt, text.content_sha256)
+        assert_eq!(source.modified_at_utc, expected_modified.to_rfc3339());
+        (source.excerpt.text.clone(), source.raw_sha256.clone())
     };
 
-    let warm = scanner.build_context(&request).unwrap().value;
-    let metrics = &warm.evidence().execution_metrics;
+    let warm = scanner.build_context(&request).unwrap();
+    let metrics = &warm.stats;
     assert!(metrics.snapshot_hit);
     assert_eq!(metrics.parse_attempt_count, 0);
     assert_eq!(report_source(&warm), report_source(&cold));
     assert_eq!(wal_commits(&cache), 1);
 
     write(&file, "# Review\nApprove amount 225 first.\n");
-    let updated = scanner.build_context(&request).unwrap().value;
-    assert_eq!(updated.evidence().execution_metrics.parse_attempt_count, 1);
+    let updated = scanner.build_context(&request).unwrap();
+    assert_eq!(updated.stats.parse_attempt_count, 1);
     let (text, source_sha256) = report_source(&updated);
     assert!(text.contains("225"));
     assert_ne!(source_sha256, report_source(&warm).1);

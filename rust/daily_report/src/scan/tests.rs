@@ -1,57 +1,176 @@
 use super::*;
-use daily_parsers::settings::{ContextAction, ParseStatus, PdfClassificationStatus};
+use crate::scan::sources::ScannedFile;
+use daily_parsers::{
+    contract::{ClassifyStatus, WorkerLane},
+    settings::ParseStatus,
+};
 use serde_json::json;
 use std::{
     fs::{self, FileTimes},
     io::Write,
 };
 
-fn fixture(tmp: &Path, settings: serde_json::Value, pdf: Option<&Path>) -> Scanner {
+fn fixture_config(tmp: &Path, settings: serde_json::Value, pdf: Option<&Path>) -> ScannerConfig {
     let input = tmp.join("input");
     fs::create_dir_all(&input).unwrap();
-    let worker_path = pdf.map_or_else(|| tmp.join("ai-daily-pdf-worker.exe"), Path::to_owned);
-    Scanner::open(ScannerConfig {
-        work_dir: input.to_string_lossy().into(),
-        scan_db_path: tmp
-            .join("cache")
-            .join(cache::CACHE_FILENAME)
-            .to_string_lossy()
-            .into(),
+    ScannerConfig {
+        work_dir: input,
+        scan_db_path: tmp.join("cache").join(cache::CACHE_FILENAME),
         scanner_settings: serde_json::from_value(settings).unwrap(),
-        adapters: AdapterPaths {
-            office_worker_path: tmp.join("ai-daily-report.exe").to_string_lossy().into(),
-            pdf_worker_path: worker_path.to_string_lossy().into(),
-        },
-    })
-    .unwrap()
+        pdf_worker_path: pdf.map_or_else(|| tmp.join("ai-daily-pdf-worker.exe"), Path::to_owned),
+    }
 }
 
-fn run(scanner: &Scanner) -> ContextResult {
-    let ret = scanner
-        .build_context_with_request_id_at(
-            &ScanRequest {
-                report_mode: ReportMode::Daily,
-                start_date: "1970-01-01".into(),
-                end_date: "2099-12-31".into(),
-                window_start_utc: None,
-                window_end_utc: None,
-                compression_profile: None,
-            },
-            "e6ecffdc-4aec-4872-a8bc-f376da969901".into(),
-            DateTime::from_timestamp(1_800_000_000, 0).unwrap(),
-        )
+fn fixture(tmp: &Path, settings: serde_json::Value, pdf: Option<&Path>) -> Scanner {
+    Scanner::open(fixture_config(tmp, settings, pdf)).unwrap()
+}
+
+fn request() -> ScanRequest {
+    ScanRequest {
+        start_date: NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+        end_date: NaiveDate::from_ymd_opt(2099, 12, 31).unwrap(),
+        utc_window: None,
+    }
+}
+
+const OBSERVED_AT: DateTime<Utc> = DateTime::from_timestamp(1_800_000_000, 0).unwrap();
+
+fn run(scanner: &Scanner) -> ScanResult {
+    let scan = scanner.build_context_at(&request(), OBSERVED_AT).unwrap();
+    assert_scan_result(&scan);
+    scan
+}
+
+fn run_benchmark(scanner: &Scanner) -> (ScanResult, Vec<ScanBenchFile>) {
+    let (scan, observed) = scanner
+        .build_context_for_benchmark(&request(), OBSERVED_AT)
         .unwrap();
-    assert_eq!(ret.exit_code, 0, "{:?}", ret.value.envelope.warnings);
-    ret.value.envelope.validate().unwrap();
-    ret.value.evidence().validate().unwrap();
-    ret.value
+    assert_scan_result(&scan);
+    assert_eq!(scan.files.len(), observed.len());
+    (scan, observed)
 }
 
-fn materials(scan: &ContextResult) -> Vec<serde_json::Value> {
-    scan.sources()
-        .iter()
-        .map(|source| serde_json::to_value(source).unwrap())
-        .collect()
+fn assert_scan_result(scan: &ScanResult) {
+    assert_ne!(scan.status, EngineStatus::Error, "{:?}", scan.warnings);
+    assert_eq!(
+        scan.stats.rendered_chars,
+        scan.files
+            .iter()
+            .map(|file| file.excerpt.chars as u64)
+            .sum::<u64>()
+    );
+}
+
+fn pdf_runtime(observed: &[ScanBenchFile]) -> impl Iterator<Item = &PdfRuntime> {
+    observed.iter().filter_map(|file| file.pdf_runtime.as_ref())
+}
+
+fn by_path(scan: &ScanResult) -> Vec<&ScannedFile> {
+    let mut files: Vec<_> = scan.files.iter().collect();
+    files.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    files
+}
+
+fn assert_same_admission(left: &ScanResult, right: &ScanResult) {
+    assert_eq!(left.files.len(), right.files.len());
+    assert_eq!(
+        left.source_profile.observed_at_utc,
+        right.source_profile.observed_at_utc
+    );
+    for (a, b) in left.files.iter().zip(&right.files) {
+        assert_eq!(a.source_id, b.source_id);
+        assert_eq!(a.relative_path, b.relative_path);
+        assert_eq!(a.extension, b.extension);
+        assert_eq!(a.size_bytes, b.size_bytes);
+        assert_eq!(a.modified_at_utc, b.modified_at_utc);
+        assert_eq!(a.raw_sha256, b.raw_sha256);
+        assert_eq!(a.excerpt_sha256, b.excerpt_sha256);
+        assert_eq!(a.excerpt.text, b.excerpt.text);
+        assert_eq!(a.excerpt.chars, b.excerpt.chars);
+        assert_eq!(a.excerpt.truncated, b.excerpt.truncated);
+        assert_eq!(a.parser_backend, b.parser_backend);
+        assert_eq!(a.worker_lane, b.worker_lane);
+        assert_eq!(a.parse_status, b.parse_status);
+        assert_eq!(a.parse_truncated, b.parse_truncated);
+        assert_eq!(a.reason, b.reason);
+        assert_eq!(a.priority, b.priority);
+        assert_eq!(a.ocr_tag, b.ocr_tag);
+        assert_eq!(a.excerpt.audit, b.excerpt.audit);
+        assert_eq!(a.excerpt.units, b.excerpt.units);
+        assert_eq!(a.excerpt.read_ranges, b.excerpt.read_ranges);
+        assert_eq!(a.excerpt.ranges, b.excerpt.ranges);
+        assert_eq!(a.excerpt.omitted_ranges, b.excerpt.omitted_ranges);
+        assert!(a.benchmark_blocks().eq(b.benchmark_blocks()));
+        assert_eq!(
+            a.coverage_limits(&left.source_profile),
+            b.coverage_limits(&right.source_profile),
+            "{}",
+            a.relative_path
+        );
+    }
+}
+
+#[test]
+fn scanner_validates_configuration_and_request_before_scanning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = fixture_config(tmp.path(), json!({}), None);
+    let mut invalid_settings = config.clone();
+    invalid_settings.scanner_settings.max_workers = Some(0);
+    let mut relative_worker = config.clone();
+    relative_worker.pdf_worker_path = PathBuf::from("relative-worker.exe");
+    let mut wrong_database = config.clone();
+    wrong_database.scan_db_path = tmp.path().join("cache/old.sqlite3");
+    for invalid in [invalid_settings, relative_worker, wrong_database] {
+        assert_eq!(
+            Scanner::open(invalid).err().unwrap().code,
+            "SCANNER_INVALID_CONFIGURATION"
+        );
+    }
+
+    let scanner = Scanner::open(config).unwrap();
+    let start_date = NaiveDate::from_ymd_opt(2026, 1, 2).unwrap();
+    let end_date = start_date.succ_opt().unwrap();
+    let start = start_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let end = end_date.and_hms_opt(0, 0, 0).unwrap().and_utc();
+    let valid = ScanRequest {
+        start_date,
+        end_date,
+        utc_window: Some((start, end)),
+    };
+    for request in [
+        ScanRequest {
+            start_date: end_date,
+            end_date: start_date,
+            utc_window: None,
+        },
+        ScanRequest {
+            utc_window: Some((end, start)),
+            ..valid
+        },
+        ScanRequest {
+            utc_window: Some((start, start)),
+            ..valid
+        },
+    ] {
+        assert_eq!(
+            scanner.build_context(&request).err().unwrap().code,
+            "SCANNER_INVALID_CONFIGURATION",
+            "{request:?}"
+        );
+    }
+    assert!(!scanner.cache_dir.join(cache::CACHE_FILENAME).exists());
+
+    for (name, modified) in [("first.md", start), ("outside.md", end)] {
+        let mut file = File::create_new(tmp.path().join("input").join(name)).unwrap();
+        file.write_all(b"# Amount\n42 CNY\n").unwrap();
+        file.set_times(FileTimes::new().set_modified(modified.into()))
+            .unwrap();
+    }
+    let scan = scanner.build_context(&valid).unwrap();
+    assert_eq!(scan.status, EngineStatus::Ok);
+    assert_eq!(scan.files.len(), 1);
+    assert_eq!(scan.files[0].relative_path, "first.md");
+    assert!(scan.files[0].excerpt.text.contains("42 CNY"));
 }
 
 #[test]
@@ -70,7 +189,7 @@ fn worker_count_changes_throughput_without_changing_admission_or_ranges() {
             (format!("file-{index:02}.md"), text)
         })
         .collect();
-    let mut first: Option<ContextResult> = None;
+    let mut first: Option<ScanResult> = None;
     for workers in [1, 2, 4, 8] {
         let root = tmp.path().join(format!("workers-{workers}"));
         let scanner = fixture(
@@ -91,25 +210,21 @@ fn worker_count_changes_throughput_without_changing_admission_or_ranges() {
             .unwrap();
         }
         let cold = run(&scanner);
-        let evidence = cold.evidence();
-        assert_eq!(
-            evidence.execution_metrics.parse_attempt_count,
-            files.len() as u64
-        );
-        assert!(cold.sources().iter().all(|source| {
-            !source.excerpt.is_empty()
-                && source.coverage_limits["evidence_audit"]["excerpt_ranges"].is_array()
-        }));
-        assert!(evidence.execution_metrics.rendered_chars <= 180_000);
-        assert!(evidence.execution_metrics.rendered_chars > 160_000);
+        assert_eq!(cold.stats.parse_attempt_count, files.len() as u64);
+        assert_eq!(cold.stats.parse_cache_lookup_count, files.len() as u64);
+        assert!(!cold.stats.snapshot_hit);
+        assert!(cold
+            .files
+            .iter()
+            .all(|file| { !file.excerpt.text.is_empty() && file.excerpt.ranges.is_some() }));
+        assert!(cold.stats.rendered_chars <= 180_000);
+        assert!(cold.stats.rendered_chars > 160_000);
         let warm = run(&scanner);
-        assert_eq!(warm.evidence().execution_metrics.parse_attempt_count, 0);
-        assert!(warm.evidence().execution_metrics.snapshot_hit);
-        assert_eq!(materials(&cold), materials(&warm));
+        assert_eq!(warm.stats.parse_attempt_count, 0);
+        assert!(warm.stats.snapshot_hit);
+        assert_same_admission(&cold, &warm);
         if let Some(first) = &first {
-            assert_eq!(cold.envelope.file_context, first.envelope.file_context);
-            assert_eq!(evidence.decisions, first.evidence().decisions);
-            assert_eq!(materials(&cold), materials(first));
+            assert_same_admission(&cold, first);
         } else {
             first = Some(cold);
         }
@@ -130,13 +245,79 @@ fn verified_snapshot_bypasses_scheduler_until_a_reference_is_corrupt() {
     let before = scans();
     let cold = run(&scanner);
     assert_eq!(scans(), before + 1);
+    assert_eq!(cold.stats.parse_attempt_count, 2);
+    assert_eq!(cold.stats.parse_cache_lookup_count, 2);
+    assert_eq!(cold.stats.parse_cache_all_hit, Some(false));
+
+    let connection =
+        rusqlite::Connection::open(scanner.cache_dir.join(cache::CACHE_FILENAME)).unwrap();
+    let (key, manifest, refs): (String, Vec<u8>, String) = connection
+        .query_row(
+            "SELECT snapshot_key, manifest, refs FROM scan_snapshots",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let bound: serde_json::Value = serde_json::from_str(&refs).unwrap();
+    // The v2.0 writer used the first eight bytes of the request UUID's SHA-256 as a u64.
+    let request_hash = sha256_hex(b"e6ecffdc-4aec-4872-a8bc-f376da969901");
+    let origin = u64::from_str_radix(&request_hash[..16], 16).unwrap();
+    let mut legacy = origin.to_le_bytes().to_vec();
+    let tuple = json!([
+        "scan_snapshot_v4",
+        96,
+        8,
+        80,
+        180_000,
+        [],
+        [
+            [
+                "first.md",
+                "success",
+                null,
+                bound[0]["reference"]["key"],
+                null
+            ],
+            [
+                "second.md",
+                "success",
+                null,
+                bound[1]["reference"]["key"],
+                null
+            ],
+        ]
+    ]);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&manifest[8..]).unwrap(),
+        tuple
+    );
+    serde_json::to_writer(&mut legacy, &tuple).unwrap();
+    let mut signed = b"scan-cache-v4\0snapshot".to_vec();
+    for piece in [key.as_bytes(), legacy.as_slice(), refs.as_bytes()] {
+        signed.extend_from_slice(&(piece.len() as u64).to_le_bytes());
+        signed.extend_from_slice(piece);
+    }
+    assert_eq!(
+        connection
+            .execute(
+                "UPDATE scan_snapshots SET manifest=?1, record_sha256=?2 WHERE snapshot_key=?3",
+                rusqlite::params![legacy, sha256_hex(&signed), key],
+            )
+            .unwrap(),
+        1
+    );
+    drop(connection);
+
     let warm = run(&scanner);
     assert_eq!(scans(), before + 1);
-    assert!(warm.evidence().execution_metrics.snapshot_hit);
-    assert_eq!(warm.envelope.file_context, cold.envelope.file_context);
-    assert_eq!(materials(&warm), materials(&cold));
+    assert!(warm.stats.snapshot_hit);
+    assert_eq!(warm.stats.parse_attempt_count, 0);
+    assert_eq!(warm.stats.parse_cache_lookup_count, 2);
+    assert_eq!(warm.stats.parse_cache_all_hit, Some(true));
+    assert_same_admission(&warm, &cold);
 
-    let connection = rusqlite::Connection::open(&scanner.config.scan_db_path).unwrap();
+    let connection =
+        rusqlite::Connection::open(scanner.cache_dir.join(cache::CACHE_FILENAME)).unwrap();
     assert_eq!(connection.execute(
         "UPDATE parse_cache SET record_sha256='corrupt' WHERE file_id=(SELECT min(file_id) FROM parse_cache)",
         [],
@@ -145,12 +326,11 @@ fn verified_snapshot_bypasses_scheduler_until_a_reference_is_corrupt() {
 
     let recovered = run(&scanner);
     assert_eq!(scans(), before + 2);
-    let metrics = recovered.evidence().execution_metrics;
-    assert!(!metrics.snapshot_hit);
-    assert_eq!(metrics.parse_attempt_count, 1);
-    assert_eq!(materials(&recovered), materials(&cold));
-    assert_eq!(recovered.envelope.file_context, cold.envelope.file_context);
-    assert!(run(&scanner).evidence().execution_metrics.snapshot_hit);
+    assert!(!recovered.stats.snapshot_hit);
+    assert_eq!(recovered.stats.parse_attempt_count, 1);
+    assert_eq!(recovered.stats.parse_cache_lookup_count, 2);
+    assert_same_admission(&recovered, &cold);
+    assert!(run(&scanner).stats.snapshot_hit);
     assert_eq!(scans(), before + 2);
 }
 
@@ -170,16 +350,13 @@ fn same_size_and_mtime_replacement_invalidates_cached_content() {
         .unwrap();
     drop(replaced);
     let changed = run(&scanner);
-    assert_ne!(
-        first.sources()[0].content_sha256,
-        changed.sources()[0].content_sha256
-    );
+    assert_ne!(first.files[0].raw_sha256, changed.files[0].raw_sha256);
     assert_eq!(
-        changed.sources()[0].modified_at_utc,
-        first.sources()[0].modified_at_utc
+        changed.files[0].modified_at_utc,
+        first.files[0].modified_at_utc
     );
-    assert!(changed.sources()[0].excerpt.contains("450"));
-    assert_eq!(changed.evidence().execution_metrics.parse_attempt_count, 1);
+    assert!(changed.files[0].excerpt.text.contains("450"));
+    assert_eq!(changed.stats.parse_attempt_count, 1);
 }
 
 #[test]
@@ -187,7 +364,7 @@ fn same_size_and_mtime_replacement_invalidates_cached_content() {
 fn real_pdf_reservations_refill_in_order_and_reuse_page_observations() {
     let worker = PathBuf::from(std::env::var_os("AI_DAILY_TEST_PDF_WORKER").expect("worker path"));
     let tmp = tempfile::tempdir().unwrap();
-    let scanner = fixture(
+    let mut config = fixture_config(
         tmp.path(),
         json!({
             "max_workers":4,
@@ -197,6 +374,7 @@ fn real_pdf_reservations_refill_in_order_and_reuse_page_observations() {
         }),
         Some(&worker),
     );
+    let scanner = Scanner::open(config.clone()).unwrap();
     let work = tmp.path().join("input");
     fs::write(work.join("01-blank.pdf"), pdf(&[None])).unwrap();
     fs::write(
@@ -206,91 +384,105 @@ fn real_pdf_reservations_refill_in_order_and_reuse_page_observations() {
     .unwrap();
     fs::write(work.join("03-text.pdf"), pdf(&[Some("Amount 900 CNY")])).unwrap();
     let doctor = scanner.doctor().unwrap();
-    assert_eq!(doctor.exit_code, 0);
-    let cold = run(&scanner);
+    assert_eq!(doctor.status, EngineStatus::Ok);
+    let (cold, observed) = run_benchmark(&scanner);
+    let cold_files = by_path(&cold);
+    assert_eq!(cold_files[0].reason, Some("pdf_window_no_text"));
+    let parsed = cold_files[1];
+    assert!(parsed.excerpt.text.contains("450 CNY"));
+    assert_eq!(parsed.parse_status, ParseStatus::Success);
+    assert_eq!(parsed.worker_lane, WorkerLane::RustPdfProcessV3.as_str());
+    assert_eq!(parsed.pdf_charged_pages, Some(2));
+    assert_eq!(parsed.pdf_extraction_slot, Some(true));
+    assert_eq!(parsed.pdf_error_code, None);
+    let pages = parsed.pdf_pages().unwrap();
+    assert_eq!(pages.checked_pages, [1, 2]);
+    let observations = pages.observations.as_ref().unwrap();
     assert_eq!(
-        cold.sources()[0].reason.as_deref(),
-        Some("pdf_window_no_text")
+        observations
+            .iter()
+            .map(|page| (page.page, page.has_text))
+            .collect::<Vec<_>>(),
+        [(1, false), (2, true)]
     );
-    assert!(cold.sources()[1].excerpt.contains("450 CNY"));
-    assert_eq!(cold.sources()[2].parse_status, ParseStatus::NotParsed);
+    assert_eq!(cold_files[2].parse_status, ParseStatus::NotParsed);
+    assert!(cold_files[2].excerpt.text.is_empty());
     assert_eq!(
-        cold.sources()[2].reason.as_deref(),
+        cold_files[2].reason,
         Some("pdf_text_extraction_quota_exhausted")
     );
-    let audit = cold.evidence();
-    assert_eq!(audit.decisions[2].action, ContextAction::Omit);
-    assert_eq!(
-        audit.files[1].pdf_classification.0.as_ref().unwrap().status,
-        PdfClassificationStatus::TextInParseWindow
-    );
-    assert_eq!(
-        audit
-            .execution_metrics
-            .refill_audit
-            .as_ref()
-            .unwrap()
-            .rounds
-            .len(),
-        1
-    );
-    assert!(cold
-        .pdf_runtime
+    assert_eq!(cold.stats.refill_rounds.len(), 1);
+    assert!(cold.stats.classify_attempt_count > 0);
+    let text_runtime = cold
+        .files
         .iter()
-        .all(|audit| audit.requests == 1 && audit.native_document_opens == 1));
-    let warm = run(&scanner);
-    assert_eq!(materials(&cold), materials(&warm));
-    let warm_metrics = warm.evidence().execution_metrics;
-    assert_eq!(warm_metrics.parse_attempt_count, 0);
-    assert_eq!(warm_metrics.classify_attempt_count, 0);
-    assert!(warm_metrics.snapshot_hit);
-    assert!(warm
+        .zip(&observed)
+        .find(|(file, _)| file.relative_path == "02-text.pdf")
+        .unwrap()
+        .1
         .pdf_runtime
-        .iter()
-        .all(|audit| audit.requests == 0 && audit.native_document_opens == 0));
+        .as_ref()
+        .unwrap();
+    assert_eq!(text_runtime.status, ClassifyStatus::TextInParseWindow);
+    assert_eq!(text_runtime.page_count, Some(2));
+    assert_eq!(text_runtime.examined_pages, Some(2));
+    assert!(text_runtime.native_page_reads >= 2);
+    assert!(
+        pdf_runtime(&observed).all(|audit| audit.requests == 1 && audit.native_document_opens == 1)
+    );
+    let (warm, warm_observed) = run_benchmark(&scanner);
+    assert_same_admission(&cold, &warm);
+    assert_eq!(warm.stats.parse_attempt_count, 0);
+    assert_eq!(warm.stats.classify_attempt_count, 0);
+    assert!(warm.stats.snapshot_hit);
+    assert_eq!(warm.stats.refill_rounds, cold.stats.refill_rounds);
+    assert_eq!(warm.peak_pdf_requests_in_flight, 0);
+    assert_eq!(
+        pdf_runtime(&warm_observed).count(),
+        pdf_runtime(&observed).count()
+    );
+    assert!(pdf_runtime(&warm_observed).all(|audit| audit.requests == 0
+        && audit.native_document_opens == 0
+        && audit.native_page_reads == 0));
 
     fs::write(work.join("04-broken.pdf"), b"%PDF-1.7\ninvalid document\n").unwrap();
-    let mut changed = scanner.config.clone();
-    changed.scanner_settings.pdf_max_pages = Some(1);
-    let narrower = Scanner::open(changed).unwrap();
-    let cold = run(&narrower);
-    let cold_sources = cold.sources();
-    assert_eq!(
-        cold_sources[1].reason.as_deref(),
-        Some("pdf_window_no_text")
-    );
-    assert!(cold_sources[1].parse_truncated);
-    assert!(cold_sources[2].excerpt.contains("900 CNY"));
-    assert_eq!(cold_sources[3].reason.as_deref(), Some("pdf_damaged"));
-    assert_eq!(cold.envelope.status, EngineStatus::Partial);
+    config.scanner_settings.pdf_max_pages = Some(1);
+    let narrower = Scanner::open(config).unwrap();
+    let (cold, observed) = run_benchmark(&narrower);
+    let cold_files = by_path(&cold);
+    assert_eq!(cold_files[1].reason, Some("pdf_window_no_text"));
+    assert!(cold_files[1].parse_truncated);
+    assert!(cold_files[2].excerpt.text.contains("900 CNY"));
+    assert_eq!(cold_files[3].reason, Some("pdf_damaged"));
+    assert_eq!(cold.status, EngineStatus::Partial);
     assert!(cold
-        .envelope
         .warnings
         .iter()
         .any(|warning| warning.error_code == ErrorCode::ParserFailed));
-    assert!(cold
-        .pdf_runtime
-        .iter()
-        .all(|audit| audit.requests == 1 && audit.native_document_opens == 1));
-    let wire = serde_json::to_value(&cold).unwrap();
-    let audit = &wire["sources"][1]["coverage_limits"]["evidence_audit"];
+    assert!(
+        pdf_runtime(&observed).all(|audit| audit.requests == 1 && audit.native_document_opens == 1)
+    );
+    let limits = cold_files[1].coverage_limits(&cold.source_profile);
+    let audit = &limits["evidence_audit"];
     assert_eq!(
         audit["pdf_page_audit"],
-        wire["evidence"]["files"][1]["pdf_classification"]["page_audit"]
+        json!(cold_files[1].pdf_pages().unwrap())
     );
     assert_eq!(
-        audit["omitted_ranges"],
+        json!(cold_files[1].excerpt.omitted_ranges),
         json!([{"unit":"pdf_page", "start":2, "end":3, "label":"unread",
             "column_start":null, "column_end":null}])
     );
+    assert_eq!(cold_files[3].parse_status, ParseStatus::Error);
+    assert_eq!(cold_files[3].pdf_error_code, Some(ErrorCode::ParserFailed));
+    let (warm, warm_observed) = run_benchmark(&narrower);
+    assert_eq!(warm.status, EngineStatus::Partial);
+    assert!(warm.stats.snapshot_hit);
     assert_eq!(
-        wire["evidence"]["files"][3]["final_diagnostic"]["error_code"],
-        "PARSER_FAILED"
+        pdf_runtime(&warm_observed).count(),
+        pdf_runtime(&observed).count()
     );
-    let warm = run(&narrower);
-    assert_eq!(warm.envelope.status, EngineStatus::Partial);
-    assert!(warm.evidence().execution_metrics.snapshot_hit);
-    assert!(warm.pdf_runtime.iter().all(|audit| audit.requests == 0));
+    assert!(pdf_runtime(&warm_observed).all(|audit| audit.requests == 0));
 }
 
 #[test]
@@ -300,7 +492,7 @@ fn optional_ocr_keeps_native_priority_and_marks_qualified_image_evidence() {
 
     let worker = PathBuf::from(std::env::var_os("AI_DAILY_TEST_PDF_WORKER").expect("worker path"));
     let tmp = tempfile::tempdir().unwrap();
-    let scanner = fixture(
+    let mut config = fixture_config(
         tmp.path(),
         json!({
             "max_workers": 1,
@@ -309,6 +501,7 @@ fn optional_ocr_keeps_native_priority_and_marks_qualified_image_evidence() {
         }),
         Some(&worker),
     );
+    let scanner = Scanner::open(config.clone()).unwrap();
     if !daily_parsers::OCR_AVAILABLE {
         assert_eq!(
             scanner.doctor().unwrap_err().code,
@@ -326,63 +519,58 @@ fn optional_ocr_keeps_native_priority_and_marks_qualified_image_evidence() {
     )
     .unwrap();
     fs::write(work.join("04-blank.pdf"), pdf(&[None])).unwrap();
-    assert_eq!(scanner.doctor().unwrap().exit_code, 0);
-    let cold = run(&scanner);
-    let cold_sources = cold.sources();
-    let recognized = &cold_sources[0];
+    assert_eq!(scanner.doctor().unwrap().status, EngineStatus::Ok);
+    let (cold, observed) = run_benchmark(&scanner);
+    let cold_files = by_path(&cold);
+    let recognized = cold_files[0];
     assert_eq!(recognized.parser_backend, OCR_BACKEND);
     assert!(
-        recognized.excerpt.contains("1936"),
+        recognized.excerpt.text.contains("1936"),
         "{}",
-        recognized.excerpt
+        recognized.excerpt.text
     );
-    let audit = &recognized.coverage_limits["evidence_audit"];
+    let limits = recognized.coverage_limits(&cold.source_profile);
+    let audit = &limits["evidence_audit"];
     assert_eq!(audit["text_unverified"], true);
-    let ranges = audit["excerpt_ranges"].as_array().unwrap();
+    let ranges = recognized.excerpt.ranges.as_ref().unwrap();
     assert!(!ranges.is_empty());
-    assert!(ranges.iter().all(|range| range["label"] == OCR_RANGE_LABEL));
+    assert!(ranges
+        .iter()
+        .all(|range| range.label.as_deref() == Some(OCR_RANGE_LABEL)));
     assert_eq!(
-        cold.sources()[1].reason.as_deref(),
+        cold_files[1].reason,
         Some("pdf_image_ocr_page_quota_exhausted")
     );
-    assert!(cold.sources()[2].excerpt.contains("Native amount 450"));
+    assert!(cold_files[2].excerpt.text.contains("Native amount 450"));
+    assert_eq!(cold_files[3].reason, Some("pdf_window_no_text"));
+    let runtime: Vec<_> = pdf_runtime(&observed).collect();
     assert_eq!(
-        cold.sources()[3].reason.as_deref(),
-        Some("pdf_window_no_text")
-    );
-    assert_eq!(
-        (
-            cold.pdf_runtime[0].requests,
-            cold.pdf_runtime[0].native_document_opens
-        ),
+        (runtime[0].requests, runtime[0].native_document_opens,),
         (2, 2)
     );
-    assert!(cold.pdf_runtime[1..].iter().all(|item| item.requests == 1));
-    let warm = run(&scanner);
-    assert_eq!(materials(&cold), materials(&warm));
-    assert!(warm.evidence().execution_metrics.snapshot_hit);
-    assert!(warm.pdf_runtime.iter().all(|item| item.requests == 0));
+    assert!(runtime[1..].iter().all(|item| item.requests == 1));
+    let (warm, warm_observed) = run_benchmark(&scanner);
+    assert_same_admission(&cold, &warm);
+    assert!(warm.stats.snapshot_hit);
+    assert_eq!(pdf_runtime(&warm_observed).count(), runtime.len());
+    assert!(pdf_runtime(&warm_observed).all(|item| item.requests == 0));
 
-    let mut changed = scanner.config.clone();
-    changed
+    config
         .scanner_settings
         .pdf_image_ocr
         .as_mut()
         .unwrap()
         .max_files = 1;
-    let capped = run(&Scanner::open(changed.clone()).unwrap());
+    let capped = run(&Scanner::open(config.clone()).unwrap());
     assert_eq!(
-        capped.sources()[1].reason.as_deref(),
+        by_path(&capped)[1].reason,
         Some("pdf_image_ocr_file_quota_exhausted")
     );
-    changed.scanner_settings.pdf_max_pages = Some(1);
-    let narrower = run(&Scanner::open(changed).unwrap());
-    assert_eq!(
-        narrower.sources()[0].reason.as_deref(),
-        Some("pdf_window_no_text")
-    );
-    assert!(narrower.sources()[0].parse_truncated);
-    assert_eq!(narrower.pdf_runtime[0].requests, 1);
+    config.scanner_settings.pdf_max_pages = Some(1);
+    let (narrower, observed) = run_benchmark(&Scanner::open(config).unwrap());
+    assert_eq!(by_path(&narrower)[0].reason, Some("pdf_window_no_text"));
+    assert!(by_path(&narrower)[0].parse_truncated);
+    assert_eq!(pdf_runtime(&observed).next().unwrap().requests, 1);
 
     let without_models = tmp.path().join("without-models");
     fs::create_dir(&without_models).unwrap();
@@ -402,13 +590,11 @@ fn optional_ocr_keeps_native_priority_and_marks_qualified_image_evidence() {
     );
     fs::write(without_models.join("input/images.pdf"), images).unwrap();
     let failed = run(&bare);
+    let failed_file = &failed.files[0];
+    assert_eq!(failed_file.reason, Some("pdf_image_ocr_failed"));
     assert_eq!(
-        failed.sources()[0].reason.as_deref(),
-        Some("pdf_image_ocr_failed")
-    );
-    assert_eq!(
-        failed.sources()[0].coverage_limits["evidence_audit"]["secondary_tags"][0],
-        "PDF_OCR_MODEL_MISSING"
+        failed_file.ocr_tag.as_deref(),
+        Some("PDF_OCR_MODEL_MISSING")
     );
 }
 

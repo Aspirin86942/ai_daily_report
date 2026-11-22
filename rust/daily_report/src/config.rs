@@ -137,7 +137,6 @@ pub struct AppConfig {
     pub scanner: ScannerSettings,
     pub archive: ArchiveSettings,
     pub index_db_path: PathBuf,
-    pub office_worker_path: PathBuf,
     pub pdf_worker_path: PathBuf,
     pub proxy_http: String,
     pub proxy_https: String,
@@ -500,7 +499,6 @@ impl AppConfig {
             retention: section(&mut settings, "retention")?,
             schedule: section(&mut settings, "schedule")?,
             index_db_path: program_dir.join(index),
-            office_worker_path: program_dir.join("ai-daily-report.exe"),
             pdf_worker_path: program_dir.join("ai-daily-pdf-worker.exe"),
             proxy_http: settings["proxy"]["http_proxy"]
                 .as_str()
@@ -547,6 +545,15 @@ impl AppConfig {
 
     pub fn api_key(&self) -> &str {
         &self.api_key
+    }
+
+    pub(crate) fn scanner_config(&self) -> crate::scan::ScannerConfig {
+        crate::scan::ScannerConfig {
+            work_dir: self.paths.work_dir.clone(),
+            scan_db_path: self.index_db_path.clone(),
+            scanner_settings: self.scanner.clone(),
+            pdf_worker_path: self.pdf_worker_path.clone(),
+        }
     }
 
     pub fn personal_scan(&self) -> bool {

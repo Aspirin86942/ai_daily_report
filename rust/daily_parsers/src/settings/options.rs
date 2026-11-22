@@ -9,52 +9,6 @@ pub enum ReportMode {
     Monthly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum CompressionProfile {
-    #[serde(rename = "daily_balanced_v1")]
-    DailyBalancedV1,
-    #[serde(rename = "weekly_balanced_v1")]
-    WeeklyBalancedV1,
-    #[serde(rename = "monthly_balanced_v1")]
-    MonthlyBalancedV1,
-}
-
-impl ReportMode {
-    pub const fn compression_profile(self) -> CompressionProfile {
-        match self {
-            Self::Daily => CompressionProfile::DailyBalancedV1,
-            Self::Weekly => CompressionProfile::WeeklyBalancedV1,
-            Self::Monthly => CompressionProfile::MonthlyBalancedV1,
-        }
-    }
-}
-
-impl CompressionProfile {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::DailyBalancedV1 => "daily_balanced_v1",
-            Self::WeeklyBalancedV1 => "weekly_balanced_v1",
-            Self::MonthlyBalancedV1 => "monthly_balanced_v1",
-        }
-    }
-}
-
-pub const CONTEXT_PER_FILE_MAX_CHARS: u64 = 100_000;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AdapterPaths {
-    pub office_worker_path: String,
-    pub pdf_worker_path: String,
-}
-
-impl Validate for AdapterPaths {
-    fn validate(&self) -> Result<(), String> {
-        require_absolute_path(&self.office_worker_path, "office_worker_path")?;
-        require_absolute_path(&self.pdf_worker_path, "pdf_worker_path")
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Scanner settings constants and the strict raw settings type. All leaves stay
 // optional; Rust normalization owns every default and routing policy.
@@ -62,23 +16,6 @@ impl Validate for AdapterPaths {
 
 pub const ADMISSION_POLICY_VERSION: &str = "budget_refill_v3";
 pub const CLASSIFIER_POLICY_VERSION: &str = "pdf_text_presence_v2";
-pub const PRIORITY_POLICY_VERSION: &str = "budget_nominal_v2";
-pub const COMPRESSION_POLICY_VERSION: &str = "markdown_context_v2";
-pub const MAX_SOURCE_FILES_PER_RUN: u64 = 1_000_000;
-
-/// report-mode 默认（spec Part 8.1 表）：
-/// daily   => (96, 80, 8, 10_000ms)
-/// weekly  => (192, 100, 12, 15_000ms)
-/// monthly => (384, 370, 16, 25_000ms)
-/// tuple order: (max_candidate_files, max_total_pdf_classification_pages,
-/// max_pdf_text_extractions, total_deadline_ms).
-pub fn quota_defaults(mode: ReportMode) -> (u64, u64, u64, u64) {
-    match mode {
-        ReportMode::Daily => (96, 80, 8, 10_000),
-        ReportMode::Weekly => (192, 100, 12, 15_000),
-        ReportMode::Monthly => (384, 370, 16, 25_000),
-    }
-}
 
 // Every override has the same wire contract: missing uses the profile default,
 // explicit null is invalid, and an absent setting is omitted when serializing.

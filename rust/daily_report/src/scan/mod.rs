@@ -19,85 +19,65 @@ use self::{
     scheduler::Scheduler,
 };
 use crate::ReportError;
-use chrono::{DateTime, Duration as Days, FixedOffset, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use daily_parsers::{
     discovery::{self, DiscoveryIssueKind, DiscoveryRequest},
     pdf_wire::file_identity_sha256,
     settings::{
-        validate_scan_request, AdapterPaths, CompressionProfile, ContextEnvelope, Diagnostic,
-        DiagnosticStage, DoctorCheck, DoctorCheckStatus, DoctorResponse, EngineStatus,
-        NormalizedScannerSettings, Nullable, ParseStatus, RefillRoundAudit, ReportMode,
-        ScannerEvidence, ScannerSettings, Validate,
+        Diagnostic, DiagnosticStage, EngineStatus, ErrorCode, NormalizedScannerSettings,
+        ParseStatus, RefillRoundAudit, ReportMode, ScannerSettings,
     },
 };
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     borrow::Cow,
     fs::File,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex,
-    },
+    sync::Mutex,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use daily_parsers::settings::ErrorCode;
+pub use crate::snapshots::digest as sha256_hex;
 pub use daily_parsers::PARSER_CONTENT_IDENTITY;
+pub use evidence::{PdfRuntime, ScanResult, ScanStats};
+pub use sources::{ScanBenchFile, ScannedFile, SourceProfile};
 
-const CONTRACT: &str = "ai_daily_context";
-const ENGINE_BUILD: &str = env!("AI_DAILY_REPORT_BUILD");
 const SNAPSHOT_POLICY: &str = "scan_snapshot_v4";
-static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 pub type ScannerError = ReportError;
 
-#[derive(Debug, Clone)]
-pub struct ContextResult {
-    pub envelope: ContextEnvelope,
-    pub(crate) files: Vec<sources::ScannedFile>,
-    pub(crate) source_profile: sources::SourceProfile,
-    // File audit rows live with their excerpts and are added at the API boundary.
-    evidence_summary: ScannerEvidence,
-    pub pdf_runtime: Vec<PdfRuntime>,
-    pub peak_pdf_requests_in_flight: u64,
+#[derive(Debug, Serialize)]
+pub struct ScannerDoctorReport {
+    pub status: EngineStatus,
+    pub checks: Vec<ScannerDoctorCheck>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct PdfRuntime {
-    pub relative_path: String,
-    pub requests: u64,
-    pub native_document_opens: u64,
-    pub native_page_reads: u64,
+#[derive(Debug, Serialize)]
+pub struct ScannerDoctorCheck {
+    pub name: &'static str,
+    pub status: EngineStatus,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct ScannerConfig {
-    pub work_dir: String,
-    pub scan_db_path: String,
+    pub work_dir: PathBuf,
+    pub scan_db_path: PathBuf,
     pub scanner_settings: ScannerSettings,
-    pub adapters: AdapterPaths,
+    pub pdf_worker_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
 pub struct ScanRequest {
-    pub report_mode: ReportMode,
-    pub start_date: String,
-    pub end_date: String,
-    pub window_start_utc: Option<String>,
-    pub window_end_utc: Option<String>,
-    pub compression_profile: Option<CompressionProfile>,
-}
-
-#[derive(Debug)]
-pub struct ScannerOperation<T> {
-    pub value: T,
-    pub exit_code: i32,
+    pub start_date: NaiveDate,
+    pub end_date: NaiveDate,
+    pub utc_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
 }
 
 pub struct Scanner {
-    config: ScannerConfig,
+    work_dir: String,
+    cache_dir: PathBuf,
+    pdf_worker_path: PathBuf,
     daily_profile: NormalizedScannerSettings,
     run_lock: Mutex<Option<VerifiedPdf>>,
 }
@@ -112,47 +92,70 @@ impl Scanner {
         let daily_profile =
             config::normalize_scanner_settings(&config.scanner_settings, ReportMode::Daily)
                 .map_err(invalid_configuration)?;
-        config.adapters.validate().map_err(invalid_configuration)?;
-        let db = Path::new(&config.scan_db_path);
-        if !Path::new(&config.work_dir).is_absolute()
-            || !db.is_absolute()
-            || db
-                .file_name()
-                .is_none_or(|name| name != cache::CACHE_FILENAME)
+        if !config.pdf_worker_path.is_absolute()
+            || config
+                .pdf_worker_path
+                .to_str()
+                .is_none_or(|path| path.contains('\0') || path.chars().count() > 32_767)
+        {
+            return Err(invalid_configuration(
+                "pdf_worker_path must be an absolute path",
+            ));
+        }
+        let mut cache_dir = config.scan_db_path;
+        if !config.work_dir.is_absolute()
+            || !cache_dir.is_absolute()
+            || !cache_dir.ends_with(cache::CACHE_FILENAME)
         {
             return Err(invalid_configuration(format!(
                 "work_dir must be absolute and scan_db_path must name an absolute {}",
                 cache::CACHE_FILENAME
             )));
         }
+        cache_dir.pop();
+        let work_dir = config
+            .work_dir
+            .into_os_string()
+            .into_string()
+            .map_err(|_| invalid_configuration("work_dir must be valid Unicode"))?;
         Ok(Self {
-            config,
+            work_dir,
+            cache_dir,
+            pdf_worker_path: config.pdf_worker_path,
             daily_profile,
             run_lock: Mutex::new(None),
         })
     }
 
-    pub fn build_context(
-        &self,
-        request: &ScanRequest,
-    ) -> Result<ScannerOperation<ContextResult>, ScannerError> {
-        self.build_context_with_request_id(request, request_id())
+    pub fn build_context(&self, request: &ScanRequest) -> Result<ScanResult, ScannerError> {
+        self.build_context_at(request, Utc::now())
     }
 
-    pub fn build_context_with_request_id(
+    pub fn build_context_at(
         &self,
         request: &ScanRequest,
-        request_id: String,
-    ) -> Result<ScannerOperation<ContextResult>, ScannerError> {
-        self.build_context_with_request_id_at(request, request_id, Utc::now())
-    }
-
-    pub fn build_context_with_request_id_at(
-        &self,
-        request: &ScanRequest,
-        request_id: String,
         observed_at: DateTime<Utc>,
-    ) -> Result<ScannerOperation<ContextResult>, ScannerError> {
+    ) -> Result<ScanResult, ScannerError> {
+        self.build_context_inner(request, observed_at, None)
+    }
+
+    /// Collect additional observations for local comparison drivers.
+    pub fn build_context_for_benchmark(
+        &self,
+        request: &ScanRequest,
+        observed_at: DateTime<Utc>,
+    ) -> Result<(ScanResult, Vec<ScanBenchFile>), ScannerError> {
+        let mut files = Vec::new();
+        let result = self.build_context_inner(request, observed_at, Some(&mut files))?;
+        Ok((result, files))
+    }
+
+    fn build_context_inner(
+        &self,
+        request: &ScanRequest,
+        observed_at: DateTime<Utc>,
+        benchmark: Option<&mut Vec<ScanBenchFile>>,
+    ) -> Result<ScanResult, ScannerError> {
         let started = Instant::now();
         let mut verified_pdf = self.run_lock.try_lock().map_err(|_| {
             ReportError::new(
@@ -160,23 +163,14 @@ impl Scanner {
                 "another build_context call is active",
             )
         })?;
-        validate_scan_request(
-            &request_id,
-            &request.start_date,
-            &request.end_date,
-            request.window_start_utc.as_deref(),
-            request.window_end_utc.as_deref(),
-            request.report_mode,
-            request.compression_profile,
-        )
-        .map_err(invalid_configuration)?;
-        let profile = self.profile(request.report_mode)?;
+        let profile = &self.daily_profile;
+        let discovery_request = discovery_request(request, profile, &self.work_dir)?;
+        self.check_ocr()?;
         let deadline = started + Duration::from_millis(profile.total_deadline_ms);
         let dispatch_deadline = deadline - Duration::from_secs(2);
         let discovery_deadline = dispatch_deadline
             .min(started + Duration::from_millis(profile.execution.discovery_timeout_ms));
-        let mut cache = ScanCache::open(self.cache_dir(), deadline)?;
-        let discovery_request = discovery_request(request, &profile, &self.config.work_dir)?;
+        let mut cache = ScanCache::open(&self.cache_dir, deadline)?;
         let root = discovery_request.work_dir.as_path();
         let mut warnings = Vec::new();
         let mut discovery_failed = false;
@@ -184,18 +178,13 @@ impl Scanner {
         let found =
             match discovery::discover_files_partial_until(&discovery_request, discovery_deadline) {
                 Ok(found) => {
-                    warnings.extend(found.issues.iter().map(|issue| {
+                    warnings.extend(found.issues.into_iter().map(|issue| {
                         let code = if issue.kind == DiscoveryIssueKind::Budget {
                             ErrorCode::StageDeadlineExhausted
                         } else {
                             ErrorCode::DiscoveryEntryUnreadable
                         };
-                        warning(
-                            code,
-                            DiagnosticStage::Discovery,
-                            issue.message.clone(),
-                            issue.path.clone(),
-                        )
+                        warning(code, DiagnosticStage::Discovery, issue.message, issue.path)
                     }));
                     found.files
                 }
@@ -211,46 +200,40 @@ impl Scanner {
                         code,
                         DiagnosticStage::Discovery,
                         error.to_string(),
-                        Some(self.config.work_dir.clone()),
+                        Some(self.work_dir.clone()),
                     ));
                     Vec::new()
                 }
             };
         let discovery_ms = parse::elapsed_ms(discovery_started);
-        let mut files = ordered_files(found, root, &profile, dispatch_deadline);
-        let pdf_path = Path::new(&self.config.adapters.pdf_worker_path);
-        let pdf_identity = if profile.max_total_pdf_classification_pages > 0
-            && files
-                .iter()
-                .any(|file| file.backend == Some(PDF) && file.completed.is_none())
-        {
-            match verify_pdf_identity(pdf_path, &mut verified_pdf, dispatch_deadline) {
-                Ok(identity) => Some(identity),
-                Err(error) => {
-                    for file in files
-                        .iter_mut()
-                        .filter(|file| file.backend == Some(PDF) && file.completed.is_none())
-                    {
-                        file.completed = Some(Completed::new(parse::failed(
-                            file,
-                            "PARSER_START_FAILED",
-                            error.to_string(),
-                            true,
-                        )));
+        let mut files = ordered_files(found, root, profile, dispatch_deadline);
+        let pdf_path = &self.pdf_worker_path;
+        let mut pending_pdfs = files
+            .iter_mut()
+            .filter(|file| file.backend == Some(PDF) && file.completed.is_none())
+            .peekable();
+        let pdf_identity =
+            if profile.max_total_pdf_classification_pages > 0 && pending_pdfs.peek().is_some() {
+                match verify_pdf_identity(pdf_path, &mut verified_pdf, dispatch_deadline) {
+                    Ok(identity) => Some(identity),
+                    Err(error) => {
+                        for file in pending_pdfs {
+                            file.completed = Some(Completed::new(parse::failed(
+                                file,
+                                "PARSER_START_FAILED",
+                                error.to_string(),
+                                true,
+                            )));
+                        }
+                        None
                     }
-                    None
                 }
-            }
-        } else {
-            None
-        };
-        let snapshot_key = snapshot_key(
-            &discovery_request,
-            &profile,
-            &files,
-            pdf_identity.as_deref(),
-        )?;
-        let mut scheduler = Scheduler::new(root, &profile, dispatch_deadline, pdf_path);
+            } else {
+                None
+            };
+        let snapshot_key =
+            snapshot_key(&discovery_request, profile, &files, pdf_identity.as_deref())?;
+        let mut scheduler = Scheduler::new(root, profile, dispatch_deadline, pdf_path);
         let snapshot_started = Instant::now();
         let snapshot_source = if warnings.is_empty() && Instant::now() < dispatch_deadline {
             scheduler.restore_snapshot(
@@ -271,165 +254,122 @@ impl Scanner {
             parse_ms = parse::elapsed_ms(parse_started);
             if warnings.is_empty() && Instant::now() < dispatch_deadline {
                 let manifest_started = Instant::now();
-                batch.snapshot = snapshot_manifest(
-                    &files,
-                    &profile,
-                    &scheduler,
-                    snapshot_key,
-                    evidence::scan_id(&request_id),
-                )?;
+                batch.snapshot = snapshot_manifest(&files, profile, &scheduler, snapshot_key)?;
                 snapshot_ms += parse::elapsed_ms(manifest_started);
             }
         }
-        let mut result = evidence::assemble(evidence::Scan {
+        let scan = evidence::Scan {
             files: &files,
-            request_id,
             observed_at,
-            profile: &profile,
+            profile,
             warnings,
             scheduler: &scheduler,
             discovery_failed,
-            snapshot_source,
-            started,
+            snapshot_hit: snapshot_source.is_some(),
             discovery_ms,
             parse_ms,
             snapshot_ms,
-        });
+        };
+        let mut result = match benchmark {
+            Some(files) => evidence::assemble::<true>(scan, files),
+            None => evidence::assemble::<false>(scan, &mut Vec::new()),
+        };
         for completed in files
             .into_iter()
             .flat_map(|file| [file.completed, file.ocr])
             .flatten()
         {
-            if !completed.reused {
-                if let Some(query) = completed.query {
-                    match completed.outcome {
-                        Outcome::Parsed {
-                            result,
-                            source_sha256,
-                            ..
-                        } => batch.parsed.push(CachedParse {
-                            query,
-                            result: *result,
-                            source_sha256,
-                            pdf_observation: completed
-                                .pdf
-                                .and_then(parse::PdfScan::into_observation),
-                        }),
-                        Outcome::Negative(kind) => {
-                            if let Some(evidence) =
-                                completed.pdf.and_then(|pdf| pdf.into_negative(kind))
-                            {
-                                batch.negatives.push(CachedNegative { query, evidence });
-                            }
-                        }
-                        _ => {}
+            if completed.reused {
+                continue;
+            }
+            let Some(query) = completed.query else {
+                continue;
+            };
+            match completed.outcome {
+                Outcome::Parsed {
+                    result,
+                    source_sha256,
+                    ..
+                } => batch.parsed.push(CachedParse {
+                    query,
+                    result: *result,
+                    source_sha256,
+                    pdf_observation: completed.pdf.and_then(parse::PdfScan::into_observation),
+                }),
+                Outcome::Negative(kind) => {
+                    if let Some(evidence) = completed.pdf.and_then(|pdf| pdf.into_negative(kind)) {
+                        batch.negatives.push(CachedNegative { query, evidence });
                     }
                 }
+                _ => {}
             }
         }
         batch.hits = std::mem::take(&mut scheduler.hits);
+        result.stats.refill_rounds = std::mem::take(&mut scheduler.rounds);
         drop(scheduler);
         let commit_started = Instant::now();
         if let Err(error) = cache.commit(batch) {
-            evidence::add_warning(
-                &mut result,
-                warning(
-                    ErrorCode::CacheWriteFailed,
-                    DiagnosticStage::Cache,
-                    error.to_string(),
-                    None,
-                ),
-            );
+            if result.status == EngineStatus::Ok {
+                result.status = EngineStatus::Partial;
+            }
+            result.warnings.push(warning(
+                ErrorCode::CacheWriteFailed,
+                DiagnosticStage::Cache,
+                error.to_string(),
+                None,
+            ));
         }
-        evidence::finish(&mut result, started, parse::elapsed_ms(commit_started));
-        let exit_code = i32::from(result.envelope.status == EngineStatus::Error) * 2;
-        Ok(ScannerOperation {
-            value: result,
-            exit_code,
-        })
+        result.stats.cache_commit_ms = parse::elapsed_ms(commit_started);
+        result.stats.total_duration_ms = parse::elapsed_ms(started);
+        Ok(result)
     }
 
-    pub fn doctor(&self) -> Result<ScannerOperation<DoctorResponse>, ScannerError> {
-        self.doctor_with_request_id(request_id())
-    }
-
-    pub fn doctor_with_request_id(
-        &self,
-        request_id: String,
-    ) -> Result<ScannerOperation<DoctorResponse>, ScannerError> {
+    pub fn doctor(&self) -> Result<ScannerDoctorReport, ScannerError> {
         let deadline = Instant::now() + Duration::from_secs(30);
-        let profile = self.profile(ReportMode::Daily)?;
-        ScanCache::open(self.cache_dir(), deadline)?.initialize()?;
-        ScanCache::check(self.cache_dir(), deadline)?;
-        let worker_path = PathBuf::from(&self.config.adapters.pdf_worker_path);
-        let identity = pdf_worker_identity(&worker_path)
+        self.check_ocr()?;
+        ScanCache::open(&self.cache_dir, deadline)?.initialize()?;
+        ScanCache::check(&self.cache_dir, deadline)?;
+        let worker_path = &self.pdf_worker_path;
+        let identity = pdf_worker_identity(worker_path)
             .map_err(|error| ReportError::new("SCANNER_PDF_IDENTITY_FAILED", error.to_string()))?;
-        PdfClient::new(worker_path, &profile, Default::default())
+        PdfClient::new(worker_path.clone(), &self.daily_profile, Default::default())
             .check(deadline)
             .map_err(|error| ReportError::new("SCANNER_PDF_HANDSHAKE_FAILED", error.to_string()))?;
-        let checks = vec![
-            DoctorCheck {
-                name: "scan_cache_v4".into(),
-                status: DoctorCheckStatus::Ok,
-                message: "schema and SQLite quick_check passed".into(),
-            },
-            DoctorCheck {
-                name: "office_parser".into(),
-                status: DoctorCheckStatus::Ok,
-                message: format!("in-process parser build {PARSER_CONTENT_IDENTITY}"),
-            },
-            DoctorCheck {
-                name: "pdf_worker".into(),
-                status: DoctorCheckStatus::Ok,
-                message: format!(
-                    "handshake passed, worker {}, PDFium {}",
-                    identity.worker_sha256, identity.pdfium_sha256
-                ),
-            },
-        ];
-        let value = DoctorResponse {
-            contract: CONTRACT.into(),
-            protocol_version: 1,
-            request_id,
+        let check = |name, message| ScannerDoctorCheck {
+            name,
             status: EngineStatus::Ok,
-            engine_version: env!("CARGO_PKG_VERSION").into(),
-            engine_build: ENGINE_BUILD.into(),
-            checks,
-            warnings: Vec::new(),
-            error: Nullable(None),
+            message,
         };
-        value.validate().map_err(invalid_configuration)?;
-        Ok(ScannerOperation {
-            value,
-            exit_code: 0,
+        Ok(ScannerDoctorReport {
+            status: EngineStatus::Ok,
+            checks: vec![
+                check(
+                    "scan_cache_v4",
+                    "schema and SQLite quick_check passed".into(),
+                ),
+                check(
+                    "office_parser",
+                    format!("in-process parser build {PARSER_CONTENT_IDENTITY}"),
+                ),
+                check(
+                    "pdf_worker",
+                    format!(
+                        "handshake passed, worker {}, PDFium {}",
+                        identity.worker_sha256, identity.pdfium_sha256
+                    ),
+                ),
+            ],
         })
     }
 
-    fn cache_dir(&self) -> &Path {
-        Path::new(&self.config.scan_db_path)
-            .parent()
-            .expect("absolute cache has a directory")
-    }
-
-    fn profile(
-        &self,
-        mode: ReportMode,
-    ) -> Result<Cow<'_, NormalizedScannerSettings>, ScannerError> {
-        let profile = if mode == ReportMode::Daily {
-            Cow::Borrowed(&self.daily_profile)
-        } else {
-            Cow::Owned(
-                config::normalize_scanner_settings(&self.config.scanner_settings, mode)
-                    .map_err(invalid_configuration)?,
-            )
-        };
-        if profile.parse.pdf.image_ocr.is_some() && !daily_parsers::OCR_AVAILABLE {
+    fn check_ocr(&self) -> Result<(), ScannerError> {
+        if self.daily_profile.parse.pdf.image_ocr.is_some() && !daily_parsers::OCR_AVAILABLE {
             return Err(ReportError::new(
                 "SCANNER_OCR_UNAVAILABLE",
                 "OCR is unavailable for this scan profile",
             ));
         }
-        Ok(profile)
+        Ok(())
     }
 }
 
@@ -438,38 +378,32 @@ fn discovery_request(
     profile: &NormalizedScannerSettings,
     work_dir: &str,
 ) -> Result<DiscoveryRequest, ScannerError> {
-    let date = |value| {
-        NaiveDate::parse_from_str(value, "%Y-%m-%d")
-            .map_err(|err| invalid_configuration(err.to_string()))
+    let ScanRequest {
+        start_date,
+        end_date,
+        utc_window,
+    } = *request;
+    if start_date > end_date || start_date.year() < 0 || end_date.year() > 9999 {
+        return Err(invalid_configuration("invalid scan date range"));
+    }
+    let (window_start_utc, window_end_utc) = match utc_window {
+        Some((start, end)) => {
+            let valid = |t: DateTime<Utc>| {
+                let nanos = t.timestamp_subsec_nanos();
+                (1..=9999).contains(&t.year())
+                    && nanos < 1_000_000_000
+                    && nanos.is_multiple_of(1_000)
+            };
+            if start >= end || !valid(start) || !valid(end) {
+                return Err(invalid_configuration("invalid UTC observation window"));
+            }
+            (start, end)
+        }
+        None => (
+            crate::types::utc_window(start_date)?.0,
+            crate::types::utc_window(end_date)?.1,
+        ),
     };
-    let start_date = date(&request.start_date)?;
-    let end_date = date(&request.end_date)?;
-    let (window_start_utc, window_end_utc) =
-        match (&request.window_start_utc, &request.window_end_utc) {
-            (Some(start), Some(end)) => {
-                let utc = |value: &str| {
-                    DateTime::parse_from_rfc3339(value)
-                        .map(|time| time.with_timezone(&Utc))
-                        .map_err(|err| invalid_configuration(err.to_string()))
-                };
-                (utc(start)?, utc(end)?)
-            }
-            _ => {
-                let shanghai = FixedOffset::east_opt(8 * 60 * 60).expect("Shanghai time offset");
-                let at_start = |day: NaiveDate| {
-                    day.and_hms_opt(0, 0, 0)
-                        .expect("day start")
-                        .and_local_timezone(shanghai)
-                        .single()
-                        .expect("fixed-offset time")
-                        .with_timezone(&Utc)
-                };
-                let through = end_date
-                    .checked_add_signed(Days::days(1))
-                    .ok_or_else(|| invalid_configuration("scan end date overflows".into()))?;
-                (at_start(start_date), at_start(through))
-            }
-        };
     let discovery = &profile.discovery;
     Ok(DiscoveryRequest {
         work_dir: PathBuf::from(discovery::normalize_contract_path_text(work_dir)),
@@ -639,7 +573,7 @@ fn snapshot_key(
         request.end_date,
         request.window_start_utc,
         request.window_end_utc,
-        &rules,
+        config::SnapshotRules(&rules),
         candidates,
     ))?))
 }
@@ -705,7 +639,6 @@ fn snapshot_manifest(
     profile: &NormalizedScannerSettings,
     scheduler: &Scheduler<'_>,
     key: String,
-    origin: u64,
 ) -> Result<Option<CacheSnapshot>, ScannerError> {
     let mut rows = Vec::with_capacity(files.len());
     let mut references = Vec::new();
@@ -737,6 +670,10 @@ fn snapshot_manifest(
         Cow::Borrowed(&scheduler.rounds),
         rows,
     );
+    let elapsed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let origin = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX).max(1);
     let mut manifest = origin.to_le_bytes().to_vec();
     serde_json::to_writer(&mut manifest, &plan)?;
     Ok(Some(CacheSnapshot {
@@ -757,35 +694,11 @@ fn warning(
         stage,
         message,
         retryable: true,
-        file_path: Nullable(file_path),
-        backend: Nullable(None),
+        file_path,
+        backend: None,
     }
 }
 
-fn invalid_configuration(message: String) -> ScannerError {
+fn invalid_configuration(message: impl Into<String>) -> ScannerError {
     ReportError::new("SCANNER_INVALID_CONFIGURATION", message)
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    daily_parsers::hex(&Sha256::digest(bytes))
-}
-
-fn request_id() -> String {
-    let time = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let sequence = u128::from(REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed));
-    let mut id = time ^ (u128::from(std::process::id()) << 64) ^ sequence;
-    id = (id & !(0xf << 76)) | (4 << 76);
-    id = (id & !(0x3 << 62)) | (0x2 << 62);
-    let hex = format!("{id:032x}");
-    format!(
-        "{}-{}-{}-{}-{}",
-        &hex[..8],
-        &hex[8..12],
-        &hex[12..16],
-        &hex[16..20],
-        &hex[20..]
-    )
 }

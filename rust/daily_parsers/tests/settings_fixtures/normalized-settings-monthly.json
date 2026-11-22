@@ -69,14 +69,7 @@
     }
   },
   "context": {
-    "profile_name": "monthly_balanced_v1",
-    "global_max_chars": 500000,
-    "per_file_max_chars": 100000,
-    "small_file_max_bytes": 65536,
-    "medium_file_max_bytes": 1048576,
-    "large_file_max_bytes": 10485760,
-    "priority_policy_version": "budget_nominal_v2",
-    "compression_policy_version": "markdown_context_v2"
+    "global_max_chars": 500000
   },
   "admission_policy_version": "budget_refill_v3",
   "classifier_policy_version": "pdf_text_presence_v2",

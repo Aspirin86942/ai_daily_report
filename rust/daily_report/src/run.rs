@@ -1,7 +1,7 @@
 mod input;
 pub mod personal;
 mod personal_scan;
-use crate::scan::{ContextResult, ScanRequest, Scanner, ScannerConfig};
+use crate::scan::{ScanRequest, ScanResult, Scanner};
 use crate::{
     config::AppConfig,
     model::transport::{HttpTransport, ModelTransport},
@@ -12,10 +12,9 @@ use crate::{
     ReportError,
 };
 use chrono::{DateTime, Utc};
-use daily_parsers::settings::{AdapterPaths, ReportMode};
+use daily_parsers::settings::ReportMode;
 use std::{
     fs,
-    path::Path,
     sync::OnceLock,
     time::{Duration, Instant},
 };
@@ -113,46 +112,31 @@ impl App {
     pub fn fingerprint(&self, recovery: bool) -> Result<String, ReportError> {
         self.config.fingerprint(recovery)
     }
-    pub fn scan(&self, request: &ReportRequest) -> Result<ContextResult, ReportError> {
+    pub fn scan(&self, request: &ReportRequest) -> Result<ScanResult, ReportError> {
         if self.scanner.get().is_none() {
             fs::create_dir_all(self.config.index_db_path.parent().unwrap())?;
-            let scanner = Scanner::open(ScannerConfig {
-                work_dir: path_text(&self.config.paths.work_dir)?,
-                scan_db_path: path_text(&self.config.index_db_path)?,
-                scanner_settings: self.config.scanner.clone(),
-                adapters: AdapterPaths {
-                    office_worker_path: path_text(&self.config.office_worker_path)?,
-                    pdf_worker_path: path_text(&self.config.pdf_worker_path)?,
-                },
-            })
-            .map_err(|_| ReportError::new("SCANNER_UNAVAILABLE", "原生扫描器初始化失败"))?;
+            let scanner = Scanner::open(self.config.scanner_config())
+                .map_err(|_| ReportError::new("SCANNER_UNAVAILABLE", "原生扫描器初始化失败"))?;
             let _ = self.scanner.set(scanner);
         }
-        let (start, _) = crate::types::utc_window(request.period.start)?;
-        let (_, end) = crate::types::utc_window(request.period.end)?;
-        let result = self
-            .scanner
+        self.scanner
             .get()
             .unwrap()
             .build_context(&ScanRequest {
-                report_mode: ReportMode::Daily,
-                start_date: request.period.start.to_string(),
-                end_date: request.period.end.to_string(),
-                window_start_utc: Some(start.to_rfc3339()),
-                window_end_utc: Some(end.to_rfc3339()),
-                compression_profile: None,
+                start_date: request.period.start,
+                end_date: request.period.end,
+                utc_window: None,
             })
-            .map_err(|_| ReportError::new("SCANNER_UNAVAILABLE", "原生扫描操作失败"))?
-            .value;
-        Ok(result)
+            .map_err(|_| ReportError::new("SCANNER_UNAVAILABLE", "原生扫描操作失败"))
     }
 }
 
-fn path_text(path: &Path) -> Result<String, ReportError> {
+fn path_text(path: &std::path::Path) -> Result<String, ReportError> {
     path.to_str()
         .map(str::to_owned)
         .ok_or_else(|| ReportError::new("PATH_INVALID", "路径不是有效文字"))
 }
+
 pub fn run_report(request: ReportRequest, app: &App) -> Result<ReportOutcome, ReportError> {
     if request.period.mode != ReportMode::Daily
         || app.config.report.profile != crate::config::ReportProfile::Personal

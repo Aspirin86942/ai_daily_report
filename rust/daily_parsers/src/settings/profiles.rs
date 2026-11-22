@@ -79,16 +79,20 @@ impl Validate for TextParseProfile {
     fn validate(&self) -> Result<(), String> {
         require_const(&self.backend, "light_text_v2", "text.backend")?;
         validate_csv_encodings(&self.csv_encodings)?;
-        require_range(self.read_head_bytes, 1, 67_108_864, "read_head_bytes")?;
-        require_range(self.read_tail_bytes, 1, 67_108_864, "read_tail_bytes")?;
-        require_range(self.max_chars, 1, 10_000_000, "text.max_chars")?;
-        require_range(
-            self.excerpt_max_chars,
-            1,
-            10_000_000,
-            "text.excerpt_max_chars",
-        )
+        validate_positive_limits(&[
+            ("read_head_bytes", self.read_head_bytes, 67_108_864),
+            ("read_tail_bytes", self.read_tail_bytes, 67_108_864),
+            ("text.max_chars", self.max_chars, 10_000_000),
+            ("text.excerpt_max_chars", self.excerpt_max_chars, 10_000_000),
+        ])
     }
+}
+
+fn validate_positive_limits(limits: &[(&str, u64, u64)]) -> Result<(), String> {
+    for &(name, value, maximum) in limits {
+        require_range(value, 1, maximum, name)?;
+    }
+    Ok(())
 }
 
 pub fn default_csv_encodings() -> Vec<String> {
@@ -131,30 +135,21 @@ pub struct OfficeParseProfile {
 impl Validate for OfficeParseProfile {
     fn validate(&self) -> Result<(), String> {
         require_non_empty(&self.primary_backend, 1024, "primary_backend")?;
-        require_range(self.excel_max_sheets, 1, 1024, "excel_max_sheets")?;
-        require_range(self.excel_max_rows, 1, 1_048_576, "excel_max_rows")?;
-        require_range(self.excel_max_columns, 1, 16_384, "excel_max_columns")?;
-        require_range(
-            self.docx_max_paragraphs,
-            1,
-            1_000_000,
-            "docx_max_paragraphs",
-        )?;
-        require_range(self.docx_max_tables, 1, 100_000, "docx_max_tables")?;
-        require_range(
-            self.docx_table_max_rows,
-            1,
-            1_048_576,
-            "docx_table_max_rows",
-        )?;
-        require_range(self.docx_table_max_cols, 1, 16_384, "docx_table_max_cols")?;
-        require_range(self.pptx_max_slides, 1, 100_000, "pptx_max_slides")?;
-        require_range(
-            self.document_excerpt_max_chars,
-            1,
-            10_000_000,
-            "document_excerpt_max_chars",
-        )
+        validate_positive_limits(&[
+            ("excel_max_sheets", self.excel_max_sheets, 1024),
+            ("excel_max_rows", self.excel_max_rows, 1_048_576),
+            ("excel_max_columns", self.excel_max_columns, 16_384),
+            ("docx_max_paragraphs", self.docx_max_paragraphs, 1_000_000),
+            ("docx_max_tables", self.docx_max_tables, 100_000),
+            ("docx_table_max_rows", self.docx_table_max_rows, 1_048_576),
+            ("docx_table_max_cols", self.docx_table_max_cols, 16_384),
+            ("pptx_max_slides", self.pptx_max_slides, 100_000),
+            (
+                "document_excerpt_max_chars",
+                self.document_excerpt_max_chars,
+                10_000_000,
+            ),
+        ])
     }
 }
 
@@ -172,26 +167,6 @@ pub struct PdfParseProfile {
     pub backend: String,
     pub max_pages: u64,
     pub excerpt_max_chars: u64,
-}
-
-impl Validate for PdfParseProfile {
-    fn validate(&self) -> Result<(), String> {
-        if let Some(ocr) = &self.image_ocr {
-            if !ocr.enabled {
-                return Err("disabled OCR must be omitted from a normalized PDF profile".into());
-            }
-            ocr.validate()?;
-        }
-        validate_pdf_policy(&self.selection_policy_version)?;
-        require_non_empty(&self.backend, 1024, "pdf.backend")?;
-        require_range(self.max_pages, 1, 10_000, "pdf.max_pages")?;
-        require_range(
-            self.excerpt_max_chars,
-            1,
-            10_000_000,
-            "pdf.excerpt_max_chars",
-        )
-    }
 }
 
 fn legacy_pdf_selection_policy() -> String {
@@ -256,64 +231,10 @@ pub(super) fn validate_excerpt_priority_paths(paths: &[String]) -> Result<(), St
     Ok(())
 }
 
-impl Validate for ParseProfile {
-    fn validate(&self) -> Result<(), String> {
-        let excerpt_version = self.excerpt_policy_version.strip_prefix("fair_semantic_v");
-        if self.cache_payload_version != 1
-            || !excerpt_version
-                .is_some_and(|version| matches!(version.as_bytes(), [b'1'..=b'9'] | b"10"))
-        {
-            return Err("parse evidence policies are unsupported".into());
-        }
-        validate_excerpt_priority_paths(&self.excerpt_priority_paths)?;
-        require_sorted_unique(&self.excerpt_priority_paths, "excerpt_priority_paths")?;
-        require_range(
-            self.aggregate_max_chars,
-            1,
-            10_000_000,
-            "aggregate_max_chars",
-        )?;
-        self.text.validate()?;
-        self.office.validate()?;
-        self.pdf.validate()
-    }
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ContextProfile {
-    pub profile_name: String,
     pub global_max_chars: u64,
-    pub per_file_max_chars: u64,
-    pub small_file_max_bytes: u64,
-    pub medium_file_max_bytes: u64,
-    pub large_file_max_bytes: u64,
-    pub priority_policy_version: String,
-    pub compression_policy_version: String,
-}
-
-impl Validate for ContextProfile {
-    fn validate(&self) -> Result<(), String> {
-        require_range(self.global_max_chars, 1, 10_000_000, "global_max_chars")?;
-        require_range(self.per_file_max_chars, 1, 10_000_000, "per_file_max_chars")?;
-        if self.small_file_max_bytes != 65_536
-            || self.medium_file_max_bytes != 1_048_576
-            || self.large_file_max_bytes != 10_485_760
-            || self.global_max_chars < self.per_file_max_chars
-        {
-            return Err("context thresholds or budgets violate v2".to_string());
-        }
-        require_const(
-            &self.priority_policy_version,
-            PRIORITY_POLICY_VERSION,
-            "priority_policy_version",
-        )?;
-        require_const(
-            &self.compression_policy_version,
-            COMPRESSION_POLICY_VERSION,
-            "compression_policy_version",
-        )
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -335,43 +256,4 @@ pub struct NormalizedScannerSettings {
     pub worker_max_requests: u64,
     pub worker_idle_ttl_ms: u64,
     pub worker_rss_limit_bytes: u64,
-}
-
-impl Validate for NormalizedScannerSettings {
-    fn validate(&self) -> Result<(), String> {
-        self.discovery.validate()?;
-        self.execution.validate()?;
-        self.parse.validate()?;
-        self.context.validate()?;
-        let expected = (
-            self.report_mode.compression_profile().as_str(),
-            CONTEXT_PER_FILE_MAX_CHARS,
-        );
-        let actual = (
-            self.context.profile_name.as_str(),
-            self.context.per_file_max_chars,
-        );
-        if actual != expected {
-            return Err("report mode and normalized context profile do not match".to_string());
-        }
-        if !matches!(
-            self.admission_policy_version.as_str(),
-            "budget_admission_v2" | "budget_refill_v3"
-        ) {
-            return Err("unsupported admission_policy_version".to_string());
-        }
-        validate_pdf_policy(&self.classifier_policy_version)?;
-        ScannerSettings {
-            max_candidate_files: Some(self.max_candidate_files),
-            max_pdf_text_extractions: Some(self.max_pdf_text_extractions),
-            max_total_pdf_classification_pages: Some(self.max_total_pdf_classification_pages),
-            pdf_classification_timeout_ms: Some(self.pdf_classification_timeout_ms),
-            total_deadline_ms: Some(self.total_deadline_ms),
-            worker_max_requests: Some(self.worker_max_requests),
-            worker_idle_ttl_ms: Some(self.worker_idle_ttl_ms),
-            worker_rss_limit_bytes: Some(self.worker_rss_limit_bytes),
-            ..ScannerSettings::default()
-        }
-        .validate_limits()
-    }
 }

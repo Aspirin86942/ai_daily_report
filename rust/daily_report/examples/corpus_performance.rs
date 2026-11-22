@@ -1,13 +1,16 @@
 //! Offline, exhaustive corpus benchmark. Four-file batches keep the production
 //! context budget from silently excluding files. Source documents are copied once;
 //! preparation is timed separately and the same frozen corpus can be replayed.
+#[path = "support/scan_projection.rs"]
+mod scan_projection;
+
 use ai_daily_report::scan::{
-    config::normalize_scanner_settings, ScanRequest, Scanner, ScannerConfig,
+    cache::CACHE_FILENAME, config::normalize_scanner_settings, ScanRequest, Scanner, ScannerConfig,
 };
 use ai_daily_report::snapshots::digest as sha256_hex;
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Utc};
 use daily_parsers::discovery::{discover_files_with_diagnostics, DiscoveryRequest};
-use daily_parsers::settings::{AdapterPaths, ReportMode, ScannerSettings};
+use daily_parsers::settings::{ReportMode, ScannerSettings};
 use serde_json::{json, Value};
 use std::{
     fs::{self, File},
@@ -96,6 +99,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("corpus has no eligible files".into());
     }
     let batches = files.len().div_ceil(4);
+    let request = ScanRequest {
+        start_date,
+        end_date,
+        utc_window: None,
+    };
     // Discovery filters were already applied to the original paths. The staged
     // names are neutral, and each batch retains the production parsing limits.
     settings.ignored_patterns = Some(Vec::new());
@@ -109,39 +117,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         fs::create_dir(&database_dir)?;
         let started = Instant::now();
         let scanner = Scanner::open(ScannerConfig {
-            work_dir: fs::canonicalize(corpus.join(format!("batch-{batch:04}")))?
-                .to_string_lossy()
-                .into_owned(),
-            scan_db_path: database_dir
-                .join("scan_cache_v4.sqlite3")
-                .to_string_lossy()
-                .into_owned(),
+            work_dir: fs::canonicalize(corpus.join(format!("batch-{batch:04}")))?,
+            scan_db_path: database_dir.join(CACHE_FILENAME),
             scanner_settings: settings.clone(),
-            adapters: AdapterPaths {
-                office_worker_path: workers
-                    .join("ai-daily-report.exe")
-                    .to_string_lossy()
-                    .into_owned(),
-                pdf_worker_path: workers
-                    .join("ai-daily-pdf-worker.exe")
-                    .to_string_lossy()
-                    .into_owned(),
-            },
+            pdf_worker_path: workers.join("ai-daily-pdf-worker.exe"),
         })?;
         initialization_ms += started.elapsed().as_secs_f64() * 1000.0;
         for (temperature_index, temperature) in ["cold", "warm"].iter().enumerate() {
+            let observed = Utc::now();
             let started = Instant::now();
-            let result = scanner.build_context(&ScanRequest {
-                report_mode: ReportMode::Daily,
-                start_date: start_date.to_string(),
-                end_date: end_date.to_string(),
-                window_start_utc: None,
-                window_end_utc: None,
-                compression_profile: None,
-            })?;
+            let (scan, facts) = scanner.build_context_for_benchmark(&request, observed)?;
             let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
             totals[temperature_index] += elapsed_ms;
-            let result = serde_json::to_value(result.value)?;
+            let result = scan_projection::project(&scan, &facts, env!("AI_DAILY_REPORT_BUILD"));
             let evidence = &result["evidence"];
             let audit_files = evidence["files"]
                 .as_array()
@@ -177,7 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "files":files.len(),"batches":batches,"cold_ms":totals[0],"warm_ms":totals[1],
         "initialization_ms":initialization_ms,"suite_wall_ms":suite_started.elapsed().as_secs_f64()*1000.0,
         "manifest_sha256":sha256_hex(&fs::read(&manifest_path)?),
-        "scope":"all eligible source documents in fixed four-file batches; cold/warm include scanning, parsing, cache, context and audit; copying and database initialization measured separately; no model calls"
+        "scope":"All eligible source documents in fixed four-file batches. Cold and warm timings cover scanning, parsing, cache and excerpt allocation. Projection, copy and database initialization are outside these timings. Model calls: 0."
     });
     fs::write(
         output.join("summary.json"),

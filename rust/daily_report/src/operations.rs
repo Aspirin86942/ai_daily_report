@@ -1,10 +1,9 @@
 //! Windows task definitions and explicit operational checks.
 pub mod rollback;
 
-use crate::scan::{Scanner, ScannerConfig};
+use crate::scan::Scanner;
 use crate::{config::AppConfig, run::App, snapshots::reject_redirects, types, ReportError};
 use chrono::{DateTime, Utc};
-use daily_parsers::settings::AdapterPaths;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
 use std::{
@@ -256,34 +255,19 @@ pub fn doctor(app: &App, check_model: bool, now: DateTime<Utc>) -> Result<Value,
             "报告数据库完整性检查失败",
         ));
     }
-    let scanner = Scanner::open(ScannerConfig {
-        work_dir: app.config.paths.work_dir.to_string_lossy().into(),
-        scan_db_path: app.config.index_db_path.to_string_lossy().into(),
-        scanner_settings: app.config.scanner.clone(),
-        adapters: AdapterPaths {
-            office_worker_path: app.config.office_worker_path.to_string_lossy().into(),
-            pdf_worker_path: app.config.pdf_worker_path.to_string_lossy().into(),
-        },
-    })
-    .map_err(|error| {
+    let scanner = Scanner::open(app.config.scanner_config()).map_err(|error| {
         ReportError::new("SCANNER_UNAVAILABLE", format!("扫描库初始化失败。{error}"))
     })?;
     let result = scanner.doctor().map_err(|error| {
         ReportError::new("SCANNER_DOCTOR_FAILED", format!("扫描自检失败。{error}"))
     })?;
-    if result.exit_code != 0 {
-        return Err(ReportError::new(
-            "WORKER_DOCTOR_FAILED",
-            "解析进程握手失败；请核对同版 EXE 和 PDFium DLL",
-        ));
-    }
     let model = if check_model {
         model_check(app, now)?
     } else {
         json!({"checked":false,"calls":0})
     };
     Ok(
-        json!({"status":"ok","strict":true,"runtime":"rust","build":env!("AI_DAILY_REPORT_BUILD"),"scanner":result.value,
+        json!({"status":"ok","strict":true,"runtime":"rust","build":env!("AI_DAILY_REPORT_BUILD"),"scanner":result,
             "parser_content_identity":crate::scan::PARSER_CONTENT_IDENTITY,"templates":TEMPLATES.len(),"database":"ok","model":model}),
     )
 }
