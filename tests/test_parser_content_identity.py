@@ -1,4 +1,4 @@
-"""Run the real Rust build script against disposable source trees."""
+"""Exercise the compiled v2 build scripts on private, disposable inputs."""
 import json
 import os
 from pathlib import Path
@@ -7,141 +7,121 @@ import subprocess
 import tempfile
 import unittest
 
-
 ROOT = Path(__file__).resolve().parents[1]
 RUST = ROOT / "rust"
-CARGO = Path.home() / ".cargo/bin/cargo.exe"
+CREATE_FLAGS = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def run(command, **kwargs):
+    return subprocess.run(command, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", creationflags=CREATE_FLAGS, **kwargs)
 
 
 class ParserContentIdentityTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cargo = shutil.which("cargo") or str(Path.home() / ".cargo/bin/cargo.exe")
+        cls.rustc = str(Path(cargo).with_name("rustc.exe" if os.name == "nt" else "rustc"))
+        metadata = run([cargo, "metadata", "--no-deps", "--format-version", "1", "--locked"], cwd=RUST, check=True)
+        packages = {p["id"]: p["name"] for p in json.loads(metadata.stdout)["packages"]}
+        build = run([cargo, "build", "--locked", "--offline", "-p", "ai-daily-report",
+                     "--lib", "--message-format", "json"], cwd=RUST)
+        if build.returncode:
+            messages = [json.loads(line) for line in build.stdout.splitlines() if line.startswith("{")]
+            errors = [m["message"]["rendered"] for m in messages
+                      if m.get("reason") == "compiler-message" and m["message"]["level"] == "error"]
+            raise AssertionError("\n".join(errors) or build.stderr)
+        cls.programs = {}
+        for line in build.stdout.splitlines():
+            event = json.loads(line)
+            if event.get("reason") == "compiler-artifact" and "custom-build" in event["target"]["kind"]:
+                name = packages.get(event["package_id"])
+                if name in ("daily_parsers", "ai-daily-report"):
+                    cls.programs[name] = Path(event["filenames"][0])
+        if set(cls.programs) != {"daily_parsers", "ai-daily-report"}:
+            raise AssertionError(f"Missing current build scripts: {list(cls.programs)}")
+
     def setUp(self):
-        build_dir = Path(os.environ.get("CARGO_TARGET_DIR", RUST / "target")) / "debug/build"
-        builds = list(build_dir.glob("ai-daily-scanner-core-*/build-script-build.exe"))
-        self.assertTrue(builds, "Build debug workers first")
-        self.program = max(builds, key=lambda p: p.stat().st_mtime_ns)
-        outputs = list(build_dir.glob("ai-daily-scanner-core-*/out/parser-build.json"))
-        document = json.loads(max(outputs, key=lambda p: p.stat().st_mtime_ns).read_bytes())
-        self.temp = tempfile.TemporaryDirectory(prefix="parser-identity-")
-        self.root = Path(self.temp.name)
-        for path in RUST.iterdir():
-            if path.is_file() and path.suffix in (".toml", ".lock", ".rs", ".json"):
-                shutil.copy2(path, self.root / path.name)
-            elif path.is_dir() and (path / "Cargo.toml").is_file():
-                target = self.root / path.name
-                target.mkdir()
-                shutil.copy2(path / "Cargo.toml", target / "Cargo.toml")
-                for name in ("src", "tests", "examples"):
-                    if (path / name).exists():
-                        shutil.copytree(path / name, target / name)
-                if (path / "build.rs").exists():
-                    shutil.copy2(path / "build.rs", target / "build.rs")
-        self.environment = dict(os.environ)
-        # The host target locates the executable; each disposable build has its own OUT_DIR.
-        self.environment.pop("CARGO_TARGET_DIR", None)
-        for name in list(self.environment):
-            if name.startswith("CARGO_CFG_"):
-                del self.environment[name]
-        values = dict(document["environment"])
-        self.environment["CARGO_ENCODED_RUSTFLAGS"] = values.pop("rustflags")
-        self.environment.update(values)
-        self.environment.update({
-            "CARGO": str(CARGO), "RUSTC": str(CARGO.with_name("rustc.exe")),
-            "CARGO_MANIFEST_DIR": str(self.root / "scanner_core"),
-            "OUT_DIR": str(self.root / "out"), "TARGET": "x86_64-pc-windows-msvc",
-        })
-        (self.root / "out").mkdir()
-        self.baseline = self.identity()
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.rust = Path(temp.name) / "rust"
+        self.rust.mkdir()
+        self.env = {**os.environ, "RUSTC": self.rustc, "TARGET": "x86_64-pc-windows-msvc",
+                    "PROFILE": "release", "CARGO_CFG_TARGET_FEATURE": "crt-static",
+                    "CARGO_ENCODED_RUSTFLAGS": ""}
+        self.env.pop("CARGO_FEATURE_OCR", None)
+        self.inputs = json.loads((RUST / "parser-inputs.json").read_bytes())["sources"]
+        for name in self.inputs:
+            src, dst = RUST / name, self.rust / name
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            if src.is_dir():
+                shutil.copytree(src, dst)
+            else:
+                shutil.copyfile(src, dst)
 
-    def tearDown(self):
-        self.temp.cleanup()
+    def script(self, name, **overrides):
+        folder = "daily_report" if name == "ai-daily-report" else name
+        return run([str(self.programs[name])], cwd=self.rust,
+                   env={**self.env, "CARGO_MANIFEST_DIR": str(self.rust / folder), **overrides})
 
-    def identity(self):
-        result = subprocess.run([str(self.program)], cwd=self.root, env=self.environment,
-                                capture_output=True, text=True, creationflags=0x08000000)
+    def identity(self, **overrides):
+        result = self.script("daily_parsers", **overrides)
         self.assertEqual(result.returncode, 0, result.stderr)
-        return dict(line.removeprefix("cargo:rustc-env=").split("=", 1)
-                    for line in result.stdout.splitlines() if line.startswith("cargo:rustc-env="))
+        digest = next(line.split("=", 2)[2] for line in result.stdout.splitlines()
+                      if line.startswith("cargo:rustc-env=DAILY_PARSER_IDENTITY="))
+        self.assertRegex(digest, "^[0-9a-f]{64}$")
+        self.assertIn("cargo::metadata=identity=" + digest, result.stdout)
+        return digest
 
-    def test_orchestration_and_debug_metadata_do_not_invalidate_content(self):
-        for name in ("scanner_core/src/scheduler.rs", "scanner_core/src/store/cache.rs",
-                     "report_app/src/run.rs"):
-            with (self.root / name).open("a", encoding="utf-8") as stream:
-                stream.write("\n// Isolated non-parser edit.\n")
-        with (self.root / "Cargo.toml").open("a", encoding="utf-8") as stream:
-            stream.write("\n[profile.dev]\ndebug = 1\n")
-        self.environment["CARGO_ENCODED_RUSTFLAGS"] = "\x1f".join(filter(None, [
-            self.environment["CARGO_ENCODED_RUSTFLAGS"], "-C", "debuginfo=1"]))
-        candidate = self.identity()
-        self.assertEqual(candidate["AI_DAILY_PARSER_BUILD"], self.baseline["AI_DAILY_PARSER_BUILD"])
-        self.assertNotEqual(candidate["AI_DAILY_ENGINE_BUILD"], self.baseline["AI_DAILY_ENGINE_BUILD"])
-
-    def test_parser_protocol_budget_and_dependency_features_invalidate(self):
-        for name in ("text_parser/src/lib.rs", "worker_contract/src/lib.rs", "worker_contract/src/archive.rs",
-                     "scanner_core/src/config.rs", "pdf_parser/src/lib.rs", "build-inputs.json",
-                     "scanner_core/src/parsers/mod.rs"):
-            path = self.root / name
-            original = path.read_bytes()
-            path.write_bytes(original + b"\n ")
-            self.assertNotEqual(self.identity()["AI_DAILY_PARSER_BUILD"], self.baseline["AI_DAILY_PARSER_BUILD"], name)
-            path.write_bytes(original)
-        path = self.root / "Cargo.toml"
-        path.write_text(path.read_text(encoding="utf-8").replace('["arbitrary_precision"]', '["arbitrary_precision", "raw_value"]'), encoding="utf-8")
-        self.assertNotEqual(self.identity()["AI_DAILY_PARSER_BUILD"], self.baseline["AI_DAILY_PARSER_BUILD"])
-
-    def test_pdf_selected_pages_and_excerpt_allocation_invalidate_content(self):
-        for name, needle, replacement in (
-            ("scanner_core/src/source_allocation/ranges.rs", b"fn full_excerpt", b"fn changed_excerpt"),
-            ("scanner_core/src/session/pool.rs", b"remaining_timeout_ms", b"changed_timeout_ms"),
-            ("scanner_core/src/parsers/document.rs", b"profile.max_pages == 2", b"profile.max_pages == 3"),
-            ("pdf_parser/src/excerpt.rs", b"const MAX_LINES: usize = 512", b"const MAX_LINES: usize = 511"),
-        ):
+    def test_parser_request_budget_and_pins_invalidate(self):
+        baseline = self.identity()
+        for name in ("daily_parsers/src/text/mod.rs", "daily_parsers/src/office/xlsx.rs",
+                     "daily_parsers/src/pdf_wire.rs", "pdf_worker/src/reader.rs",
+                     "daily_report/src/scan/parse.rs", "daily_report/src/config.defaults.json",
+                     "Cargo.lock", "build-inputs.json", "daily_report/Cargo.toml"):
             with self.subTest(name=name):
-                path = self.root / name
-                original = path.read_bytes()
-                self.assertIn(needle, original)
-                path.write_bytes(original.replace(needle, replacement, 1))
-                self.assertNotEqual(self.identity()["AI_DAILY_PARSER_BUILD"], self.baseline["AI_DAILY_PARSER_BUILD"])
-                path.write_bytes(original)
+                path = self.rust / name
+                saved = path.read_bytes()
+                path.write_bytes(saved + b"\n")
+                self.assertNotEqual(self.identity(), baseline)
+                path.write_bytes(saved)
+        self.assertEqual(self.identity(), baseline)
 
-    def test_build_label_cannot_override_parser_identity(self):
-        self.environment["AI_DAILY_BUILD_ID"] = "explicit-audit-label"
-        candidate = self.identity()
-        self.assertEqual(candidate["AI_DAILY_ENGINE_BUILD"], "explicit-audit-label")
-        self.assertEqual(candidate["AI_DAILY_PARSER_BUILD"], self.baseline["AI_DAILY_PARSER_BUILD"])
+    def test_abi_compiler_options_and_ocr_are_distinct(self):
+        baseline = self.identity()
+        for key, value in (("TARGET", "other-target"), ("PROFILE", "debug"),
+                           ("CARGO_CFG_TARGET_FEATURE", "sse2"),
+                           ("CARGO_ENCODED_RUSTFLAGS", "-Copt-level=2"), ("CARGO_FEATURE_OCR", "1")):
+            with self.subTest(key=key):
+                self.assertNotEqual(self.identity(**{key: value}), baseline)
 
-    def test_application_manifest_can_change_unified_parser_features(self):
-        path = self.root / "report_app/Cargo.toml"
-        original = path.read_text(encoding="utf-8")
-        needle = "serde_json.workspace = true"
-        self.assertIn(needle, original)
-        path.write_text(original.replace(
-            needle, 'serde_json = { workspace = true, features = ["raw_value"] }',
-        ), encoding="utf-8")
-        self.assertNotEqual(
-            self.identity()["AI_DAILY_PARSER_BUILD"], self.baseline["AI_DAILY_PARSER_BUILD"],
-        )
+    def test_report_only_changes_and_external_build_labels_do_not_change_parser(self):
+        baseline = self.identity()
+        path = self.rust / "daily_report/src/publish.rs"
+        path.write_bytes(b"report-only formatting change")
+        self.assertEqual(self.identity(AI_DAILY_ENGINE_BUILD="foreign-build"), baseline)
 
-    def test_corrupted_dependency_cache_is_recomputed(self):
-        cache = self.root / "out/parser-dependencies.json"
-        if not cache.exists():
-            self.skipTest("Cargo configuration overrides disable metadata caching")
-        saved = json.loads(cache.read_bytes())
-        saved["value"]["metadata"]["resolve"]["nodes"] = []
-        cache.write_text(json.dumps(saved), encoding="utf-8")
-        self.assertEqual(self.identity(), self.baseline)
-        restored = json.loads(cache.read_bytes())
-        self.assertTrue(restored["value"]["metadata"]["resolve"]["nodes"])
+    def test_missing_or_nonlocal_input_fails_closed(self):
+        path = self.rust / "parser-inputs.json"
+        for name in ("missing.rs", "../outside.rs"):
+            with self.subTest(name=name):
+                path.write_text(json.dumps({"schema": "ai_daily_parser_inputs_v2", "sources": [name]}), encoding="utf-8")
+                self.assertNotEqual(self.script("daily_parsers").returncode, 0)
 
-    def test_stale_build_script_cannot_attest_to_changed_helper_source(self):
-        path = self.root / "build_identity/src/parser_identity.rs"
-        path.write_bytes(path.read_bytes() + b"\n ")
-        result = subprocess.run(
-            [str(self.program)], cwd=self.root, env=self.environment,
-            capture_output=True, text=True, creationflags=0x08000000,
-        )
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("build script does not match source", result.stderr)
-        self.assertNotIn("cargo:rustc-env=AI_DAILY_PARSER_BUILD=", result.stdout)
+    def test_engine_attests_to_its_parser_and_template_bytes(self):
+        template = self.rust.parent / "templates/daily_prompt.md"
+        template.parent.mkdir()
+        template.write_text("one", encoding="utf-8")
+        shutil.copyfile(RUST / "daily_report/build.rs", self.rust / "daily_report/build.rs")
+        def engine(parser):
+            result = self.script("ai-daily-report", DEP_DAILY_PARSERS_IDENTITY=parser)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            return next(l for l in result.stdout.splitlines() if l.startswith("cargo:rustc-env=AI_DAILY_REPORT_BUILD="))
+        parser = self.identity()
+        baseline = engine(parser)
+        self.assertNotEqual(engine("0" * 64), baseline)
+        template.write_text("two", encoding="utf-8")
+        self.assertNotEqual(engine(parser), baseline)
 
 
 if __name__ == "__main__":

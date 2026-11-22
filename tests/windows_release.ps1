@@ -39,7 +39,7 @@ function Update-TestManifest([string]$RelativePath) {
 }
 
 # Both the manifest and directory omit the file: the verifier must know it is required.
-$required = @('scripts/health_notify.ps1', 'parser-build.json', 'templates/personal_daily_scan_template_v6.md')
+$required = @('scripts/health_notify.ps1', 'ai-daily-pdf-worker.exe', 'templates/daily_render_template.md')
 $hasOcrModels = Test-Path -LiteralPath (Join-Path $candidate 'ocr-models')
 if ($hasOcrModels) { $required += 'ocr-models/rec.mnn' }
 foreach ($relative in $required) {
@@ -61,20 +61,17 @@ if ($hasOcrModels) {
     Assert-Rejected { Test-RustReleaseBundle $candidate } 'Pinned OCR model hash mismatch: dict.txt'
     [IO.File]::Copy((Join-Path $source $relative), $file, $true)
 }
-$relative = 'parser-manifest.json'
-$file = Join-Path $candidate $relative
-$parser = [IO.File]::ReadAllText($file) | ConvertFrom-Json
-$parser.files.'pdfium.dll' = '0' * 64
-[IO.File]::WriteAllText($file, ($parser | ConvertTo-Json -Depth 10), $utf8)
-Update-TestManifest $relative
-Assert-Rejected { Test-RustReleaseBundle $candidate } 'Parser manifest hash mismatch: pdfium.dll'
-[IO.File]::Copy((Join-Path $source $relative), $file, $true)
+$manifest = $manifestText | ConvertFrom-Json
+$manifest.parser_content_identity = '0' * 64
+[IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 30), $utf8)
+Assert-Rejected { Test-RustReleaseBundle $candidate } 'Release build identity mismatch'
+[IO.File]::WriteAllText($manifestPath, $manifestText, $utf8)
 
-$relative = 'templates/personal_daily_scan_prompt_v8.md'
+$relative = 'templates/daily_prompt.md'
 $file = Join-Path $candidate $relative
 [IO.File]::AppendAllText($file, 'changed', $utf8)
 Update-TestManifest $relative
-Assert-Rejected { Test-RustReleaseBundle $candidate } '*TEMPLATE_BUILD_MISMATCH*personal_daily_scan_prompt_v8.md*'
+Assert-Rejected { Test-RustReleaseBundle $candidate } '*TEMPLATE_BUILD_MISMATCH*daily_prompt.md*'
 [IO.File]::Copy((Join-Path $source $relative), $file, $true)
 [IO.File]::WriteAllText($manifestPath, $manifestText, $utf8)
 

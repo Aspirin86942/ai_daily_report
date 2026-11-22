@@ -39,7 +39,14 @@ $script:disabled = 0
 $script:badReadback = $false
 $script:afterRegister = ''
 $script:readbackFault = ''
-function Get-ScheduledTask { param($TaskPath,$TaskName) if (-not $TaskName -and $null -ne $script:task) { $script:task } }
+$script:taskReads = 0
+function Get-ScheduledTask {
+    param($TaskPath,$TaskName)
+    if (-not $TaskName) {
+        $script:taskReads++
+        if ($null -ne $script:task) { $script:task }
+    }
+}
 function Get-ScheduledTaskInfo { param($TaskName) }
 function Export-ScheduledTask {
     param($TaskName,$TaskPath)
@@ -56,8 +63,77 @@ function Register-ScheduledTask { param($TaskName,$TaskPath,$Xml,[switch]$Force)
 }
 function Disable-ScheduledTask { param($TaskName,$TaskPath) $script:disabled++ }
 function Unregister-ScheduledTask { param($TaskName,$TaskPath,[switch]$Confirm) $script:task = $null }
-$preview = Install-ReportDailyTask -Plan $plan
-Assert-Test (-not $preview.Applied -and $script:registered -eq 0) 'Preview registered a task'
+
+$prefix = 'Local\AIDailyReportTaskTest-' + [Guid]::NewGuid().ToString('N')
+$ready = [Threading.EventWaitHandle]::new($false, 'ManualReset', "$prefix-ready")
+$finish = [Threading.EventWaitHandle]::new($false, 'ManualReset', "$prefix-finish")
+$fixture = @{
+    common = Join-Path $repo 'scripts/daily_task_common.ps1'
+    prefix = $prefix
+    plan = @{
+        owner_marker = $plan.owner_marker
+        task_path = $plan.task_path
+        user_sid = $plan.user_sid
+        project_root = Join-Path $root 'previous-release'
+        config_dir = Join-Path $root 'previous-config'
+        task_name = $plan.task_name + ' Health'
+        kind = 'health'
+    }
+}
+$payload = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($fixture | ConvertTo-Json -Compress)))
+$ownerScript = @'
+$fixture = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($payload)) | ConvertFrom-Json
+. $fixture.common
+$ready = [Threading.EventWaitHandle]::OpenExisting($fixture.prefix + '-ready')
+$finish = [Threading.EventWaitHandle]::OpenExisting($fixture.prefix + '-finish')
+$mutex = Enter-ReportTaskMaintenance -Plan $fixture.plan
+$null = $ready.Set()
+if (-not $finish.WaitOne(30000)) { exit 1 }
+# Exit with the mutex still owned.
+exit 0
+'@
+$command = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes("`$payload = '$payload'`n$ownerScript"))
+$owner = $null
+# Keep the mutex alive after the owner exits so the next waiter sees abandonment.
+$keeper = Enter-ReportTaskMaintenance -Plan $plan
+try {
+    $keeper.ReleaseMutex()
+    $windowsPowerShell = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    $ownerArguments = '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', $command
+    $owner = Start-Process -FilePath $windowsPowerShell -ArgumentList $ownerArguments -WindowStyle Hidden -PassThru
+    Assert-Test ($ready.WaitOne(10000)) 'Maintenance owner did not acquire the lock'
+    $readsBefore = $script:taskReads
+    $message = ''
+    try { Install-ReportDailyTask -Plan $plan -Apply | Out-Null } catch { $message = $_.Exception.Message }
+    Assert-Test (
+        $message -eq 'TASK_MAINTENANCE_BUSY' -and $script:taskReads -eq $readsBefore -and $script:registered -eq 0
+    ) 'Apply did not reject the previous package before reading tasks'
+    $preview = Install-ReportDailyTask -Plan $plan
+    Assert-Test ($preview.Action -eq 'create' -and -not $preview.Applied -and $script:registered -eq 0) 'Preview failed while maintenance was locked'
+
+    $script:task = [pscustomobject]@{ TaskName = $plan.task_name }
+    $script:taskXml = $plan.xml.Replace($plan.owner_marker, 'other-owner')
+    $null = $finish.Set()
+    Assert-Test ($owner.WaitForExit(10000) -and $owner.ExitCode -eq 0) 'Maintenance owner did not exit'
+    $message = ''
+    try { Install-ReportDailyTask -Plan $plan -Apply | Out-Null } catch { $message = $_.Exception.Message }
+    Assert-Test (
+        $message -eq 'TASK_NAME_BELONGS_TO_ANOTHER_PROJECT' -and $script:registered -eq 0
+    ) 'Apply failed to acquire the abandoned mutex and check the current task owner'
+    $script:task = $null
+    $script:taskXml = ''
+}
+finally {
+    $null = $finish.Set()
+    if ($null -ne $owner) {
+        $null = $owner.WaitForExit(10000)
+        $owner.Dispose()
+    }
+    $keeper.Dispose()
+    $finish.Dispose()
+    $ready.Dispose()
+}
+
 $plan.credential_present = $false
 $blocked = $false
 try { Install-ReportDailyTask -Plan $plan -Apply | Out-Null } catch { $blocked = $_.Exception.Message -eq 'TASK_CREDENTIAL_NOT_VISIBLE' }

@@ -73,7 +73,7 @@ schedule:
 scanner:
   # 整节替换旧 scanner 配置，避免文件类型及排除列表被追加合并。
   dynaconf_merge: false
-  index_db_path: "data/db/scan_index_rust_v3.sqlite3"
+  index_db_path: "data/db/scan_cache_v4.sqlite3"
   allowed_extensions:
     - ".xlsx"
     - ".xls"
@@ -97,8 +97,7 @@ scanner:
   # 每种真实格式固定一个 Rust 解析器。
   # Keep legacy .doc/.ppt out of default scanning until explicitly enabled.
   legacy_office_enabled: false
-  # 个人日报可使用 1 或 2 个解析任务，Office 与 PDF 共用同一上限。
-  max_workers: 2
+  # 默认使用最多四个处理器。显式设置并发数时沿用指定值。
   excel_max_rows: 500
   pdf_max_pages: 50
   # 只有全部已核实为纯图的 PDF 可进入本机识字。额度按一次扫描合计。

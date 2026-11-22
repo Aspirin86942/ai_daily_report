@@ -1,8 +1,10 @@
 # Windows 安装、任务与回退
 
-Rust 程序包面向 Windows x64。三个 EXE 使用静态 C 运行库，PDFium 固定版本和 SHA-256；运行不需要 Python、uv、虚拟环境或 Rust 工具链。
+v2 面向 Windows x64，主程序与 PDF 子程序使用静态 C 运行库。PDFium 按固定哈希加载。文本和 Office 直接在主程序内解析。
 
 正式任务路径、配置、已完成验收及证据统一见[当前状态](current-state.md)。以下为安装、切换和回退说明。
+
+v2 的 Windows x64 发布主程序在首次使用联网函数时加载系统网络与证书组件，历史查询可以直接打开本机数据库。延迟加载限于 Windows 系统目录，PDFium 仍由独立子程序从包内加载。[MSVC 延迟加载说明](https://learn.microsoft.com/en-us/cpp/build/reference/linker-support-for-delay-loaded-dlls?view=msvc-170)
 
 ## 目录与配置
 
@@ -11,26 +13,24 @@ D:/DailyReport/
   current.json
   releases/<version>/
     ai-daily-report.exe
-    ai-daily-office-parser.exe
-    ai-daily-pdf-parser.exe
+    ai-daily-pdf-worker.exe
     pdfium.dll
-    ocr-models/
     templates/  config/settings.example.yaml  scripts/  licenses/
     manifest.json
   shared/
     config/settings.yaml
     data/db/reports.sqlite3
-    data/db/scan_index_rust_v3.sqlite3
+    data/db/scan_cache_v4.sqlite3
     reports/  logs/  backups/
 ```
 
 每个版本保存在独立目录。配置显式通过 `--config-dir` 传入；省略时只读取 EXE 旁的 `config`。配置中的相对路径始终以 EXE 目录为基准，正式安装建议全部填写绝对路径，避免升级后数据目录改变。
 
-从包内示例生成新的 Rust 配置。旧配置中的 Python 路径、`fallback_after_timeout` 等废弃项会被拒绝，需要在准备阶段移除。保留业务模型、工作根目录、预算开关和扫描限制，扫描库使用独立的 `scan_index_rust_v3.sqlite3`。凭据继续使用当前用户环境变量，配置与凭据不进入发布包。
+配置可沿用旧版的已知 Office 和 PDF 程序名称，v2 将它们映射到当前主程序和同包 PDF 子程序。旧库名映射到同目录的 `scan_cache_v4.sqlite3`。v3 扫描库保留供旧包使用，两版共用原报告业务库。自定义解析程序无法等价映射时，配置检查会指出对应字段。
 
 ## 包校验与自检
 
-候选包携带已固定哈希的 PP-OCRv6 Tiny 检测、识别权重和中文词表，运行时从本地读取。离线构建可给 `scripts/build_windows_release.ps1` 传入 `-OcrModelDirectory <已备好模型的目录>`。包校验同时检查模型哈希和许可证。
+默认包关闭 OCR（图片文字识别）。构建可选 OCR 包时使用 `-WithOcr -OcrModelDirectory <模型目录>`，构建和包校验均核对权重、词表和许可证。
 
 ```powershell
 ./scripts/verify_windows_release.ps1 -BundleDirectory D:/DailyReport/releases/<version>
@@ -70,6 +70,22 @@ PowerShell 调用发布 EXE 时接 `| Out-Host`，让 PowerShell 等待退出；
 任务归属按持久配置的父目录生成。将配置从旧仓库移到新的安装根目录时，先保存并按原归属移除旧任务，再注册新任务，禁止绕过归属检查覆盖同名任务。
 
 ## 备份与回退
+
+### v2 任务动作回退
+
+切换前用独立目录保存两项任务的 XML、权限、启用状态、两个程序包的指纹，以及已校验的回退程序和脚本副本。业务主库另做 SQLite 一致备份。新旧配置可以共用一个目录。若另设候选配置目录，捕获时传入 `-CandidateConfigDirectory`。捕获时会核对两份配置实际打开的业务库、快照目录和发布目录，并把三处位置的指纹写入回执。
+
+```powershell
+./scripts/kernel_task_rollback.ps1 -PreviousRoot $previous -CandidateRoot $candidate -ConfigDirectory $config -BackupDirectory $receipt
+./scripts/kernel_task_rollback.ps1 -Restore -BackupDirectory $receipt
+./scripts/kernel_task_rollback.ps1 -Restore -Apply -BackupDirectory $receipt
+```
+
+第二条命令预览原任务动作。预览与实际回退都会由备份目录中的检查程序持有跨版本报告锁，核对旧包可接手的未完成运行。若旧程序可能重发结果未知的请求，命令以 `ROLLBACK_MODEL_OUTCOME_UNKNOWN` 退出并给出运行编号，任务动作和原账本保持原状。请核对该次请求的响应和冻结材料后再处理。
+
+实际回退在持锁期间验证旧包与任务归属，恢复空闲任务的动作，先恢复健康检查，再启用日报，最后回读两项任务的动作、权限和启用状态。新回执目录中的 `scripts/kernel_task_rollback.ps1` 可以在候选安装目录丢失时使用。若动作替换中断，两项任务保持停用，可以用同一回执重试。运行后的新日报、附件和模型账本继续保存在原业务库。
+
+### 历史版本回退记录
 
 2026-11-12 的十倍材料扩容已切换至 `.releases/rust-20261112-material-range-10x-01`。配置、两项任务 XML 和数据库一致备份位于 `.artifacts/material-range-10x-20261112/deployment/before`，逐文件哈希见同级 `backup-manifest.json`。正式任务保持原有触发器、权限、补跑设置与时限。
 

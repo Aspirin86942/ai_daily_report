@@ -3,7 +3,6 @@ param([string]$ProjectRoot = (Join-Path $PSScriptRoot '..'), [string]$ConfigDire
 . (Join-Path $PSScriptRoot 'daily_task_common.ps1')
 $plan = Get-ReportTaskPlan -ProjectRoot $ProjectRoot -ConfigDirectory $ConfigDirectory -Kind $Kind
 if ($Apply) {
-    Assert-ReportTaskContext -Plan $plan
     if (-not (Test-Path -LiteralPath $plan.work_dir -PathType Container)) { throw 'TASK_WORK_DIRECTORY_UNAVAILABLE' }
     if ($Kind -eq 'daily') {
         & $plan.program --config-dir $plan.config_dir doctor --strict | Out-Host

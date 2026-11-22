@@ -82,6 +82,8 @@ scripts/corpus/
 .artifacts/kernel-once-*/
 .artifacts/kernel-phase2-*/
 .artifacts/kernel-phase3-*/
+.artifacts/kernel-v2-*/
+.artifacts/retained-30c5034/
 .artifacts/search-acceptance-*/
 .artifacts/worker-concurrency-*/
 .artifacts/daily-scan-*/

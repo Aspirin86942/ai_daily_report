@@ -1,0 +1,24 @@
+[package]
+name = "pdf_worker"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "ai-daily-pdf-worker"
+path = "src/main.rs"
+
+[features]
+default = []
+ocr = ["dep:rusto-core", "daily_parsers/ocr"]
+
+[dependencies]
+daily_parsers = { path = "../daily_parsers" }
+pdfium-render.workspace = true
+rusto-core = { version = "=0.4.1", default-features = false, optional = true }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

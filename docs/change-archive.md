@@ -1,6 +1,6 @@
 # 历史归档查询与备份
 
-归档保存旧流程观察到的不可变原件、全文提取、位置和报告依据，位于 `data_dir/archive`，结构保持 schema v1。当前程序提供历史读取、内容核验和一致备份。
+归档保存旧流程观察到的不可变原件、全文提取、位置和报告依据，位于 `data_dir/archive`，结构保持 schema v1。历史读取、内容核验和备份由保留的旧内核三期程序提供。以下命令在 `.releases/rust-20261122-kernel-phase3-01` 目录中使用该目录的 EXE 和配套配置。
 
 ```powershell
 ai-daily-report.exe --config-dir <配置目录> archive history --path <历史路径> | Out-Host

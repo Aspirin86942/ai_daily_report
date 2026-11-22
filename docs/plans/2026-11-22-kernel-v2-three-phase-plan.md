@@ -1,8 +1,10 @@
 # 个人日报内核 v2 三期重构计划
 
-**本页保留实施前的三期设计。** `offline-v2-04` 已于 2026 年 11 月 22 日部署到本机正式环境。v2 面向 Windows 单机，交付个人日报和历史证据检索。最终工作区保留 3 个 Rust 包，生成主程序和 PDF 解析程序两个 EXE，随包交付 `pdfium.dll`、模板和任务脚本。新日报正文最多 **1,500 字**，完整依据保存在独立附件。历史报告继续按原始字节恢复。[正式运行与回退记录](../current-state.md)
+**三个阶段已完成交付，`offline-v2-04` 已于 2026 年 11 月 22 日部署到本机正式环境。** v2 提供个人日报和历史证据检索。工作区包含 3 个 Rust 包，生成主程序和 PDF 解析程序两个 EXE，随包交付 `pdfium.dll`、模板和任务脚本。新日报正文最多 **1,500 字**，完整依据保存在独立附件。历史报告继续按原始字节恢复。[正式运行与回退记录](../current-state.md) · [离线包与验收记录](2026-11-22-kernel-v2-results.md)
 
 比较起点为 2026 年 11 月 22 日已部署的旧内核三期。正式目录为 `.releases/rust-20261122-kernel-phase3-01`，构建提交为 `c9f82f6f`。当日 02:12:47 完成切换，`30c5034` 补记部署与回退验证。本计划中的一期、二期、三期均指 **v2 的交付阶段**。[正式部署记录](../current-state.md) · [旧内核三期同机验收](2026-11-22-kernel-phase3-results.md)
+
+**2026 年 11 月 22 日离线交付决定。** 03 候选实测 35,095 行，原目标为 18,000 行。用户确认保留全部功能，接受三包源码行数按实记录。最终验收同时公布原目标、实测值及差额。三包结构、性能、证据保真、历史恢复和回退仍按下列门槛验收。[候选实测结果](2026-11-22-kernel-v2-results.md)
 
 | v2 阶段 | 对应附件里程碑 | 交付物 | 进入下一阶段的条件 |
 | --- | --- | --- | --- |
@@ -28,11 +30,11 @@
 
 **文本和 Office。** UTF-8、GB18030、CSV、XLSX、真实 XLS、DOCX、PPTX 及显式启用的旧 DOC/PPT 都走既有格式算法。保留公式、图表、批注、整行、单位、否定条件与首中末摘录。进程内统一返回 Rust 数据，稳定的 `parser_backend` 继续说明由谁解析，执行位置另记。默认发布关闭 OCR（图片文字识别），单独构建的可选功能沿用模型文件及哈希核验。[二期格式与边界验收](2026-11-21-kernel-phase2.md)
 
-**Office 的资源上限。** XLSX 按 52,428,800 字节验证上限前一字节、正好等于、超出一字节。读取前和读取中限制压缩包条目、实际累计解压字节、膨胀比、XML 嵌套、行及单元格大小。盘点 `calamine`、`office_oxide` 和长文本路径的整块读取与分配，将缺少工作量上限的调用改成有界读取。停止等待线程无法终止仍在运行的解析。用慢文件、超长单元格和损坏文档验证主程序能收尾、后续文件仍可完成。任一格式只能依赖强制终止进程才能通过时，一期不得验收。[现有进程超时用例](../../rust/scanner_core/src/session/pool/tests.rs) · [Rust 线程句柄说明](https://doc.rust-lang.org/std/thread/struct.JoinHandle.html)
+**Office 的资源上限。** XLSX 按 52,428,800 字节验证上限前一字节、正好等于、超出一字节。读取前和读取中限制压缩包条目、实际累计解压字节、膨胀比、XML 嵌套、行及单元格大小。盘点 `calamine`、`office_oxide` 和长文本路径的整块读取与分配，将缺少工作量上限的调用改成有界读取。停止等待线程无法终止仍在运行的解析。用慢文件、超长单元格和损坏文档验证主程序能收尾、后续文件仍可完成。任一格式只能依赖强制终止进程才能通过时，一期不得验收。[现有进程超时用例](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/scanner_core/src/session/pool/tests.rs) · [Rust 线程句柄说明](https://doc.rust-lang.org/std/thread/struct.JoinHandle.html)
 
 **PDF。** 用 `InspectAndExtract` 在一次业务请求内完成检查和提取。请求携带已分配的页窗口、正文上限、来源身份和截止时间。复用同一已打开句柄及已读页文本。选用已有序列化库的强类型消息，加 4 字节长度前缀、帧长上限、协议版本和请求编号。主程序按需启动 1～2 个同包子进程，一次扫描内复用，扫描结束后退出。启动使用 `CREATE_NO_WINDOW` 并纳入 Windows 作业对象，使父进程退出时系统能回收子进程。验明同目录 DLL 的哈希，并在加载期间保持受保护的文件句柄。
 
-**PDF 名额按顺序发放。** 派发前按文件顺序预留检查页数和有文字时可用的提取名额。遇到无文字文件只返回逐页观察，释放提取名额。如果后续文件能否提取取决于前一个结果，就等名额确定后再发它的唯一请求。提取名额确定耗尽后仍可执行已获准的检查。沿用最多两轮补位及未知结果的页数预留。用“无字在前、有字在后、仅一个提取名额”和反转完成顺序验证，缓存命中与冷读应选中同一文件。[现行 PDF 准入规则](../../rust/scanner_core/src/admission.rs) · [页文本复用对照](../../rust/pdf_parser/src/worker/tests.rs)
+**PDF 名额按顺序发放。** 派发前按文件顺序预留检查页数和有文字时可用的提取名额。遇到无文字文件只返回逐页观察，释放提取名额。如果后续文件能否提取取决于前一个结果，就等名额确定后再发它的唯一请求。提取名额确定耗尽后仍可执行已获准的检查。沿用最多两轮补位及未知结果的页数预留。用“无字在前、有字在后、仅一个提取名额”和反转完成顺序验证，缓存命中与冷读应选中同一文件。[现行 PDF 准入规则](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/scanner_core/src/admission.rs) · [页文本复用对照](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/pdf_parser/src/worker/tests.rs)
 
 **一期验收。** 6 份文档的正文事实 **8/8**、附件定位 **9/9**、原文范围 **39/39**。15 份旧 PDF 样本的原生打开次数仍为 15，另加入大于 1 MiB 的文本 PDF（含约 30 MiB 样本）、前页空白而后页有字、加密和损坏样本。对每份获准冷解析的正常 PDF 分别断言 **1 次原生打开、1 次业务往返**。验证部分帧、超时、进程异常退出、错误 DLL 和连续 20 轮后台启动，要求父程序可继续、窗口新增 0 个。[旧版 PDF 和 Windows 实测](2026-11-22-kernel-phase3-results.md)
 
@@ -60,9 +62,9 @@
 
 前两张表以 `(file_id, source_guard, profile_hash)` 为主键，快照表以 `snapshot_key` 为主键。三表使用 `STRICT, WITHOUT ROWID`，访问日与写入时间单独建索引。新库启用写前日志（WAL）。缓存连接采用 `synchronous=NORMAL`、内存临时表、32 MiB 页缓存目标、128 MiB 映射上限，锁等待取剩余时间与 2 秒的较小值。初始化与只读命中分开，内存验收计入所有连接的实际工作集。[SQLite 缓存与映射参数](https://www.sqlite.org/pragma.html#pragma_mmap_size)
 
-缓存身份覆盖解析代码、依赖、DLL、输出相关的请求构造、实际选页、抽取与预算规则。用同大小同修改时间的文件替换、页窗变化、解析器改动验证失效。主程序与 PDF 程序仍有可核验的构建身份。两个旧契约包的在线通信和 SQLite 租约可退出新工作区，历史证据类型及其序列化表示迁入所属模块。新运行的页级观察、准入、覆盖缺口与终态随冻结输入和运行记录保存，清空 v4 后仍能解释已发布报告。时间耗尽的部分运行不成为可复用的整批快照。[现有解析身份输入](../../rust/parser-inputs.json) · [现有页级观察回读](../../rust/scanner_core/src/store/cache/classification.rs)
+缓存身份覆盖解析代码、依赖、DLL、输出相关的请求构造、实际选页、抽取与预算规则。用同大小同修改时间的文件替换、页窗变化、解析器改动验证失效。主程序与 PDF 程序仍有可核验的构建身份。两个旧契约包的在线通信和 SQLite 租约可退出新工作区，历史证据类型及其序列化表示迁入所属模块。新运行的页级观察、准入、覆盖缺口与终态随冻结输入和运行记录保存，清空 v4 后仍能解释已发布报告。时间耗尽的部分运行不成为可复用的整批快照。[现有解析身份输入](../../rust/parser-inputs.json) · [现有页级观察回读](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/scanner_core/src/store/cache/classification.rs)
 
-沿用报告库及处理目录的操作系统锁约定。v4 扫描写入和清理共用同一个缓存锁，Windows 用 `LockFileEx` 锁文件字节。用两个独立进程验证同时运行、锁等待计入截止时间、持锁进程退出后的接管、残留锁文件，以及旧持有者无法补写终态。缓存提交与报告、发布和模型调用账本各自计数。[现有跨版本报告锁](../../rust/report_app/src/store/locking.rs)
+沿用报告库及处理目录的操作系统锁约定。v4 扫描写入和清理共用同一个缓存锁，Windows 用 `LockFileEx` 锁文件字节。用两个独立进程验证同时运行、锁等待计入截止时间、持锁进程退出后的接管、残留锁文件，以及旧持有者无法补写终态。缓存提交与报告、发布和模型调用账本各自计数。[现有跨版本报告锁](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/src/store/locking.rs)
 
 同一 UTC 日期、整份快照或全部解析项命中时，扫描库写事务为 **0**，解析调用为 **0**。全命中但快照缺失时直接用内存结果。跨日访问最多一次批量更新，冷扫描的新增、访问和淘汰合并成一次事务。对三种情况分别读取 SQLite 写前日志的真实提交标记。按访问日统筹三张表的 1 GiB 缓存预算，计入日志增长并淘汰失效引用。正式处理材料继续遵守原有 7 天／1 GiB、72 MiB 控制空间和未完成运行保留规则。[三期缓存提交基线](2026-11-22-kernel-phase3-results.md) · [处理材料保留说明](../daily-report-operations.md)
 
@@ -72,11 +74,11 @@
 
 - **新日报。** 正文最多 1,500 字，按最终发布的正文区逐个 Unicode 字符计数，含标点、换行和文内引用标记。文件头元数据和独立的附件入口计入总字节。初稿合规即发布，超限才进入单独记账的精简步骤。精简后再次校验事实、数字、单位、否定条件、下一步和引用。精简无效时按优先级保留完整事项及下一步，所有采纳依据仍在附件。无法形成有效正文时保留可恢复记录和原有发布。覆盖 1,499、1,500、1,501 字、中文与表情符号、精简失败和通信失败。
 - **完整附件。** 为本轮每个已采纳证据块保存原文和位置，包括正文精简后未展开的材料。原文件中未读取或未采纳的范围列明原因。冻结时计算证据和引用的实际 UTF-8 字节数，加上文件头、附件入口等固定开销，并为 1,500 个正文字符预留最多 6,000 字节。发布前以两个实际文件再核对合计 **≤1,000,000 字节**。遇到无法容纳的必要材料，返回可定位的失败并保留已有发布。逐条验证正文引用能打开附件的对应原文。
-- **冻结格式。** 新生成规则使用新版本的冻结输入、模型计划和提示词。已发布报告沿用三期能读取的 v6 字段，保存正文、附件和链接，限制新正文长度的规则写入生成计划。保存实际模板字节、配置身份和模型答复。包内公开 3 份活动模板（生成、精简、渲染），默认副本须与内置字节一致。选定配置目录的显式模板覆盖按实际字节冻结。历史冻结输入 v5／v6 各自匹配计划 v6／v7，旧档按各版本的 600 字、1,500 字或详版规则回放。旧模板由只读兼容资源或已冻结原件提供。[现有日报版本分派](../../rust/report_app/src/run/personal.rs) · [三期发布格式校验](../../rust/report_app/src/reports/personal.rs)
-- **历史数字。** 将 JSON 的 `arbitrary_precision`（保留数字精度）从工作区默认特性移出。历史读取保留原始数字文本及既有规范化、模板转换规则。用大整数、小数、指数、负零与空值逐项对照旧包的请求、渲染和哈希，再核对最终依赖特性。3 份历史冻结回放要求正文和附件字节相同。另为 v2 的 1,500 字规则建立独立期望值。[模板的数字转换](../../rust/report_app/src/reports.rs) · [快照兼容测试](../../rust/report_app/tests/state_recovery.rs)
-- **业务主库与发布。** 以现有 `reports.sqlite3` v1 的实际表、列、主外键、索引、触发器和原行值为准。先把可恢复的正文、附件和哈希提交到数据库，再原子写附件、写正文，校验后更新当前报告指针。检索按已发布状态同步，中断后可按修订号补齐。在每个落盘边界模拟中断，再用 `repair-output --target-date` 或 `--run-id` 恢复。验证重复执行、旧候选及外部手工编辑的文件。周报和月报均覆盖原字节恢复。[报告库结构](../../rust/report_app/src/store/schema-v1.sql) · [发布实现](../../rust/report_app/src/publish.rs)
-- **运行入口。** 验收 `daily` 的定时、手工日期、补充、预演、审计预览和带原因重跑，以及 `search/list/runs/repair-output/doctor/health/backup/cleanup/task`。公司网关和本机 Magpie 接口均用本机模型替身验证。预览及结果未知的调用均记账，通信失败按现有规则停发，运行在 270 秒停止启动新操作、300 秒内收尾。保留日永久调用计数、诊断 30 天／8 MiB、个人日志 30 天／2 MiB。`cleanup` 默认预演。`health` 核对 v4 缓存完整性，从业务记录读取历史异常。重建空缓存后历史异常仍可见。[命令契约](../../rust/report_app/src/cli.rs) · [日报使用与恢复](../daily-report-operations.md)
-- **历史检索与归档。** 复用 SQLite FTS5 全文检索的正文、附件双视图和源库修订检测。覆盖中文一两字、多词、短语、排序、附件锚点、同一报告更新和索引重建。历史采集的 `archive history/show/diff/verify/backup`、`stats` 与 `archive-scanner` 由保留的三期包提供，写明可运行路径与配套配置，在归档副本验证原件、全文及备份回读。深度维护沿用相应的旧包。历史归档、匹配的 Python/PyO3 恢复材料及旧工作程序继续留存。[检索实现](../../rust/report_app/src/search.rs) · [历史归档的操作边界](../change-archive.md)
+- **冻结格式。** 新生成规则使用新版本的冻结输入、模型计划和提示词。已发布报告沿用三期能读取的 v6 字段，保存正文、附件和链接，限制新正文长度的规则写入生成计划。保存实际模板字节、配置身份和模型答复。包内公开 3 份活动模板（生成、精简、渲染），默认副本须与内置字节一致。选定配置目录的显式模板覆盖按实际字节冻结。历史冻结输入 v5／v6 各自匹配计划 v6／v7，旧档按各版本的 600 字、1,500 字或详版规则回放。旧模板由只读兼容资源或已冻结原件提供。[现有日报版本分派](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/src/run/personal.rs) · [三期发布格式校验](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/src/reports/personal.rs)
+- **历史数字。** 将 JSON 的 `arbitrary_precision`（保留数字精度）从工作区默认特性移出。历史读取保留原始数字文本及既有规范化、模板转换规则。用大整数、小数、指数、负零与空值逐项对照旧包的请求、渲染和哈希，再核对最终依赖特性。3 份历史冻结回放要求正文和附件字节相同。另为 v2 的 1,500 字规则建立独立期望值。[模板的数字转换](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/src/reports.rs) · [快照兼容测试](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/tests/state_recovery.rs)
+- **业务主库与发布。** 以现有 `reports.sqlite3` v1 的实际表、列、主外键、索引、触发器和原行值为准。先把可恢复的正文、附件和哈希提交到数据库，再原子写附件、写正文，校验后更新当前报告指针。检索按已发布状态同步，中断后可按修订号补齐。在每个落盘边界模拟中断，再用 `repair-output --target-date` 或 `--run-id` 恢复。验证重复执行、旧候选及外部手工编辑的文件。周报和月报均覆盖原字节恢复。[报告库结构](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/src/store/schema-v1.sql) · [发布实现](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/src/publish.rs)
+- **运行入口。** 验收 `daily` 的定时、手工日期、补充、预演、审计预览和带原因重跑，以及 `search/list/runs/repair-output/doctor/health/backup/cleanup/task`。公司网关和本机 Magpie 接口均用本机模型替身验证。预览及结果未知的调用均记账，通信失败按现有规则停发，运行在 270 秒停止启动新操作、300 秒内收尾。保留日永久调用计数、诊断 30 天／8 MiB、个人日志 30 天／2 MiB。`cleanup` 默认预演。`health` 核对 v4 缓存完整性，从业务记录读取历史异常。重建空缓存后历史异常仍可见。[命令契约](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/src/cli.rs) · [日报使用与恢复](../daily-report-operations.md)
+- **历史检索与归档。** 复用 SQLite FTS5 全文检索的正文、附件双视图和源库修订检测。覆盖中文一两字、多词、短语、排序、附件锚点、同一报告更新和索引重建。历史采集的 `archive history/show/diff/verify/backup`、`stats` 与 `archive-scanner` 由保留的三期包提供，写明可运行路径与配套配置，在归档副本验证原件、全文及备份回读。深度维护沿用相应的旧包。历史归档、匹配的 Python/PyO3 恢复材料及旧工作程序继续留存。[检索实现](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/src/search.rs) · [历史归档的操作边界](../change-archive.md)
 
 ### M4　同机验收指标
 
@@ -92,13 +94,13 @@
 | 历史全文索引首次建立 | 3.122 秒 | ≤2.8 秒 |
 | 独立进程热查询中位数 / 重读完整原报告 | 14.81 ms / 0 行 | ≤14 ms / 0 行 |
 | 检索前五条命中 / 索引大小 | 20/20，41.95 MiB | 20/20，≤45 MiB |
-| Rust 工作区成员 / 各成员 `src/**/*.rs` 物理行数 | 9 个，58,527 行 | 3 个，目标区间 15,000～18,000 行，上限 18,000 行 |
+| Rust 工作区成员 / 各成员 `src/**/*.rs` 物理行数 | 9 个，58,527 行 | 3 个。行数按实交付，并列原设计目标 15,000～18,000 行 |
 
-**扫描测量。** 同一台 Windows x64 机器交替运行正式三期包和 v2 候选包，绑定各自匹配的验收驱动。48 文件为 CSV、DOCX、MD、PDF、PPTX、XLSX 各 8 份，至少 20 组。按三期口径每 5 ms 同时采样主程序及子进程工作集，取所有样本最大值。13 文件按 4+4+4+1 分批，含损坏 PDF，至少 10 对。每轮先算四批耗时之和，再取中位数。目录发现另做 12 对，覆盖 16 个子目录、2,048 份窗口外文件及 16 份当日文件。P95 沿用最近秩算法。[扫描计时驱动](../../rust/report_app/examples/corpus_performance.rs) · [硬链接回归](../../rust/discovery/tests/absolute_window.rs)
+**扫描测量。** 同一台 Windows x64 机器交替运行正式三期包和 v2 候选包，绑定各自匹配的验收驱动。48 文件为 CSV、DOCX、MD、PDF、PPTX、XLSX 各 8 份，至少 20 组。按三期口径每 5 ms 同时采样主程序及子进程工作集，取所有样本最大值。13 文件按 4+4+4+1 分批，含损坏 PDF，至少 10 对。每轮先算四批耗时之和，再取中位数。目录发现另做 12 对，覆盖 16 个子目录、2,048 份窗口外文件及 16 份当日文件。P95 沿用最近秩算法。[扫描计时驱动](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/report_app/examples/corpus_performance.rs) · [硬链接回归](https://github.com/Aspirin86942/ai_daily_report/blob/c9f82f6f356542ca6a7860cc8d18f24fac399f05/rust/discovery/tests/absolute_window.rs)
 
 **比较方式。** 同机记录显式单路、匹配并发及 v2 默认并发，保留逐轮数值、实际线程及进程数、程序清单哈希。主目标按 v2 发布默认配置测量，显式单路暖扫描单独判定。另测现有显式并发 2 的配置，单列实际可部署的收益。检索在同一份 225 条报告副本上做 6 对冷建库，每次再启 9 个独立进程热查。每批 9 次取中位数，再取 6 批的中位数，核对重建 0 次、重读原报告 0 行。每个计时样本同时核对业务结果，运行编号、计时和构建标识单独核对。[旧版检索判定脚本](../../.artifacts/kernel-phase3-20261122/accept/verify_search.py)
 
-**规模测量。** 58,527 行包含 9,159 行测试专用代码，另外 49,368 行为非测试源码（含空行和注释）。独立 `tests/` 另有 20,864 行，`examples/` 和 `build.rs` 也在原口径之外。v2 的 18,000 行指三个包同口径的最终总量。分包设计预算依次为解析库约 5,500 行、PDF 程序约 1,800 行、主程序约 8,000 行，共 15,300 行。同步公布非测试实现、独立测试、示例及构建辅助的行数和测试迁移表，另处承载的运行逻辑计回总量。每项硬指标都列实测值，未过项注明差距，候选维持待验收状态。[工作区成员](../../rust/Cargo.toml) · [现有源码计数方法](../../.artifacts/kernel-phase2-20261121/structure/line_report.py)
+**规模测量。** 58,527 行包含 9,159 行测试专用代码，另外 49,368 行为非测试源码（含空行和注释）。独立 `tests/` 另有 20,864 行，`examples/` 和 `build.rs` 也在原口径之外。原设计上限 18,000 行指三个包同口径的最终总量。分包设计预算依次为解析库约 5,500 行、PDF 程序约 1,800 行、主程序约 8,000 行，共 15,300 行。按用户确认的交付口径，同步公布分包行数、非测试实现、独立测试、示例、构建脚本和测试迁移表，另处承载的运行逻辑计回总量。任一功能、兼容或性能硬指标未过时，候选维持待验收状态。[工作区成员](../../rust/Cargo.toml) · [本机源码计数工具](../../.artifacts/kernel-v2-20261122/measure_sources.py)
 
 ### 可切换条件与回退
 
@@ -116,3 +118,23 @@ cargo test --manifest-path rust/Cargo.toml --workspace --locked
 ```
 
 交付时将基线清单、逐轮计时、语义与历史兼容结果、程序包校验和回退演练记录放入本机同一验收目录。报告只引用指纹、数量、结果及可定位的差异。正式任务回执和首次定时结果在实际发生后单列。
+
+### 在本机复验同一个候选包
+
+在 v2 工作树根目录执行下列命令。每轮使用新的运行编号。构建步骤会冻结当前源码，并把性能驱动与包内两个程序绑定。功能验收使用业务库副本、本机模型替身和任务替身。等待其他编译和测试完成后再计时，保留系统空闲检查及所有失败回执。
+
+```powershell
+$source = (Get-Location).Path
+$project = 'D:\python_program\ai_daily_report'
+$python = Join-Path $project '.venv\Scripts\python.exe'
+$lab = Join-Path $project '.artifacts\kernel-v2-20261122'
+$run = 'local-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+& $python "$lab/run_candidate.py" --worktree $source --run $run seal
+if ($LASTEXITCODE -ne 0) { throw '候选封存失败' }
+& $python "$lab/run_candidate.py" --worktree $source --run $run functional
+& $python "$lab/qualify_ocr.py" --run $run
+& $python "$lab/run_candidate.py" --worktree $source --run $run time
+& $python "$lab/aggregate.py" $run --size-policy recorded
+```
+
+逐项结论保存在 `candidate-<运行编号>/acceptance.json`。汇总器核验程序包、源码、驱动和执行日志的指纹。退出码 0 表示离线验收通过，2 表示至少一项门槛未过。缺少必需的验收回执或校验值不匹配会中止汇总。可选 OCR 验收单独构建同源程序，默认包关闭识字。[本机验收工具](../../.artifacts/kernel-v2-20261122/run_candidate.py) · [测量方法](../../.artifacts/kernel-v2-20261122/bench/README.md)

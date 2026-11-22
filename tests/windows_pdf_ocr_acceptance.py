@@ -1,16 +1,18 @@
 """Exercise the ordinary Windows daily CLI using synthetic PDFs and a loopback model stub."""
 
+import argparse
 import hashlib
+import io
 import json
 import os
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
-import sys
 import threading
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -18,17 +20,14 @@ import win32api
 import win32con
 import win32job
 from pypdf import PdfReader, PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 
 REPO = Path(__file__).resolve().parents[1]
-STAGE = Path(os.environ.get("AI_DAILY_ACCEPTANCE_OUTPUT", REPO / ".artifacts/kernel-once-20261121/ocr-daily-acceptance")).resolve()
-PACKAGED = os.environ.get("AI_DAILY_TEST_BUNDLE")
-TARGET = Path(os.environ.get("CARGO_TARGET_DIR", REPO / ".artifacts/rust-migration/cargo-release")).resolve()
-BUILT = Path(PACKAGED).resolve(strict=True) if PACKAGED else TARGET / "x86_64-pc-windows-msvc/release"
-IMAGE = REPO / "rust/pdf_parser/tests/fixtures/ocr-image-pages.pdf"
-TEXT = REPO / "tests/fixtures/pdf_benchmark/case_02.pdf"
+STAGE = REPO / ".artifacts/kernel-v2-20261122/ocr-acceptance"
+IMAGE = REPO / "rust/pdf_worker/tests/fixtures/ocr-image-pages.pdf"
 ZONE = timezone(timedelta(hours=8))
-DAY = datetime.now(ZONE).date() - timedelta(days=1)
+DAY = date(2026, 11, 20)
 ANCHORS = {1: ("4827", "7359", "金额"), 2: ("1936", "2064", "验收")}
 
 
@@ -36,27 +35,37 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def staged_programs(run):
-    dest = run / "bin"
+def staged_programs(run, name, bundle, *, ocr):
+    bundle = bundle.resolve(strict=True)
+    dest = run / name
     dest.mkdir()
     pin = json.loads((REPO / "rust/build-inputs.json").read_text(encoding="utf-8"))
-    for name in ("ai-daily-report.exe", "ai-daily-office-parser.exe", "ai-daily-pdf-parser.exe"):
-        shutil.copyfile(BUILT / name, dest / name)
-        assert sha(dest / name) == sha(BUILT / name)
-    shutil.copyfile((BUILT if PACKAGED else TARGET / "debug") / "pdfium.dll", dest / "pdfium.dll")
+    for filename in ("ai-daily-report.exe", "ai-daily-pdf-worker.exe", "pdfium.dll"):
+        shutil.copyfile(bundle / filename, dest / filename)
+        assert sha(dest / filename) == sha(bundle / filename)
     assert sha(dest / "pdfium.dll") == pin["pdfium"]["dll_sha256"]
-    model_roots = [BUILT / "ocr-models"] if PACKAGED else [TARGET / "inputs/ppocrv6-tiny", TARGET / "debug/ocr-models"]
-    model_files = pin["image_ocr"]["files"]
-    model_dir = next(p for p in model_roots if all((p / f["name"]).is_file() for f in model_files))
-    (dest / "ocr-models").mkdir()
-    for entry in model_files:
-        name = entry["name"]
-        assert Path(name).name == name
-        target = dest / "ocr-models" / name
-        shutil.copyfile(model_dir / name, target)
-        assert target.stat().st_size == entry["size"] and sha(target) == entry["sha256"]
-    shutil.copytree((BUILT if PACKAGED else REPO) / "templates", dest / "templates")
-    return dest
+    assert (bundle / "ocr-models").is_dir() == ocr
+    if ocr:
+        shutil.copytree(bundle / "ocr-models", dest / "ocr-models")
+        for entry in pin["image_ocr"]["files"]:
+            model = dest / "ocr-models" / entry["name"]
+            assert model.stat().st_size == entry["size"] and sha(model) == entry["sha256"]
+    shutil.copytree(bundle / "templates", dest / "templates")
+    app = build_info(dest, "ai-daily-report.exe", "build-info")
+    worker = build_info(dest, "ai-daily-pdf-worker.exe", "--build-info")
+    for field in ("parser_content_identity", "protocol_version"):
+        assert app[field] == worker[field], f"{name} has unmatched {field}"
+    assert worker["ocr_enabled"] is ocr
+    inputs = {path.relative_to(dest).as_posix(): sha(path)
+              for path in sorted(dest.rglob("*")) if path.is_file()}
+    return dest, {"app": app, "worker": worker, "file_sha256": inputs}
+
+
+def build_info(binary, filename, argument):
+    result = subprocess.run([binary / filename, argument], cwd=binary, env=env(binary),
+                            capture_output=True, check=True, timeout=20,
+                            creationflags=subprocess.CREATE_NO_WINDOW)
+    return json.loads(result.stdout)
 
 
 def env(root):
@@ -101,7 +110,21 @@ def fixture(directory, name, pages):
     destination = directory / name
     writer = PdfWriter()
     for source, number in pages:
-        writer.add_page(PdfReader(source).pages[number - 1])
+        if source is not None:
+            writer.add_page(PdfReader(source).pages[number - 1])
+            continue
+        page = writer.add_blank_page(width=612, height=792)
+        font = DictionaryObject({
+            NameObject("/Type"): NameObject("/Font"),
+            NameObject("/Subtype"): NameObject("/Type1"),
+            NameObject("/BaseFont"): NameObject("/Helvetica"),
+        })
+        page[NameObject("/Resources")] = DictionaryObject({
+            NameObject("/Font"): DictionaryObject({NameObject("/F1"): font}),
+        })
+        stream = DecodedStreamObject()
+        stream.set_data(b"BT /F1 12 Tf 72 700 Td (Synthetic revenue 128,400 USD) Tj ET")
+        page.replace_contents(stream)
     writer.write(destination)
     noon = datetime.combine(DAY, datetime.min.time(), tzinfo=ZONE) + timedelta(hours=12)
     os.utime(destination, (noon.timestamp(), noon.timestamp()))
@@ -115,10 +138,9 @@ def context(run, name):
     return root
 
 
-def daily(root, binary, server, ocr=None, *, dry=True, workers=1, files=1, pages=2, user_note=None):
+def daily(root, binary, server, ocr=None, *, dry=True, workers=1, files=1, pages=2,
+          user_note=None, error_code=None):
     scanner = {
-        "pdf_worker_path": str(binary / "ai-daily-pdf-parser.exe"),
-        "office_worker_path": str(binary / "ai-daily-office-parser.exe"),
         "max_workers": workers, "pdf_max_pages": 3, "max_total_pdf_classification_pages": 60,
         "max_pdf_text_extractions": 1, "total_deadline_ms": 120_000,
     }
@@ -142,6 +164,10 @@ def daily(root, binary, server, ocr=None, *, dry=True, workers=1, files=1, pages
     before = len(server.unverified)
     result = subprocess.run(cmd, cwd=root, env=env(root), capture_output=True, timeout=140,
                             creationflags=subprocess.CREATE_NO_WINDOW)
+    if error_code is not None:
+        assert result.returncode and error_code.encode() in result.stdout + result.stderr
+        assert len(server.unverified) == before
+        return
     if result.returncode:
         # Preserve only machine error codes, never arbitrary application text.
         codes = re.findall(rb"\b[A-Z][A-Z0-9_]{4,}\b", result.stderr + result.stdout)
@@ -158,17 +184,48 @@ def excerpts(selection, name):
     return [m for m in selection["materials"] if Path(m["source"]["relative_path"]).name == name]
 
 
-def classification(root, name):
-    path = root / "db/scan_index_rust_v3.sqlite3"
-    assert path.is_file(), "isolated scanner index missing"
+def cache_evidence(root):
+    path = root / "db/scan_cache_v4.sqlite3"
+    assert path.is_file(), "isolated v4 scan cache missing"
+    assert not list(root.rglob("scan_index_rust_v3.sqlite3"))
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
-        row = db.execute("""
-            SELECT e.classification_status, e.classification_page_count, e.classification_result_examined_pages
-            FROM scan_file_execution e JOIN scan_file_results f USING (scan_run_id, file_identity)
-            WHERE f.relative_path=? ORDER BY e.scan_run_id DESC LIMIT 1
-        """, (name,)).fetchone()
-    assert row is not None, f"no scanner classification audit for {name}"
-    return row
+        tables = {r[1]: (r[4], r[5]) for r in db.execute("PRAGMA table_list")
+                  if r[0] == "main" and not r[1].startswith("sqlite_")}
+        assert tables == dict.fromkeys(("parse_cache", "pdf_negative_cache", "scan_snapshots"), (1, 1))
+        assert db.execute("PRAGMA quick_check").fetchone() == ("ok",)
+        evidence = {}
+        snapshots = db.execute("SELECT manifest,refs FROM scan_snapshots").fetchall()
+        assert snapshots, "scanner wrote no complete snapshot"
+        for manifest, refs in snapshots:
+            bindings = {(ref["reference"]["kind"], tuple(ref["reference"]["key"][k] for k in
+                         ("file_id", "source_guard", "profile_hash"))): ref["record_sha256"]
+                        for ref in json.loads(refs)}
+            for name, _status, reason, key, _pdf_budget in json.loads(manifest[8:])[-1]:
+                if key is None:
+                    continue
+                kind = "negative" if reason in ("pdf_window_no_text", "pdf_damaged", "pdf_protected") else "parse"
+                values = tuple(key[k] for k in ("file_id", "source_guard", "profile_hash"))
+                table = "pdf_negative_cache" if kind == "negative" else "parse_cache"
+                record = db.execute(
+                    f"SELECT payload, record_sha256 FROM {table} "
+                    "WHERE file_id=? AND source_guard=? AND profile_hash=?", values).fetchone()
+                assert record and record[1] == bindings[kind, values], f"missing snapshot record for {name}"
+                payload = json.loads(record[0])
+                observation = (payload["evidence"].get("no_text") if kind == "negative"
+                               else payload["observation"])
+                if observation:
+                    evidence.setdefault(name, []).append((kind, payload["window"], observation))
+        return evidence
+
+
+def classification(root, name):
+    entries = cache_evidence(root)[name]
+    native = {(("text_in_parse_window" if item["pages"]["observations"][-1]["has_text"]
+                else "no_text_in_parse_window"), item["page_count"],
+               len(item["pages"]["checked_pages"]))
+              for _, window, item in entries if window["selected_pages"] is None}
+    assert len(native) == 1, f"ambiguous native PDF classification for {name}"
+    return native.pop()
 
 
 def assert_ocr(materials):
@@ -179,24 +236,43 @@ def assert_ocr(materials):
     for m in materials:
         audit = m["source"]["coverage_limits"]["evidence_audit"]
         assert audit.get("text_unverified") is True, "OCR evidence must be unverified"
-        assert "OCR_TEXT_UNVERIFIED" in audit["secondary_tags"]
     ranges = [entry for m in materials for entry in m["source"]["coverage_limits"]["evidence_audit"]["read_ranges"]]
     assert {(r["start"], r["end"]) for r in ranges if r.get("label") == "offline_ocr_unverified"} == {(1, 2), (2, 3)}
 
 
-def direct_worker(root, binary):
+def frame(version, id, command):
+    data = json.dumps({"version": version, "id": id, "command": command}).encode("utf-8")
+    return struct.pack("<I", len(data)) + data
+
+
+def read_frame(stream, version, id):
+    prefix = stream.read(4)
+    assert len(prefix) == 4, "missing worker frame"
+    size, = struct.unpack("<I", prefix)
+    assert 0 < size <= 2 * 1024 * 1024
+    data = stream.read(size)
+    assert len(data) == size, "incomplete worker frame"
+    reply = json.loads(data)
+    assert reply["version"] == version and reply["id"] == id
+    return reply["reply"]
+
+
+def direct_worker(root, binary, build):
     pdf = fixture(root / "work", "job.pdf", [(IMAGE, 1), (IMAGE, 2)])
     stat = pdf.stat()
-    request = {"contract": "ai_daily_worker", "protocol_version": 4, "request_id": str(uuid.uuid4()),
-               "operation": "pdf_parse", "payload": {"file_path": str(pdf), "file_type": ".pdf",
-               "backend": "rust_pdfium_v3", "remaining_timeout_ms": 15_000, "max_file_size_bytes": 1_048_576,
-               "expected_source_version": f"mtime_ns={stat.st_mtime_ns}:size={stat.st_size}",
-               "parser_limits": {"kind": "pdf_image_ocr", "max_pages": 2, "excerpt_max_chars": 8192,
-                                 "selected_pages": [1, 2]}}}
-    # The job has no process-count limit. Windows counts even children that exit between observations.
+    version = build["protocol_version"]
+    request = {"inspect_and_extract": {
+        "parse": {"file_path": str(pdf), "file_type": ".pdf", "backend": "rust_pdfium_v3",
+                  "remaining_timeout_ms": 15_000, "max_file_size_bytes": 1_048_576,
+                  "expected_source_version": f"mtime_ns={stat.st_mtime_ns}:size={stat.st_size}",
+                  "parser_limits": {"kind": "pdf_image_ocr", "max_pages": 2,
+                                    "excerpt_max_chars": 8192, "selected_pages": [1, 2]}},
+        "inspect_max_pages": 2, "policy_version": "pdf_text_presence_v2", "extract": True,
+        "expected_source_guard": {"kind": "content_sha256_v1", "sha256": sha(pdf)},
+    }}
     job = win32job.CreateJobObject(None, "")
     try:
-        with subprocess.Popen([binary / "ai-daily-pdf-parser.exe", "session"], cwd=root, env=env(root),
+        with subprocess.Popen([binary / "ai-daily-pdf-worker.exe", "--stdio"], cwd=root, env=env(root),
                               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                               creationflags=win32con.DETACHED_PROCESS) as proc:
             handle = win32api.OpenProcess(win32con.PROCESS_SET_QUOTA | win32con.PROCESS_TERMINATE, False, proc.pid)
@@ -205,23 +281,31 @@ def direct_worker(root, binary):
             finally:
                 handle.Close()
             try:
-                raw, _ = proc.communicate((json.dumps(request) + "\n").encode(), timeout=20)
+                raw, _ = proc.communicate(frame(version, 0, "hello") + frame(version, 1, request), timeout=20)
             except subprocess.TimeoutExpired:
                 win32job.TerminateJobObject(job, 1)
                 proc.wait()
                 raise
-        hello, reply = map(json.loads, raw.splitlines())
-        assert hello["worker_kind"] == "pdf"
+            assert proc.returncode == 0
+            pid = proc.pid
+        stream = io.BytesIO(raw)
+        hello = read_frame(stream, version, 0)["hello"]
+        assert hello == {"pid": pid, "parser_identity": build["parser_content_identity"],
+                         "pdfium_sha256": sha(binary / "pdfium.dll"), "ocr": True}
+        reply = read_frame(stream, version, 1)["inspect_and_extract"]
+        assert not stream.read(), "unexpected extra worker business reply"
         count = win32job.QueryInformationJobObject(job, win32job.JobObjectBasicAccountingInformation)["TotalProcesses"]
-        assert reply["status"] == "ok", f"typed OCR rejected: {(reply.get('error') or {}).get('error_code')}"
         assert count == 1, f"OCR started {count - 1} extra processes"
-        result = reply["result"]
+        assert (reply["native_document_opens"], reply["native_page_reads"]) == (1, 2)
+        assert reply["classification"]["status"] == "no_text_in_parse_window"
+        result = reply["extraction"]["Ok"]
         units = result["evidence_audit"]["content_units"]
         for page, terms in ANCHORS.items():
             content = "".join(result["content"][u["text_start"]:u["text_end"]] for u in units
                               if any(r["start"] == page and r["label"] == "offline_ocr_unverified" for r in u["ranges"]))
-            assert all(t in content for t in terms), f"page {page} lost its labelled Chinese evidence"
-        return {"job_total_processes": count, "verified_page_anchors": 6, "duration_ms": result["duration_ms"]}
+            assert all(t in content for t in terms), f"page {page} lost its labelled evidence"
+        return {"job_total_processes": count, "business_replies": 1, "native_opens": 1,
+                "native_page_reads": 2, "verified_page_anchors": 6, "duration_ms": result["duration_ms"]}
     finally:
         job.Close()
 
@@ -229,14 +313,20 @@ def direct_worker(root, binary):
 def main():
     if os.name != "nt":
         raise SystemExit("This acceptance test requires Windows.")
-    STAGE.mkdir(parents=True, exist_ok=True)
-    run = STAGE / ("run-" + uuid.uuid4().hex)
-    run.mkdir()
-    binary = staged_programs(run)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ocr-bundle", type=Path, default=os.environ.get("AI_DAILY_TEST_BUNDLE"),
+                        required=not os.environ.get("AI_DAILY_TEST_BUNDLE"))
+    parser.add_argument("--default-bundle", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=os.environ.get("AI_DAILY_ACCEPTANCE_OUTPUT", STAGE))
+    parser.add_argument("cases", nargs="*")
+    args = parser.parse_args()
+    run = args.output.resolve() / ("run-" + uuid.uuid4().hex)
+    run.mkdir(parents=True)
+    binary, ocr_build = staged_programs(run, "ocr-bin", args.ocr_bundle, ocr=True)
+    default_binary, default_build = staged_programs(run, "default-bin", args.default_bundle, ocr=False)
     (run / "programs.json").write_text(json.dumps({
-        "executables": {p.name: sha(p) for p in binary.glob("*.exe")},
-        "dll": sha(binary / "pdfium.dll"), "model_inputs": {p.name: sha(p) for p in (binary / "ocr-models").iterdir()},
-        "fixture_sha256": sha(IMAGE), "target_date": str(DAY), "server": "loopback",
+        "ocr": ocr_build, "default": default_build, "fixture_sha256": sha(IMAGE),
+        "target_date": str(DAY), "model_server": "loopback",
     }, indent=2), encoding="utf-8")
     server = HTTPServer(("127.0.0.1", 0), Reply)
     server.unverified = []
@@ -245,7 +335,7 @@ def main():
     results = {}
 
     def check(name, test):
-        if len(sys.argv) > 1 and name not in sys.argv[1:]:
+        if args.cases and name not in args.cases:
             return
         try:
             results[name] = {"status": "passed", "evidence": test()}
@@ -256,24 +346,35 @@ def main():
     root = context(run, "switch")
     fixture(root / "work", "image.pdf", [(IMAGE, 1), (IMAGE, 2)])
 
-    def off(explicit):
+    def off(explicit, *, program=binary, data=root):
         count = len(server.unverified)
-        selection = daily(root, binary, server, explicit)
+        selection = daily(data, program, server, explicit)
         assert not excerpts(selection, "image.pdf"), "disabled OCR returned image text"
-        assert classification(root, "image.pdf") == ("no_text_in_parse_window", 2, 2), "full image not classified"
+        assert classification(data, "image.pdf") == ("no_text_in_parse_window", 2, 2), "full image not classified"
         return {"selected_files": selection["summary"]["selected_files"], "loopback_calls": len(server.unverified) - count}
+
+    def default_package():
+        box = context(run, "default-package")
+        fixture(box / "work", "image.pdf", [(IMAGE, 1), (IMAGE, 2)])
+        result = off(None, program=default_binary, data=box)
+        daily(box, default_binary, server, True, error_code="SCANNER_UNAVAILABLE")
+        assert all(kind == "negative" for kind, _, _ in cache_evidence(box)["image.pdf"])
+        return result | {"explicit_enable_rejected": True}
 
     def on():
         selection = daily(root, binary, server, True)
         assert_ocr(excerpts(selection, "image.pdf"))
         assert classification(root, "image.pdf") == ("no_text_in_parse_window", 2, 2), "OCR changed native classification"
         assert any(g["code"] == "OCR_TEXT_UNVERIFIED" for g in selection["gaps"]), "missing report OCR gap"
-        return {"physical_pages": 2, "unverified": True}
+        cached = cache_evidence(root)["image.pdf"]
+        assert any(kind == "parse" and window["selected_pages"] == [1, 2]
+                   for kind, window, _ in cached), "missing OCR parse row"
+        return {"physical_pages": 2, "unverified": True, "ocr_cache_bound_to_snapshot": True}
 
     def mixed():
         box = context(run, "exclusions")
-        fixture(box / "work", "mixed.pdf", [(IMAGE, 1), (TEXT, 1)])
-        fixture(box / "work", "outside-window.pdf", [(IMAGE, 1)] * 3 + [(TEXT, 1)] + [(IMAGE, 2)] * 2)
+        fixture(box / "work", "mixed.pdf", [(IMAGE, 1), (None, 1)])
+        fixture(box / "work", "outside-window.pdf", [(IMAGE, 1)] * 3 + [(None, 1)] + [(IMAGE, 2)] * 2)
         selection = daily(box, binary, server, True)
         mixed_text = " ".join(m["text"] for m in excerpts(selection, "mixed.pdf"))
         assert "128,400" in mixed_text and "4827" not in mixed_text, "mixed document lost native routing"
@@ -287,7 +388,7 @@ def main():
         box = context(run, "quota")
         for name, pages in [("one.pdf", [1, 2]), ("two.pdf", [2, 1])]:
             fixture(box / "work", name, [(IMAGE, p) for p in pages])
-        fixture(box / "work", "native.pdf", [(TEXT, 1)])
+        fixture(box / "work", "native.pdf", [(None, 1)])
         selection = daily(box, binary, server, True, workers=2)
         assert "128,400" in "".join(m["text"] for m in excerpts(selection, "native.pdf")), "native allocation lost"
         chosen = [name for name in ("one.pdf", "two.pdf") if excerpts(selection, name)]
@@ -342,9 +443,9 @@ def main():
         markdown = summary.read_text(encoding="utf-8")
         assert relative in markdown
         assert report["items"] and all(item["statement_kind"] == "uncertain" for item in report["items"])
-        overview = markdown.split("## 今日概览", 1)[1].split("## 事项详述", 1)[0]
-        assert "4827" in overview and any(label in overview for label in ("待确认", "待核实"))
-        assert "待确认" in markdown.split("## 事项详述", 1)[1]
+        body = markdown.split("[完整依据](", 1)[0]
+        assert "4827" in body and "待确认" in body
+        assert re.search(r"\[S\d+\]\(" + re.escape(relative) + r"#s\d+\)", body)
         published = summary.parent / relative
         assert sha(published) == attachment["sha256"]
         text = published.read_bytes().decode("utf-8")
@@ -356,21 +457,22 @@ def main():
 
     def native_publication():
         box = context(run, "native-control")
-        fixture(box / "work", "native.pdf", [(TEXT, 1)])
+        fixture(box / "work", "native.pdf", [(None, 1)])
         value = daily(box, binary, server, dry=False)
         path = Path(value["output_path"]).resolve(strict=True)
         assert path.is_relative_to(box) and server.unverified[-1] == []
         return {"ordinary_daily": True, "local_stub_calls": 1, "verified_text_source": True}
 
     try:
-        check("worker_process_tree", lambda: direct_worker(context(run, "worker"), binary))
+        check("worker_process_tree", lambda: direct_worker(context(run, "worker"), binary, ocr_build["worker"]))
+        check("default_package", default_package)
         check("native_daily_control", native_publication)
         check("default_off", lambda: off(None))
         check("explicit_off", lambda: off(False))
         check("enabled_after_off", on)
         if results.get("enabled_after_off", {}).get("status") == "passed":
             check("disabled_after_enabled", lambda: off(False))
-        elif len(sys.argv) == 1 or "disabled_after_enabled" in sys.argv[1:]:
+        elif not args.cases or "disabled_after_enabled" in args.cases:
             results["disabled_after_enabled"] = {"status": "not_run", "reason": "positive OCR cache unavailable"}
         check("mixed_and_sampled", mixed)
         check("independent_global_quota", quota)
@@ -383,7 +485,7 @@ def main():
         thread.join()
     print(run / "verification.json")
     print(json.dumps({k: v["status"] for k, v in results.items()}))
-    if set(sys.argv[1:]) - results.keys():
+    if set(args.cases) - results.keys():
         raise SystemExit("unknown acceptance case")
     return int(any(v["status"] != "passed" for v in results.values()))
 

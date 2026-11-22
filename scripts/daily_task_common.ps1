@@ -1,3 +1,4 @@
+#Requires -Version 5.1
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -169,48 +170,82 @@ function Get-ExistingReportTask {
     return $tasks[0]
 }
 
-function Install-ReportDailyTask {
-    param($Plan, [switch]$Apply)
-    $existing = Get-ExistingReportTask -Plan $Plan
-    $oldXml = $null
-    $differences = @()
-    if ($null -ne $existing) {
-        $oldXml = Export-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path
-        Assert-ReportTaskOwned -Plan $Plan -Xml $oldXml
-        $differences = @(Get-ReportTaskDifferences -Plan $Plan -Xml $oldXml)
-    }
-    if (-not $Apply) {
-        return [pscustomobject]@{ Action = $(if ($null -eq $existing) { 'create' } else { 'update-or-reuse' });
-            Applied = $false; TaskName = $Plan.task_name; Plan = $Plan; Differences = $differences }
-    }
-    $health = $Plan.PSObject.Properties.Name -contains 'kind' -and $Plan.kind -eq 'health'
-    if (-not $health) {
-        if (-not $Plan.credential_present) { throw 'TASK_CREDENTIAL_NOT_VISIBLE' }
-        if (-not $Plan.capabilities_configured -or -not $Plan.model_check_verified) { throw 'TASK_MODEL_ACCEPTANCE_REQUIRED' }
-    }
-    if ($null -ne $existing -and $differences.Count -eq 0) {
-        return [pscustomobject]@{ Action = 'unchanged'; Applied = $false; TaskName = $Plan.task_name }
-    }
-    $backup = $null
-    if ($oldXml) {
-        $backupDirectory = Join-Path $Plan.data_dir 'task_backups'
-        [IO.Directory]::CreateDirectory($backupDirectory) | Out-Null
-        $backup = Join-Path $backupDirectory ('task-' + [Guid]::NewGuid().ToString('N') + '.xml')
-        [IO.File]::WriteAllText($backup, $oldXml, [Text.UTF8Encoding]::new($false))
-    }
-    Register-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -Xml $Plan.xml -Force | Out-Null
+function Enter-ReportTaskMaintenance {
+    param($Plan)
+    # Daily and Health share this identity across releases and Windows sessions.
+    $identity = @($Plan.owner_marker, $Plan.task_path, $Plan.user_sid) -join "`n"
+    $sha256 = [Security.Cryptography.SHA256]::Create()
     try {
-        $readback = Export-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -ErrorAction Stop
-        if (@(Get-ReportTaskDifferences -Plan $Plan -Xml $readback).Count) { throw 'TASK_READBACK_MISMATCH' }
+        $hash = [BitConverter]::ToString($sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($identity))).Replace('-', '')
+    }
+    finally { $sha256.Dispose() }
+
+    $mutex = [Threading.Mutex]::new($false, "Global\AIDailyReportTaskMaintenance-$hash")
+    try {
+        if (-not $mutex.WaitOne(0)) { throw 'TASK_MAINTENANCE_BUSY' }
+    }
+    catch [Threading.AbandonedMutexException] {
+        # WaitOne transfers ownership to this thread before throwing.
     }
     catch {
-        $reason = $_.Exception.Message
-        try { Disable-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -ErrorAction Stop | Out-Null }
-        catch { throw "TASK_READBACK_DISABLE_FAILED: $reason; $($_.Exception.Message); backup=$backup" }
-        if ($reason -eq 'TASK_READBACK_MISMATCH') { throw 'TASK_READBACK_MISMATCH_DISABLED' }
-        throw "TASK_READBACK_FAILED_DISABLED: $reason; backup=$backup"
+        $mutex.Dispose()
+        throw
     }
-    return [pscustomobject]@{ Action = 'registered'; Applied = $true; TaskName = $Plan.task_name; Backup = $backup }
+    return $mutex
+}
+
+function Install-ReportDailyTask {
+    param($Plan, [switch]$Apply)
+    $maintenance = if ($Apply) { Enter-ReportTaskMaintenance -Plan $Plan }
+    try {
+        if ($Apply) { Assert-ReportTaskContext -Plan $Plan }
+        $existing = Get-ExistingReportTask -Plan $Plan
+        $oldXml = $null
+        $differences = @()
+        if ($null -ne $existing) {
+            $oldXml = Export-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path
+            Assert-ReportTaskOwned -Plan $Plan -Xml $oldXml
+            $differences = @(Get-ReportTaskDifferences -Plan $Plan -Xml $oldXml)
+        }
+        if (-not $Apply) {
+            return [pscustomobject]@{ Action = $(if ($null -eq $existing) { 'create' } else { 'update-or-reuse' });
+                Applied = $false; TaskName = $Plan.task_name; Plan = $Plan; Differences = $differences }
+        }
+        $health = $Plan.PSObject.Properties.Name -contains 'kind' -and $Plan.kind -eq 'health'
+        if (-not $health) {
+            if (-not $Plan.credential_present) { throw 'TASK_CREDENTIAL_NOT_VISIBLE' }
+            if (-not $Plan.capabilities_configured -or -not $Plan.model_check_verified) { throw 'TASK_MODEL_ACCEPTANCE_REQUIRED' }
+        }
+        if ($null -ne $existing -and $differences.Count -eq 0) {
+            return [pscustomobject]@{ Action = 'unchanged'; Applied = $false; TaskName = $Plan.task_name }
+        }
+        $backup = $null
+        if ($oldXml) {
+            $backupDirectory = Join-Path $Plan.data_dir 'task_backups'
+            [IO.Directory]::CreateDirectory($backupDirectory) | Out-Null
+            $backup = Join-Path $backupDirectory ('task-' + [Guid]::NewGuid().ToString('N') + '.xml')
+            [IO.File]::WriteAllText($backup, $oldXml, [Text.UTF8Encoding]::new($false))
+        }
+        Register-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -Xml $Plan.xml -Force | Out-Null
+        try {
+            $readback = Export-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -ErrorAction Stop
+            if (@(Get-ReportTaskDifferences -Plan $Plan -Xml $readback).Count) { throw 'TASK_READBACK_MISMATCH' }
+        }
+        catch {
+            $reason = $_.Exception.Message
+            try { Disable-ScheduledTask -TaskName $Plan.task_name -TaskPath $Plan.task_path -ErrorAction Stop | Out-Null }
+            catch { throw "TASK_READBACK_DISABLE_FAILED: $reason; $($_.Exception.Message); backup=$backup" }
+            if ($reason -eq 'TASK_READBACK_MISMATCH') { throw 'TASK_READBACK_MISMATCH_DISABLED' }
+            throw "TASK_READBACK_FAILED_DISABLED: $reason; backup=$backup"
+        }
+        return [pscustomobject]@{ Action = 'registered'; Applied = $true; TaskName = $Plan.task_name; Backup = $backup }
+    }
+    finally {
+        if ($null -ne $maintenance) {
+            try { $maintenance.ReleaseMutex() }
+            finally { $maintenance.Dispose() }
+        }
+    }
 }
 
 function Remove-ReportDailyTask {

@@ -1,0 +1,36 @@
+[package]
+name = "daily_parsers"
+links = "daily_parsers"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+ocr = []
+
+[dependencies]
+calamine.workspace = true
+chrono.workspace = true
+encoding_rs = "=0.8.35"
+glob.workspace = true
+office_oxide.workspace = true
+quick-xml.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+zip.workspace = true
+
+[build-dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+csv = "=1.4.0"
+tempfile.workspace = true

@@ -1,15 +1,5 @@
 [workspace]
-members = [
-    "build_identity",
-    "discovery",
-    "office_parser",
-    "scanner_contract",
-    "scanner_core",
-    "text_parser",
-    "worker_contract",
-    "report_app",
-    "pdf_parser",
-]
+members = ["daily_parsers", "pdf_worker", "daily_report"]
 resolver = "2"
 
 [workspace.package]
@@ -25,7 +15,7 @@ quick-xml = "=0.40.1"
 rayon = "=1.12.0"
 rusqlite = { version = "=0.40.1", features = ["bundled"] }
 serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = { version = "=1.0.150", features = ["arbitrary_precision"] }
+serde_json = { version = "=1.0.150", features = ["raw_value"] }
 sha2 = "=0.11.0"
 tempfile = "=3.27.0"
 thiserror = "=2.0.18"

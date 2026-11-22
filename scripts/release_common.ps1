@@ -1,14 +1,9 @@
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$ReleaseTemplates = @(
-    'personal_daily_template_v5.md', 'personal_daily_scan_template_v5.md', 'personal_daily_scan_template_v6.md',
-    'personal_daily_prompt_v5.md', 'personal_daily_prompt_v5_compact.md',
-    'personal_daily_scan_prompt_v5.md', 'personal_daily_scan_prompt_v6.md', 'personal_daily_scan_prompt_v7.md', 'personal_daily_scan_prompt_v8.md',
-    'personal_daily_compact_prompt_v6.md', 'personal_daily_compact_prompt_v7.md'
-)
+$ReleaseTemplates = @('daily_prompt.md', 'daily_compact_prompt.md', 'daily_render_template.md')
 $ReleaseScripts = @(
     'daily_task_common.ps1', 'install_daily_task.ps1', 'check_daily_task.ps1', 'remove_daily_task.ps1',
-    'health_notify.ps1', 'set_model_service.ps1', 'archive_scanner_database.ps1',
+    'health_notify.ps1', 'set_model_service.ps1', 'kernel_task_rollback.ps1',
     'update_release_pointer.ps1', 'release_common.ps1', 'verify_windows_release.ps1'
 )
 function Assert-ReleaseLocalPath([string]$Path) {
@@ -104,12 +99,12 @@ function Test-RustReleaseBundle([string]$BundleDirectory) {
     Assert-ReleaseLocalPath $root
     Assert-ReleaseLocalPath (Join-Path $root 'manifest.json')
     $manifest = Get-Content -LiteralPath (Join-Path $root 'manifest.json') -Encoding UTF8 -Raw | ConvertFrom-Json
-    if ($manifest.schema_version -cne 'ai_daily_rust_release_v1') { throw 'Invalid Rust release manifest' }
+    if ($manifest.schema_version -cne 'ai_daily_rust_release_v2') { throw 'Invalid Rust release manifest' }
     $hashes = Get-VerifiedReleaseHashes $root $manifest
-    $parserFiles = @('ai-daily-office-parser.exe', 'ai-daily-pdf-parser.exe', 'pdfium.dll')
-    $requiredFiles = $parserFiles + @('ai-daily-report.exe', 'build-inputs.json', 'parser-build.json', 'parser-manifest.json',
+    $requiredFiles = @('ai-daily-report.exe', 'ai-daily-pdf-worker.exe', 'pdfium.dll', 'build-inputs.json',
         'config/settings.example.yaml', 'config/model-services.example.json', 'licenses/dependencies.json', 'licenses/pdfium/LICENSE',
-        'README.md', 'CONTEXT.md', 'AGENTS.md', 'CLAUDE.md', 'docs/current-state.md', 'docs/windows-deployment.md')
+        'README.md', 'CONTEXT.md','docs/windows-deployment.md', 'docs/daily-report-operations.md', 'docs/change-archive.md',
+        'docs/scanner-backends.md', 'docs/current-state.md', 'docs/plans/2026-11-22-kernel-v2-three-phase-plan.md')
     $requiredFiles += @($ReleaseTemplates | ForEach-Object { "templates/$_" })
     $requiredFiles += @($ReleaseScripts | ForEach-Object { "scripts/$_" })
     foreach ($required in $requiredFiles) {
@@ -124,7 +119,7 @@ function Test-RustReleaseBundle([string]$BundleDirectory) {
         }
     }
     $inputs = Get-Content -LiteralPath (Join-Path $root 'build-inputs.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($inputs.PSObject.Properties['image_ocr']) {
+    if ($manifest.ocr_enabled) {
         foreach ($notice in @('licenses/ocr-models/LICENSE', 'licenses/ocr-models/NOTICE')) {
             if (-not $hashes.ContainsKey($notice)) { throw "Manifest omits OCR license file: $notice" }
         }
@@ -134,33 +129,25 @@ function Test-RustReleaseBundle([string]$BundleDirectory) {
             if ($hashes[$relative] -cne $model.sha256) { throw "Pinned OCR model hash mismatch: $($model.name)" }
         }
     }
-    $build = Get-Content -LiteralPath (Join-Path $root 'parser-build.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    $parser = Get-Content -LiteralPath (Join-Path $root 'parser-manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($manifest.target -cne $inputs.target -or $manifest.worker_protocol -ne 4 -or
-        $manifest.pdfium_version -cne $inputs.pdfium.version -or $inputs.pdfium.dll_sha256 -cne $hashes['pdfium.dll'] -or
-        $parser.schema -cne 'ai_daily_parser_manifest_v1' -or $build.inputs.schema -cne 'ai_daily_parser_build_v1' -or
-        $build.inputs.sources.'build-inputs.json' -cne $hashes['build-inputs.json'] -or
-        $manifest.engine_build -cne $parser.engine_build -or $parser.engine_build -cne $build.engine_build -or
-        $parser.parser_content_identity -cnotmatch '^sha256-parser-v1:[a-f0-9]{64}$' -or
-        $parser.parser_content_identity -cne $build.parser_content_identity) { throw 'Release build identity mismatch' }
-    foreach ($file in $parserFiles) {
-        if ($parser.files.$file -cne $hashes[$file]) { throw "Parser manifest hash mismatch: $file" }
+    if (-not $manifest.ocr_enabled -and @($hashes.Keys | Where-Object { $_ -like 'ocr-models/*' }).Count) {
+        throw 'Default release contains unexpected OCR weights'
     }
-    foreach ($kind in @('office', 'pdf')) {
-        $worker = Join-Path $root "ai-daily-$kind-parser.exe"
-        $hello = & $worker hello | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0 -or $hello.worker_kind -cne $kind -or $hello.protocol_version -ne $manifest.worker_protocol -or
-            $hello.worker_build -cne $manifest.engine_build) { throw "Worker handshake mismatch: $kind" }
-        $actual = & $worker parser-build | ConvertFrom-Json
-        if ($LASTEXITCODE -ne 0 -or ($actual | ConvertTo-Json -Depth 50 -Compress) -cne ($build | ConvertTo-Json -Depth 50 -Compress)) {
-            throw "Compiled parser inputs mismatch: $kind"
-        }
+    $build = & (Join-Path $root 'ai-daily-report.exe') build-info | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot read report build identity' }
+    $worker = & (Join-Path $root 'ai-daily-pdf-worker.exe') --build-info | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $manifest.target -cne $inputs.target -or $manifest.worker_protocol -ne 1 -or
+        $manifest.pdfium_version -cne $inputs.pdfium.version -or $inputs.pdfium.dll_sha256 -cne $hashes['pdfium.dll'] -or
+        $build.engine_build -cnotmatch '^[a-f0-9]{64}$' -or $manifest.engine_build -cne $build.engine_build -or
+        $manifest.parser_content_identity -cnotmatch '^[a-f0-9]{64}$' -or $worker.ocr_enabled -ne $manifest.ocr_enabled -or
+        $worker.parser_content_identity -cne $build.parser_content_identity -or $worker.parser_content_identity -cne $manifest.parser_content_identity -or
+        $worker.protocol_version -ne $manifest.worker_protocol -or $build.protocol_version -ne $manifest.worker_protocol) {
+        throw 'Release build identity mismatch'
     }
     $doctor = Get-ReleaseDoctor $root
-    if ($doctor.status -cne 'ok' -or $doctor.build -cnotmatch '^[a-f0-9]{64}$' -or
+    if ($doctor.status -cne 'ok' -or $doctor.build -cne $manifest.engine_build -or
         $doctor.templates -ne $ReleaseTemplates.Count -or $doctor.model.calls -ne 0 -or
-        $doctor.scanner.engine_build -cne $manifest.engine_build -or $doctor.parser_content_identity -cne $parser.parser_content_identity) {
-        throw 'Report program does not match the packaged workers and templates'
+        $doctor.parser_content_identity -cne $manifest.parser_content_identity) {
+        throw 'Packaged offline doctor failed'
     }
     return $manifest
 }

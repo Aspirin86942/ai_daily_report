@@ -2,6 +2,15 @@ tests/fixtures/pdf_benchmark/*.pdf binary
 tests/fixtures/pdf_classifier/*.pdf binary
 rust/pdf_parser/tests/fixtures/*.pdf binary
 rust/office_parser/tests/fixtures/* binary
+rust/pdf_worker/tests/fixtures/*.pdf binary
+rust/daily_parsers/tests/office/fixtures/* binary
+rust/daily_report/tests/fixtures/*.md text eol=lf
+rust/daily_report/tests/fixtures/*.sql text eol=lf
+rust/daily_report/src/store/schema-v1.sql text eol=lf
+rust/daily_report/src/scan/cache/schema.sql text eol=lf
+templates/*.md text eol=lf
+templates/personal_daily_scan_prompt_v5.md text eol=crlf
+templates/personal_daily_scan_template_v5.md text eol=crlf
 requirements.lock text eol=lf
 rust/report_app/tests/fixtures/*.md text eol=lf
 templates/evidence_*_prompt_v3.md text eol=lf
@@ -13,3 +22,26 @@ rust/**/Cargo.toml text eol=lf
 rust/Cargo.toml text eol=lf
 rust/Cargo.lock text eol=lf
 rust/*.json text eol=lf
+# These four files had CRLF bytes in the verified parser build.
+rust/daily_parsers/src/text/mod.rs text eol=crlf
+rust/daily_parsers/src/text/tests.rs text eol=crlf
+rust/daily_parsers/src/text/windows.rs text eol=crlf
+rust/daily_report/src/config.defaults.json text eol=crlf
+config/settings.example.yaml text eol=lf
+scripts/kernel_task_rollback.ps1 text eol=lf
+scripts/release_common.ps1 text eol=lf
+# Keep release documentation and verification scripts identical on Windows checkout.
+/AGENTS.md text eol=lf
+/CONTEXT.md text eol=lf
+/README.md text eol=lf
+docs/change-archive.md text eol=lf
+docs/current-state.md text eol=lf
+docs/daily-report-operations.md text eol=lf
+docs/scanner-backends.md text eol=lf
+docs/windows-deployment.md text eol=lf
+docs/plans/2026-11-22-kernel-v2-*.md text eol=lf
+scripts/build_windows_release.ps1 text eol=lf
+tests/test_parser_content_identity.py text eol=lf
+tests/windows_kernel_rollback.ps1 text eol=lf
+tests/windows_kernel_v2_recovery.py text eol=lf
+tests/windows_release.ps1 text eol=lf

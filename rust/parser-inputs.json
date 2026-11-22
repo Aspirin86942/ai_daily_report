@@ -1,33 +1,20 @@
 {
-  "schema": "ai_daily_parser_inputs_v1",
+  "schema": "ai_daily_parser_inputs_v2",
   "sources": [
-    "build_identity/src",
-    "parser-inputs.json",
+    "Cargo.toml",
+    "Cargo.lock",
     "build-inputs.json",
-    "text_parser/src",
-    "office_parser/src",
-    "pdf_parser/src",
-    "scanner_contract/src",
-    "worker_contract/src",
-    "discovery/src",
-    "scanner_core/src/parsers",
-    "scanner_core/src/admission.rs",
-    "scanner_core/src/budget_model.rs",
-    "scanner_core/src/classifier.rs",
-    "scanner_core/src/config.rs",
-    "scanner_core/src/source_allocation.rs",
-    "scanner_core/src/source_allocation",
-    "scanner_core/src/sources.rs",
-    "scanner_core/src/source_guard.rs",
-    "scanner_core/src/scheduler_adapter.rs",
-    "scanner_core/src/process.rs",
-    "scanner_core/src/session.rs",
-    "scanner_core/src/session",
-    "scanner_core/src/windows_job.rs"
-  ],
-  "dependency_roots": [
-    "ai-daily-text-parser",
-    "ai-daily-office-parser",
-    "ai-daily-pdf-parser"
+    "parser-inputs.json",
+    "daily_parsers/Cargo.toml",
+    "daily_parsers/build.rs",
+    "daily_parsers/src",
+    "pdf_worker/Cargo.toml",
+    "pdf_worker/src",
+    "daily_report/Cargo.toml",
+    "daily_report/src/scan",
+    "daily_report/src/config.rs",
+    "daily_report/src/run.rs",
+    "daily_report/src/run/personal_scan.rs",
+    "daily_report/src/config.defaults.json"
   ]
 }

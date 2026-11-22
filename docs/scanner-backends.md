@@ -1,16 +1,15 @@
 # 扫描与解析后端
 
-## 当前调用关系
+## v2 调用关系
 
-Rust CLI 的 report_app 负责报告、模型调用和恢复。个人日报在一次运行中依次扫描、解析、总结并发布。scanner_core 复用未变文件的解析缓存；archive 只处理历史证据查询、核验和存储维护。
+主程序负责文件顺序、材料预算、报告库与发布。文本和 Office 直接返回带原文位置的 Rust 结构。PDF 子程序在同一文档句柄里检查选定页并提取正文。v4 缓存保存可重建的解析结果，发布依据独立保存在报告记录中。
 
 ~~~text
 ai-daily-report.exe
-  ├─ archive → 历史原件、版本、差异与证据查询
-  └─ daily --source scan → scanner_core
-       ├─ Rust 内部轻文本解析
-       ├─ ai-daily-office-parser.exe
-       └─ ai-daily-pdf-parser.exe + pdfium.dll
+  └─ daily → daily_report::scan
+       ├─ daily_parsers::discovery → 文件及来源身份
+       ├─ daily_parsers::text / office → 原文及来源范围
+       └─ ai-daily-pdf-worker.exe + pdfium.dll → 页文本及页级观察
 ~~~
 
 旧 Python 的 NativeScanner 与 PyO3 调用链已随匹配版本归档，恢复规程见[恢复说明](../.artifacts/kernel-once-20261121/legacy/RECOVERY.md)和[历史扫描说明](archive/python-scanner-backends-2026-10-17.md)。
@@ -22,10 +21,10 @@ parser_backend 表示实际生成内容的解析器；worker_lane 表示执行�
 | 真实格式 | parser_backend | worker_lane |
 | --- | --- | --- |
 | 文本、Markdown、CSV、JSON、日志 | light_text_v2 | rust_core |
-| XLSX | rust_xlsx_bounded_v2 | rust_office_process_v3 |
-| XLS | rust_xls_calamine_v3 | rust_office_process_v3 |
-| DOCX、PPTX | rust_office_oxide_v2 | rust_office_process_v3 |
-| 显式启用的 DOC、PPT | rust_legacy_office_v3 | rust_office_process_v3 |
+| XLSX | rust_xlsx_bounded_v2 | rust_office_in_process |
+| XLS | rust_xls_calamine_v3 | rust_office_in_process |
+| DOCX、PPTX | rust_office_oxide_v2 | rust_office_in_process |
+| 显式启用的 DOC、PPT | rust_legacy_office_v3 | rust_office_in_process |
 | PDF 文字层 | rust_pdfium_v3 | rust_pdf_process_v3 |
 | 逐页确认的纯图 PDF，显式启用识字 | rust_pdfium_ocr_v1 | rust_pdf_process_v3 |
 
@@ -46,21 +45,19 @@ parser_backend 表示实际生成内容的解析器；worker_lane 表示执行�
 
 ## 工作进程与缓存
 
-Office/PDF 工作进程使用协议 v4，以逐行 JSON 完成启动握手、能力与构建身份检查、请求及响应。归档解析支持分块输出正文和位置。请求数、空闲时间、内存、运行时间或协议异常达到限制时回收进程。
+主程序与 PDF 工作程序同批构建。启动时核对解析器身份与固定 PDFium 的 SHA-256。协议 v1 为每帧添加四字节长度前缀、版本和请求编号。一次业务请求完成页窗检查和正文提取。达到单文件截止时间或协议出错时回收子程序，保留已经确认的页级观察。
 
-DOCX、PPTX 和旧式 XLS 的上游库在选取摘录前就会展开文档部件或解码工作簿。默认 512 MiB 是单个请求结束后判断是否回收工作进程的阈值。大型文档首次读取的峰值可能更高，超时会作为覆盖缺口记录。
+文本和 Office 受实际读取、解压、结构深度、单元格大小和截止时间约束。默认并发最多四路。PDF 同时受进程名额和内存预算限制，显式单路配置按顺序执行。
 
-三个 EXE 一起构建，两个工作进程必须具有匹配的构建身份。旧包继续使用各自匹配的工作进程。PDFium 的版本和 SHA-256 固定，发布校验会检查 DLL。
-
-扫描缓存身份包含规范化配置、解析器、通道、构建身份、预算、超时及原件指纹。影响解析结果的设置变化必须改变缓存身份。源文件在读取期间变化时保留诊断和既有重试边界。
+新扫描库 `scan_cache_v4.sqlite3` 只保存解析缓存、PDF 负向结果和快照三张表。缓存键包含来源身份、影响输出的设置、解析器构建身份和实际页窗。命中后仍复核记录哈希及快照引用。正常冷扫合并为一次写事务，同日全命中零写，跨日访问日合并更新。旧三期包继续使用原配的协议 v4 工作程序和独立 v3 扫描库。
 
 扫描结果一次返回上下文、来源、诊断及审计证据。冷扫描表示目标缓存中没有可用解析结果；热扫描复用兼容结果。比较时保持输入和内容签名一致，并区分进程内工作量、并行耗时之和与实际完成耗时。
 
 ## 验证与阅读
 
-`scripts/verify_rich_facts.py` 用同一组合成文档核对解析、冻结材料、实际请求、正文和依据五个环节。创建样本使用 Python 开发环境中的 python-docx、python-pptx、openpyxl、pypdf。传入 `--bundle`、`--corpus` 和新的 `--output` 目录，候选包加 `--require`。可用 `--markitdown-python` 指向独立安装 MarkItDown 的测试环境，核对同一份演示文稿的系列、类别、数值、备注和组合形状。日常生成使用 Rust 解析程序。
+v2 使用本机验收目录的 `bench/v2_semantics.py`，由同一份候选清单和构建驱动核对解析、冻结材料、实际请求、正文和依据。固定用例覆盖 8 项正文事实、9 项附件定位、39 处原文范围及 3 份冻结答复。[验收入口](plans/2026-11-22-kernel-v2-three-phase-plan.md)
 
-使用隔离目录、固定样本和本地模拟模型验证每日扫描、冻结恢复与重复发布。测试入口为 `rust/report_app/tests/personal_scan.rs` 和 `bundle_acceptance.rs`。旧归档性能测量保留原始数据和口径，不能作为当前日扫性能结论；旧采集基准脚本已退役。计时期间不并行运行构建或测试。
+使用隔离目录、固定样本和本地模拟模型验证每日扫描、冻结恢复与重复发布。测试入口为 `rust/daily_report/tests/personal_scan.rs` 和 `bundle_acceptance.rs`。旧归档性能测量保留原始数据和口径，不能作为当前日扫性能结论；旧采集基准脚本已退役。计时期间不并行运行构建或测试。
 
 - [历史归档查询](change-archive.md)：全文、差异、引用核验和存储维护。
 - [历史性能测量](archive/history/archive-performance-20261017.md)：全量样本、覆盖缺口和原始测量口径。

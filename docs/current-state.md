@@ -21,6 +21,10 @@
 
 两个正式任务的执行路径、账号、权限和触发时间均已回读。下一次日报计划于 11 月 22 日 09:00 汇总 11 月 21 日的材料，健康检查每天 11:00 和 23:00 运行。正式配置只更新了 Office 和 PDF 解析程序的路径。切换后，按该配置选择的两个进程在隔离目录各解析一份合成文件，图片文字识别关闭。部署验收新增真实模型调用 0 次。[日报任务核对](../.artifacts/kernel-phase3-release-20261122/check-task-daily.json) · [健康任务核对](../.artifacts/kernel-phase3-release-20261122/check-task-health.json) · [解析实测](../.artifacts/kernel-phase3-deployment-20261122/attempt-e8227a96651e4dbc9edfba5ca2b96e29/runtime/native-after.json)
 
+11 月 22 日 09:00:01，Windows 计划任务实际启动了上述旧内核三期程序，日报退出码为 0。10:30 的只读业务快照比部署基线增加 1 份日报和 2 个发布文件，现有 224 份日报、1 份周报、1 份月报和 285 个发布文件。基线的 283 个发布文件哈希相同，1,668 条模型调用明细逐行相同。[当日业务核对](../.artifacts/kernel-v2-20261122/daily-observation-20261122-103010-833392/receipt.json)
+
+个人日报内核 v2 的 Windows x64 包 `offline-v2-04` 已完成离线交付，36 项验收通过。真实模型请求和正式任务写入均为 0。该包的实测、压缩包及校验值见[v2 离线验收](plans/2026-11-22-kernel-v2-results.md)。[v2 三期计划](plans/2026-11-22-kernel-v2-three-phase-plan.md)
+
 报告库和扫描库的内容指纹、283 个已发布文件的哈希均与切换前一致。数据库保有 223 份日报、1 份周报、1 份月报和 1,668 条模型调用明细。在正式数据库的一致副本上对同一目标日执行健康检查，7 项结果与二期相同，其中有 1 项历史报告错误和 1 项材料范围预警。[业务核对](../.artifacts/kernel-phase3-deployment-20261122/attempt-e8227a96651e4dbc9edfba5ca2b96e29/runtime/business-after.json) · [健康检查](../.artifacts/kernel-phase3-deployment-20261122/attempt-e8227a96651e4dbc9edfba5ca2b96e29/runtime/health-after.json)
 
 二期包、原配置、任务定义及权限、两份数据库一致备份均可用于核验。隔离实测中，二期成功复用了三期使用过的检索索引，并从三期生成的测试日报中恢复了字节一致的正文和附件。[回退说明](../.artifacts/kernel-phase3-deployment-20261122/ROLLBACK.md) · [跨版本读写](../.artifacts/kernel-phase3-release-20261122/compat-_0bme2v2/result.json) · [正文和附件恢复](../.artifacts/kernel-phase3-release-20261122/recovery-hb71tpa2/result.json) · [三期同机性能与回归](plans/2026-11-22-kernel-phase3-results.md)
