@@ -1,5 +1,20 @@
 # 当前运行与验收状态
 
+## 个人日报内核 v2.1 已部署并完成结案空间清理（2026-11-22，上海时间）
+
+**16:49:58，正式日报和健康检查原位切换到 `.releases/rust-20261122-offline-v2-1-01`。** 候选包由干净源码提交 `12c2ee51` 构建（对应主干 `ae8dfe3e`），发布清单 SHA-256 为 `e5f4dc45d97041fcf6b14603f2b1442297d9eeb4eb73e9461bb6b36261344b27`，341 个文件核验通过。两项任务共用 `config-rust`，未修改任何配置；正式目录通过 `doctor --strict`（`templates=3`、`database=ok`、`model.calls=0`）。[部署回执](../.artifacts/kernel-v2-1-deployment-20261122/attempt-c687196c006449ceaac917eba32545a4/final-verification.json)
+
+| 正式任务 | 通过 Windows 任务计划程序立即启动 | 下一次自然触发 |
+| --- | --- | --- |
+| 日报 | 16:50:22 启动，退出码 0。729 毫秒复用 11 月 21 日已发布日报（`action=existing`、`quality=no_changes`），模型调用 0 次 | 11 月 23 日 09:00 |
+| 健康检查 | 16:50:24 启动，巡检执行成功。程序返回 2，任务返回 1。6 项业务检查与切换前一致（仍为 11 月 17/19/20 日既有历史告警，0 新增） | 11 月 22 日 23:00 |
+
+两次实跑均关联计划任务触发、工作目录、执行程序与日志。[日报实跑](../.artifacts/kernel-v2-1-deployment-20261122/attempt-c687196c006449ceaac917eba32545a4/runtime/verified-daily.json) · [健康实跑](../.artifacts/kernel-v2-1-deployment-20261122/attempt-c687196c006449ceaac917eba32545a4/runtime/verified-health.json)
+
+切换前已完成 `reports.sqlite3`、`scan_cache_v4.sqlite3`、`scan_index_rust_v3.sqlite3` 在线一致备份，并核对非凭据配置与 285 个发布文件哈希。实跑后 `reports.sqlite3` 整库逻辑指纹（`da912de9e887a9f122e342d515cc06b5e79628df38aa6224337b7af8b69caf8e`）、224 份日报 / 1 份周报 / 1 份月报 / 295 条运行记录 / 1,668 条调用明细、285 个发布文件及 `scan_index_rust_v3.sqlite3` 均逐项未变（新增真实模型调用 0 次）。`offline-v2-04` 与旧内核三期包完整保留，回退预览在切换前后逐字节一致。[备份清单](../.artifacts/kernel-v2-1-deployment-20261122/attempt-c687196c006449ceaac917eba32545a4/before/backup-manifest.json) · [业务核对](../.artifacts/kernel-v2-1-deployment-20261122/attempt-c687196c006449ceaac917eba32545a4/runtime/business-after.json) · [回退说明](../.artifacts/kernel-v2-1-deployment-20261122/attempt-c687196c006449ceaac917eba32545a4/ROLLBACK.md)
+
+**结案空间清理同步完成。** 经逐路径校验无文档链接冲突、无 Git 追踪文件且无重解析点后，安全清理 `.artifacts/` 下 65 个可再生编译缓存、重写试验与重复搜索压测库目录（共 306,874 个文件、208.19 GiB）；`.artifacts` 占用由 **256.57 GiB 降至 48.37 GiB**（452,688 → 145,814 文件），D 盘可用空间由 **197.45 GiB 增至 395.48 GiB（实增 +198.02 GiB）**。同时移除已合入的外置 worktree 及 `codex/daily-kernel-v2`、`codex/daily-kernel-v2-1` 分支；全部 `.releases/`、`kernel-once-20261121/legacy/` 恢复归档及 `.artifacts/rust-migration/cargo-release/x86_64-pc-windows-msvc` 共享发布缓存保留。清理后复验正式包清单、严格自检、计划任务回读、回退预览及活动文档 `.artifacts` 链接均通过（0 断链）。[空间清理回执](../.artifacts/kernel-v2-1-deployment-20261122/cleanup-receipt.json)
+
 ## 个人日报内核 v2 已部署（2026-11-22，上海时间）
 
 **12:46:51，正式日报和健康检查切换到 `.releases/rust-20261122-offline-v2-04`。** 发布清单 SHA-256 为 `bf27689c17127d01edb5b933aaf1e6be568c6cc6320fea755785922ce2a3f296`，341 个文件通过核验。原位更换两个任务的执行动作，已回读触发时间、运行账号、权限、时限及启用状态。两版共用 `config-rust`，新程序已通过严格自检，并在隔离目录各解析了一份 Office 和 PDF 样本。[部署回执](../.artifacts/kernel-v2-deployment-20261122/attempt-d5ef943fe618417ba5e08f38c5e14915/final-verification.json)
