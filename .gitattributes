@@ -30,6 +30,16 @@ rust/daily_report/src/config.defaults.json text eol=crlf
 config/settings.example.yaml text eol=lf
 scripts/kernel_task_rollback.ps1 text eol=lf
 scripts/release_common.ps1 text eol=lf
+# Preserve the CRLF bytes shipped in offline-v2-04.
+scripts/check_daily_task.ps1 text eol=crlf
+scripts/daily_task_common.ps1 text eol=crlf
+scripts/health_notify.ps1 text eol=crlf
+scripts/install_daily_task.ps1 text eol=crlf
+scripts/model-services.example.json text eol=crlf
+scripts/remove_daily_task.ps1 text eol=crlf
+scripts/set_model_service.ps1 text eol=crlf
+scripts/update_release_pointer.ps1 text eol=crlf
+scripts/verify_windows_release.ps1 text eol=crlf
 # Keep release documentation and verification scripts identical on Windows checkout.
 /AGENTS.md text eol=lf
 /CONTEXT.md text eol=lf
