@@ -1,5 +1,20 @@
 # 当前运行与验收状态
 
+## 个人日报内核 v2 已部署（2026-11-22，上海时间）
+
+**12:46:51，正式日报和健康检查切换到 `.releases/rust-20261122-offline-v2-04`。** 发布清单 SHA-256 为 `bf27689c17127d01edb5b933aaf1e6be568c6cc6320fea755785922ce2a3f296`，341 个文件通过核验。原位更换两个任务的执行动作，已回读触发时间、运行账号、权限、时限及启用状态。两版共用 `config-rust`，新程序已通过严格自检，并在隔离目录各解析了一份 Office 和 PDF 样本。[部署回执](../.artifacts/kernel-v2-deployment-20261122/attempt-d5ef943fe618417ba5e08f38c5e14915/final-verification.json)
+
+| 正式任务 | 通过 Windows 任务计划程序立即启动 | 下一次自然触发 |
+| --- | --- | --- |
+| 日报 | 12:48:30 启动，退出码 0。复用 11 月 21 日的已发布正文和附件，应用耗时 711 毫秒，模型调用 0 次 | 11 月 23 日 09:00 |
+| 健康检查 | 12:49:15 启动，巡检执行成功。程序返回 2，任务返回 1。6 项业务结果与旧版一致，已有历史告警触发去重 | 11 月 22 日 23:00 |
+
+两次实跑均关联了调度事件、进程编号、新目录中的实际 EXE 和应用日志。健康告警涉及 11 月 17 日和 19 日的解析缺口，以及 11 月 20 日的模型接口错误和总结缺失。[日报实跑](../.artifacts/kernel-v2-deployment-20261122/attempt-d5ef943fe618417ba5e08f38c5e14915/runtime/verified-daily.json) · [健康实跑](../.artifacts/kernel-v2-deployment-20261122/attempt-d5ef943fe618417ba5e08f38c5e14915/runtime/verified-health.json)
+
+切换前已核验两个数据库的一致备份、非凭据配置、两项任务 XML 和权限，以及 285 个发布文件和 4,280 个快照的备份。实跑后，所有发布文件、现存快照和 1,668 条调用明细逐项相同。按七天保留规则，程序清除了 11 月 14 日一份已发布日报的两个过期快照引用字段，所指文件在备份前已不存在。在备份上重现该变化后，整份报告库的内容指纹与实库相同。[备份清单](../.artifacts/kernel-v2-deployment-20261122/attempt-d5ef943fe618417ba5e08f38c5e14915/before/backup-manifest.json) · [数据核对](../.artifacts/kernel-v2-deployment-20261122/attempt-d5ef943fe618417ba5e08f38c5e14915/runtime/verified-retention.json)
+
+旧内核三期包及其 v3 扫描库完整保留。回退入口已在切换后验证，可将两个任务恢复到原程序并继续使用当前业务库。[回退说明](../.artifacts/kernel-v2-deployment-20261122/attempt-d5ef943fe618417ba5e08f38c5e14915/ROLLBACK.md) · [任务最终回读](../.artifacts/kernel-v2-deployment-20261122/attempt-d5ef943fe618417ba5e08f38c5e14915/runtime/task-final.json)
+
 ## 个人日报内核三期已部署（2026-11-22，上海时间）
 
 **02:12:47 完成本机正式切换。** 日报和健康检查均已启用，使用 `.releases/rust-20261122-kernel-phase3-01`。程序由干净的源码提交 `c9f82f6` 构建，发布清单 SHA-256 为 `098b1ea3bf6803931aa0e8da0dab98fef4f74722e190ea52a8ff4f3da18d2eaa`。清单内 527 个文件核验通过，3 项独立程序包测试全部通过。[正式包记录](../.artifacts/kernel-phase3-release-20261122/release.json) · [切换回执](../.artifacts/kernel-phase3-deployment-20261122/attempt-e8227a96651e4dbc9edfba5ca2b96e29/switch.json)
