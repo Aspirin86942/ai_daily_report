@@ -239,11 +239,18 @@ impl Store {
                 // Rows may have changed while one or more triggers were absent.
                 transaction.execute("DELETE FROM report_metadata WHERE key='search_revision_v1'", [])?;
             }
-            transaction.execute_batch(
-                "INSERT OR IGNORE INTO report_metadata(key,value) VALUES
-                 ('search_database_id_v1',lower(hex(randomblob(16)))),
-                 ('search_revision_v1',lower(hex(randomblob(16))));",
+            let existing_keys: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM report_metadata WHERE key IN ('search_database_id_v1','search_revision_v1')",
+                [],
+                |r| r.get(0),
             )?;
+            if existing_keys < 2 {
+                transaction.execute_batch(
+                    "INSERT OR IGNORE INTO report_metadata(key,value) VALUES
+                     ('search_database_id_v1',lower(hex(randomblob(16)))),
+                     ('search_revision_v1',lower(hex(randomblob(16))));",
+                )?;
+            }
         }
         transaction.commit()?;
         Ok(store)
@@ -252,7 +259,7 @@ impl Store {
     pub fn connection(&self) -> Result<Connection, ReportError> {
         reject_redirects(&self.path, "REPORT_PATH_REDIRECTED")?;
         let conn = Connection::open(&self.path)?;
-        conn.busy_timeout(Duration::from_secs(5))?;
+        conn.busy_timeout(Duration::from_secs(30))?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(conn)
     }

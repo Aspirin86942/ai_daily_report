@@ -5,7 +5,7 @@ use crate::{
 use std::{
     fs::{File, OpenOptions},
     io::{Seek, SeekFrom, Write},
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -16,12 +16,26 @@ pub struct ReportLock {
 }
 
 impl ReportLock {
-    pub fn acquire(database: &Path, scope: &str, wait: Duration) -> Result<Self, ReportError> {
+    fn lock_path(
+        database: &Path,
+        scope: &str,
+        create_parent: bool,
+    ) -> Result<Option<PathBuf>, ReportError> {
         let database = std::path::absolute(database)?;
         reject_redirects(&database, "REPORT_PATH_REDIRECTED")?;
-        std::fs::create_dir_all(database.parent().unwrap())?;
-        let parent = std::fs::canonicalize(database.parent().unwrap())?;
-        let full = parent.join(database.file_name().unwrap());
+        let Some(parent_dir) = database.parent() else {
+            return Ok(None);
+        };
+        let Some(file_name) = database.file_name() else {
+            return Ok(None);
+        };
+        if create_parent {
+            std::fs::create_dir_all(parent_dir)?;
+        } else if !parent_dir.is_dir() {
+            return Ok(None);
+        }
+        let parent = std::fs::canonicalize(parent_dir)?;
+        let full = parent.join(file_name);
         #[cfg(windows)]
         let mut identity = crate::processing_cache::normalized(&full)
             .to_string_lossy()
@@ -36,6 +50,22 @@ impl ReportLock {
             &digest(identity.as_bytes())[..24]
         ));
         reject_redirects(&path, "REPORT_PATH_REDIRECTED")?;
+        Ok(Some(path))
+    }
+
+    pub fn is_held(database: &Path, scope: &str) -> bool {
+        let Ok(Some(path)) = Self::lock_path(database, scope, false) else {
+            return false;
+        };
+        let Ok(file) = OpenOptions::new().read(true).open(&path) else {
+            return false;
+        };
+        try_probe_held(&file)
+    }
+
+    pub fn acquire(database: &Path, scope: &str, wait: Duration) -> Result<Self, ReportError> {
+        let path = Self::lock_path(database, scope, true)?
+            .ok_or_else(|| ReportError::new("REPORT_PATH_INVALID", "报告库路径无效"))?;
         let mut file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -101,6 +131,48 @@ fn try_lock(file: &File) -> Result<bool, ReportError> {
         Ok(()) => Ok(true),
         Err(std::fs::TryLockError::WouldBlock) => Ok(false),
         Err(std::fs::TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+#[cfg(windows)]
+fn try_probe_held(file: &File) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{
+        Foundation::{GetLastError, ERROR_LOCK_VIOLATION},
+        Storage::FileSystem::{LockFileEx, UnlockFileEx, LOCKFILE_FAIL_IMMEDIATELY},
+        System::IO::OVERLAPPED,
+    };
+    let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    let result = unsafe {
+        LockFileEx(
+            file.as_raw_handle(),
+            LOCKFILE_FAIL_IMMEDIATELY,
+            0,
+            1,
+            0,
+            &mut overlapped,
+        )
+    };
+    if result != 0 {
+        let mut unlock_overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+        unsafe {
+            UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut unlock_overlapped);
+        }
+        false
+    } else {
+        unsafe { GetLastError() == ERROR_LOCK_VIOLATION }
+    }
+}
+
+#[cfg(not(windows))]
+fn try_probe_held(file: &File) -> bool {
+    match file.try_lock_shared() {
+        Ok(()) => {
+            let _ = file.unlock();
+            false
+        }
+        Err(std::fs::TryLockError::WouldBlock) => true,
+        Err(_) => false,
     }
 }
 

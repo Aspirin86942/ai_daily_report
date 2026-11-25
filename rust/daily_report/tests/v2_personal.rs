@@ -467,3 +467,202 @@ fn oversized_attachment_is_rejected_before_the_first_model_request() {
     assert!(app.store.calls(&id).unwrap().is_empty());
     assert!(app.store.current(&run.target_date).unwrap().is_none());
 }
+
+fn dynamic_loopback(
+    steps: usize,
+    mut respond: impl FnMut(usize, &Value) -> Value + Send + 'static,
+) -> (String, JoinHandle<Vec<(String, Value)>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let address = format!("http://{}", listener.local_addr().unwrap());
+    let thread = thread::spawn(move || {
+        let mut requests = Vec::new();
+        for index in 0..steps {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "缺少预期的 HTTP 请求");
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            let (target, payload) = read_request(&mut stream);
+            let reply = respond(index, &payload);
+            let body = json!({
+                "choices":[{"finish_reason":"stop", "message":{"content":reply.to_string()}}],
+                "usage":{"prompt_tokens":150, "completion_tokens":100}
+            })
+            .to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            requests.push((target, payload));
+        }
+        requests
+    });
+    (address, thread)
+}
+
+fn write_daily_work_file(work_dir: &Path, name: &str, content: &str) {
+    let path = work_dir.join(name);
+    fs::write(&path, content).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified((fixed_now() - Days::new(1)).into())
+        .unwrap();
+}
+
+#[test]
+fn compaction_prunes_redundant_source_ids_to_fit_1500_char_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, server) = dynamic_loopback(2, |step, payload| {
+        let content: Value =
+            serde_json::from_str(payload["messages"][1]["content"].as_str().unwrap()).unwrap();
+        if step == 0 {
+            let file_ids: Vec<String> = content["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|s| s["source_id"].as_str())
+                .filter(|id| *id != "user_input")
+                .map(str::to_owned)
+                .collect();
+            assert_eq!(file_ids.len(), 14);
+            envelope(vec![
+                json!({
+                    "title": "专项核查进展",
+                    "text": "完成 14 份底稿核对，核心结论一致。",
+                    "kind": "progress",
+                    "statement_kind": "observed",
+                    "source_ids": &file_ids[..7],
+                }),
+                json!({
+                    "title": "跟进审批事项",
+                    "text": "待确认审批节点与系统校验口径。",
+                    "kind": "next_step",
+                    "statement_kind": "observed",
+                    "source_ids": &file_ids[7..14],
+                }),
+            ])
+        } else {
+            assert!(content["draft_chars"].as_u64().unwrap() > 1500);
+            assert_eq!(content["max_chars"], 1500);
+            let mut items = content["draft_items"].as_array().unwrap().clone();
+            let first_ids = items[0]["source_ids"].as_array().unwrap().clone();
+            let second_ids = items[1]["source_ids"].as_array().unwrap().clone();
+            items[0]["source_ids"] = json!([first_ids[0].clone()]);
+            items[1]["source_ids"] = json!([second_ids[0].clone(), second_ids[3].clone()]);
+            envelope(items)
+        }
+    });
+    let cfg = config(dir.path(), "openai", &url);
+    for idx in 0..14 {
+        write_daily_work_file(
+            &cfg.paths.work_dir,
+            &format!("note-{idx:02}.md"),
+            &format!("材料 {idx} 记录：核查金额为 {} 元。", 100 + idx),
+        );
+    }
+    let app = App::open(cfg, fixed_now()).unwrap();
+    let outcome = run_daily(request(), &app).unwrap();
+    assert_eq!(server.join().unwrap().len(), 2);
+    assert_eq!(outcome.model_calls, 2);
+    assert!(published_body(&outcome.markdown).chars().count() <= 1500);
+    let saved = saved_report(&app, &outcome.run_id);
+    assert_eq!(saved.items.len(), 2);
+    assert!(
+        !saved
+            .gaps
+            .iter()
+            .any(|g| g.code == "MODEL_COMPACTION_TOO_LONG" || g.code == "PERSONAL_OUTPUT_REDUCED"),
+        "{:?}",
+        saved.gaps
+    );
+    let attachment = saved.evidence_attachment.unwrap().markdown;
+    for idx in 0..14 {
+        assert!(attachment.contains(&format!("note-{idx:02}.md")));
+    }
+}
+
+#[test]
+fn compaction_rejects_reordered_or_added_source_ids() {
+    for mode in ["reorder", "add"] {
+        let dir = tempfile::tempdir().unwrap();
+        let mode_owned = mode.to_owned();
+        let (url, server) = dynamic_loopback(2, move |step, payload| {
+            let content: Value =
+                serde_json::from_str(payload["messages"][1]["content"].as_str().unwrap()).unwrap();
+            if step == 0 {
+                let file_ids: Vec<String> = content["sources"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|s| s["source_id"].as_str())
+                    .filter(|id| *id != "user_input")
+                    .map(str::to_owned)
+                    .collect();
+                assert_eq!(file_ids.len(), 3);
+                envelope(vec![
+                    json!({
+                        "title": TITLE,
+                        "text": FACT.repeat(60),
+                        "kind": "progress",
+                        "statement_kind": "observed",
+                        "source_ids": [file_ids[0].clone(), file_ids[1].clone()],
+                    }),
+                    json!({
+                        "title": "跟进审批",
+                        "text": NEXT,
+                        "kind": "next_step",
+                        "statement_kind": "observed",
+                        "source_ids": [file_ids[2].clone()],
+                    }),
+                ])
+            } else {
+                let mut items = content["draft_items"].as_array().unwrap().clone();
+                let ids0 = items[0]["source_ids"].as_array().unwrap().clone();
+                let extra = items[1]["source_ids"].as_array().unwrap()[0].clone();
+                items[0]["text"] = json!(FACT);
+                if mode_owned == "reorder" {
+                    items[0]["source_ids"] = json!([ids0[1].clone(), ids0[0].clone()]);
+                } else {
+                    items[0]["source_ids"] = json!([ids0[0].clone(), ids0[1].clone(), extra]);
+                }
+                envelope(items)
+            }
+        });
+        let cfg = config(dir.path(), "openai", &url);
+        for idx in 0..3 {
+            write_daily_work_file(
+                &cfg.paths.work_dir,
+                &format!("source-{idx}.md"),
+                &format!("独立材料 {idx} 内容：金额为 {} 元。", 200 + idx),
+            );
+        }
+        let app = App::open(cfg, fixed_now()).unwrap();
+        let outcome = run_daily(request(), &app).unwrap();
+        assert_eq!(server.join().unwrap().len(), 2);
+        assert_eq!(
+            app.store.calls(&outcome.run_id).unwrap()[1]["status"],
+            "failed"
+        );
+        let saved = saved_report(&app, &outcome.run_id);
+        assert!(saved
+            .gaps
+            .iter()
+            .any(|g| g.code == "MODEL_RESPONSE_INVALID"));
+        assert_eq!(saved.items.len(), 1);
+        assert_eq!(
+            saved.items[0].kind,
+            ai_daily_report::reports::personal::ItemKind::NextStep
+        );
+    }
+}

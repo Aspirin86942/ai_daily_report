@@ -88,5 +88,6 @@ scripts/corpus/
 .artifacts/worker-concurrency-*/
 .artifacts/daily-scan-*/
 .artifacts/project-space-cleanup-*/
+.artifacts/health-lock-compact-*/
 .releases/
 config-rust/

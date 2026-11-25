@@ -1,5 +1,13 @@
 # 当前运行与验收状态
 
+## 撞锁修复与引用预算优化版已部署（2026-11-25，上海时间）
+
+**23:41 完成正式日报与健康检查任务原位切换至 `.releases/rust-20261125-health-lock-compact-01`。** 本版修复了健康补跑执行 `PRAGMA quick_check` 期间与 `09:00` 日报撞锁导致 `REPORT_DATABASE_FAILED` 的隐患（[health.rs](../rust/daily_report/src/health.rs) 新增基于 `ReportLock::is_held` 探测与 `Connection::get_interrupt_handle()` 中断的可让路校验，并在磁盘文件核验前提前释放 SQLite 读锁；[store/mod.rs](../rust/daily_report/src/store/mod.rs) 将 `busy_timeout` 提升至 30 秒并避免无效元数据写锁升级），同时优化了 `1,500` 字渲染上限下的引用链接预算（[daily_prompt.md](../templates/daily_prompt.md)、[daily_compact_prompt.md](../templates/daily_compact_prompt.md) 与 [bounded.rs](../rust/daily_report/src/model/personal/bounded.rs) 的保序子集校验 `retains_source_subset`）。
+
+- **包校验与严格自检**：`build_windows_release.ps1` 与 `verify_windows_release.ps1` 核验通过（341 个文件、23,501,714 字节、`engine_build=d8d5b6cd04c40c3b28d784736ba9bebc999ddd2e7fb1600390d4af65c7941382`，3 项独立包验收通过）；正式配置 `config-rust` 通过 `doctor --strict`（`status=ok`、`database=ok`、`templates=3`、`model.calls=0`）。工作区全部 Rust 格式、Clippy 与锁定测试通过（364 passed, 0 failed, 8 ignored）。
+- **备份、回退与任务切换**：切换前已完成 `reports.sqlite3` 一致性备份（`.artifacts/health-lock-compact-deployment-20261125/before/reports.sqlite3`，`sha256: 73680756e255cf870060451bb9716495645183cf6cc554ac3b7b21ac0c82e5c2`）并采集回退回执（`.artifacts/health-lock-compact-deployment-20261125/rollback/task-rollback.json`，切换前后回退预览均指向 `.releases/rust-20261122-offline-v2-1-01`）。两项任务通过 `Set-ScheduledTask` 原位更新动作，`check_daily_task.ps1` 回读 `MatchesPlan=true`、`Differences=[]`；实跑 `AI Daily Report` 耗时 1.5 秒退出 0（`action=existing`、`target_date=2026-11-24`、`model_calls=0`），`AI Daily Report Health` 耗时 20.4 秒完成（`execution_status=succeeded`）。
+- **授权日报恢复**：使用新包重跑 `2026-11-23`（`run 9cf66dda37a736a5a24b0194732c556d`，1 次模型调用，恢复完整 5 项，已退出 `HISTORICAL_REPORT_ATTENTION`）与 `2026-11-24`（`run da6986de2b8ba5b88c0c38a2a020adc8`，1 次模型调用，恢复完整 6 项，`MODEL_COMPACTION_TOO_LONG` 与 `PERSONAL_OUTPUT_REDUCED` 已清除，仅保留 121 MiB 超大工作簿的 `FILE_SIZE_LIMIT` 范围提示）。
+
 ## 个人日报内核 v2.1 已部署并完成结案空间清理（2026-11-22，上海时间）
 
 **16:49:58，正式日报和健康检查原位切换到 `.releases/rust-20261122-offline-v2-1-01`。** 候选包由干净源码提交 `12c2ee51` 构建（对应主干 `ae8dfe3e`），发布清单 SHA-256 为 `e5f4dc45d97041fcf6b14603f2b1442297d9eeb4eb73e9461bb6b36261344b27`，341 个文件核验通过。两项任务共用 `config-rust`，未修改任何配置；正式目录通过 `doctor --strict`（`templates=3`、`database=ok`、`model.calls=0`）。[部署回执](../.artifacts/kernel-v2-1-deployment-20261122/attempt-c687196c006449ceaac917eba32545a4/final-verification.json)

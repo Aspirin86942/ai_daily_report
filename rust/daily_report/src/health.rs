@@ -9,6 +9,10 @@ use serde_json::{json, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Condvar, Mutex,
+    },
 };
 
 const DISK_WARN_BYTES: u64 = 20 * 1024 * 1024 * 1024;
@@ -70,26 +74,93 @@ fn open_read(path: &std::path::Path) -> Result<Connection, ReportError> {
     if !path.is_file() {
         return Err(ReportError::new("HEALTH_DB_MISSING", "数据库文件不存在"));
     }
-    Ok(Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?)
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(connection)
 }
 
 fn quick_check(connection: &Connection) -> bool {
     matches!(
-        connection.query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0)),
+        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0)),
         Ok(value) if value == "ok"
     )
 }
 
-fn published_report(
+enum QuickCheckOutcome {
+    Ok,
+    Deferred,
+    Failed,
+}
+
+fn quick_check_yielding(
+    connection: &Connection,
+    database: &Path,
+    scope: &str,
+) -> QuickCheckOutcome {
+    if crate::store::locking::ReportLock::is_held(database, scope) {
+        return QuickCheckOutcome::Deferred;
+    }
+    let interrupt = connection.get_interrupt_handle();
+    let state = Arc::new((Mutex::new(false), Condvar::new()));
+    let interrupted = Arc::new(AtomicBool::new(false));
+    let watcher_state = Arc::clone(&state);
+    let watcher_interrupted = Arc::clone(&interrupted);
+    let watcher_db = database.to_path_buf();
+    let watcher_scope = scope.to_owned();
+    let watcher = std::thread::spawn(move || {
+        let (lock, cvar) = &*watcher_state;
+        let mut done = lock.lock().unwrap_or_else(|error| error.into_inner());
+        while !*done {
+            if crate::store::locking::ReportLock::is_held(&watcher_db, &watcher_scope) {
+                watcher_interrupted.store(true, Ordering::Release);
+                interrupt.interrupt();
+                break;
+            }
+            let (guard, _) = cvar
+                .wait_timeout(done, std::time::Duration::from_millis(50))
+                .unwrap_or_else(|error| error.into_inner());
+            done = guard;
+        }
+    });
+    let result = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0));
+    {
+        let (lock, cvar) = &*state;
+        let mut done = lock.lock().unwrap_or_else(|error| error.into_inner());
+        *done = true;
+        cvar.notify_one();
+    }
+    let _ = watcher.join();
+    match result {
+        Ok(value) if value == "ok" => QuickCheckOutcome::Ok,
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::OperationInterrupted
+                && interrupted.load(Ordering::Acquire) =>
+        {
+            QuickCheckOutcome::Deferred
+        }
+        _ => QuickCheckOutcome::Failed,
+    }
+}
+
+enum PublishedQuery {
+    Resolved(HealthCheck),
+    VerifyFiles {
+        target: NaiveDate,
+        run_id: String,
+        quality: Option<String>,
+        output_path: Option<String>,
+        expected_sha256: Option<String>,
+        report_json: Option<String>,
+    },
+}
+
+fn fetch_published_report(
     connection: &Connection,
     config: &AppConfig,
     target: NaiveDate,
     now: DateTime<Utc>,
     active: &[(String, String)],
-) -> Result<HealthCheck, ReportError> {
+) -> Result<PublishedQuery, ReportError> {
     let row = connection
         .query_row(
             "SELECT r.run_id,r.quality,r.output_path,r.expected_sha256,r.report_json
@@ -104,10 +175,10 @@ fn published_report(
     let Some((run_id, quality, output_path, expected_sha256, report_json)) = row else {
         let date = target.to_string();
         if active.iter().any(|(_, target_date)| target_date == &date) {
-            return Ok(HealthCheck::ok(
+            return Ok(PublishedQuery::Resolved(HealthCheck::ok(
                 "REPORT_IN_PROGRESS",
                 format!("{target} 日报正在生成，仍在运行预算内"),
-            ));
+            )));
         }
         let scheduled = types::utc_window(target)?.1
             + Duration::seconds(i64::from(
@@ -118,7 +189,7 @@ fn published_report(
                 .to_std()
                 .is_ok_and(|elapsed| elapsed.as_secs() < config.recovery.run_budget_seconds)
         {
-            return Ok(HealthCheck::ok(
+            return Ok(PublishedQuery::Resolved(HealthCheck::ok(
                 "REPORT_NOT_DUE",
                 format!(
                     "{target} 日报尚未到应完成时间（计划 {}，运行预算 {} 秒）",
@@ -127,13 +198,41 @@ fn published_report(
                         .format("%Y-%m-%d %H:%M"),
                     config.recovery.run_budget_seconds
                 ),
-            ));
+            )));
         }
-        return Ok(HealthCheck::error(
+        return Ok(PublishedQuery::Resolved(HealthCheck::error(
             "REPORT_NOT_PUBLISHED",
             format!("{target} 没有已发布的正式日报"),
             json!({"target_date": target, "reports_dir": display_path(&config.paths.reports_dir)}),
-        ));
+        )));
+    };
+    Ok(PublishedQuery::VerifyFiles {
+        target,
+        run_id,
+        quality,
+        output_path,
+        expected_sha256,
+        report_json,
+    })
+}
+
+fn verify_published_files(
+    config: &AppConfig,
+    query: PublishedQuery,
+) -> Result<HealthCheck, ReportError> {
+    let PublishedQuery::VerifyFiles {
+        target,
+        run_id,
+        quality,
+        output_path,
+        expected_sha256,
+        report_json,
+    } = query
+    else {
+        let PublishedQuery::Resolved(check) = query else {
+            unreachable!()
+        };
+        return Ok(check);
     };
     let Some(expected) = expected_sha256 else {
         return Ok(HealthCheck::error(
@@ -377,14 +476,35 @@ pub fn check(
     let mut checks = Vec::new();
     let reports_path = config.paths.db_dir.join("reports.sqlite3");
     let reports = match open_read(&reports_path) {
-        Ok(connection) if quick_check(&connection) => Some(connection),
-        Ok(_) => {
-            checks.push(HealthCheck::error(
-                "DATABASE_INTEGRITY",
-                "报告库完整性检查未通过",
-                json!({"path": display_path(&reports_path)}),
-            ));
-            None
+        Ok(connection) => {
+            match quick_check_yielding(&connection, &reports_path, &config.report.scope_id) {
+                QuickCheckOutcome::Ok => Some(connection),
+                QuickCheckOutcome::Deferred => {
+                    if connection
+                        .query_row("SELECT COUNT(*) FROM report_schema_migrations", [], |row| {
+                            row.get::<_, i64>(0)
+                        })
+                        .is_ok()
+                    {
+                        Some(connection)
+                    } else {
+                        checks.push(HealthCheck::error(
+                            "DATABASE_INTEGRITY",
+                            "报告库完整性检查未通过",
+                            json!({"path": display_path(&reports_path)}),
+                        ));
+                        None
+                    }
+                }
+                QuickCheckOutcome::Failed => {
+                    checks.push(HealthCheck::error(
+                        "DATABASE_INTEGRITY",
+                        "报告库完整性检查未通过",
+                        json!({"path": display_path(&reports_path)}),
+                    ));
+                    None
+                }
+            }
         }
         Err(_) => {
             checks.push(HealthCheck::error(
@@ -396,20 +516,25 @@ pub fn check(
         }
     };
     if let Some(connection) = reports {
+        let mut pending_published = None;
+        let mut published_err = None;
+        let mut after_published = Vec::new();
         let observe = (|| -> Result<(), ReportError> {
             let tx = connection.unchecked_transaction()?;
             let active = active_runs(&tx, config, now)?;
-            match published_report(&tx, config, target, now, &active) {
-                Ok(check) => checks.push(check),
-                Err(_) => checks.push(HealthCheck::error(
-                    "DATABASE_INTEGRITY",
-                    format!("{target} 日报无法核对：报告库结构不可用"),
-                    json!({"target_date": target}),
-                )),
+            match fetch_published_report(&tx, config, target, now, &active) {
+                Ok(query) => pending_published = Some(query),
+                Err(_) => {
+                    published_err = Some(HealthCheck::error(
+                        "DATABASE_INTEGRITY",
+                        format!("{target} 日报无法核对：报告库结构不可用"),
+                        json!({"target_date": target}),
+                    ))
+                }
             }
             match run_attention(&tx, now, &active) {
-                Ok(check) => checks.push(check),
-                Err(_) => checks.push(HealthCheck::error(
+                Ok(check) => after_published.push(check),
+                Err(_) => after_published.push(HealthCheck::error(
                     "DATABASE_INTEGRITY",
                     "运行状态无法核对：报告库结构不可用",
                     json!({}),
@@ -417,8 +542,8 @@ pub fn check(
             }
             if config.report.profile == crate::config::ReportProfile::Personal {
                 match historical_attention(&tx, config, now, &active) {
-                    Ok(check) => checks.push(check),
-                    Err(_) => checks.push(HealthCheck::error(
+                    Ok(check) => after_published.push(check),
+                    Err(_) => after_published.push(HealthCheck::error(
                         "DATABASE_INTEGRITY",
                         "历史日报异常无法核对",
                         json!({}),
@@ -430,17 +555,25 @@ pub fn check(
                 [target.to_string()], |r|r.get(0)).optional().ok().flatten();
             if let Some(report) = partial {
                 let report = crate::snapshots::read_frozen_report_json(&report).unwrap_or_default();
-                checks.push(HealthCheck::warning("REPORT_CONTENT_PARTIAL", "日报已发布，内容仅部分可用",
+                after_published.push(HealthCheck::warning("REPORT_CONTENT_PARTIAL", "日报已发布，内容仅部分可用",
                     json!({"quality":"partial","selection":report["selection"],"gaps":report["gaps"]})));
             }
             Ok(())
         })();
+        drop(connection);
         if observe.is_err() {
             checks.push(HealthCheck::error(
                 "DATABASE_INTEGRITY",
                 "运行状态无法核对：报告库结构不可用",
                 json!({}),
             ));
+        } else {
+            if let Some(err_check) = published_err {
+                checks.push(err_check);
+            } else if let Some(query) = pending_published {
+                checks.push(verify_published_files(config, query)?);
+            }
+            checks.extend(after_published);
         }
     } else {
         checks.push(HealthCheck::error(

@@ -58,8 +58,17 @@ impl PublicationRules {
     }
 }
 
+fn retains_source_subset(kept: &[String], prior: &[String]) -> bool {
+    if kept.is_empty() || kept.len() > prior.len() {
+        return false;
+    }
+    let mut prior_iter = prior.iter();
+    kept.iter()
+        .all(|id| prior_iter.any(|candidate| candidate == id))
+}
+
 pub(super) fn keeps_content(item: &PersonalItem, prior: &PersonalItem) -> bool {
-    item.source_ids == prior.source_ids
+    retains_source_subset(&item.source_ids, &prior.source_ids)
         && item.title.trim() == prior.title.trim()
         && assertions(&item.text) == assertions(&prior.text)
 }

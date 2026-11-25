@@ -597,3 +597,85 @@ fn run_attention_keeps_historical_failure_record() {
         .unwrap();
     assert_eq!(published, 1);
 }
+
+#[test]
+fn health_defers_quick_check_while_report_lock_is_held() {
+    let (_dir, config) = setup();
+    let reports_path = config.paths.db_dir.join("reports.sqlite3");
+    let lock = ai_daily_report::store::locking::ReportLock::acquire(
+        &reports_path,
+        &config.report.scope_id,
+        std::time::Duration::from_secs(1),
+    )
+    .unwrap();
+    let target = chrono::NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+    let report = health::check(&config, target, now()).unwrap();
+    assert!(
+        !report
+            .checks
+            .iter()
+            .any(|check| check.code == "DATABASE_INTEGRITY"),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.code == "REPORT_NOT_PUBLISHED" && check.level == "error"),
+        "{report:?}"
+    );
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| check.code == "RUN_ATTENTION" && check.level == "ok"),
+        "{report:?}"
+    );
+
+    fs::write(&reports_path, b"not a database").unwrap();
+    let corrupted = health::check(&config, target, now()).unwrap();
+    assert!(
+        corrupted
+            .checks
+            .iter()
+            .any(|check| check.code == "DATABASE_INTEGRITY" && check.level == "error"),
+        "{corrupted:?}"
+    );
+    drop(lock);
+}
+
+#[test]
+fn health_yields_to_concurrent_writer_without_database_busy_error() {
+    let (_dir, config) = setup();
+    let reports_path = config.paths.db_dir.join("reports.sqlite3");
+    let target = chrono::NaiveDate::from_ymd_opt(2026, 10, 17).unwrap();
+
+    std::thread::scope(|scope| {
+        let reader = scope.spawn(|| {
+            for _ in 0..10 {
+                let report = health::check(&config, target, now()).unwrap();
+                assert!(
+                    !report
+                        .checks
+                        .iter()
+                        .any(|check| check.code == "DATABASE_INTEGRITY"),
+                    "{report:?}"
+                );
+            }
+        });
+        let writer = scope.spawn(|| {
+            for _ in 0..10 {
+                let store = Store::open(&reports_path, now()).unwrap();
+                let id = ai_daily_report::types::new_run_id();
+                let context =
+                    ai_daily_report::types::RunContext::new(id.clone(), now(), target, "fp".into())
+                        .unwrap();
+                store
+                    .create_personal(&context, "report", &id, None, now())
+                    .unwrap();
+            }
+        });
+        reader.join().unwrap();
+        writer.join().unwrap();
+    });
+}
