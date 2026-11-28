@@ -1,0 +1,30 @@
+name: Rust Architecture & Quality Gates
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  rust-gates:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --manifest-path rust/Cargo.toml --all -- --check
+
+      - name: Run clippy with warnings denied
+        run: cargo clippy --manifest-path rust/Cargo.toml --workspace --all-targets --locked -- -D warnings
+
+      # Note: full PDF worker integration tests require the pinned pdfium.dll beside target binaries.
+      - name: Build PDF worker binary for library process tests
+        run: cargo build --manifest-path rust/Cargo.toml -p pdf_worker --locked --bin ai-daily-pdf-worker
+
+      - name: Run library tests and architecture contracts
+        run: |
+          cargo test --manifest-path rust/Cargo.toml --workspace --locked --lib
+          cargo test --manifest-path rust/Cargo.toml -p ai-daily-report --locked --test architecture_baseline --test architecture_contracts
