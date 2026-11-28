@@ -90,5 +90,7 @@ scripts/corpus/
 .artifacts/project-space-cleanup-*/
 .artifacts/health-lock-compact-*/
 .artifacts/attachment-dedup-*/
+.artifacts/pdf-benchmark-retirement-*/
+.artifacts/arch-deentropy-*/
 .releases/
 config-rust/
