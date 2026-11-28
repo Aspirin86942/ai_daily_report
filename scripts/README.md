@@ -77,31 +77,21 @@ $Manifest = Join-Path $Evidence 'manifest.json'
 | [accept_windows_bundle.ps1](accept_windows_bundle.ps1) | 独立验收无 Python 的发布包、报告恢复和调度契约 | `-BundleDirectory`、全新 `-OutputDirectory`、`-Harness`；需构建 `bundle_acceptance` 测试程序，默认查找 `bundle-acceptance.exe` | 验收证据 |
 | [archive_scanner_database.ps1](archive_scanner_database.ps1) | 调用 Rust `archive-scanner` 保存扫描数据库归档 | `-SourceDatabase`、`-ArchiveDirectory`，可指定 `-Program`；涉及数据库归档写入，需相应授权 | 验收证据 |
 | [deduplicate_historical_artifacts.py](deduplicate_historical_artifacts.py) | 对固定白名单内的冻结历史输入建立同卷硬链接，并保留逐文件核验与恢复日志 | Windows；`plan --project-root ... --output ...` 生成清单，`apply`、`verify`、`rollback` 必须同时指定 `--manifest` 和 `--sha256`；不处理正式归档及已有硬链接 | 历史材料维护 |
-| [pdf_benchmark/generate_classifier_corpus.py](pdf_benchmark/generate_classifier_corpus.py) | 生成固定 PDF 分类器数值验证语料与清单 | `python scripts/pdf_benchmark/generate_classifier_corpus.py`；需 `reportlab`、`pypdf`；已有夹具跳过生成，保留基线 | 验收证据 |
-| [pdf_benchmark/generate_corpus.py](pdf_benchmark/generate_corpus.py) | 生成含中英文参考正文的合成 PDF 基准语料 | `python scripts/pdf_benchmark/generate_corpus.py`；需 `reportlab`；已有 PDF 和参考文本跳过生成 | 验收证据 |
-| [pdf_benchmark/metrics.py](pdf_benchmark/metrics.py) | 提供 PDF 对照测量共用的可打印率与正文保真度指标 | 由同目录 Python/Rust 测量脚本导入；保留历史比较口径 | 验收证据 |
-| [pdf_benchmark/run_python.py](pdf_benchmark/run_python.py) | 用 `pdfplumber` 输出固定语料的质量与耗时 | `python scripts/pdf_benchmark/run_python.py`；需固定语料与 `pdfplumber`，写 `results/python.json` | 验收证据 |
-| [pdf_benchmark/run_rust.py](pdf_benchmark/run_rust.py) | 用历史 `pdf-extract` 候选程序输出对称测量结果 | `python scripts/pdf_benchmark/run_rust.py`；需固定语料与 `rust/pdf_extract_bench` 的 release 程序，写 `results/rust.json` | 验收证据 |
-| [pdf_benchmark/summarize.py](pdf_benchmark/summarize.py) | 汇总两侧原始结果并按冻结阈值生成迁移判定 | `python scripts/pdf_benchmark/summarize.py`；先保留并核对两份原始 JSON，写 `results/summary.json` | 验收证据 |
-| [pdf_benchmark/results/python.json](pdf_benchmark/results/python.json) | 保存 Python PDF 测量原始结果 | `run_python.py` 生成；历史证据，保留不删，不代表当前生产性能 | 验收证据 |
-| [pdf_benchmark/results/rust.json](pdf_benchmark/results/rust.json) | 保存 Rust PDF 候选测量原始结果 | `run_rust.py` 生成；历史证据，保留不删，不代表当前生产解析路径 | 验收证据 |
-| [pdf_benchmark/results/summary.json](pdf_benchmark/results/summary.json) | 保存冻结门槛下的历史质量与性能比较 | `summarize.py` 生成；保留两侧原始结果和未通过项 | 验收证据 |
 
 ## 保留边界
 
-二期工作树的 17 个 Python 文件均用于开发机离线操作。Windows 发布包和 Daily、Health 任务直接运行 Rust 程序或随包 PowerShell 脚本。
+二期工作树的 11 个 Python 文件均用于开发机离线操作。Windows 发布包和 Daily、Health 任务直接运行 Rust 程序或随包 PowerShell 脚本。
 
 | 路径与文件 | 离线用途 |
 | --- | --- |
 | `scripts/compress_historical_artifacts.py`、`scripts/deduplicate_historical_artifacts.py` | 对明确选定的历史归档执行存储维护和回退 |
 | `tests/test_historical_artifact_compression.py`、`tests/test_historical_artifact_deduplication.py` | 在临时目录验证两项维护操作 |
-| `scripts/pdf_benchmark/` 下的 `generate_corpus.py`、`generate_classifier_corpus.py`、`metrics.py`、`run_python.py`、`run_rust.py`、`summarize.py` | 制作固定 PDF 语料，对照提取质量和耗时 |
 | `rust/pdf_extract_bench/oxide_compare/` 下的 `corpus.py`、`compare.py`、`score.py` | 比较候选 PDF 解析器，生成质量评分 |
 | `scripts/verify_rich_facts.py`、`rust/scanner_core/tests/semantic_daily_entry.py` | 用合成文档核对事实和原文范围，生成报告时使用本机替身 |
 | `tests/test_parser_content_identity.py` | 改动临时源码树，验证解析身份按预期失效或复用 |
 | `tests/windows_pdf_ocr_acceptance.py` | 已有的独立识别测试工具，需单独选择启用识别的验收场景 |
 
-历史看板生成脚本保存在[可恢复的单文件归档](../.artifacts/kernel-phase2-20261121/offline-python/audit-board-script.zip)，原路径和 SHA-256 见[归档记录](../.artifacts/kernel-phase2-20261121/offline-python/archived.json)。
+历史看板生成脚本保存在[可恢复的单文件归档](../.artifacts/kernel-phase2-20261121/offline-python/audit-board-script.zip)，原路径和 SHA-256 见[归档记录](../.artifacts/kernel-phase2-20261121/offline-python/archived.json)。历史 `scripts/pdf_benchmark/`（6 个脚本及 3 份结果 JSON）已于 2026-11-29 归档至[PDF 基准脚本归档](../.artifacts/pdf-benchmark-retirement-20261129/pdf-benchmark-scripts.zip)，文件清单与 SHA-256 见[归档清单](../.artifacts/pdf-benchmark-retirement-20261129/archived.json)。
 
 当前 Rust 验收使用 [verify_rich_facts.py](verify_rich_facts.py) 和[验证依赖清单](requirements-validation.txt)。旧 Python 生成、发布与补录脚本随匹配的源码和解析器归档。恢复原路径、文件哈希和隔离演练见[内核优化验收](../docs/plans/2026-11-21-kernel-optimization.md)。`rust/pdf_extract_bench` 保留开发对照工具。
 
