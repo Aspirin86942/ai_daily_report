@@ -95,7 +95,7 @@ pub struct DailyArgs {
     pub date: Option<NaiveDate>,
     #[arg(long, conflicts_with_all = ["target_date", "date", "no_save", "dry_run", "regenerate"])]
     pub scheduled: bool,
-    #[arg(long, value_parser = ["Asia/Shanghai"])]
+    #[arg(long, value_parser = clap::builder::PossibleValuesParser::new([crate::types::DEFAULT_TIMEZONE]))]
     pub timezone: Option<String>,
     #[arg(long, conflicts_with_all = ["no_save", "scheduled", "regenerate"])]
     pub dry_run: bool,

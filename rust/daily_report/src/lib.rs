@@ -2,6 +2,7 @@ pub mod cli;
 pub mod config;
 pub mod evidence;
 pub mod health;
+pub mod infra;
 pub mod maintenance;
 pub mod model;
 pub mod operations;

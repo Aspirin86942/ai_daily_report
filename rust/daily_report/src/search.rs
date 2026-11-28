@@ -8,9 +8,10 @@ mod terms;
 use crate::{
     cli::{Format, SearchArgs, SearchKind},
     config::AppConfig,
+    infra::{json::digest, sqlite::open_read_only_nolock},
     ReportError,
 };
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -83,11 +84,7 @@ fn source_error(error: impl std::fmt::Display) -> ReportError {
 }
 
 fn open_reports(path: &Path) -> Result<Connection, ReportError> {
-    Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(source_error)
+    open_read_only_nolock(path).map_err(source_error)
 }
 
 fn cached_revision(index: &Connection) -> rusqlite::Result<Option<String>> {
@@ -121,15 +118,14 @@ pub fn execute(config: &AppConfig, args: &SearchArgs) -> Result<Value, ReportErr
             "请输入非空检索关键词",
         ));
     }
-    let report_path = config.paths.db_dir.join("reports.sqlite3");
+    let report_path = config.reports_db_path();
     if !report_path.exists() {
         return Err(ReportError::new(
             "SEARCH_DB_MISSING",
             "报告库不存在，请先生成报告或检查配置中的数据库目录",
         ));
     }
-    let mut index =
-        Connection::open(config.paths.db_dir.join("report_search.sqlite3")).map_err(index_error)?;
+    let mut index = Connection::open(config.search_db_path()).map_err(index_error)?;
     index
         .busy_timeout(Duration::from_secs(30))
         .map_err(index_error)?;
@@ -307,7 +303,7 @@ fn refresh(
                 .map_err(source_error)?
                 .unwrap_or("");
             source_rows_read += 1;
-            let sha = crate::snapshots::digest(raw.as_bytes());
+            let sha = digest(raw.as_bytes());
             let old = previous.remove(&(table.kind.to_owned(), key.clone()));
             if old.as_ref() == Some(&sha) {
                 continue;

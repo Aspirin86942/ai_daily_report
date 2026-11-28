@@ -1,4 +1,4 @@
-use crate::{snapshots::read_frozen_report_json, ReportError};
+use crate::{infra::json::read_frozen_report_json, ReportError};
 use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Visitor};
 use serde::Deserializer;
 use serde_json::{Map, Value};

@@ -163,7 +163,7 @@ fn execute(
         }
         Command::Backup { output } => {
             let app = App::open_history(config, now)?;
-            let _lock = ai_daily_report::store::locking::ReportLock::acquire(
+            let _lock = ai_daily_report::infra::locking::ReportLock::acquire(
                 &app.store.path,
                 &app.config.report.scope_id,
                 std::time::Duration::from_secs(5),

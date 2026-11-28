@@ -1,14 +1,17 @@
 use crate::{
+    infra::{
+        fs::{normalized_path, optional_file_sha256, reject_redirects, write_synced},
+        json::{digest, read_frozen_report_json},
+    },
     processing_cache::write_immutable,
     reports::personal::{EvidenceAttachment, PersonalReport},
-    snapshots::{digest, reject_redirects},
     store::{RunRecord, Store},
     types::{parse_date, RunPhase},
     ReportError,
 };
 use chrono::{DateTime, Utc};
 use std::{
-    fs::{self, File},
+    fs,
     path::{Path, PathBuf},
 };
 
@@ -17,20 +20,15 @@ pub struct Publisher<'a> {
     pub store: &'a Store,
 }
 
-pub(crate) fn output_hash(path: &Path) -> Result<Option<String>, ReportError> {
-    reject_redirects(path, "OUTPUT_PATH_REDIRECTED")?;
-    match File::open(path) {
-        Ok(file) => Ok(Some(daily_parsers::reader_sha256(file)?)),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+fn output_hash(path: &Path) -> Result<Option<String>, ReportError> {
+    optional_file_sha256(path, "OUTPUT_PATH_REDIRECTED")
 }
 
 fn attachment(
     report_json: &str,
     validate_detailed: impl FnOnce(&PersonalReport) -> Result<(), ReportError>,
 ) -> Result<Option<(String, EvidenceAttachment)>, ReportError> {
-    let value = crate::snapshots::read_frozen_report_json(report_json)?;
+    let value = read_frozen_report_json(report_json)?;
     if value["evidence_attachment"].is_null() && value["schema_version"] != 6 {
         return Ok(None);
     }
@@ -77,7 +75,7 @@ fn plain_path(path: &Path) -> Result<PathBuf, ReportError> {
             "报告路径不是有效文字",
         ));
     }
-    Ok(crate::processing_cache::normalized(&absolute))
+    Ok(normalized_path(&absolute))
 }
 
 impl<'a> Publisher<'a> {
@@ -199,7 +197,7 @@ impl<'a> Publisher<'a> {
                 .report_json
                 .as_deref()
                 .ok_or_else(|| ReportError::new("REPORT_NOT_STAGED", "周月报正文缺失"))?;
-            let report = crate::snapshots::read_frozen_report_json(raw)?;
+            let report = read_frozen_report_json(raw)?;
             Some(crate::reports::period::validate_identity(
                 &run.run_kind,
                 &report,
@@ -301,7 +299,7 @@ impl<'a> Publisher<'a> {
         fs::create_dir_all(directory)?;
         self.check(target)?;
         let mut temporary = tempfile::NamedTempFile::new_in(directory)?;
-        crate::maintenance::write_synced(temporary.as_file_mut(), body)?;
+        write_synced(temporary.as_file_mut(), body)?;
         let temporary = temporary.into_temp_path();
         if output_hash(target)? != existing {
             self.conflict(run, body)?;

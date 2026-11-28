@@ -9,12 +9,12 @@ mod reports;
 pub use reports::StagedReport;
 
 use crate::{
-    snapshots::{canonical_json, reject_redirects, SnapshotRef},
-    types::{RunContext, RunPhase},
+    infra::{fs::reject_redirects, json::canonical_json, locking::ReportLock},
+    snapshots::SnapshotRef,
+    types::{RunContext, RunPhase, DEFAULT_SCOPE_ID, DEFAULT_TIMEZONE},
     ReportError,
 };
 use chrono::{DateTime, Utc};
-use locking::ReportLock;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -161,7 +161,7 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path, now: DateTime<Utc>) -> Result<Self, ReportError> {
-        let _lock = ReportLock::acquire(path, "personal_work", Duration::from_secs(5))?;
+        let _lock = ReportLock::acquire(path, DEFAULT_SCOPE_ID, Duration::from_secs(5))?;
         Self::open_locked(path, now, &_lock)
     }
 
@@ -218,7 +218,10 @@ impl Store {
                 "报告库版本不支持",
             ));
         }
-        for (key, expected) in [("scope_id", "personal_work"), ("timezone", "Asia/Shanghai")] {
+        for (key, expected) in [
+            ("scope_id", DEFAULT_SCOPE_ID),
+            ("timezone", DEFAULT_TIMEZONE),
+        ] {
             if metadata(&transaction, key)?.as_deref() != Some(expected) {
                 return Err(ReportError::new(
                     "REPORT_SCOPE_MISMATCH",

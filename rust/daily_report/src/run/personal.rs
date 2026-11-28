@@ -1,6 +1,11 @@
 use super::{App, PERSONAL_APP_BUDGET, PERSONAL_WORK_BUDGET};
 use crate::{
     evidence::{denied_sources, permission_denied},
+    infra::{
+        fs::reject_redirects,
+        json::{fingerprint, read_frozen_report_json},
+        locking::ReportLock,
+    },
     model::{
         personal::{
             self as model, PersonalPrompts, PublicationRules, COMPACT_PROMPT_V8, SCAN_PROMPT_V9,
@@ -18,10 +23,8 @@ use crate::{
             MAX_REPORT_BYTES, SCAN_TEMPLATE_V7,
         },
     },
-    snapshots::{
-        fingerprint, read_frozen_report_json, reject_redirects, SnapshotRef, SnapshotStore,
-    },
-    store::{locking::ReportLock, RunStatus, StagedReport},
+    snapshots::{SnapshotRef, SnapshotStore},
+    store::{RunStatus, StagedReport},
     types::{ReportOutcome, ReportRequest, ReportSource, RunContext, RunPhase},
     ReportError,
 };

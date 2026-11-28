@@ -1,4 +1,8 @@
-use crate::{snapshots::valid_hash, store::locking::ReportLock, ReportError};
+use crate::{
+    infra::{json::valid_hash, locking::ReportLock},
+    types::SCAN_CACHE_FILENAME,
+    ReportError,
+};
 use daily_parsers::contract::{ParseResult, PdfPageAudit, WorkerDiagnostic};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -18,7 +22,7 @@ mod tests;
 use records::{read_negative, read_parse, snapshot_hash, BoundReference, PreparedBatch};
 use storage::{refresh_timeout, sql};
 
-pub const CACHE_FILENAME: &str = "scan_cache_v4.sqlite3";
+pub const CACHE_FILENAME: &str = SCAN_CACHE_FILENAME;
 const MAX_CACHE_BYTES: u64 = 1 << 30;
 const MAX_BUSY_WAIT: Duration = Duration::from_secs(2);
 const LOCK_SCOPE: &str = "scan-cache-v4";

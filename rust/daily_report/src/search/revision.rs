@@ -128,6 +128,6 @@ fn rollback(snapshot: &Transaction<'_>) -> Option<String> {
         basic.CreationTime,
         basic.ChangeTime,
         basic.LastWriteTime,
-        crate::snapshots::digest(&header)
+        crate::infra::json::digest(&header)
     ))
 }

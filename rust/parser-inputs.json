@@ -11,6 +11,8 @@
     "pdf_worker/Cargo.toml",
     "pdf_worker/src",
     "daily_report/Cargo.toml",
+    "daily_report/src/infra",
+    "daily_report/src/types.rs",
     "daily_report/src/scan",
     "daily_report/src/config.rs",
     "daily_report/src/run.rs",

@@ -222,7 +222,7 @@ impl EncodedEntry {
         }
         let parse = ParseColumns {
             backend: payload.result.parser_backend.as_str(),
-            content_sha256: crate::snapshots::digest(payload.result.content.as_bytes()),
+            content_sha256: crate::infra::json::digest(payload.result.content.as_bytes()),
             content_text: std::mem::take(&mut payload.result.content),
             source_sha256: item.source_sha256,
         };
@@ -289,7 +289,7 @@ pub(super) fn read_parse(
     if bytes.len() > MAX_RECORD_BYTES
         || content.len() > MAX_CONTENT_BYTES
         || !valid_hash(source_sha256)
-        || crate::snapshots::digest(content.as_bytes()) != content_sha256
+        || crate::infra::json::digest(content.as_bytes()) != content_sha256
         || parse_hash(key, bytes, backend, content_sha256, source_sha256) != record_sha256
     {
         return Ok(None);

@@ -1,15 +1,25 @@
 //! Windows task definitions and explicit operational checks.
 pub mod rollback;
 
-use crate::scan::Scanner;
-use crate::{config::AppConfig, run::App, snapshots::reject_redirects, types, ReportError};
+pub use crate::infra::fs::display_path;
+use crate::{
+    config::AppConfig,
+    infra::{
+        fs::{reject_redirects, write_synced},
+        json::fingerprint,
+        locking::ReportLock,
+        sqlite::open_read_only,
+    },
+    run::App,
+    scan::Scanner,
+    types, ReportError,
+};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::{
     fs,
     io::Write,
-    path::Path,
     time::{Duration, Instant},
 };
 
@@ -20,14 +30,6 @@ fn xml(value: &str) -> String {
         .replace('>', "&gt;")
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
-}
-pub fn display_path(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    if let Some(rest) = value.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{rest}")
-    } else {
-        value.strip_prefix(r"\\?\").unwrap_or(&value).into()
-    }
 }
 
 fn calendar_trigger(id: &str, date: chrono::NaiveDate, time: &str) -> String {
@@ -144,10 +146,14 @@ fn task_definition(
         arguments = xml(&arguments),
         root = xml(&root),
     );
-    let db = config.paths.db_dir.join("reports.sqlite3");
+    let db = config.reports_db_path();
     let verified = if matches!(kind, TaskKind::Daily) && db.exists() {
-        reject_redirects(&db, "DATABASE_PATH_REDIRECTED")?;
-        let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let conn = open_read_only(
+            &db,
+            Duration::from_secs(5),
+            "DATABASE_PATH_REDIRECTED",
+            "DATABASE_MISSING",
+        )?;
         conn.query_row("SELECT 1 FROM report_runs WHERE run_kind='model_check' AND status='succeeded' AND config_fingerprint=? LIMIT 1",[config.fingerprint(false)?],|row|row.get::<_,i64>(0)).optional()?.is_some()
     } else {
         false
@@ -176,13 +182,13 @@ pub fn task_plan_kind(
     plan["report_profile"] = json!(config.report.profile);
     plan["processing_dir"] = json!(display_path(&config.paths.data_dir.join(
         if config.report.profile == crate::config::ReportProfile::Personal {
-            "daily_cache"
+            types::DAILY_CACHE_DIR
         } else {
             "archive"
         }
     )));
     plan["base_task_name"] = json!(config.schedule.task_name);
-    plan["execution_scope"] = json!(crate::snapshots::fingerprint(&json!({
+    plan["execution_scope"] = json!(fingerprint(&json!({
         "profile":config.report.profile,"work_dir":config.paths.work_dir,"data_dir":config.paths.data_dir,
         "roots":config.archive.roots,"model_roots":config.archive.model_roots,
         "allow_work_dir_for_model":config.archive.allow_work_dir_for_model,
@@ -231,7 +237,7 @@ pub fn doctor(app: &App, check_model: bool, now: DateTime<Utc>) -> Result<Value,
         reject_redirects(path, "PATH_REDIRECTED")?;
         fs::create_dir_all(path)?;
         let mut file = tempfile::NamedTempFile::new_in(path)?;
-        crate::maintenance::write_synced(file.as_file_mut(), b"doctor")?;
+        write_synced(file.as_file_mut(), b"doctor")?;
     }
     for (name, expected) in TEMPLATES {
         let path = app.config.program_dir.join("templates").join(name);
@@ -280,7 +286,7 @@ pub fn model_check(app: &App, now: DateTime<Utc>) -> Result<Value, ReportError> 
             personal::{Material, Selection},
         },
     };
-    let _lock = crate::store::locking::ReportLock::acquire(
+    let _lock = ReportLock::acquire(
         &app.store.path,
         &app.config.report.scope_id,
         Duration::from_secs(5),
@@ -349,8 +355,13 @@ pub fn model_check(app: &App, now: DateTime<Utc>) -> Result<Value, ReportError> 
 }
 
 fn run_phase(config: &AppConfig, run_id: &str) -> String {
-    let path = config.paths.db_dir.join("reports.sqlite3");
-    let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+    let path = config.reports_db_path();
+    let Ok(connection) = open_read_only(
+        &path,
+        Duration::from_secs(1),
+        "DATABASE_PATH_REDIRECTED",
+        "DATABASE_MISSING",
+    ) else {
         return "unknown".into();
     };
     connection

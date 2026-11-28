@@ -1,4 +1,6 @@
-use chrono::{DateTime, FixedOffset};
+use crate::infra::json::{frozen_float, frozen_json_key, frozen_number};
+use crate::types::shanghai;
+use chrono::DateTime;
 use minijinja::{Environment, Error, ErrorKind, Value};
 use serde_json::Value as JsonValue;
 pub mod data;
@@ -72,7 +74,7 @@ pub fn environment() -> Environment<'static> {
         let timestamp = DateTime::parse_from_rfc3339(&value)
             .map_err(|_| Error::new(ErrorKind::InvalidOperation, "invalid report timestamp"))?;
         Ok(timestamp
-            .with_timezone(&FixedOffset::east_opt(8 * 3600).unwrap())
+            .with_timezone(&shanghai())
             .format("%Y-%m-%d %H:%M:%S +08:00")
             .to_string())
     });
@@ -94,9 +96,8 @@ pub fn environment() -> Environment<'static> {
 
 // Historical templates displayed out-of-range JSON numbers as text.
 pub(crate) fn template_value(value: &JsonValue) -> Value {
-    if let Some(number) = crate::snapshots::frozen_number(value) {
-        return crate::snapshots::frozen_float(number)
-            .map_or_else(|| Value::from(number), Value::from);
+    if let Some(number) = frozen_number(value) {
+        return frozen_float(number).map_or_else(|| Value::from(number), Value::from);
     }
     match value {
         JsonValue::Null => Value::from(()),
@@ -116,12 +117,11 @@ pub(crate) fn template_value(value: &JsonValue) -> Value {
         JsonValue::Array(values) => {
             Value::from(values.iter().map(template_value).collect::<Vec<_>>())
         }
-        JsonValue::Object(values) => Value::from_pairs(values.iter().map(|(key, value)| {
-            (
-                crate::snapshots::frozen_json_key(key).to_owned(),
-                template_value(value),
-            )
-        })),
+        JsonValue::Object(values) => Value::from_pairs(
+            values
+                .iter()
+                .map(|(key, value)| (frozen_json_key(key).to_owned(), template_value(value))),
+        ),
     }
 }
 

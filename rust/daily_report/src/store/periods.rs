@@ -3,7 +3,7 @@ use super::{
     reports::{daily_pointer, read_run},
     timestamp, RunRecord, Store,
 };
-use crate::{reports::period, snapshots::read_frozen_report_json, types::RunPhase, ReportError};
+use crate::{infra::json::read_frozen_report_json, reports::period, types::RunPhase, ReportError};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::Value;

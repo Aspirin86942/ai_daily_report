@@ -2,8 +2,8 @@
 use super::data::{CoverageGap, ReportSource};
 use crate::{
     evidence::EvidenceRef,
-    snapshots::{digest, valid_hash},
-    types::{parse_date, utc_window, RunContext},
+    infra::json::{digest, valid_hash},
+    types::{parse_date, utc_window, RunContext, DEFAULT_SCOPE_ID, DEFAULT_TIMEZONE},
     ReportError,
 };
 use chrono::{DateTime, Utc};
@@ -13,8 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-pub const MAX_FILE_CHARS: usize = 180_000;
-pub const MAX_USER_CHARS: usize = 2_000;
+pub use crate::types::{MAX_FILE_CHARS, MAX_USER_CHARS};
 pub const MAX_INPUT_CHARS: usize = MAX_FILE_CHARS + MAX_USER_CHARS;
 pub const MAX_BODY_CHARS: usize = 1_500;
 pub const MAX_ITEMS: usize = 10;
@@ -400,8 +399,8 @@ impl PersonalReport {
         };
         if !matches!(self.schema_version, 5 | 6)
             || self.report_kind != "personal_daily"
-            || self.scope_id != "personal_work"
-            || self.timezone != "Asia/Shanghai"
+            || self.scope_id != DEFAULT_SCOPE_ID
+            || self.timezone != DEFAULT_TIMEZONE
             || self.root_alias.is_empty()
             || self.root_alias.chars().count() > 64
             || utc(&self.window_start_utc) != Some(window.0)

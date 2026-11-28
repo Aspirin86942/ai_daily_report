@@ -1,6 +1,6 @@
 use super::{changed_one, metadata, query, timestamp, RunRecord, Store};
 use crate::{
-    snapshots::digest,
+    infra::json::{digest, frozen_report_json, read_frozen_report_json},
     types::{parse_date, RunContext, RunPhase},
     ReportError,
 };
@@ -111,7 +111,7 @@ impl Store {
         validate_report(&run.context_json, staged.report, staged.markdown)?;
         let previous: Option<(String, String)> = tx.query_row("SELECT r.run_id,r.expected_sha256 FROM daily_reports d JOIN report_runs r ON r.run_id=d.current_run_id WHERE d.date=?", [&run.target_date], |row| Ok((row.get(0)?,row.get(1)?))).optional()?;
         tx.execute("UPDATE report_runs SET phase='db_committed',quality=?,report_json=?,markdown=?,expected_sha256=?,previous_sha256=?,previous_run_id=?,output_path=?,publication_fingerprint=?,updated_at=? WHERE run_id=?",
-            params![staged.report["quality"].as_str(),crate::snapshots::frozen_report_json(staged.report)?,staged.markdown,digest(staged.markdown.as_bytes()),previous.as_ref().map(|value| &value.1),previous.as_ref().map(|value| &value.0),staged.output_path,staged.publication_fingerprint,timestamp(now),id])?;
+            params![staged.report["quality"].as_str(),frozen_report_json(staged.report)?,staged.markdown,digest(staged.markdown.as_bytes()),previous.as_ref().map(|value| &value.1),previous.as_ref().map(|value| &value.0),staged.output_path,staged.publication_fingerprint,timestamp(now),id])?;
         tx.execute("DELETE FROM report_run_sources WHERE run_id=?", [id])?;
         insert_sources(&tx, id, staged.report["sources"].as_array().unwrap())?;
         tx.commit()?;
@@ -162,7 +162,7 @@ impl Store {
             ));
         }
         validate_report(&run.context_json, report, markdown)?;
-        let count = tx.execute("UPDATE report_runs SET phase='preview',status='succeeded',quality=?,report_json=?,markdown=?,expected_sha256=?,updated_at=?,finished_at=? WHERE run_id=? AND status='running'", params![report["quality"].as_str(),crate::snapshots::frozen_report_json(report)?,markdown,digest(markdown.as_bytes()),timestamp(now),timestamp(now),id])?;
+        let count = tx.execute("UPDATE report_runs SET phase='preview',status='succeeded',quality=?,report_json=?,markdown=?,expected_sha256=?,updated_at=?,finished_at=? WHERE run_id=? AND status='running'", params![report["quality"].as_str(),frozen_report_json(report)?,markdown,digest(markdown.as_bytes()),timestamp(now),timestamp(now),id])?;
         changed_one(count, "RUN_PHASE_INVALID")?;
         tx.commit()?;
         Ok(())
@@ -232,7 +232,7 @@ impl Store {
         let mut reports = BTreeMap::new();
         while let Some(row) = rows.next()? {
             let date: String = row.get(0)?;
-            let data = crate::snapshots::read_frozen_report_json(&row.get::<_, String>(1)?)?;
+            let data = read_frozen_report_json(&row.get::<_, String>(1)?)?;
             let version = data["schema_version"].as_u64().unwrap_or(1);
             if !(1..=6).contains(&version) {
                 return Err(ReportError::new(
@@ -296,7 +296,7 @@ fn mark_daily_published(
             "正式版本在发布期间改变",
         ));
     }
-    let report = crate::snapshots::read_frozen_report_json(
+    let report = read_frozen_report_json(
         run.report_json
             .as_deref()
             .ok_or_else(|| ReportError::new("REPORT_NOT_STAGED", "缺少已提交正文"))?,

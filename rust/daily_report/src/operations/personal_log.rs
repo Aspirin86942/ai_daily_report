@@ -1,5 +1,8 @@
 //! Bounded personal operation detail; historical evidence logs are untouched.
-use crate::{snapshots::reject_redirects, store::locking::ReportLock, ReportError};
+use crate::{
+    infra::{fs::reject_redirects, locking::ReportLock},
+    ReportError,
+};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use std::{

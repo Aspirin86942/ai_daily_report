@@ -1,4 +1,8 @@
-use crate::{reports::personal::MAX_FILE_CHARS, types::shanghai, ReportError};
+use crate::{
+    infra::json::fingerprint,
+    types::{shanghai, DEFAULT_SCOPE_ID, DEFAULT_TIMEZONE, MAX_FILE_CHARS, SCAN_CACHE_FILENAME},
+    ReportError,
+};
 mod evidence;
 use chrono::{NaiveTime, Utc};
 use daily_parsers::settings::{ReportMode, ScannerSettings};
@@ -444,7 +448,7 @@ impl AppConfig {
                 ));
             }
         }
-        let cache_filename = crate::scan::cache::CACHE_FILENAME;
+        let cache_filename = SCAN_CACHE_FILENAME;
         let index = take_scanner_path(
             scanner_map,
             "index_db_path",
@@ -543,6 +547,22 @@ impl AppConfig {
         Ok(config)
     }
 
+    pub fn reports_db_path(&self) -> PathBuf {
+        self.paths.db_dir.join(crate::types::REPORTS_DB_FILENAME)
+    }
+
+    pub fn search_db_path(&self) -> PathBuf {
+        self.paths.db_dir.join(crate::types::SEARCH_DB_FILENAME)
+    }
+
+    pub fn daily_cache_dir(&self) -> PathBuf {
+        self.paths.data_dir.join(crate::types::DAILY_CACHE_DIR)
+    }
+
+    pub fn run_snapshots_dir(&self) -> PathBuf {
+        self.paths.data_dir.join(crate::types::RUN_SNAPSHOTS_DIR)
+    }
+
     pub fn api_key(&self) -> &str {
         &self.api_key
     }
@@ -561,7 +581,7 @@ impl AppConfig {
     }
 
     pub fn fingerprint(&self, recovery: bool) -> Result<String, ReportError> {
-        crate::snapshots::fingerprint(&self.fingerprint_fields(recovery)?)
+        fingerprint(&self.fingerprint_fields(recovery)?)
     }
 
     fn fingerprint_fields(&self, recovery: bool) -> Result<Value, ReportError> {
@@ -591,8 +611,6 @@ impl AppConfig {
         expected: &str,
         recovery: bool,
     ) -> Result<bool, ReportError> {
-        use crate::snapshots::fingerprint;
-
         let mut fields = self.fingerprint_fields(recovery)?;
         if fingerprint(&fields)? == expected {
             return Ok(true);
@@ -705,8 +723,8 @@ impl AppConfig {
             return Err(invalid("llm.base_url"));
         }
         let report = &self.report;
-        if report.scope_id != "personal_work"
-            || report.timezone != "Asia/Shanghai"
+        if report.scope_id != DEFAULT_SCOPE_ID
+            || report.timezone != DEFAULT_TIMEZONE
             || report.default_target != "previous_calendar_day"
             || report.root_alias.is_empty()
             || report.root_alias.len() > 64

@@ -1,11 +1,16 @@
 use crate::{
     config::AppConfig,
+    infra::{
+        fs::reject_redirects,
+        json::{digest, valid_run_id},
+        locking::ReportLock,
+        sqlite::open_read_only,
+    },
     processing_cache::MAX_INPUT_BYTES,
-    snapshots::{digest, reject_redirects, valid_run_id, SnapshotRef, SnapshotStore},
-    store::locking::ReportLock,
+    snapshots::{SnapshotRef, SnapshotStore},
     ReportError,
 };
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -52,7 +57,7 @@ impl Target {
             scope_id: config.report.scope_id.clone(),
             database: database_path(config)?,
             snapshots: directory_path(
-                &config.paths.data_dir.join("daily_cache").join("snapshots"),
+                &config.daily_cache_dir().join("snapshots"),
                 "SNAPSHOT_PATH_REDIRECTED",
             )?,
             reports: directory_path(&config.paths.reports_dir, "OUTPUT_PATH_REDIRECTED")?,
@@ -88,12 +93,13 @@ fn checked_lock(
     let wait = Duration::from_secs(5);
     let processing = ReportLock::acquire(&target.processing_lock_path(), "personal", wait)?;
     let report = ReportLock::acquire(&target.database, &target.scope_id, wait)?;
-    let connection =
-        Connection::open_with_flags(&target.database, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|_| database_error())?;
-    connection
-        .busy_timeout(wait)
-        .map_err(|_| database_error())?;
+    let connection = open_read_only(
+        &target.database,
+        wait,
+        "REPORT_PATH_REDIRECTED",
+        "ROLLBACK_DB_MISSING",
+    )
+    .map_err(|_| database_error())?;
     check_pending(&connection, &target)?;
     Ok(HeldLocks {
         _report: report,
@@ -187,7 +193,7 @@ fn directory_path(path: &Path, redirect_code: &'static str) -> Result<PathBuf, R
 }
 
 fn database_path(config: &AppConfig) -> Result<PathBuf, ReportError> {
-    let database = config.paths.db_dir.join("reports.sqlite3");
+    let database = config.reports_db_path();
     reject_redirects(&database, "REPORT_PATH_REDIRECTED").map_err(|error| {
         if error.code == "REPORT_PATH_REDIRECTED" {
             error

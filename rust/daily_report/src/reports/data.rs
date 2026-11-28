@@ -1,4 +1,8 @@
-use crate::{scan::sources::ScanSource, snapshots::digest, ReportError};
+use crate::{
+    infra::json::{digest, valid_hash},
+    scan::sources::ScanSource,
+    ReportError,
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -99,14 +103,14 @@ impl ReportSource {
     }
     pub fn validate(&self) -> Result<(), ReportError> {
         let valid_id = self.source_id == "user_input"
-            || self.source_id.strip_prefix("src_").is_some_and(sha256);
+            || self.source_id.strip_prefix("src_").is_some_and(valid_hash);
         if !valid_id
             || !matches!(
                 self.parse_status.as_str(),
                 "success" | "error" | "timeout" | "not_parsed"
             )
-            || !sha256(&self.excerpt_sha256)
-            || self.content_sha256.as_ref().is_some_and(|s| !sha256(s))
+            || !valid_hash(&self.excerpt_sha256)
+            || self.content_sha256.as_ref().is_some_and(|s| !valid_hash(s))
             || self.model_chars > self.excerpt_chars
             || !utc(&self.observed_at_utc)
             || self.modified_at_utc.as_ref().is_some_and(|s| !utc(s))
@@ -128,12 +132,6 @@ impl ReportSource {
     }
 }
 
-fn sha256(text: &str) -> bool {
-    text.len() == 64
-        && text
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
 fn utc(text: &str) -> bool {
     DateTime::parse_from_rfc3339(text).is_ok_and(|t| t.offset().local_minus_utc() == 0)
 }

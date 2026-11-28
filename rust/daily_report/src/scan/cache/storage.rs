@@ -102,7 +102,7 @@ pub(super) fn open(
 
 pub(super) fn check_paths(path: &Path) -> Result<(), ReportError> {
     const CODE: &str = "SCAN_CACHE_PATH_REDIRECTED";
-    crate::snapshots::reject_redirects(path, CODE)?;
+    crate::infra::fs::reject_redirects(path, CODE)?;
     // The database and sidecars share the already validated ancestor chain.
     for suffix in ["-wal", "-shm", "-journal"] {
         let info = match fs::symlink_metadata(sidecar(path, suffix)) {
@@ -110,14 +110,7 @@ pub(super) fn check_paths(path: &Path) -> Result<(), ReportError> {
             Err(error) if error.kind() == ErrorKind::NotFound => continue,
             Err(error) => return Err(error.into()),
         };
-        #[cfg(windows)]
-        let redirect = {
-            use std::os::windows::fs::MetadataExt;
-            info.file_attributes() & 0x400 != 0
-        };
-        #[cfg(not(windows))]
-        let redirect = info.file_type().is_symlink();
-        if redirect {
+        if crate::infra::fs::is_redirect(&info) {
             return Err(ReportError::new(CODE, "路径包含链接或重定向"));
         }
     }

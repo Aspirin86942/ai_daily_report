@@ -4,10 +4,11 @@ mod personal_scan;
 use crate::scan::{ScanRequest, ScanResult, Scanner};
 use crate::{
     config::AppConfig,
+    infra::locking::ReportLock,
     model::transport::{HttpTransport, ModelTransport},
     publish::Publisher,
     snapshots::SnapshotStore,
-    store::{locking::ReportLock, Store},
+    store::Store,
     types::{ReportOutcome, ReportRequest, RunPhase},
     ReportError,
 };
@@ -60,7 +61,7 @@ impl App {
             } else {
                 None
             };
-        let path = config.paths.db_dir.join("reports.sqlite3");
+        let path = config.reports_db_path();
         let lock = ReportLock::acquire(
             &path,
             &config.report.scope_id,
@@ -80,10 +81,10 @@ impl App {
                 (started + PERSONAL_WORK_BUDGET).min(Instant::now() + Duration::from_secs(2)),
             )?;
         }
-        let snapshot_root = config.paths.data_dir.join("run_snapshots");
+        let snapshot_root = config.run_snapshots_dir();
         let snapshots = if maintain {
             SnapshotStore::new(
-                config.paths.data_dir.join("run_snapshots"),
+                snapshot_root,
                 config
                     .retention
                     .snapshot_max_mib

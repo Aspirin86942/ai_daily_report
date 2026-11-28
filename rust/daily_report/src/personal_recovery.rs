@@ -1,6 +1,6 @@
 //! Outstanding personal reports stay visible until their current publication is usable.
 use crate::{
-    processing_cache::RETENTION_DAYS, snapshots::read_frozen_report_json, types, ReportError,
+    infra::json::read_frozen_report_json, processing_cache::RETENTION_DAYS, types, ReportError,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::Connection;

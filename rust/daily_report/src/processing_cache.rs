@@ -1,6 +1,11 @@
 //! One OS lock and one shared reservation pool for every personal processing writer.
 use crate::{
-    config::AppConfig, snapshots::reject_redirects, store::locking::ReportLock, ReportError,
+    config::AppConfig,
+    infra::{
+        fs::{normalized_path, reject_redirects, write_synced},
+        locking::ReportLock,
+    },
+    ReportError,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -52,7 +57,7 @@ impl ProcessingSession {
         deadline: Instant,
     ) -> Result<Self, ReportError> {
         Self::at(
-            &config.paths.data_dir.join("daily_cache"),
+            &config.daily_cache_dir(),
             now,
             deadline,
             MAX_BYTES,
@@ -116,7 +121,7 @@ impl CacheQuota {
         max_bytes: u64,
         control_bytes: u64,
     ) -> Result<Self, ReportError> {
-        let root = normalized(&std::path::absolute(root)?);
+        let root = normalized_path(&std::path::absolute(root)?);
         let ledger = root.join(".cache-ledger.json");
         let mut entries: BTreeMap<String, Entry> = if ledger.exists() {
             if fs::metadata(&ledger)?.len() > (control_bytes / 4).min(2 * 1024 * 1024) {
@@ -168,7 +173,7 @@ impl CacheQuota {
     }
 
     fn relative(&self, path: &Path) -> Result<String, ReportError> {
-        let path = normalized(&std::path::absolute(path)?);
+        let path = normalized_path(&std::path::absolute(path)?);
         // canonicalize only the existing root; destinations need not exist yet.
         let relative = path
             .strip_prefix(&self.root)
@@ -222,7 +227,7 @@ impl CacheQuota {
         let next = self.root.join(".cache-ledger.next");
         reject_redirects(&next, "PROCESSING_PATH_REDIRECTED")?;
         let mut file = fs::File::create(&next)?;
-        crate::maintenance::write_synced(&mut file, &bytes)?;
+        write_synced(&mut file, &bytes)?;
         drop(file);
         fs::rename(next, self.root.join(".cache-ledger.json"))?;
         Ok(())
@@ -503,7 +508,7 @@ pub(crate) fn write_immutable(
     if let Some(reservation) = &mut reservation {
         reservation.track_immutable(path, temporary.path())?;
     }
-    crate::maintenance::write_synced(temporary.as_file_mut(), bytes)?;
+    write_synced(temporary.as_file_mut(), bytes)?;
     install_immutable(path, reservation, temporary, verify_existing)
 }
 
@@ -541,20 +546,6 @@ fn full() -> ReportError {
     ReportError::new("PROCESSING_CACHE_FULL", "处理缓存容量不足，当前材料已暂缓")
 }
 
-pub(crate) fn normalized(path: &Path) -> PathBuf {
-    #[cfg(windows)]
-    {
-        let text = path.to_string_lossy();
-        if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
-            return PathBuf::from(format!(r"\\{unc}"));
-        }
-        if let Some(local) = text.strip_prefix(r"\\?\") {
-            return PathBuf::from(local);
-        }
-    }
-    path.to_owned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,7 +571,7 @@ mod tests {
             .reserve(write_reservation_bytes(CONTENT.len() as u64))
             .unwrap();
         reservation.track_immutable(path, temporary.path()).unwrap();
-        crate::maintenance::write_synced(temporary.as_file_mut(), CONTENT).unwrap();
+        write_synced(temporary.as_file_mut(), CONTENT).unwrap();
         (temporary, reservation)
     }
 

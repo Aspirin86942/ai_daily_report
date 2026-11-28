@@ -2,7 +2,7 @@
 use super::personal::FrozenStep;
 use crate::{
     config::Llm,
-    snapshots::{canonical_json, fingerprint},
+    infra::json::{canonical_json, fingerprint},
     ReportError,
 };
 use serde::{Deserialize, Serialize};

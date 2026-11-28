@@ -37,7 +37,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-pub use crate::snapshots::digest as sha256_hex;
+pub use crate::infra::json::digest as sha256_hex;
 pub use daily_parsers::PARSER_CONTENT_IDENTITY;
 pub use evidence::{PdfRuntime, ScanResult, ScanStats};
 pub use sources::{ScanBenchFile, ScannedFile, SourceProfile};

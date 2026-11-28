@@ -1,10 +1,10 @@
 use super::{PersonalItem, Selection, MAX_BODY_CHARS};
 use crate::{
+    infra::json::valid_hash,
     reports::{
         environment,
         personal::{bounded_body, compile_template},
     },
-    snapshots::valid_hash,
     ReportError,
 };
 use serde::{Deserialize, Serialize};

@@ -3,12 +3,12 @@
 use super::{input, App};
 use crate::{
     evidence::{EvidencePermissions, EvidenceRef},
+    infra::json::digest,
     reports::{
         data::ReportSource,
         personal::{Material, Selection, MAX_FILE_CHARS},
     },
     scan::sources::{range_spans, ranges_for, AllocatedExcerpt, ExcerptBlock},
-    snapshots::digest,
     types::ReportRequest,
     ReportError,
 };

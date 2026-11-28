@@ -6,12 +6,12 @@ use super::{
 };
 use crate::{
     config::Llm,
+    infra::json::{canonical_json, digest},
     reports::personal::{
         body_chars, source_map, validate_item_sources, ItemKind, Material, PersonalItem, Selection,
         StatementKind, MAX_BODY_CHARS, MAX_ITEMS, MAX_OVERVIEW_CHARS, MAX_REPORT_BYTES,
         MAX_SUMMARY_CHARS, MAX_SUMMARY_CHARS_EXTENDED, MAX_SUMMARY_ITEMS,
     },
-    snapshots::{canonical_json, digest},
     types::RunContext,
     ReportError,
 };

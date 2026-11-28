@@ -1,10 +1,10 @@
 use crate::{
+    infra::fs::reject_redirects,
     reports::data::{CoverageGap, ReportSource},
     scan::{
         sources::{ScannedFile, SourceProfile},
         ScanResult,
     },
-    snapshots::reject_redirects,
     types::RunContext,
     ReportError,
 };

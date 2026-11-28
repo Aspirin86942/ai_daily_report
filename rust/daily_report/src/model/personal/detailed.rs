@@ -4,9 +4,9 @@ use super::{
 };
 use crate::{
     config::Llm,
+    infra::json::{canonical_json, valid_hash},
     model::plan::request_too_large,
     reports::personal::MAX_REPORT_BYTES,
-    snapshots::{canonical_json, valid_hash},
     types::RunContext,
     ReportError,
 };

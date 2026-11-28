@@ -1,7 +1,12 @@
 use crate::{
+    infra::{
+        fs::{read_bounded_bytes, reject_redirects},
+        json::{digest, valid_hash, valid_run_id},
+        locking::ReportLock,
+    },
     run::App,
-    snapshots::{digest, reject_redirects, valid_hash, valid_run_id},
-    store::{locking::ReportLock, query, RunRecord, RunStatus},
+    snapshots::SnapshotRef,
+    store::{query, RunRecord, RunStatus},
     types::RunPhase,
     ReportError,
 };
@@ -138,7 +143,7 @@ pub fn cleanup(
             continue;
         }
         if let (Some(path), Some(sha)) = (&run.snapshot_path, &run.snapshot_sha256) {
-            let reference = crate::snapshots::SnapshotRef {
+            let reference = SnapshotRef {
                 path: path.clone(),
                 sha256: sha.clone(),
             };
@@ -229,7 +234,12 @@ pub fn cleanup(
                     preserve = true;
                     break;
                 };
-                let bytes = super::files::read_bytes(&path, 8 * 1024 * 1024)?;
+                let bytes = read_bounded_bytes(
+                    &path,
+                    8 * 1024 * 1024,
+                    "MAINTENANCE_PATH_REDIRECTED",
+                    "MAINTENANCE_FILE_LIMIT",
+                )?;
                 if digest(&bytes) != expected {
                     preserve = true;
                     break;

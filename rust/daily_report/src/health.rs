@@ -1,18 +1,22 @@
 //! 只读健康巡检：任务、采集、日报发布、磁盘与数据库状态。
 //!
 //! 该模块不调用模型、不扫描原目录、不修改数据库；`health` 命令与健康任务共用这里的检查结果。
-use crate::{config::AppConfig, operations::display_path, types, ReportError};
+use crate::{
+    config::AppConfig,
+    infra::{
+        fs::{display_path, optional_file_sha256, reject_redirects, write_atomic},
+        json::read_frozen_report_json,
+        sqlite::{open_read_only, quick_check, quick_check_yielding, QuickCheckOutcome},
+    },
+    types, ReportError,
+};
 use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
     fs,
     path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Condvar, Mutex,
-    },
 };
 
 const DISK_WARN_BYTES: u64 = 20 * 1024 * 1024 * 1024;
@@ -70,76 +74,13 @@ impl HealthCheck {
     }
 }
 
-fn open_read(path: &std::path::Path) -> Result<Connection, ReportError> {
-    if !path.is_file() {
-        return Err(ReportError::new("HEALTH_DB_MISSING", "数据库文件不存在"));
-    }
-    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    connection.busy_timeout(std::time::Duration::from_secs(5))?;
-    Ok(connection)
-}
-
-fn quick_check(connection: &Connection) -> bool {
-    matches!(
-        connection.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0)),
-        Ok(value) if value == "ok"
+fn open_read(path: &Path) -> Result<Connection, ReportError> {
+    open_read_only(
+        path,
+        std::time::Duration::from_secs(5),
+        "HEALTH_PATH_REDIRECTED",
+        "HEALTH_DB_MISSING",
     )
-}
-
-enum QuickCheckOutcome {
-    Ok,
-    Deferred,
-    Failed,
-}
-
-fn quick_check_yielding(
-    connection: &Connection,
-    database: &Path,
-    scope: &str,
-) -> QuickCheckOutcome {
-    if crate::store::locking::ReportLock::is_held(database, scope) {
-        return QuickCheckOutcome::Deferred;
-    }
-    let interrupt = connection.get_interrupt_handle();
-    let state = Arc::new((Mutex::new(false), Condvar::new()));
-    let interrupted = Arc::new(AtomicBool::new(false));
-    let watcher_state = Arc::clone(&state);
-    let watcher_interrupted = Arc::clone(&interrupted);
-    let watcher_db = database.to_path_buf();
-    let watcher_scope = scope.to_owned();
-    let watcher = std::thread::spawn(move || {
-        let (lock, cvar) = &*watcher_state;
-        let mut done = lock.lock().unwrap_or_else(|error| error.into_inner());
-        while !*done {
-            if crate::store::locking::ReportLock::is_held(&watcher_db, &watcher_scope) {
-                watcher_interrupted.store(true, Ordering::Release);
-                interrupt.interrupt();
-                break;
-            }
-            let (guard, _) = cvar
-                .wait_timeout(done, std::time::Duration::from_millis(50))
-                .unwrap_or_else(|error| error.into_inner());
-            done = guard;
-        }
-    });
-    let result = connection.query_row("PRAGMA quick_check(1)", [], |row| row.get::<_, String>(0));
-    {
-        let (lock, cvar) = &*state;
-        let mut done = lock.lock().unwrap_or_else(|error| error.into_inner());
-        *done = true;
-        cvar.notify_one();
-    }
-    let _ = watcher.join();
-    match result {
-        Ok(value) if value == "ok" => QuickCheckOutcome::Ok,
-        Err(rusqlite::Error::SqliteFailure(err, _))
-            if err.code == rusqlite::ErrorCode::OperationInterrupted
-                && interrupted.load(Ordering::Acquire) =>
-        {
-            QuickCheckOutcome::Deferred
-        }
-        _ => QuickCheckOutcome::Failed,
-    }
 }
 
 enum PublishedQuery {
@@ -255,7 +196,7 @@ fn verify_published_files(
             json!({"run_id": run_id}),
         ));
     }
-    if crate::publish::output_hash(&path)?.as_deref() != Some(&expected) {
+    if optional_file_sha256(&path, "OUTPUT_PATH_REDIRECTED")?.as_deref() != Some(&expected) {
         return Ok(HealthCheck::error(
             "REPORT_HASH_MISMATCH",
             format!("{target} 日报正文哈希与数据库不一致"),
@@ -474,7 +415,7 @@ pub fn check(
     now: DateTime<Utc>,
 ) -> Result<HealthReport, ReportError> {
     let mut checks = Vec::new();
-    let reports_path = config.paths.db_dir.join("reports.sqlite3");
+    let reports_path = config.reports_db_path();
     let reports = match open_read(&reports_path) {
         Ok(connection) => {
             match quick_check_yielding(&connection, &reports_path, &config.report.scope_id) {
@@ -554,7 +495,7 @@ pub fn check(
                 "SELECT r.report_json FROM report_runs r JOIN daily_reports d ON d.current_run_id=r.run_id WHERE d.date=? AND r.quality='partial'",
                 [target.to_string()], |r|r.get(0)).optional().ok().flatten();
             if let Some(report) = partial {
-                let report = crate::snapshots::read_frozen_report_json(&report).unwrap_or_default();
+                let report = read_frozen_report_json(&report).unwrap_or_default();
                 after_published.push(HealthCheck::warning("REPORT_CONTENT_PARTIAL", "日报已发布，内容仅部分可用",
                     json!({"quality":"partial","selection":report["selection"],"gaps":report["gaps"]})));
             }
@@ -598,7 +539,7 @@ pub fn check(
     });
     checks.push(disk_space(config));
     if config.report.profile == crate::config::ReportProfile::Personal {
-        let root = config.paths.data_dir.join("daily_cache");
+        let root = config.daily_cache_dir();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let mut bytes = 0u64;
         let mut complete = true;
@@ -646,25 +587,15 @@ pub fn check(
 
 /// 原子写入健康 JSON：临时文件与目标同目录，显式 UTF-8，刷新后替换。
 pub fn write_report(report: &HealthReport, path: &Path) -> Result<(), ReportError> {
-    if path.file_name().is_none() {
-        return Err(ReportError::new(
-            "HEALTH_PATH_INVALID",
-            "健康文件路径缺少文件名",
-        ));
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| ReportError::new("HEALTH_PATH_INVALID", "健康文件路径缺少目录"))?;
-    crate::snapshots::reject_redirects(path, "HEALTH_PATH_REDIRECTED")?;
-    fs::create_dir_all(parent)?;
-    crate::snapshots::reject_redirects(path, "HEALTH_PATH_REDIRECTED")?;
     let mut bytes = serde_json::to_vec_pretty(report)?;
     bytes.push(b'\n');
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    crate::maintenance::write_synced(file.as_file_mut(), &bytes)?;
-    file.persist(path)
-        .map_err(|error| ReportError::from(error.error))?;
-    Ok(())
+    write_atomic(
+        path,
+        &bytes,
+        "HEALTH_PATH_REDIRECTED",
+        "HEALTH_PATH_INVALID",
+        "健康文件路径无效",
+    )
 }
 
 /// 按 generated_at 的上海日期写入 `log_dir/health-YYYY-MM-DD.json`。
@@ -674,11 +605,11 @@ pub fn persist(report: &HealthReport) -> Result<PathBuf, ReportError> {
     let day = generated.with_timezone(&types::shanghai()).date_naive();
     let directory = Path::new(&report.log_dir);
     let path = directory.join(format!("health-{day}.json"));
-    crate::snapshots::reject_redirects(&path, "HEALTH_PATH_REDIRECTED")?;
+    reject_redirects(&path, "HEALTH_PATH_REDIRECTED")?;
     fs::create_dir_all(directory)?;
     // health_notify.ps1 takes the same OS file lock while enriching this observation.
     let lock_path = directory.join(".health-publish.lock");
-    crate::snapshots::reject_redirects(&lock_path, "HEALTH_PATH_REDIRECTED")?;
+    reject_redirects(&lock_path, "HEALTH_PATH_REDIRECTED")?;
     let lock = fs::OpenOptions::new()
         .read(true)
         .write(true)

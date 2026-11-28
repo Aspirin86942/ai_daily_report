@@ -20,8 +20,12 @@ impl Store {
                 .to_str()
                 .ok_or_else(|| ReportError::new("BACKUP_PATH_INVALID", "备份路径无效"))?],
         )?;
-        let backup =
-            Connection::open_with_flags(destination, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        let backup = crate::infra::sqlite::open_read_only(
+            destination,
+            Duration::from_secs(5),
+            "BACKUP_PATH_REDIRECTED",
+            "BACKUP_VERIFY_FAILED",
+        )?;
         let check: String = backup.query_row("PRAGMA integrity_check", [], |r| r.get(0))?;
         if check != "ok" || schema_shape(&backup)? != schema_shape(&conn)? {
             return Err(ReportError::new(
@@ -38,6 +42,5 @@ impl Store {
     }
 }
 pub(crate) fn file_sha(path: &Path) -> Result<String, ReportError> {
-    reject_redirects(path, "MAINTENANCE_PATH_REDIRECTED")?;
-    Ok(daily_parsers::reader_sha256(fs::File::open(path)?)?)
+    crate::infra::fs::file_sha256(path, "MAINTENANCE_PATH_REDIRECTED")
 }

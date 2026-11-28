@@ -1,9 +1,22 @@
-use crate::ReportError;
+use crate::{
+    infra::json::{digest, valid_run_id},
+    ReportError,
+};
 use chrono::{
     DateTime, Datelike, Duration, FixedOffset, NaiveDate, NaiveTime, TimeZone, Utc, Weekday,
 };
 pub use daily_parsers::settings::ReportMode;
 use serde::{Deserialize, Serialize};
+
+pub const DEFAULT_SCOPE_ID: &str = "personal_work";
+pub const DEFAULT_TIMEZONE: &str = "Asia/Shanghai";
+pub const MAX_FILE_CHARS: usize = 180_000;
+pub const MAX_USER_CHARS: usize = 2_000;
+pub const REPORTS_DB_FILENAME: &str = "reports.sqlite3";
+pub const SEARCH_DB_FILENAME: &str = "report_search.sqlite3";
+pub const SCAN_CACHE_FILENAME: &str = "scan_cache_v4.sqlite3";
+pub const DAILY_CACHE_DIR: &str = "daily_cache";
+pub const RUN_SNAPSHOTS_DIR: &str = "run_snapshots";
 
 pub fn shanghai() -> FixedOffset {
     FixedOffset::east_opt(8 * 3600).unwrap()
@@ -17,7 +30,7 @@ pub fn new_run_id() -> String {
         std::process::id(),
         SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     );
-    crate::snapshots::digest(identity.as_bytes())[..32].to_owned()
+    digest(identity.as_bytes())[..32].to_owned()
 }
 
 pub fn parse_date(value: &str) -> Result<NaiveDate, ReportError> {
@@ -109,9 +122,9 @@ impl RunContext {
         let (window_start_utc, window_end_utc) = utc_window(target)?;
         let context = Self {
             run_id,
-            scope_id: "personal_work".into(),
+            scope_id: DEFAULT_SCOPE_ID.into(),
             target_date: target,
-            timezone: "Asia/Shanghai".into(),
+            timezone: DEFAULT_TIMEZONE.into(),
             window_start_utc,
             window_end_utc,
             started_at: now,
@@ -122,9 +135,9 @@ impl RunContext {
     }
 
     pub fn validate(&self) -> Result<(), ReportError> {
-        if !crate::snapshots::valid_run_id(&self.run_id)
-            || self.scope_id != "personal_work"
-            || self.timezone != "Asia/Shanghai"
+        if !valid_run_id(&self.run_id)
+            || self.scope_id != DEFAULT_SCOPE_ID
+            || self.timezone != DEFAULT_TIMEZONE
             || (self.window_start_utc, self.window_end_utc) != utc_window(self.target_date)?
         {
             return Err(ReportError::new(

@@ -6,7 +6,8 @@ pub mod recovery;
 pub mod transport;
 use crate::{
     config::Llm,
-    snapshots::{canonical_json, digest, read_frozen_report_json, SnapshotRef, SnapshotStore},
+    infra::json::{canonical_json, digest, read_frozen_report_json},
+    snapshots::{SnapshotRef, SnapshotStore},
     store::{CallCompletion, CallReservation, Store},
     ReportError,
 };
