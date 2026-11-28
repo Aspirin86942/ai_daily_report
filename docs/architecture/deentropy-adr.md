@@ -48,7 +48,7 @@
 
 以下事项涉及部署决策或历史基线清理，在本隔离治理分支中仅登记、不擅自执行：
 
-1. **合并与新发布包部署**：`refactor/arch-deentropy-20261129` 经全面门禁验证后，何时合并回 `main` 及是否基于其构建并切换新的 Windows 发布包。
+1. **合并与新发布包部署**：[done] `refactor/arch-deentropy-20261129` 已快进合并回 `main`（`c90302d0`），并完成 `.releases/rust-20261129-arch-deentropy-01` 构建、严格自检、计划任务切换、实跑健康核验与远端推送准备。
 2. **历史离线脚本与基准产物退场**：[done] 经确认授权，`scripts/pdf_benchmark/`（9 个文件）已按原相对路径打包并校验 SHA-256 归档至 `.artifacts/pdf-benchmark-retirement-20261129/pdf-benchmark-scripts.zip`（索引 `archived.json`）后从工作树移除；`tests/fixtures/pdf_benchmark/` 与 `rust/pdf_extract_bench/` 按基线规则保留。
 3. **本周周报草稿（`2026-11-23_2026-11-29`）**：CLI `weekly` 命令已按 `AGENTS.md` 永久退役，`data/weekly_drafts/` 无代码引用；目前 Phase 1 已补齐 `2026-11-25..27` 日报，如需生成本周 `2026-11-23_2026-11-29` 周报审核稿，可结合本周已发布的 `23`–`27` 日报按周会工作流单独触发。
 4. **`config` 中的历史兼容字段**：`ReportProfile::Evidence`、`ArchiveSettings` 与 `matches_personal_fingerprint` 仍为历史 `report_runs` 冻结回放所必需，保持只读保留直至明确放弃历史库回放支持。
