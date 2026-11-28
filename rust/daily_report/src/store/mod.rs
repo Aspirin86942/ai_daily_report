@@ -1,12 +1,20 @@
 mod calls;
 pub mod locking;
+mod periods;
 mod personal;
+pub mod queries;
 pub use calls::{CallCompletion, CallReservation};
 mod maintenance;
-mod periods;
 pub(crate) use maintenance::file_sha;
 mod reports;
 pub use reports::StagedReport;
+
+pub(crate) const PERSONAL_RUN_PREFIX: &str = "personal_run:";
+pub(crate) const PERSONAL_CALLS_PREFIX: &str = "personal_calls:";
+pub(crate) const PERSONAL_SUMMARY_PREFIX: &str = "personal_summary:";
+pub(crate) const PERSONAL_COMPACTED_PREFIX: &str = "personal_compacted:";
+pub(crate) const CURRENT_PERIOD_PREFIX: &str = "current_period:";
+pub(crate) const FIRST_TARGET_DATE_KEY: &str = "first_target_date";
 
 use crate::{
     infra::{fs::reject_redirects, json::canonical_json, locking::ReportLock},
@@ -313,7 +321,7 @@ impl Store {
         if personal {
             transaction.execute(
                 "INSERT INTO report_metadata(key,value) VALUES(?,'5')",
-                [format!("personal_run:{}", context.run_id)],
+                [queries::personal_run_key(&context.run_id)],
             )?;
         }
         transaction.commit()?;
@@ -404,8 +412,20 @@ impl Store {
     ) -> Result<(), ReportError> {
         let mut conn = self.connection()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("UPDATE report_model_calls SET status='unknown',error_code='CALL_RESULT_UNKNOWN',finished_at=? WHERE status='reserved' AND EXISTS(SELECT 1 FROM report_metadata m WHERE m.key='personal_run:'||report_model_calls.run_id AND m.value='5')", [timestamp(now)])?;
-        tx.execute("UPDATE report_runs SET status='failed',error_code='RUN_INTERRUPTED',updated_at=?,finished_at=? WHERE status='running' AND EXISTS(SELECT 1 FROM report_metadata m WHERE m.key='personal_run:'||report_runs.run_id AND m.value='5') AND (phase IN ('created','scanning') OR run_kind!='report')", params![timestamp(now),timestamp(now)])?;
+        tx.execute(
+            &format!(
+                "UPDATE report_model_calls SET status='unknown',error_code='CALL_RESULT_UNKNOWN',finished_at=?
+                 WHERE status='reserved' AND EXISTS(SELECT 1 FROM report_metadata m WHERE m.key='{PERSONAL_RUN_PREFIX}'||report_model_calls.run_id AND m.value='5')"
+            ),
+            [timestamp(now)],
+        )?;
+        tx.execute(
+            &format!(
+                "UPDATE report_runs SET status='failed',error_code='RUN_INTERRUPTED',updated_at=?,finished_at=?
+                 WHERE status='running' AND EXISTS(SELECT 1 FROM report_metadata m WHERE m.key='{PERSONAL_RUN_PREFIX}'||report_runs.run_id AND m.value='5') AND (phase IN ('created','scanning') OR run_kind!='report')"
+            ),
+            params![timestamp(now), timestamp(now)],
+        )?;
         tx.commit()?;
         Ok(())
     }

@@ -8,10 +8,14 @@ use crate::{
         json::read_frozen_report_json,
         sqlite::{open_read_only, quick_check, quick_check_yielding, QuickCheckOutcome},
     },
+    store::queries::{
+        active_report_runs, partial_daily_report_json, published_daily_report,
+        run_attention_counts, schema_migrations_present, PublishedDailyRow,
+    },
     types, ReportError,
 };
 use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
@@ -102,18 +106,14 @@ fn fetch_published_report(
     now: DateTime<Utc>,
     active: &[(String, String)],
 ) -> Result<PublishedQuery, ReportError> {
-    let row = connection
-        .query_row(
-            "SELECT r.run_id,r.quality,r.output_path,r.expected_sha256,r.report_json
-             FROM report_runs r LEFT JOIN daily_reports d ON d.date=r.target_date
-             WHERE r.target_date=?1 AND r.run_kind='report' AND r.status='succeeded' AND r.phase='published'
-               AND (d.current_run_id IS NULL OR d.current_run_id=r.run_id)
-             ORDER BY r.created_at DESC LIMIT 1",
-            [target.to_string()],
-            |row| <(String, Option<String>, Option<String>, Option<String>, Option<String>)>::try_from(row),
-        )
-        .optional()?;
-    let Some((run_id, quality, output_path, expected_sha256, report_json)) = row else {
+    let Some(PublishedDailyRow {
+        run_id,
+        quality,
+        output_path,
+        expected_sha256,
+        report_json,
+    }) = published_daily_report(connection, target)?
+    else {
         let date = target.to_string();
         if active.iter().any(|(_, target_date)| target_date == &date) {
             return Ok(PublishedQuery::Resolved(HealthCheck::ok(
@@ -221,31 +221,6 @@ fn verify_published_files(
     ))
 }
 
-fn active_runs(
-    connection: &Connection,
-    config: &AppConfig,
-    now: DateTime<Utc>,
-) -> Result<Vec<(String, String)>, ReportError> {
-    let mut statement = connection.prepare(
-        "SELECT run_id,target_date,created_at FROM report_runs WHERE scope_id=?
-         AND run_kind='report' AND status='running' AND finished_at IS NULL AND error_code IS NULL
-         AND phase IN ('created','scanning','prepared','generating','db_committed')",
-    )?;
-    let rows = statement.query_map([&config.report.scope_id], |row| row.try_into())?;
-    let mut active = Vec::new();
-    for row in rows {
-        let (id, date, created_at): (String, String, String) = row?;
-        if DateTime::parse_from_rfc3339(&created_at).is_ok_and(|started| {
-            (now - started.with_timezone(&Utc))
-                .to_std()
-                .is_ok_and(|elapsed| elapsed.as_secs() < config.recovery.run_budget_seconds)
-        }) {
-            active.push((id, date));
-        }
-    }
-    Ok(active)
-}
-
 fn historical_attention(
     connection: &Connection,
     config: &AppConfig,
@@ -283,56 +258,13 @@ fn run_attention(
     now: DateTime<Utc>,
     active: &[(String, String)],
 ) -> Result<HealthCheck, ReportError> {
-    let mut pending_statement = connection.prepare(
-        "SELECT run_id FROM report_runs r WHERE run_kind='report' AND phase IN ('prepared','generating','db_committed') AND status!='succeeded' AND COALESCE(error_code,'')!='RUN_SUPERSEDED' AND COALESCE(regeneration_reason,'') NOT LIKE 'coverage_publish:%'
-         AND NOT EXISTS(SELECT 1 FROM daily_reports d JOIN report_runs p ON p.run_id=d.current_run_id
-             WHERE p.scope_id=r.scope_id AND p.target_date=r.target_date AND p.created_at>r.created_at
-             AND p.status='succeeded' AND p.phase='published'
-             AND (COALESCE(json_extract(p.report_json,'$.schema_version'),0) NOT IN (5,6)
-                 OR json_array_length(p.report_json,'$.items')>0 OR p.quality='no_changes'))",
-    )?;
-    let pending = pending_statement
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .filter(|id| !active.iter().any(|(active_id, _)| active_id == id))
-        .count();
-    let cutoff = now - Duration::hours(24);
-    // A later publication for the same scope and date resolves an earlier failure.
-    let mut statement = connection.prepare(
-        "SELECT r.created_at, (
-             SELECT MAX(COALESCE(p.finished_at,p.created_at)) FROM report_runs p
-             WHERE p.scope_id=r.scope_id AND p.target_date=r.target_date
-               AND p.run_kind='report' AND p.status='succeeded' AND p.phase='published'
-               AND (COALESCE(json_extract(p.report_json,'$.schema_version'),0) NOT IN (5,6)
-                   OR json_array_length(p.report_json,'$.items')>0 OR p.quality='no_changes')
-         ) FROM report_runs r WHERE r.status='failed'",
-    )?;
-    let rows = statement.query_map([], |row| row.try_into())?;
-    let mut recent_failures = 0usize;
-    let mut resolved_failures = 0usize;
-    let mut failures: Vec<String> = Vec::new();
-    for row in rows {
-        let (text, published): (String, Option<String>) = row?;
-        let Ok(at) = DateTime::parse_from_rfc3339(&text) else {
-            continue;
-        };
-        let at = at.with_timezone(&Utc);
-        if at < cutoff {
-            continue;
-        }
-        let resolved = published
-            .and_then(|published_at| DateTime::parse_from_rfc3339(&published_at).ok())
-            .is_some_and(|published_at| published_at > at);
-        if resolved {
-            resolved_failures += 1;
-            continue;
-        }
-        recent_failures += 1;
-        if failures.len() < 5 {
-            failures.push(text);
-        }
-    }
+    let counts = run_attention_counts(connection, now, active)?;
+    let (pending, recent_failures, resolved_failures, failures) = (
+        counts.pending,
+        counts.recent_failures,
+        counts.resolved_failures,
+        counts.failures,
+    );
     let mut evidence = json!({
         "pending": pending,
         "recent_failures": recent_failures,
@@ -421,12 +353,7 @@ pub fn check(
             match quick_check_yielding(&connection, &reports_path, &config.report.scope_id) {
                 QuickCheckOutcome::Ok => Some(connection),
                 QuickCheckOutcome::Deferred => {
-                    if connection
-                        .query_row("SELECT COUNT(*) FROM report_schema_migrations", [], |row| {
-                            row.get::<_, i64>(0)
-                        })
-                        .is_ok()
-                    {
+                    if schema_migrations_present(&connection) {
                         Some(connection)
                     } else {
                         checks.push(HealthCheck::error(
@@ -462,7 +389,12 @@ pub fn check(
         let mut after_published = Vec::new();
         let observe = (|| -> Result<(), ReportError> {
             let tx = connection.unchecked_transaction()?;
-            let active = active_runs(&tx, config, now)?;
+            let active = active_report_runs(
+                &tx,
+                &config.report.scope_id,
+                config.recovery.run_budget_seconds,
+                now,
+            )?;
             match fetch_published_report(&tx, config, target, now, &active) {
                 Ok(query) => pending_published = Some(query),
                 Err(_) => {
@@ -491,10 +423,7 @@ pub fn check(
                     )),
                 }
             }
-            let partial: Option<String> = tx.query_row(
-                "SELECT r.report_json FROM report_runs r JOIN daily_reports d ON d.current_run_id=r.run_id WHERE d.date=? AND r.quality='partial'",
-                [target.to_string()], |r|r.get(0)).optional().ok().flatten();
-            if let Some(report) = partial {
+            if let Some(report) = partial_daily_report_json(&tx, target) {
                 let report = read_frozen_report_json(&report).unwrap_or_default();
                 after_published.push(HealthCheck::warning("REPORT_CONTENT_PARTIAL", "日报已发布，内容仅部分可用",
                     json!({"quality":"partial","selection":report["selection"],"gaps":report["gaps"]})));

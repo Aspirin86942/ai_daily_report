@@ -1,6 +1,9 @@
 //! Outstanding personal reports stay visible until their current publication is usable.
 use crate::{
-    infra::json::read_frozen_report_json, processing_cache::RETENTION_DAYS, types, ReportError,
+    infra::json::read_frozen_report_json,
+    processing_cache::RETENTION_DAYS,
+    store::queries::{personal_failure_summaries, personal_recovery_candidates},
+    types, ReportError,
 };
 use chrono::{DateTime, NaiveDate, Utc};
 use rusqlite::Connection;
@@ -65,34 +68,16 @@ pub fn issues(
     now: DateTime<Utc>,
 ) -> Result<Vec<Issue>, ReportError> {
     let today = now.with_timezone(&types::shanghai()).date_naive();
-    let mut statement = conn.prepare(
-        "SELECT r.target_date,r.run_id,r.report_json,r.error_code,
-         (SELECT value FROM report_metadata WHERE key='personal_calls:'||r.scope_id||':'||r.target_date)
-         FROM report_runs r WHERE r.scope_id=?1 AND r.run_kind='report'
-         AND EXISTS(SELECT 1 FROM report_metadata m WHERE m.key='personal_run:'||r.run_id)
-         AND (EXISTS(SELECT 1 FROM daily_reports d WHERE d.current_run_id=r.run_id)
-           OR (NOT EXISTS(SELECT 1 FROM daily_reports d WHERE d.date=r.target_date)
-             AND COALESCE(r.error_code,'')!='RUN_SUPERSEDED'
-             AND NOT EXISTS(SELECT 1 FROM report_runs n WHERE n.scope_id=r.scope_id
-                 AND n.target_date=r.target_date AND n.run_kind='report'
-                 AND (n.created_at>r.created_at OR (n.created_at=r.created_at AND n.rowid>r.rowid)))))
-         ORDER BY r.target_date,r.run_id",
-    )?;
-    let rows = statement.query_map([scope], |r| {
-        Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, Option<String>>(2)?,
-            r.get::<_, Option<String>>(3)?,
-            r.get::<_, Option<String>>(4)?,
-        ))
-    })?;
+    let rows = personal_recovery_candidates(conn, scope)?;
     let mut result = Vec::new();
     for row in rows {
-        let (date, run_id, report, error, budget) = row?;
-        let target_date = types::parse_date(&date)
+        let target_date = types::parse_date(&row.target_date)
             .map_err(|_| ReportError::new("PERSONAL_RECOVERY_INVALID", "历史日报日期无效"))?;
-        let report = report.as_deref().map(read_frozen_report_json).transpose()?;
+        let report = row
+            .report_json
+            .as_deref()
+            .map(read_frozen_report_json)
+            .transpose()?;
         let (reason_codes, missing_summary) = if let Some(report) = &report {
             (
                 reasons(report),
@@ -101,14 +86,16 @@ pub fn issues(
             )
         } else {
             (
-                vec![error.unwrap_or_else(|| "REPORT_NOT_PUBLISHED".into())],
+                vec![row
+                    .error_code
+                    .unwrap_or_else(|| "REPORT_NOT_PUBLISHED".into())],
                 true,
             )
         };
         if reason_codes.is_empty() {
             continue;
         }
-        let calls_used = match budget {
+        let calls_used = match row.calls_budget_json {
             Some(text) => serde_json::from_str::<Value>(&text)?["used"]
                 .as_u64()
                 .ok_or_else(|| {
@@ -118,7 +105,7 @@ pub fn issues(
         };
         result.push(Issue {
             target_date,
-            run_id,
+            run_id: row.run_id,
             missing_summary,
             reason_codes,
             calls_used,
@@ -127,13 +114,8 @@ pub fn issues(
         });
     }
     // Detailed failed runs expire; their compact daily summary must retain the alert.
-    let mut summaries = conn.prepare("SELECT value FROM report_metadata WHERE key LIKE ?1
-        AND json_extract(value,'$.last_failure') IS NOT NULL
-        AND NOT EXISTS(SELECT 1 FROM daily_reports d WHERE d.date=json_extract(value,'$.target_date'))")?;
-    for row in summaries.query_map([format!("personal_summary:{scope}:%")], |r| {
-        r.get::<_, String>(0)
-    })? {
-        let summary: Value = serde_json::from_str(&row?)?;
+    for row in personal_failure_summaries(conn, scope)? {
+        let summary: Value = serde_json::from_str(&row)?;
         let date = types::parse_date(summary["target_date"].as_str().unwrap_or(""))
             .map_err(|_| ReportError::new("PERSONAL_RECOVERY_INVALID", "历史日报摘要日期无效"))?;
         if result.iter().any(|issue| issue.target_date == date) {

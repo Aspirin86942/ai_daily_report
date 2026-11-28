@@ -6,20 +6,20 @@ use crate::{
     },
     run::App,
     snapshots::SnapshotRef,
-    store::{query, RunRecord, RunStatus},
+    store::{
+        queries::{
+            all_metadata, all_run_records, clear_run_snapshot_and_calls,
+            current_referenced_run_ids, is_personal_run_meta, open_job_call_run_ids,
+        },
+        RunStatus,
+    },
     types::RunPhase,
     ReportError,
 };
 use chrono::{DateTime, Utc};
-use rusqlite::params;
 use serde::Serialize;
 use serde_json::Value;
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    fs,
-    path::PathBuf,
-    time::Duration,
-};
+use std::{collections::BTreeSet, fs, path::PathBuf, time::Duration};
 #[derive(Debug, Default, Serialize)]
 pub struct RetentionResult {
     pub deleted_files: usize,
@@ -67,16 +67,8 @@ pub fn cleanup(
     )?;
     reject_redirects(&app.snapshots.root, "RETENTION_PATH_REDIRECTED")?;
     let conn = app.store.connection()?;
-    let runs = query(&conn, "SELECT * FROM report_runs ORDER BY run_id", [])?
-        .into_iter()
-        .map(serde_json::from_value::<RunRecord>)
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut current=conn.prepare("SELECT current_run_id FROM daily_reports WHERE current_run_id IS NOT NULL UNION SELECT value FROM report_metadata WHERE key LIKE 'current_period:%'")?.query_map([],|r|r.get::<_,String>(0))?.collect::<Result<BTreeSet<_>,_>>()?;
-    for run in &runs {
-        if let Some(id) = &run.previous_run_id {
-            current.insert(id.clone());
-        }
-    }
+    let runs = all_run_records(&conn)?;
+    let current = current_referenced_run_ids(&conn, &runs)?;
     let mut protected: BTreeSet<_> = runs
         .iter()
         .filter(|r| {
@@ -92,15 +84,8 @@ pub fn cleanup(
         })
         .map(|r| r.run_id.clone())
         .collect();
-    let metadata = conn
-        .prepare("SELECT key,value FROM report_metadata")?
-        .query_map([], |row| row.try_into())?
-        .collect::<Result<BTreeMap<String, String>, _>>()?;
-    let is_personal = |id: &str| {
-        metadata
-            .get(&format!("personal_run:{id}"))
-            .is_some_and(|value| value == "5")
-    };
+    let metadata = all_metadata(&conn)?;
+    let is_personal = |id: &str| is_personal_run_meta(&metadata, id);
     let mut retained_calls = BTreeSet::new();
     let mut oldest_open_job = i64::MAX;
     for (key, text) in &metadata {
@@ -123,20 +108,11 @@ pub fn cleanup(
             }
         }
     }
-    let mut statement = conn.prepare(
-        "SELECT run_id FROM report_model_calls
-         WHERE call_id>?1 OR call_id IN (SELECT value FROM json_each(?2))
-         UNION SELECT c.run_id FROM report_model_calls c
-         JOIN report_metadata m ON m.key='backfill_state:'||json_extract(c.usage_json,'$.job_id')
-         WHERE NOT EXISTS(SELECT 1 FROM report_metadata done
-           WHERE done.key='backfill_complete:'||json_extract(c.usage_json,'$.job_id'))",
-    )?;
-    for run in statement.query_map(
-        params![oldest_open_job, serde_json::to_string(&retained_calls)?],
-        |row| row.get::<_, String>(0),
-    )? {
-        protected.insert(run?);
-    }
+    protected.extend(open_job_call_run_ids(
+        &conn,
+        oldest_open_job,
+        &serde_json::to_string(&retained_calls)?,
+    )?);
     // Cross-generation references remain readable while their owner still has an input snapshot.
     for run in &runs {
         if is_personal(&run.run_id) {
@@ -266,7 +242,6 @@ pub fn cleanup(
         app.store
             .compact_personal(now, &session.quota.root.join("snapshots"))?;
     }
-    use rusqlite::TransactionBehavior;
     for candidate in candidates {
         for (path, size, hash) in &candidate.files {
             reject_redirects(path, "RETENTION_PATH_REDIRECTED")?;
@@ -285,20 +260,9 @@ pub fn cleanup(
             fs::remove_dir(&directory)?;
         }
         let mut conn = app.store.connection()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute(
-            "UPDATE report_runs SET snapshot_path=NULL,snapshot_sha256=NULL WHERE run_id=?",
-            [&candidate.run_id],
-        )?;
-        tx.execute("UPDATE report_model_calls SET request_path=NULL,request_sha256=NULL,response_path=NULL,response_sha256=NULL WHERE run_id=?",[&candidate.run_id])?;
-        if candidate.delete_run {
-            tx.execute(
-                "DELETE FROM report_runs WHERE run_id=?",
-                params![candidate.run_id],
-            )?;
+        if clear_run_snapshot_and_calls(&mut conn, &candidate.run_id, candidate.delete_run)? {
             result.deleted_runs += 1;
         }
-        tx.commit()?;
     }
     Ok(result)
 }

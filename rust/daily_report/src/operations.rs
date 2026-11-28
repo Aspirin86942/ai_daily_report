@@ -12,10 +12,10 @@ use crate::{
     },
     run::App,
     scan::Scanner,
+    store::queries::{has_verified_model_check, run_phase as query_run_phase},
     types, ReportError,
 };
 use chrono::{DateTime, Utc};
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 use std::{
     fs,
@@ -154,7 +154,7 @@ fn task_definition(
             "DATABASE_PATH_REDIRECTED",
             "DATABASE_MISSING",
         )?;
-        conn.query_row("SELECT 1 FROM report_runs WHERE run_kind='model_check' AND status='succeeded' AND config_fingerprint=? LIMIT 1",[config.fingerprint(false)?],|row|row.get::<_,i64>(0)).optional()?.is_some()
+        has_verified_model_check(&conn, &config.fingerprint(false)?)?
     } else {
         false
     };
@@ -364,13 +364,7 @@ fn run_phase(config: &AppConfig, run_id: &str) -> String {
     ) else {
         return "unknown".into();
     };
-    connection
-        .query_row(
-            "SELECT phase FROM report_runs WHERE run_id=?",
-            [run_id],
-            |row| row.get::<_, String>(0),
-        )
-        .unwrap_or_else(|_| "unknown".into())
+    query_run_phase(&connection, run_id)
 }
 
 pub fn append_scheduled_log(

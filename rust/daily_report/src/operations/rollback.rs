@@ -218,44 +218,15 @@ fn database_error() -> ReportError {
     ReportError::new("ROLLBACK_DB_READ_FAILED", "无法只读检查报告库")
 }
 
-// Startup diagnostic cleanup can remove an earlier pending run before recovery.
-// Only a published current report excludes the date from model recovery.
-const PENDING_WITH_UNRESOLVED_CALL: &str = "
-SELECT r.run_id, r.snapshot_path, r.snapshot_sha256
-FROM report_runs r
-WHERE r.scope_id=?1 AND r.run_kind='report'
-  AND r.phase IN ('prepared','generating') AND r.status!='succeeded'
-  AND coalesce(r.error_code,'')!='RUN_SUPERSEDED'
-  AND coalesce(r.regeneration_reason,'') NOT LIKE 'coverage_publish:%'
-  AND EXISTS (SELECT 1 FROM report_metadata m WHERE m.key='personal_run:'||r.run_id AND m.value='5')
-  AND NOT EXISTS (
-      SELECT 1 FROM daily_reports d JOIN report_runs published ON published.run_id=d.current_run_id
-      WHERE d.date=r.target_date AND published.target_date=r.target_date
-        AND published.scope_id=r.scope_id AND published.phase='published' AND published.status='succeeded'
-  )
-  AND EXISTS (
-      SELECT 1 FROM report_model_calls c
-      WHERE c.generation_id=r.generation_id AND c.status IN ('unknown','reserved')
-        AND NOT EXISTS (
-            SELECT 1 FROM report_model_calls s
-            WHERE s.generation_id=c.generation_id AND s.request_fingerprint=c.request_fingerprint
-              AND s.status='succeeded'
-        )
-  )
-ORDER BY r.target_date, r.created_at, r.run_id";
-
 fn check_pending(connection: &Connection, target: &Target) -> Result<(), ReportError> {
-    let mut query = connection
-        .prepare(PENDING_WITH_UNRESOLVED_CALL)
-        .map_err(|_| database_error())?;
-    let mut rows = query
-        .query([&target.scope_id])
-        .map_err(|_| database_error())?;
-    while let Some(row) = rows.next().map_err(|_| database_error())? {
-        let id: String = row.get(0).map_err(|_| database_error())?;
-        let path: Option<String> = row.get(1).map_err(|_| database_error())?;
-        let sha256: Option<String> = row.get(2).map_err(|_| database_error())?;
-        if let (Some(path), Some(sha256)) = (path, sha256) {
+    let rows = crate::store::queries::pending_personal_runs_with_unresolved_calls(
+        connection,
+        &target.scope_id,
+    )
+    .map_err(|_| database_error())?;
+    for row in rows {
+        let id = row.run_id;
+        if let (Some(path), Some(sha256)) = (row.snapshot_path, row.snapshot_sha256) {
             let reference = SnapshotRef { path, sha256 };
             if v2_only(&target.snapshots, &id, &reference) {
                 continue;
@@ -371,7 +342,10 @@ mod tests {
         ).unwrap();
         connection
             .execute(
-                "INSERT INTO report_metadata(key,value) VALUES('personal_run:'||?1,'5')",
+                &format!(
+                    "INSERT INTO report_metadata(key,value) VALUES('{}'||?1,'5')",
+                    crate::store::PERSONAL_RUN_PREFIX
+                ),
                 [&id],
             )
             .unwrap();
@@ -456,7 +430,10 @@ mod tests {
         let unmarked = run(&connection, 3, "2026-11-19");
         connection
             .execute(
-                "DELETE FROM report_metadata WHERE key='personal_run:'||?1",
+                &format!(
+                    "DELETE FROM report_metadata WHERE key='{}'||?1",
+                    crate::store::PERSONAL_RUN_PREFIX
+                ),
                 [&unmarked],
             )
             .unwrap();

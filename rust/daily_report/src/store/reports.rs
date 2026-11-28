@@ -1,4 +1,4 @@
-use super::{changed_one, metadata, query, timestamp, RunRecord, Store};
+use super::{changed_one, metadata, query, timestamp, RunRecord, Store, FIRST_TARGET_DATE_KEY};
 use crate::{
     infra::json::{digest, frozen_report_json, read_frozen_report_json},
     types::{parse_date, RunContext, RunPhase},
@@ -188,14 +188,14 @@ impl Store {
 
     pub fn activate(&self, first: NaiveDate) -> Result<(), ReportError> {
         self.connection()?.execute(
-            "INSERT OR IGNORE INTO report_metadata(key,value) VALUES ('first_target_date',?)",
-            [first.to_string()],
+            "INSERT OR IGNORE INTO report_metadata(key,value) VALUES (?,?)",
+            params![FIRST_TARGET_DATE_KEY, first.to_string()],
         )?;
         Ok(())
     }
 
     pub fn missed_dates(&self, target: NaiveDate) -> Result<Vec<String>, ReportError> {
-        let first = metadata(&self.connection()?, "first_target_date")?;
+        let first = metadata(&self.connection()?, FIRST_TARGET_DATE_KEY)?;
         let Some(first) = first else {
             return Ok(vec![]);
         };
@@ -227,7 +227,7 @@ impl Store {
              WHERE d.date>=? AND d.date<=? ORDER BY d.date",
         )?;
         let mut rows = statement.query(params![start.to_string(), end.to_string()])?;
-        let activation = metadata(&conn, "first_target_date")?;
+        let activation = metadata(&conn, FIRST_TARGET_DATE_KEY)?;
         let activation = activation.as_deref().map(parse_date).transpose()?;
         let mut reports = BTreeMap::new();
         while let Some(row) = rows.next()? {

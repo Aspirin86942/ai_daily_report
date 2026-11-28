@@ -1,5 +1,10 @@
 //! Personal run accounting and bounded diagnostic retention.
-use super::{metadata, reports::read_run, Store};
+use super::{
+    metadata,
+    queries::{personal_calls_key, personal_run_key, personal_summary_key},
+    reports::read_run,
+    Store, PERSONAL_COMPACTED_PREFIX, PERSONAL_RUN_PREFIX,
+};
 use crate::ReportError;
 use rusqlite::{params, Connection};
 use serde_json::{json, Value};
@@ -31,16 +36,17 @@ impl Store {
                 .saturating_duration_since(std::time::Instant::now())
                 .min(std::time::Duration::from_secs(2)),
         )?;
-        let mut detail_bytes: i64 = conn.query_row(
+        let detail_sql = format!(
             "SELECT
              (SELECT COALESCE(sum(length(CAST(c.usage_json AS BLOB))+1024),0) FROM report_model_calls c
-              JOIN report_metadata m ON m.key='personal_run:'||c.run_id WHERE m.value='5') +
+              JOIN report_metadata m ON m.key='{PERSONAL_RUN_PREFIX}'||c.run_id WHERE m.value='5') +
              (SELECT COALESCE(sum(length(CAST(s.metadata_json AS BLOB))),0) FROM report_run_sources s
-              JOIN report_metadata m ON m.key='personal_run:'||s.run_id WHERE m.value='5') +
+              JOIN report_metadata m ON m.key='{PERSONAL_RUN_PREFIX}'||s.run_id WHERE m.value='5') +
              (SELECT COALESCE(sum(COALESCE(length(CAST(r.report_json AS BLOB)),0)+COALESCE(length(CAST(r.markdown AS BLOB)),0)+2048),0)
-              FROM report_runs r JOIN report_metadata m ON m.key='personal_run:'||r.run_id
-              WHERE m.value='5' AND r.run_id NOT IN(SELECT current_run_id FROM daily_reports WHERE current_run_id IS NOT NULL))",
-            [], |r| r.get(0))?;
+              FROM report_runs r JOIN report_metadata m ON m.key='{PERSONAL_RUN_PREFIX}'||r.run_id
+              WHERE m.value='5' AND r.run_id NOT IN(SELECT current_run_id FROM daily_reports WHERE current_run_id IS NOT NULL))"
+        );
+        let mut detail_bytes: i64 = conn.query_row(&detail_sql, [], |r| r.get(0))?;
         let cutoff = (now - chrono::Duration::days(30)).to_rfc3339();
         let input_cutoff = (now - chrono::Duration::days(7)).to_rfc3339();
         let mut cursor = (String::new(), String::new());
@@ -49,12 +55,14 @@ impl Store {
                 break;
             }
             let ids = {
-                let mut statement = conn.prepare(
-                    "SELECT r.run_id,r.created_at FROM report_runs r JOIN report_metadata m ON m.key='personal_run:'||r.run_id
+                let batch_sql = format!(
+                    "SELECT r.run_id,r.created_at FROM report_runs r JOIN report_metadata m ON m.key='{PERSONAL_RUN_PREFIX}'||r.run_id
                      WHERE m.value='5' AND (r.created_at,r.run_id)>(?1,?2)
-                     AND (NOT EXISTS(SELECT 1 FROM report_metadata x WHERE x.key='personal_compacted:'||r.run_id)
+                     AND (NOT EXISTS(SELECT 1 FROM report_metadata x WHERE x.key='{PERSONAL_COMPACTED_PREFIX}'||r.run_id)
                           OR r.run_id NOT IN(SELECT current_run_id FROM daily_reports WHERE current_run_id IS NOT NULL))
-                     ORDER BY r.created_at,r.run_id LIMIT 128")?;
+                     ORDER BY r.created_at,r.run_id LIMIT 128"
+                );
+                let mut statement = conn.prepare(&batch_sql)?;
                 let rows = statement
                     .query_map(params![cursor.0, cursor.1], |r| {
                         Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
@@ -107,14 +115,11 @@ impl Store {
                 )?;
                 let compacted: bool = tx.query_row(
                     "SELECT EXISTS(SELECT 1 FROM report_metadata WHERE key=?)",
-                    [format!("personal_compacted:{id}")],
+                    [format!("{PERSONAL_COMPACTED_PREFIX}{id}")],
                     |r| r.get(0),
                 )?;
-                let key = format!("personal_summary:{}:{}", run.scope_id, run.target_date);
-                let calls = used(
-                    &tx,
-                    &format!("personal_calls:{}:{}", run.scope_id, run.target_date),
-                )?;
+                let key = personal_summary_key(&run.scope_id, &run.target_date);
+                let calls = used(&tx, &personal_calls_key(&run.scope_id, &run.target_date))?;
                 let mut summary = metadata(&tx, &key)?
                     .map(|v| serde_json::from_str::<Value>(&v))
                     .transpose()?
@@ -167,17 +172,17 @@ impl Store {
                     tx.execute("DELETE FROM report_runs WHERE run_id=?", [&id])?;
                     tx.execute(
                         "DELETE FROM report_metadata WHERE key=?",
-                        [format!("personal_run:{id}")],
+                        [personal_run_key(&id)],
                     )?;
                     tx.execute(
                         "DELETE FROM report_metadata WHERE key=?",
-                        [format!("personal_compacted:{id}")],
+                        [format!("{PERSONAL_COMPACTED_PREFIX}{id}")],
                     )?;
                 } else {
                     tx.execute("UPDATE report_runs SET snapshot_path=NULL,snapshot_sha256=NULL WHERE run_id=?", [&id])?;
                     tx.execute(
                         "INSERT OR IGNORE INTO report_metadata(key,value) VALUES(?,'1')",
-                        [format!("personal_compacted:{id}")],
+                        [format!("{PERSONAL_COMPACTED_PREFIX}{id}")],
                     )?;
                 }
                 tx.commit()?;
@@ -190,22 +195,19 @@ impl Store {
         self.get(id)?;
         self.connection()?.execute(
             "INSERT OR IGNORE INTO report_metadata(key,value) VALUES(?,'5')",
-            [format!("personal_run:{id}")],
+            [personal_run_key(id)],
         )?;
         Ok(())
     }
     pub fn is_personal_run(&self, id: &str) -> Result<bool, ReportError> {
         Ok(self.connection()?.query_row(
             "SELECT EXISTS(SELECT 1 FROM report_metadata WHERE key=? AND value='5')",
-            [format!("personal_run:{id}")],
+            [personal_run_key(id)],
             |r| r.get(0),
         )?)
     }
     pub fn personal_calls(&self, scope: &str, date: &str) -> Result<u64, ReportError> {
-        used(
-            &self.connection()?,
-            &format!("personal_calls:{scope}:{date}"),
-        )
+        used(&self.connection()?, &personal_calls_key(scope, date))
     }
 }
 
@@ -221,19 +223,15 @@ fn used(conn: &Connection, key: &str) -> Result<u64, ReportError> {
 pub(super) fn record_call(conn: &Connection, run: &Value) -> Result<(), ReportError> {
     let personal: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM report_metadata WHERE key=? AND value='5')",
-        [format!(
-            "personal_run:{}",
-            run["run_id"].as_str().unwrap_or("")
-        )],
+        [personal_run_key(run["run_id"].as_str().unwrap_or(""))],
         |r| r.get(0),
     )?;
     if !personal {
         return Ok(());
     }
-    let key = format!(
-        "personal_calls:{}:{}",
+    let key = personal_calls_key(
         run["scope_id"].as_str().unwrap_or(""),
-        run["target_date"].as_str().unwrap_or("")
+        run["target_date"].as_str().unwrap_or(""),
     );
     let count = used(conn, &key)?;
     conn.execute(

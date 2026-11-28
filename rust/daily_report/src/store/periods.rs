@@ -1,7 +1,7 @@
 use super::{
     metadata,
     reports::{daily_pointer, read_run},
-    timestamp, RunRecord, Store,
+    timestamp, RunRecord, Store, CURRENT_PERIOD_PREFIX,
 };
 use crate::{infra::json::read_frozen_report_json, reports::period, types::RunPhase, ReportError};
 use chrono::{DateTime, Utc};
@@ -16,7 +16,7 @@ fn table(kind: &str) -> Result<(&'static str, &'static str), ReportError> {
     }
 }
 fn key(kind: &str, label: &str) -> String {
-    format!("current_period:{kind}:{label}")
+    format!("{CURRENT_PERIOD_PREFIX}{kind}:{label}")
 }
 fn current(conn: &Connection, kind: &str, label: &str) -> Result<Option<RunRecord>, ReportError> {
     let (table, column) = table(kind)?;
