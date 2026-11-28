@@ -222,9 +222,8 @@ pub(super) fn omitted_ranges(source: &ReportSource) -> Result<Vec<String>, Repor
 mod tests {
     use super::*;
     use crate::{
-        evidence::EvidenceRef,
-        reports::data::ReportSource,
-        snapshots::digest,
+        infra::json::digest,
+        reports::data::{EvidenceRef, ReportSource},
         types::{new_run_id, parse_date, RunContext},
     };
     use chrono::Utc;

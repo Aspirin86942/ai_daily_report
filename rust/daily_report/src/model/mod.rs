@@ -1,5 +1,4 @@
 //! Audited execution and replay of personal summary and compaction requests.
-pub mod contracts;
 pub mod personal;
 pub mod plan;
 pub mod recovery;
@@ -12,12 +11,17 @@ use crate::{
     ReportError,
 };
 use chrono::{DateTime, Utc};
-use contracts::MAX_RESPONSE_BYTES;
 use personal::FrozenStep;
 use plan::{PlannedStep, BOUNDED_PLAN_VERSION, DETAILED_PLAN_VERSION};
 use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 use transport::{ModelTransport, TransportFailure};
+
+const MAX_RESPONSE_BYTES: usize = 128 * 1024;
+
+pub(crate) fn invalid_response() -> ReportError {
+    ReportError::new("MODEL_RESPONSE_INVALID", "模型响应结构、内容范围或引用无效")
+}
 
 #[derive(Debug)]
 pub struct StepResult {
@@ -43,16 +47,16 @@ fn validate_response(
 ) -> Result<personal::PersonalOutput, ReportError> {
     let version = frozen.plan.version;
     let response = if version == BOUNDED_PLAN_VERSION {
-        serde_json::from_slice(body).map_err(|_| contracts::invalid())?
+        serde_json::from_slice(body).map_err(|_| invalid_response())?
     } else {
         std::str::from_utf8(body)
-            .map_err(|_| contracts::invalid())
-            .and_then(|text| read_frozen_report_json(text).map_err(|_| contracts::invalid()))?
+            .map_err(|_| invalid_response())
+            .and_then(|text| read_frozen_report_json(text).map_err(|_| invalid_response()))?
     };
     let choices = response["choices"]
         .as_array()
         .filter(|c| c.len() == 1)
-        .ok_or_else(contracts::invalid)?;
+        .ok_or_else(invalid_response)?;
     let choice = &choices[0];
     if choice["finish_reason"] == "length" {
         return Err(ReportError::new(
@@ -61,7 +65,7 @@ fn validate_response(
         ));
     }
     if choice["finish_reason"] != "stop" || !choice["message"]["refusal"].is_null() {
-        return Err(contracts::invalid());
+        return Err(invalid_response());
     }
     // The transport bounds the whole response. Detailed reports apply their combined
     // byte ceiling to the rendered body and evidence, after decoding the model JSON.
@@ -71,8 +75,8 @@ fn validate_response(
             matches!(version, DETAILED_PLAN_VERSION | BOUNDED_PLAN_VERSION)
                 || s.len() <= MAX_RESPONSE_BYTES
         })
-        .ok_or_else(contracts::invalid)?;
-    let content = serde_json::from_str(text).map_err(|_| contracts::invalid())?;
+        .ok_or_else(invalid_response)?;
+    let content = serde_json::from_str(text).map_err(|_| invalid_response())?;
     personal::validate_response(frozen, content)
 }
 fn reference(row: &Value, prefix: &str) -> Result<SnapshotRef, ReportError> {

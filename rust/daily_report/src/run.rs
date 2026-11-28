@@ -54,7 +54,7 @@ impl App {
         let processing =
             if maintain && config.report.profile == crate::config::ReportProfile::Personal {
                 Some(crate::processing_cache::ProcessingSession::acquire(
-                    &config,
+                    &config.paths.data_dir,
                     now,
                     started + PERSONAL_APP_BUDGET,
                 )?)

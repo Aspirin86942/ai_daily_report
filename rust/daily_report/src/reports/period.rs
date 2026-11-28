@@ -1,5 +1,9 @@
-use crate::{model::contracts::invalid, types::Period, ReportError};
+use crate::{types::Period, ReportError};
 use serde_json::Value;
+
+fn invalid() -> ReportError {
+    ReportError::new("MODEL_RESPONSE_INVALID", "模型响应结构、内容范围或引用无效")
+}
 
 const WEEK_FIELDS: &[&str] = &[
     "week_label",

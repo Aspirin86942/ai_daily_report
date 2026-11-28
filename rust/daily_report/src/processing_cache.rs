@@ -1,10 +1,10 @@
 //! One OS lock and one shared reservation pool for every personal processing writer.
 use crate::{
-    config::AppConfig,
     infra::{
         fs::{normalized_path, reject_redirects, write_synced},
         locking::ReportLock,
     },
+    types::DAILY_CACHE_DIR,
     ReportError,
 };
 use chrono::{DateTime, Utc};
@@ -52,12 +52,12 @@ pub struct ProcessingSession {
 
 impl ProcessingSession {
     pub fn acquire(
-        config: &AppConfig,
+        data_dir: &Path,
         now: DateTime<Utc>,
         deadline: Instant,
     ) -> Result<Self, ReportError> {
         Self::at(
-            &config.daily_cache_dir(),
+            &data_dir.join(DAILY_CACHE_DIR),
             now,
             deadline,
             MAX_BYTES,

@@ -581,10 +581,13 @@ fn processing_lock_wait_respects_the_remaining_deadline() {
     let root = config.paths.data_dir.join("daily_cache");
     let _held = ReportLock::acquire(&root.join("processing"), "personal", Duration::ZERO).unwrap();
     let started = Instant::now();
-    let error =
-        ProcessingSession::acquire(&config, Utc::now(), started + Duration::from_millis(150))
-            .err()
-            .unwrap();
+    let error = ProcessingSession::acquire(
+        &config.paths.data_dir,
+        Utc::now(),
+        started + Duration::from_millis(150),
+    )
+    .err()
+    .unwrap();
     assert_eq!(error.code, "REPORT_ALREADY_RUNNING");
     assert!(started.elapsed() < Duration::from_secs(2));
     assert!(!root.join(".cache-ledger.json").exists());

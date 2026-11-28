@@ -2,10 +2,10 @@
 //! Scan identities describe a frozen observation, never an archive version.
 use super::{input, App};
 use crate::{
-    evidence::{EvidencePermissions, EvidenceRef},
+    evidence::EvidencePermissions,
     infra::json::digest,
     reports::{
-        data::ReportSource,
+        data::{EvidenceRef, ReportSource},
         personal::{Material, Selection, MAX_FILE_CHARS},
     },
     scan::sources::{range_spans, ranges_for, AllocatedExcerpt, ExcerptBlock},

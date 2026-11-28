@@ -1,7 +1,7 @@
 mod bounded;
 mod detailed;
 use super::{
-    contracts::invalid,
+    invalid_response as invalid,
     plan::{payload, PlannedStep, StepKind, BOUNDED_PLAN_VERSION, DETAILED_PLAN_VERSION},
 };
 use crate::{

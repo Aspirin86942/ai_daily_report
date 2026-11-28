@@ -1,27 +1,8 @@
 //! Evidence identities and sending permissions shared by personal reporting.
+pub use crate::reports::data::EvidenceRef;
 use crate::{config::AppConfig, ReportError};
-use daily_parsers::contract::SourceRange;
-use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct EvidenceRef {
-    pub source_id: String,
-    pub version_id: String,
-    pub extraction_id: String,
-    pub unit_id: String,
-    pub side: String,
-    pub raw_sha256: String,
-    pub unit_sha256: String,
-    pub quote: String,
-    pub quote_sha256: String,
-    pub unit_char_start: usize,
-    pub input_start: usize,
-    pub input_end: usize,
-    pub ranges: Vec<SourceRange>,
-}
 
 fn comparable(path: &Path) -> String {
     path.to_string_lossy()
