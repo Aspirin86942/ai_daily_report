@@ -127,7 +127,9 @@ fn context_literal<'a>(
         .map(published_range)
         .collect::<Vec<_>>()
         .join("、");
-    if range.unwrap_or_default() != label {
+    let compact = crate::reports::personal::detailed::compact_ranges_label(&ranges);
+    let actual_range = range.unwrap_or_default();
+    if actual_range != label && actual_range != compact {
         return None;
     }
     let raw = context["text"]

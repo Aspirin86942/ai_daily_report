@@ -89,5 +89,6 @@ scripts/corpus/
 .artifacts/daily-scan-*/
 .artifacts/project-space-cleanup-*/
 .artifacts/health-lock-compact-*/
+.artifacts/attachment-dedup-*/
 .releases/
 config-rust/

@@ -645,6 +645,6 @@ fn too_large() -> ReportError {
 }
 
 mod bounded;
-mod detailed;
+pub(crate) mod detailed;
 pub(crate) use bounded::bounded_body;
 use detailed::block_context;

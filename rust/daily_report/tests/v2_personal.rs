@@ -666,3 +666,44 @@ fn compaction_rejects_reordered_or_added_source_ids() {
         );
     }
 }
+
+#[test]
+fn workbook_headings_deduplicate_in_published_v7_attachment() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, server) = dynamic_loopback(1, |_, payload| {
+        let content: Value =
+            serde_json::from_str(payload["messages"][1]["content"].as_str().unwrap()).unwrap();
+        let file_id = content["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|s| s["source_id"].as_str())
+            .find(|id| *id != "user_input")
+            .unwrap()
+            .to_owned();
+        envelope(vec![json!({
+            "title": "工作簿核对",
+            "text": "完成测试工作簿摘要，详见依据。",
+            "kind": "progress",
+            "statement_kind": "observed",
+            "source_ids": [file_id],
+        })])
+    });
+    let cfg = config(dir.path(), "openai", &url);
+    let path = cfg.paths.work_dir.join("personal-headings.xlsx");
+    fs::write(&path, include_bytes!("fixtures/personal-headings.xlsx")).unwrap();
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified((fixed_now() - Days::new(1)).into())
+        .unwrap();
+    let app = App::open(cfg, fixed_now()).unwrap();
+    let outcome = run_daily(request(), &app).unwrap();
+    assert_eq!(server.join().unwrap().len(), 1);
+    assert_eq!(outcome.action, "published");
+    let saved = saved_report(&app, &outcome.run_id);
+    let attachment = saved.evidence_attachment.unwrap();
+    attachment.validate().unwrap();
+    assert!(attachment.markdown.contains("personal-headings.xlsx"));
+}

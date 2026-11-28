@@ -25,9 +25,10 @@
 {% for part in parts %}
 {{ part.kind }}{% if part.range %} · {{ part.range | report_inline }}{% endif %}
 
-<a id="{{ part.anchor }}"></a>
+{% if part.previous %}[查看相同原文](#{{ part.previous }})
+{% else %}<a id="{{ part.anchor }}"></a>
 <pre><code>{{ part.text | source_verbatim }}</code></pre>
-{% endfor %}
+{% endif %}{% endfor %}
 {% elif section == "evidence" -%}
 <a id="personal-evidence"></a>
 # {{ date }} 个人日报 · 完整依据

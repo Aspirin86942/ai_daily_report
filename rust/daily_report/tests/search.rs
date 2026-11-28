@@ -1712,3 +1712,74 @@ fn only_published_attachment_text_is_searchable_with_its_path_anchor_and_range()
     fixture.put("daily", &report.date, json!(report));
     assert_eq!(fixture.execute(&arguments("定位文字"))["total"], 0);
 }
+
+#[test]
+fn bounded_v7_attachment_with_dedup_and_compact_ranges_is_searchable() {
+    use ai_daily_report::{reports::personal::EvidenceAttachment, snapshots::digest};
+    let fixture = Fixture::new();
+    let heading = "共管账户双人复核规则";
+    let (mut report, mut first_range) = attachment_report("首块内容行");
+    let (mut second_report, mut second_range) = attachment_report("次块内容行");
+    report.schema_version = 6;
+    first_range.end = first_range.start + 1;
+    let mut first_col2 = first_range.clone();
+    first_col2.column_start = Some(4);
+    first_col2.column_end = Some(6);
+    report.sources[0].coverage_limits["personal"] =
+        json!({"context":[{"text":heading,"ranges":[first_range.clone(), first_col2.clone()]}]});
+    let mut second = second_report.sources.remove(0);
+    let mut refs = second_report.evidence.remove(&second.source_id).unwrap();
+    second.source_id = format!("src_{}", digest(b"second-v7-heading"));
+    refs[0].source_id.clone_from(&second.source_id);
+    refs[0].ranges[0].start = 22;
+    refs[0].ranges[0].end = 24;
+    second_range.start = 20;
+    second_range.end = 21;
+    let mut second_col2 = second_range.clone();
+    second_col2.column_start = Some(4);
+    second_col2.column_end = Some(6);
+    second.coverage_limits["personal"] =
+        json!({"context":[{"text":heading,"ranges":[second_range.clone(), second_col2.clone()]}]});
+    report.evidence.insert(second.source_id.clone(), refs);
+    report.sources.push(second);
+    let markdown = format!(
+        "<a id=\"personal-evidence\"></a>\n\
+         # {} 个人日报 · 完整依据\n\n\
+         ## 材料范围\n\n\
+         ## 采纳材料原文\n\n\
+         <a id=\"s001\"></a>\n\
+         ### S001 · 样本/合成表.xlsx\n\n\
+         观察时间 2026-10-10 09:00。\n\
+         - 解析或摘录上限导致未覆盖 · 汇总 · 第 50–100 行，第 1–5 列\n\n\
+         表头、标题或单位 · 汇总 · 第 12 行，第 2–5 列\n\n\
+         <a id=\"s001-p1\"></a>\n\
+         <pre><code>{heading}</code></pre>\n\n\
+         本次读取 · 汇总 · 第 12–13 行，第 2–3 列\n\n\
+         <a id=\"s001-p2\"></a>\n\
+         <pre><code>首块内容行</code></pre>\n\n\
+         <a id=\"s002\"></a>\n\
+         ### S002 · 样本/合成表.xlsx\n\n\
+         观察时间 2026-10-10 09:00。\n\n\
+         表头、标题或单位 · 汇总 · 第 20 行，第 2–5 列\n\n\
+         [查看相同原文](#s001-p1)\n\n\
+         本次读取 · 汇总 · 第 22–23 行，第 2–3 列\n\n\
+         <a id=\"s002-p2\"></a>\n\
+         <pre><code>次块内容行</code></pre>\n",
+        report.date
+    );
+    report.evidence_attachment = Some(EvidenceAttachment {
+        sha256: digest(markdown.as_bytes()),
+        markdown,
+    });
+    fixture.put("daily", &report.date, json!(report));
+    let output = fixture.cli(&[
+        "--query", heading, "--phrase", "--source", "S002", "--format", "json",
+    ]);
+    assert!(output.status.success());
+    let hits: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(hits["total"], 1);
+    let loc = &hits["results"][0]["location"];
+    assert_eq!(loc["anchor"], "s002");
+    assert_eq!(loc["source_ranges"], json!([second_range, second_col2]));
+    assert!(loc["original_link"].as_str().unwrap().ends_with("#s001-p1"));
+}

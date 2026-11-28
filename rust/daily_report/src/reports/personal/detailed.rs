@@ -1,5 +1,11 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+pub(super) enum MaterialMode {
+    Detailed,
+    Bounded { dedup_shared: bool },
+}
+
 impl PersonalReport {
     /// Freeze the attachment and size both Markdown files before changing this report.
     pub fn render_detailed_output(&mut self, template: &str) -> Result<String, ReportError> {
@@ -76,7 +82,7 @@ impl PersonalReport {
                 &labels[source.source_id.as_str()],
                 &mut seen,
                 &mut headings,
-                false,
+                MaterialMode::Detailed,
             )?);
         }
 
@@ -228,8 +234,12 @@ impl PersonalReport {
         label: &str,
         seen: &mut HashMap<&'a str, String>,
         headings: &mut HashMap<(&'a str, &'a str), Option<String>>,
-        complete: bool,
+        mode: MaterialMode,
     ) -> Result<String, ReportError> {
+        let (complete, dedup_shared) = match mode {
+            MaterialMode::Detailed => (false, true),
+            MaterialMode::Bounded { dedup_shared } => (true, dedup_shared),
+        };
         let refs = self
             .evidence
             .get(&source.source_id)
@@ -242,17 +252,21 @@ impl PersonalReport {
         let mut originals = Vec::new();
         let mut add = |kind: &str, text: &'a str, ranges: &[SourceRange], shared: Option<&str>| {
             let part_anchor = format!("{anchor}-p{}", parts.len() + 1);
-            let previous = if complete {
-                None
-            } else {
+            let previous = if dedup_shared {
                 shared.or_else(|| seen.get(text).map(String::as_str))
+            } else {
+                None
             };
             let printed_at = previous.unwrap_or(&part_anchor).to_owned();
-            let mut range = ranges
-                .iter()
-                .map(range_label)
-                .collect::<Vec<_>>()
-                .join("、");
+            let mut range = if complete {
+                compact_ranges_label(ranges)
+            } else {
+                ranges
+                    .iter()
+                    .map(range_label)
+                    .collect::<Vec<_>>()
+                    .join("、")
+            };
             if range.is_empty() && kind == "本次读取" {
                 let metadata = &source.coverage_limits["personal"];
                 if let (Some(start), Some(end)) = (
@@ -267,9 +281,14 @@ impl PersonalReport {
                 text => if previous.is_none() { text } else { "" },
             });
             if complete {
-                originals.push((part_anchor.clone(), text, range));
+                originals.push((
+                    part_anchor.clone(),
+                    previous.map(str::to_owned),
+                    text,
+                    range,
+                ));
             }
-            if !complete && previous.is_none() {
+            if dedup_shared && previous.is_none() {
                 seen.insert(text, part_anchor);
             }
             printed_at
@@ -318,11 +337,16 @@ impl PersonalReport {
             && (!block
                 .lines()
                 .any(|line| line == format!("<a id=\"{anchor}\"></a>"))
-                || originals.into_iter().any(|(part, text, range)| {
-                    !block.contains(&format!(
-                        "<a id=\"{part}\"></a>\n<pre><code>{}</code></pre>",
-                        crate::reports::source_verbatim(text)
-                    )) || !block.contains(&crate::reports::markdown_inline(&range))
+                || originals.into_iter().any(|(part, previous, text, range)| {
+                    let body_ok = if let Some(prev) = previous {
+                        block.contains(&format!("[查看相同原文](#{prev})"))
+                    } else {
+                        block.contains(&format!(
+                            "<a id=\"{part}\"></a>\n<pre><code>{}</code></pre>",
+                            crate::reports::source_verbatim(text)
+                        ))
+                    };
+                    !body_ok || !block.contains(&crate::reports::markdown_inline(&range))
                 }))
         {
             return Err(invalid("依据模板缺少原文、位置或引用锚点"));
@@ -364,16 +388,29 @@ pub(super) fn block_context(source: &ReportSource) -> Result<Vec<BlockContext<'_
     Ok(contexts)
 }
 
-pub(super) fn range_label(range: &SourceRange) -> String {
-    // Stored ranges are half-open. Display page, row and column numbers inclusively.
-    let positions = |start: u64, end: u64| {
-        if end - start == 1 {
-            start.to_string()
+fn merge_spans(mut spans: Vec<(u64, u64)>) -> Vec<(u64, u64)> {
+    spans.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in spans {
+        if let Some(prev) = merged.last_mut().filter(|prev| start <= prev.1) {
+            prev.1 = prev.1.max(end);
         } else {
-            format!("{start}–{}", end - 1)
+            merged.push((start, end));
         }
-    };
-    let unit = match range.unit {
+    }
+    merged
+}
+
+fn format_positions(start: u64, end: u64) -> String {
+    if end - start == 1 {
+        start.to_string()
+    } else {
+        format!("{start}–{}", end - 1)
+    }
+}
+
+fn unit_label(unit: SourceRangeUnit) -> &'static str {
+    match unit {
         SourceRangeUnit::PdfPage => "页",
         SourceRangeUnit::SheetRow | SourceRangeUnit::TableRow => "行",
         SourceRangeUnit::Paragraph => "段",
@@ -381,15 +418,102 @@ pub(super) fn range_label(range: &SourceRange) -> String {
         SourceRangeUnit::CsvRecord => "条记录",
         SourceRangeUnit::TextChar => "字符",
         SourceRangeUnit::Byte => "字节",
-    };
+    }
+}
+
+pub(crate) fn compact_ranges_label(ranges: &[SourceRange]) -> String {
+    if ranges.is_empty() {
+        return String::new();
+    }
+    struct Group {
+        label: Option<String>,
+        unit: SourceRangeUnit,
+        start: u64,
+        end: u64,
+        cols: Vec<(u64, u64)>,
+    }
+    let mut groups: Vec<Group> = Vec::new();
+    for r in ranges {
+        let label = r
+            .label
+            .as_deref()
+            .map(|text| text.replace(['\r', '\n'], " "));
+        if let Some(group) = groups
+            .iter_mut()
+            .find(|g| g.label == label && g.unit == r.unit && g.start == r.start && g.end == r.end)
+        {
+            if let (Some(cs), Some(ce)) = (r.column_start, r.column_end) {
+                group.cols.push((cs, ce));
+            }
+        } else {
+            let cols = match (r.column_start, r.column_end) {
+                (Some(cs), Some(ce)) => vec![(cs, ce)],
+                _ => Vec::new(),
+            };
+            groups.push(Group {
+                label,
+                unit: r.unit,
+                start: r.start,
+                end: r.end,
+                cols,
+            });
+        }
+    }
+    for group in &mut groups {
+        group.cols = merge_spans(std::mem::take(&mut group.cols));
+    }
+    let mut merged: Vec<Group> = Vec::new();
+    for group in groups {
+        if let Some(prev) = merged.last_mut().filter(|prev| {
+            prev.label == group.label
+                && prev.unit == group.unit
+                && prev.cols == group.cols
+                && group.start <= prev.end
+        }) {
+            prev.end = prev.end.max(group.end);
+        } else {
+            merged.push(group);
+        }
+    }
+    merged
+        .into_iter()
+        .map(|g| {
+            let unit = unit_label(g.unit);
+            let mut location = match g.unit {
+                SourceRangeUnit::TextChar | SourceRangeUnit::Byte => {
+                    format!("{unit} [{}, {})", g.start, g.end)
+                }
+                _ => format!("第 {} {unit}", format_positions(g.start, g.end)),
+            };
+            if !g.cols.is_empty() {
+                let cols = g
+                    .cols
+                    .into_iter()
+                    .map(|(cs, ce)| format_positions(cs, ce))
+                    .collect::<Vec<_>>()
+                    .join("、");
+                location.push_str(&format!("，第 {cols} 列"));
+            }
+            if let Some(label) = g.label {
+                location = format!("{label} · {location}");
+            }
+            location
+        })
+        .collect::<Vec<_>>()
+        .join("、")
+}
+
+pub(super) fn range_label(range: &SourceRange) -> String {
+    // Stored ranges are half-open. Display page, row and column numbers inclusively.
+    let unit = unit_label(range.unit);
     let mut location = match range.unit {
         SourceRangeUnit::TextChar | SourceRangeUnit::Byte => {
             format!("{unit} [{}, {})", range.start, range.end)
         }
-        _ => format!("第 {} {unit}", positions(range.start, range.end)),
+        _ => format!("第 {} {unit}", format_positions(range.start, range.end)),
     };
     if let (Some(start), Some(end)) = (range.column_start, range.column_end) {
-        location.push_str(&format!("，第 {} 列", positions(start, end)));
+        location.push_str(&format!("，第 {} 列", format_positions(start, end)));
     }
     if let Some(label) = &range.label {
         location = format!("{label} · {location}");
