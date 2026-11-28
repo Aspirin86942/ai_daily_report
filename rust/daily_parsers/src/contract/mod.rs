@@ -1,6 +1,7 @@
 //! Typed parser input, output and source ranges.
 pub use crate::settings::{
-    pdf_sample_pages, PdfPageAudit, PdfPageObservation, OCR_BACKEND, OCR_RANGE_LABEL,
+    pdf_sample_pages, PdfPageAudit, PdfPageObservation, SourceGuardKind, OCR_BACKEND,
+    OCR_RANGE_LABEL,
 };
 use crate::settings::{
     require_range as validate_range, require_source_version, validate_text_window,
@@ -65,15 +66,6 @@ impl WorkerLane {
             Self::RustPdfProcessV3 => "rust_pdf_process_v3",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SourceGuardKind {
-    WindowsFileIdChangeTimeV1,
-    UnixInodeCtimeV1,
-    ContentSha256V1,
-    Unavailable,
 }
 
 impl ParserBackend {

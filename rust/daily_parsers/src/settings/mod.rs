@@ -4,7 +4,14 @@ use serde::de;
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
-pub use crate::contract::SourceGuardKind;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceGuardKind {
+    WindowsFileIdChangeTimeV1,
+    UnixInodeCtimeV1,
+    ContentSha256V1,
+    Unavailable,
+}
 mod pdf_audit;
 pub use pdf_audit::{pdf_extraction_pages, pdf_sample_pages, PdfPageAudit, PdfPageObservation};
 pub(crate) use pdf_audit::{validate_pdf_policy, validate_text_window};
