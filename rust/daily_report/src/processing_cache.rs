@@ -542,6 +542,27 @@ pub fn check_deadline(deadline: Instant) -> Result<(), ReportError> {
     }
 }
 
+pub(crate) fn measure_directory_bounded(root: &Path, deadline: Instant) -> (u64, bool) {
+    let mut bytes = 0u64;
+    let mut complete = true;
+    for entry in walkdir::WalkDir::new(root).follow_links(false) {
+        if Instant::now() >= deadline {
+            complete = false;
+            break;
+        }
+        match entry {
+            Ok(entry) if entry.file_type().is_file() => match entry.metadata() {
+                Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
+                Err(_) => complete = false,
+            },
+            Ok(entry) if entry.path_is_symlink() => complete = false,
+            Err(_) => complete = false,
+            _ => {}
+        }
+    }
+    (bytes, complete)
+}
+
 fn full() -> ReportError {
     ReportError::new("PROCESSING_CACHE_FULL", "处理缓存容量不足，当前材料已暂缓")
 }

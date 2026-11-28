@@ -19,7 +19,12 @@ use crate::{
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
-use std::{collections::BTreeSet, fs, path::PathBuf, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::PathBuf,
+    time::Duration,
+};
 #[derive(Debug, Default, Serialize)]
 pub struct RetentionResult {
     pub deleted_files: usize,
@@ -54,21 +59,12 @@ fn ids(value: &Value, key: &str, into: &mut BTreeSet<String>) {
         _ => {}
     }
 }
-/// Operates only on known, expired snapshot files. All path/hash checks precede deletion.
-pub fn cleanup(
+fn collect_protected_runs(
     app: &App,
-    now: DateTime<Utc>,
-    execute: bool,
-) -> Result<RetentionResult, ReportError> {
-    let _lock = ReportLock::acquire(
-        &app.store.path,
-        &app.config.report.scope_id,
-        Duration::from_secs(5),
-    )?;
-    reject_redirects(&app.snapshots.root, "RETENTION_PATH_REDIRECTED")?;
-    let conn = app.store.connection()?;
-    let runs = all_run_records(&conn)?;
-    let current = current_referenced_run_ids(&conn, &runs)?;
+    conn: &rusqlite::Connection,
+    runs: &[crate::store::RunRecord],
+    metadata: &BTreeMap<String, String>,
+) -> Result<BTreeSet<String>, ReportError> {
     let mut protected: BTreeSet<_> = runs
         .iter()
         .filter(|r| {
@@ -84,11 +80,9 @@ pub fn cleanup(
         })
         .map(|r| r.run_id.clone())
         .collect();
-    let metadata = all_metadata(&conn)?;
-    let is_personal = |id: &str| is_personal_run_meta(&metadata, id);
     let mut retained_calls = BTreeSet::new();
     let mut oldest_open_job = i64::MAX;
-    for (key, text) in &metadata {
+    for (key, text) in metadata {
         if key.starts_with("job_budget_revision:") || key.starts_with("job_calls_revision:") {
             let value: Value = serde_json::from_str(text)?;
             retained_calls.extend(
@@ -109,13 +103,13 @@ pub fn cleanup(
         }
     }
     protected.extend(open_job_call_run_ids(
-        &conn,
+        conn,
         oldest_open_job,
         &serde_json::to_string(&retained_calls)?,
     )?);
     // Cross-generation references remain readable while their owner still has an input snapshot.
-    for run in &runs {
-        if is_personal(&run.run_id) {
+    for run in runs {
+        if is_personal_run_meta(metadata, &run.run_id) {
             continue;
         }
         if let (Some(path), Some(sha)) = (&run.snapshot_path, &run.snapshot_sha256) {
@@ -147,17 +141,25 @@ pub fn cleanup(
             .filter(|r| generations.contains(&r.generation_id))
             .map(|r| r.run_id.clone()),
     );
+    Ok(protected)
+}
+
+fn collect_candidates(
+    app: &App,
+    runs: Vec<crate::store::RunRecord>,
+    current: &BTreeSet<String>,
+    protected: &BTreeSet<String>,
+    metadata: &BTreeMap<String, String>,
+    now: DateTime<Utc>,
+    result: &mut RetentionResult,
+) -> Result<Vec<Candidate>, ReportError> {
     let file_cutoff =
         now - chrono::Duration::days(app.config.retention.input_snapshot_days.min(365000) as i64);
     let run_cutoff =
         now - chrono::Duration::days(app.config.retention.terminal_run_days.min(365000) as i64);
     let mut candidates = Vec::new();
-    let mut result = RetentionResult {
-        dry_run: !execute,
-        ..Default::default()
-    };
     for run in runs {
-        if is_personal(&run.run_id) {
+        if is_personal_run_meta(metadata, &run.run_id) {
             result.preserved_runs += 1;
             continue;
         }
@@ -234,9 +236,15 @@ pub fn cleanup(
             delete_run: finished < run_cutoff && !current.contains(&run.run_id),
         });
     }
-    if !execute {
-        return Ok(result);
-    }
+    Ok(candidates)
+}
+
+fn execute_candidates(
+    app: &App,
+    candidates: Vec<Candidate>,
+    now: DateTime<Utc>,
+    result: &mut RetentionResult,
+) -> Result<(), ReportError> {
     if let Some(session) = &app.processing {
         session.prune_snapshots()?;
         app.store
@@ -263,6 +271,36 @@ pub fn cleanup(
         if clear_run_snapshot_and_calls(&mut conn, &candidate.run_id, candidate.delete_run)? {
             result.deleted_runs += 1;
         }
+    }
+    Ok(())
+}
+
+/// Operates only on known, expired snapshot files. All path/hash checks precede deletion.
+pub fn cleanup(
+    app: &App,
+    now: DateTime<Utc>,
+    execute: bool,
+) -> Result<RetentionResult, ReportError> {
+    let _lock = ReportLock::acquire(
+        &app.store.path,
+        &app.config.report.scope_id,
+        Duration::from_secs(5),
+    )?;
+    reject_redirects(&app.snapshots.root, "RETENTION_PATH_REDIRECTED")?;
+    let conn = app.store.connection()?;
+    let runs = all_run_records(&conn)?;
+    let current = current_referenced_run_ids(&conn, &runs)?;
+    let metadata = all_metadata(&conn)?;
+    let protected = collect_protected_runs(app, &conn, &runs, &metadata)?;
+    drop(conn);
+    let mut result = RetentionResult {
+        dry_run: !execute,
+        ..Default::default()
+    };
+    let candidates =
+        collect_candidates(app, runs, &current, &protected, &metadata, now, &mut result)?;
+    if execute {
+        execute_candidates(app, candidates, now, &mut result)?;
     }
     Ok(result)
 }

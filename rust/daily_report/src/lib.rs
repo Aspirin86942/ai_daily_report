@@ -28,17 +28,15 @@ impl ReportError {
     pub fn retryable(&self) -> bool {
         matches!(
             self.code,
+            // MODEL_CONNECTION_FAILED, MODEL_CONNECT_TIMEOUT, MODEL_RESPONSE_INTERRUPTED, and MODEL_TIMEOUT
+            // are emitted dynamically by model::transport::TransportFailure::code().
             "REPORT_ALREADY_RUNNING"
                 | "IO_FAILED"
                 | "PROCESSING_READ_FAILED"
                 | "MODEL_CONNECTION_FAILED"
-                | "MODEL_TRANSPORT_FAILED"
-                | "SOURCE_BUSY"
-                | "SOURCE_CHANGED"
-                | "MODEL_TIMEOUT"
                 | "MODEL_CONNECT_TIMEOUT"
-                | "PERSONAL_RECOVERY_WAITING"
                 | "MODEL_RESPONSE_INTERRUPTED"
+                | "MODEL_TIMEOUT"
         )
     }
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {

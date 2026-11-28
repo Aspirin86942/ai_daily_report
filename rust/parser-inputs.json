@@ -15,6 +15,7 @@
     "daily_report/src/types.rs",
     "daily_report/src/scan",
     "daily_report/src/config.rs",
+    "daily_report/src/config",
     "daily_report/src/run.rs",
     "daily_report/src/run/personal_scan.rs",
     "daily_report/src/config.defaults.json"

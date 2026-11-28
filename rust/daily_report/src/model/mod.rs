@@ -156,6 +156,169 @@ impl ModelRunner<'_> {
     pub fn execute(&self, root: &PlannedStep) -> Result<StepResult, ReportError> {
         self.execute_frozen(&root.checked(self.llm)?)
     }
+
+    fn try_reuse_call(
+        &self,
+        frozen: &FrozenStep<'_>,
+        run: &crate::store::RunRecord,
+        identity: &str,
+        bytes: &[u8],
+    ) -> Result<Option<(personal::PersonalOutput, i64)>, ReportError> {
+        let Some(row) = self.store.successful_call(&run.generation_id, identity)? else {
+            return Ok(None);
+        };
+        let prior_run = self.store.get(row["run_id"].as_str().unwrap_or(""))?;
+        if prior_run.scope_id != run.scope_id
+            || prior_run.target_date != run.target_date
+            || prior_run.config_fingerprint != run.config_fingerprint
+            || self.snapshots.read_bytes(&reference(&row, "request")?)? != bytes
+        {
+            return Err(ReportError::new(
+                "MODEL_REUSE_IDENTITY_MISMATCH",
+                "成功响应的输入身份不一致",
+            ));
+        }
+        let output = validate_response(
+            frozen,
+            &self.snapshots.read_bytes(&reference(&row, "response")?)?,
+        )?;
+        Ok(Some((output, row["call_id"].as_i64().unwrap())))
+    }
+
+    fn send_and_record(
+        &self,
+        frozen: &FrozenStep<'_>,
+        root_sha: &str,
+        identity: &str,
+        bytes: &[u8],
+    ) -> Result<(i64, Result<personal::PersonalOutput, ReportError>), ReportError> {
+        let step = frozen.plan;
+        self.remaining()?;
+        if !self.allow_new_calls {
+            return Err(ReportError::new(
+                "RECOVERY_CONFIG_CHANGED",
+                "配置已改变且仍有未完成的模型步骤",
+            ));
+        }
+        step.check_capacity(self.llm)?;
+        self.transport.prepare()?;
+        let response_reservation = self.snapshots.reserve_response()?;
+        let request = self
+            .snapshots
+            .put_bytes(self.run_id, "model-request", bytes)?;
+        let revision =
+            self.snapshots
+                .put(self.run_id, "model-plan", &serde_json::to_value(step)?)?;
+        let audit = json!({"model_plan_version":step.version,"root_plan_sha256":root_sha,"plan_revision":revision,"source_ranges":{},"response_schema_sha256":step.schema_sha256,"prompt_sha256":step.prompt_sha256});
+        let call_id = self.store.reserve_call(CallReservation {
+            run_id: self.run_id,
+            fingerprint: identity,
+            logical_step: &step.logical_step,
+            request: &request,
+            job_id: None,
+            audit: &audit,
+            max_attempts: self.llm.max_retries,
+            now: self.now(),
+        })?;
+        let started = Instant::now();
+        let response = self
+            .transport
+            .before_send()
+            .and_then(|()| self.remaining())
+            .map_err(|error| (error, false))
+            .and_then(|remaining| {
+                let timeout =
+                    remaining.min(Duration::from_secs_f64(self.llm.request_timeout_seconds));
+                self.transport.send(bytes, timeout).map_err(|failure| {
+                    let unknown = !matches!(
+                        failure,
+                        TransportFailure::Configuration | TransportFailure::PermissionDenied
+                    );
+                    (
+                        ReportError::new(failure.code(), "模型通信未取得完整响应"),
+                        unknown,
+                    )
+                })
+            });
+        drop(response_reservation);
+        let mut completion = CallCompletion {
+            call_id,
+            status: "failed",
+            response: None,
+            usage: json!({}),
+            error_code: None,
+            duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+            now: self.now(),
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err((error, unknown)) => {
+                if unknown {
+                    completion.status = "unknown";
+                }
+                completion.error_code = Some(error.code);
+                self.store.finish_call(completion)?;
+                return Err(error);
+            }
+        };
+        let saved = match self
+            .snapshots
+            .put_bytes(self.run_id, "model-response", &response.body)
+        {
+            Ok(saved) => saved,
+            Err(error) => {
+                completion.status = "unknown";
+                completion.error_code = Some("MODEL_RESPONSE_SAVE_FAILED");
+                completion.now = self.now();
+                let _ = self.store.finish_call(completion);
+                return Err(error);
+            }
+        };
+        let output = if (200..300).contains(&response.status) {
+            validate_response(frozen, &response.body)
+        } else {
+            Err(ReportError::new(
+                "MODEL_HTTP_ERROR",
+                format!("模型服务返回 HTTP {}", response.status),
+            ))
+        };
+        completion.response = Some(&saved);
+        completion.usage = serde_json::from_slice::<Value>(&response.body)
+            .ok()
+            .map_or(Value::Null, |response| response["usage"].clone());
+        completion.error_code = output.as_ref().err().map(|error| error.code);
+        if output.is_ok() {
+            completion.status = "succeeded";
+        }
+        completion.now = self.now();
+        self.store.finish_call(completion)?;
+        Ok((call_id, output))
+    }
+
+    fn wait_before_retry(
+        &self,
+        generation_id: &str,
+        logical_step: &str,
+        error: ReportError,
+    ) -> Result<(), ReportError> {
+        let attempts = self
+            .store
+            .generation_calls(generation_id, logical_step)?
+            .len();
+        if attempts >= self.llm.max_retries as usize {
+            return Err(error);
+        }
+        let delay = retry_after(None, attempts, self.now());
+        if delay >= self.remaining()? {
+            return Err(ReportError::new(
+                "MODEL_RUN_DEADLINE_EXCEEDED",
+                "剩余时间不足以等待模型重试",
+            ));
+        }
+        std::thread::sleep(delay);
+        Ok(())
+    }
+
     fn execute_frozen(&self, frozen: &FrozenStep<'_>) -> Result<StepResult, ReportError> {
         let step = frozen.plan;
         let run = self.store.get(self.run_id)?;
@@ -165,23 +328,8 @@ impl ModelRunner<'_> {
         let identity = request_identity(&run, &root_sha, &bytes)?;
         let mut invalid_retries = 0u32;
         let (output, call_id, reused) = loop {
-            if let Some(row) = self.store.successful_call(&run.generation_id, &identity)? {
-                let prior_run = self.store.get(row["run_id"].as_str().unwrap_or(""))?;
-                if prior_run.scope_id != run.scope_id
-                    || prior_run.target_date != run.target_date
-                    || prior_run.config_fingerprint != run.config_fingerprint
-                    || self.snapshots.read_bytes(&reference(&row, "request")?)? != bytes
-                {
-                    return Err(ReportError::new(
-                        "MODEL_REUSE_IDENTITY_MISMATCH",
-                        "成功响应的输入身份不一致",
-                    ));
-                }
-                let output = validate_response(
-                    frozen,
-                    &self.snapshots.read_bytes(&reference(&row, "response")?)?,
-                )?;
-                break (output, row["call_id"].as_i64().unwrap(), true);
+            if let Some((output, call_id)) = self.try_reuse_call(frozen, &run, &identity, &bytes)? {
+                break (output, call_id, true);
             }
             if step.version == BOUNDED_PLAN_VERSION && unknown {
                 return Err(ReportError::new(
@@ -189,106 +337,7 @@ impl ModelRunner<'_> {
                     "同一冻结步骤已有结果未知的调用",
                 ));
             }
-            self.remaining()?;
-            if !self.allow_new_calls {
-                return Err(ReportError::new(
-                    "RECOVERY_CONFIG_CHANGED",
-                    "配置已改变且仍有未完成的模型步骤",
-                ));
-            }
-            step.check_capacity(self.llm)?;
-            self.transport.prepare()?;
-            let response_reservation = self.snapshots.reserve_response()?;
-            let request = self
-                .snapshots
-                .put_bytes(self.run_id, "model-request", &bytes)?;
-            let revision =
-                self.snapshots
-                    .put(self.run_id, "model-plan", &serde_json::to_value(step)?)?;
-            let audit = json!({"model_plan_version":step.version,"root_plan_sha256":root_sha,"plan_revision":revision,"source_ranges":{},"response_schema_sha256":step.schema_sha256,"prompt_sha256":step.prompt_sha256});
-            let call_id = self.store.reserve_call(CallReservation {
-                run_id: self.run_id,
-                fingerprint: &identity,
-                logical_step: &step.logical_step,
-                request: &request,
-                job_id: None,
-                audit: &audit,
-                max_attempts: self.llm.max_retries,
-                now: self.now(),
-            })?;
-            let started = Instant::now();
-            let response = self
-                .transport
-                .before_send()
-                .and_then(|()| self.remaining())
-                .map_err(|error| (error, false))
-                .and_then(|remaining| {
-                    let timeout =
-                        remaining.min(Duration::from_secs_f64(self.llm.request_timeout_seconds));
-                    self.transport.send(&bytes, timeout).map_err(|failure| {
-                        let unknown = !matches!(
-                            failure,
-                            TransportFailure::Configuration | TransportFailure::PermissionDenied
-                        );
-                        (
-                            ReportError::new(failure.code(), "模型通信未取得完整响应"),
-                            unknown,
-                        )
-                    })
-                });
-            drop(response_reservation);
-            let mut completion = CallCompletion {
-                call_id,
-                status: "failed",
-                response: None,
-                usage: json!({}),
-                error_code: None,
-                duration_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
-                now: self.now(),
-            };
-            let response = match response {
-                Ok(response) => response,
-                Err((error, unknown)) => {
-                    if unknown {
-                        completion.status = "unknown";
-                    }
-                    completion.error_code = Some(error.code);
-                    self.store.finish_call(completion)?;
-                    return Err(error);
-                }
-            };
-            let saved =
-                match self
-                    .snapshots
-                    .put_bytes(self.run_id, "model-response", &response.body)
-                {
-                    Ok(saved) => saved,
-                    Err(error) => {
-                        completion.status = "unknown";
-                        completion.error_code = Some("MODEL_RESPONSE_SAVE_FAILED");
-                        completion.now = self.now();
-                        let _ = self.store.finish_call(completion);
-                        return Err(error);
-                    }
-                };
-            let output = if (200..300).contains(&response.status) {
-                validate_response(frozen, &response.body)
-            } else {
-                Err(ReportError::new(
-                    "MODEL_HTTP_ERROR",
-                    format!("模型服务返回 HTTP {}", response.status),
-                ))
-            };
-            completion.response = Some(&saved);
-            completion.usage = serde_json::from_slice::<Value>(&response.body)
-                .ok()
-                .map_or(Value::Null, |response| response["usage"].clone());
-            completion.error_code = output.as_ref().err().map(|error| error.code);
-            if output.is_ok() {
-                completion.status = "succeeded";
-            }
-            completion.now = self.now();
-            self.store.finish_call(completion)?;
+            let (call_id, output) = self.send_and_record(frozen, &root_sha, &identity, &bytes)?;
             let error = match output {
                 Ok(output) => break (output, call_id, false),
                 Err(error) => error,
@@ -299,21 +348,7 @@ impl ModelRunner<'_> {
                 return Err(error);
             }
             invalid_retries += 1;
-            let attempts = self
-                .store
-                .generation_calls(&run.generation_id, &step.logical_step)?
-                .len();
-            if attempts >= self.llm.max_retries as usize {
-                return Err(error);
-            }
-            let delay = retry_after(None, attempts, self.now());
-            if delay >= self.remaining()? {
-                return Err(ReportError::new(
-                    "MODEL_RUN_DEADLINE_EXCEEDED",
-                    "剩余时间不足以等待模型重试",
-                ));
-            }
-            std::thread::sleep(delay);
+            self.wait_before_retry(&run.generation_id, &step.logical_step, error)?;
         };
         Ok(StepResult {
             output,

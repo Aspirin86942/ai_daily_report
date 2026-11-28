@@ -340,31 +340,21 @@ fn free_bytes(_path: &std::path::Path) -> Option<u64> {
     None
 }
 
-/// 只读检查；数据库缺失或损坏以 unhealthy 结果返回，不向调用方抛错。
-pub fn check(
+fn check_reports_db(
     config: &AppConfig,
     target: NaiveDate,
     now: DateTime<Utc>,
-) -> Result<HealthReport, ReportError> {
-    let mut checks = Vec::new();
+    checks: &mut Vec<HealthCheck>,
+) -> Result<(), ReportError> {
     let reports_path = config.reports_db_path();
     let reports = match open_read(&reports_path) {
         Ok(connection) => {
             match quick_check_yielding(&connection, &reports_path, &config.report.scope_id) {
                 QuickCheckOutcome::Ok => Some(connection),
-                QuickCheckOutcome::Deferred => {
-                    if schema_migrations_present(&connection) {
-                        Some(connection)
-                    } else {
-                        checks.push(HealthCheck::error(
-                            "DATABASE_INTEGRITY",
-                            "报告库完整性检查未通过",
-                            json!({"path": display_path(&reports_path)}),
-                        ));
-                        None
-                    }
+                QuickCheckOutcome::Deferred if schema_migrations_present(&connection) => {
+                    Some(connection)
                 }
-                QuickCheckOutcome::Failed => {
+                QuickCheckOutcome::Deferred | QuickCheckOutcome::Failed => {
                     checks.push(HealthCheck::error(
                         "DATABASE_INTEGRITY",
                         "报告库完整性检查未通过",
@@ -383,77 +373,83 @@ pub fn check(
             None
         }
     };
-    if let Some(connection) = reports {
-        let mut pending_published = None;
-        let mut published_err = None;
-        let mut after_published = Vec::new();
-        let observe = (|| -> Result<(), ReportError> {
-            let tx = connection.unchecked_transaction()?;
-            let active = active_report_runs(
-                &tx,
-                &config.report.scope_id,
-                config.recovery.run_budget_seconds,
-                now,
-            )?;
-            match fetch_published_report(&tx, config, target, now, &active) {
-                Ok(query) => pending_published = Some(query),
-                Err(_) => {
-                    published_err = Some(HealthCheck::error(
-                        "DATABASE_INTEGRITY",
-                        format!("{target} 日报无法核对：报告库结构不可用"),
-                        json!({"target_date": target}),
-                    ))
-                }
-            }
-            match run_attention(&tx, now, &active) {
-                Ok(check) => after_published.push(check),
-                Err(_) => after_published.push(HealthCheck::error(
-                    "DATABASE_INTEGRITY",
-                    "运行状态无法核对：报告库结构不可用",
-                    json!({}),
-                )),
-            }
-            if config.report.profile == crate::config::ReportProfile::Personal {
-                match historical_attention(&tx, config, now, &active) {
-                    Ok(check) => after_published.push(check),
-                    Err(_) => after_published.push(HealthCheck::error(
-                        "DATABASE_INTEGRITY",
-                        "历史日报异常无法核对",
-                        json!({}),
-                    )),
-                }
-            }
-            if let Some(report) = partial_daily_report_json(&tx, target) {
-                let report = read_frozen_report_json(&report).unwrap_or_default();
-                after_published.push(HealthCheck::warning("REPORT_CONTENT_PARTIAL", "日报已发布，内容仅部分可用",
-                    json!({"quality":"partial","selection":report["selection"],"gaps":report["gaps"]})));
-            }
-            Ok(())
-        })();
-        drop(connection);
-        if observe.is_err() {
-            checks.push(HealthCheck::error(
-                "DATABASE_INTEGRITY",
-                "运行状态无法核对：报告库结构不可用",
-                json!({}),
-            ));
-        } else {
-            if let Some(err_check) = published_err {
-                checks.push(err_check);
-            } else if let Some(query) = pending_published {
-                checks.push(verify_published_files(config, query)?);
-            }
-            checks.extend(after_published);
-        }
-    } else {
+    let Some(connection) = reports else {
         checks.push(HealthCheck::error(
             "REPORT_NOT_PUBLISHED",
             format!("{target} 日报无法核对：报告库不可用"),
             json!({"target_date": target}),
         ));
+        return Ok(());
+    };
+    let mut pending_published = None;
+    let mut published_err = None;
+    let mut after_published = Vec::new();
+    let observe = (|| -> Result<(), ReportError> {
+        let tx = connection.unchecked_transaction()?;
+        let active = active_report_runs(
+            &tx,
+            &config.report.scope_id,
+            config.recovery.run_budget_seconds,
+            now,
+        )?;
+        match fetch_published_report(&tx, config, target, now, &active) {
+            Ok(query) => pending_published = Some(query),
+            Err(_) => {
+                published_err = Some(HealthCheck::error(
+                    "DATABASE_INTEGRITY",
+                    format!("{target} 日报无法核对：报告库结构不可用"),
+                    json!({"target_date": target}),
+                ))
+            }
+        }
+        match run_attention(&tx, now, &active) {
+            Ok(check) => after_published.push(check),
+            Err(_) => after_published.push(HealthCheck::error(
+                "DATABASE_INTEGRITY",
+                "运行状态无法核对：报告库结构不可用",
+                json!({}),
+            )),
+        }
+        if config.report.profile == crate::config::ReportProfile::Personal {
+            match historical_attention(&tx, config, now, &active) {
+                Ok(check) => after_published.push(check),
+                Err(_) => after_published.push(HealthCheck::error(
+                    "DATABASE_INTEGRITY",
+                    "历史日报异常无法核对",
+                    json!({}),
+                )),
+            }
+        }
+        if let Some(report) = partial_daily_report_json(&tx, target) {
+            let report = read_frozen_report_json(&report).unwrap_or_default();
+            after_published.push(HealthCheck::warning(
+                "REPORT_CONTENT_PARTIAL",
+                "日报已发布，内容仅部分可用",
+                json!({"quality":"partial","selection":report["selection"],"gaps":report["gaps"]}),
+            ));
+        }
+        Ok(())
+    })();
+    drop(connection);
+    if observe.is_err() {
+        checks.push(HealthCheck::error(
+            "DATABASE_INTEGRITY",
+            "运行状态无法核对：报告库结构不可用",
+            json!({}),
+        ));
+    } else {
+        if let Some(err_check) = published_err {
+            checks.push(err_check);
+        } else if let Some(query) = pending_published {
+            checks.push(verify_published_files(config, query)?);
+        }
+        checks.extend(after_published);
     }
+    Ok(())
+}
 
-    checks.push(match open_read(&config.index_db_path) {
+fn check_scan_index(config: &AppConfig) -> HealthCheck {
+    match open_read(&config.index_db_path) {
         Ok(connection)
             if quick_check(&connection)
                 && crate::scan::cache::verify_schema(&connection).is_ok() =>
@@ -463,35 +459,45 @@ pub fn check(
         _ => HealthCheck::error(
             "SCAN_INDEX_INTEGRITY",
             "每日扫描索引不存在或完整性检查未通过",
-            json!({"path":display_path(&config.index_db_path)}),
+            json!({"path": display_path(&config.index_db_path)}),
         ),
-    });
+    }
+}
+
+fn check_processing_cache(config: &AppConfig) -> HealthCheck {
+    let root = config.daily_cache_dir();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let (bytes, complete) = crate::processing_cache::measure_directory_bounded(&root, deadline);
+    HealthCheck {
+        code: "PROCESSING_CACHE",
+        level: if complete && bytes <= crate::processing_cache::MAX_BYTES {
+            "ok"
+        } else {
+            "warning"
+        },
+        message: format!("个人处理缓存已核对 {bytes} 字节"),
+        evidence: json!({
+            "path": display_path(&root),
+            "logical_bytes": bytes,
+            "complete": complete,
+            "max_bytes": crate::processing_cache::MAX_BYTES,
+            "retention_days": crate::processing_cache::RETENTION_DAYS,
+        }),
+    }
+}
+
+/// 只读检查；数据库缺失或损坏以 unhealthy 结果返回，不向调用方抛错。
+pub fn check(
+    config: &AppConfig,
+    target: NaiveDate,
+    now: DateTime<Utc>,
+) -> Result<HealthReport, ReportError> {
+    let mut checks = Vec::new();
+    check_reports_db(config, target, now, &mut checks)?;
+    checks.push(check_scan_index(config));
     checks.push(disk_space(config));
     if config.report.profile == crate::config::ReportProfile::Personal {
-        let root = config.daily_cache_dir();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let mut bytes = 0u64;
-        let mut complete = true;
-        for entry in walkdir::WalkDir::new(&root).follow_links(false) {
-            if std::time::Instant::now() >= deadline {
-                complete = false;
-                break;
-            }
-            match entry {
-                Ok(entry) if entry.file_type().is_file() => match entry.metadata() {
-                    Ok(metadata) => bytes = bytes.saturating_add(metadata.len()),
-                    Err(_) => complete = false,
-                },
-                Ok(entry) if entry.path_is_symlink() => complete = false,
-                Err(_) => complete = false,
-                _ => {}
-            }
-        }
-        checks.push(HealthCheck {
-            code:"PROCESSING_CACHE",level:if complete && bytes <= crate::processing_cache::MAX_BYTES {"ok"} else {"warning"},
-            message:format!("个人处理缓存已核对 {bytes} 字节"),
-            evidence:json!({"path":display_path(&root),"logical_bytes":bytes,"complete":complete,"max_bytes":crate::processing_cache::MAX_BYTES,"retention_days":crate::processing_cache::RETENTION_DAYS}),
-        });
+        checks.push(check_processing_cache(config));
     }
 
     let status = if checks.iter().any(|check| check.level == "error") {
